@@ -172,18 +172,25 @@ fn apply_and_dispatch(
     worker_tx: &Sender<WorkerCommand>,
 ) -> Result<ApplyResult> {
     let result = state.apply(command)?;
-    dispatch_pending_jobs(state, worker_tx);
+    dispatch_pending_worker_commands(state, worker_tx);
     Ok(result)
 }
 
-fn dispatch_pending_jobs(state: &mut AppState, worker_tx: &Sender<WorkerCommand>) {
-    for job in state.take_pending_worker_jobs() {
-        let job_id = job.id;
-        if let Err(error) = worker_tx.send(WorkerCommand::Run(job)) {
-            state.handle_job_dispatch_failure(
-                job_id,
-                format!("worker channel is unavailable: {error}"),
-            );
+fn dispatch_pending_worker_commands(state: &mut AppState, worker_tx: &Sender<WorkerCommand>) {
+    for command in state.take_pending_worker_commands() {
+        let run_job_id = match &command {
+            WorkerCommand::Run(job) => Some(job.id),
+            _ => None,
+        };
+        if let Err(error) = worker_tx.send(command) {
+            if let Some(job_id) = run_job_id {
+                state.handle_job_dispatch_failure(
+                    job_id,
+                    format!("worker channel is unavailable: {error}"),
+                );
+            } else {
+                state.set_status(format!("worker channel is unavailable: {error}"));
+            }
             break;
         }
     }

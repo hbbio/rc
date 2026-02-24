@@ -22,12 +22,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     frame.render_widget(
         Paragraph::new(Line::from(format!(
-            "rc | context: {:?} | routes: {} | jobs q:{} r:{} ok:{} err:{}",
+            "rc | context: {:?} | routes: {} | jobs q:{} r:{} ok:{} cx:{} err:{}",
             state.key_context(),
             state.route_depth(),
             job_counts.queued,
             job_counts.running,
             job_counts.succeeded,
+            job_counts.canceled,
             job_counts.failed
         ))),
         root[0],

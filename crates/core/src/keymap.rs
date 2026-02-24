@@ -96,6 +96,7 @@ pub enum KeyCommand {
     Copy,
     Move,
     Delete,
+    CancelJob,
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -134,6 +135,7 @@ impl KeyCommand {
             "copy" | "filecopy" => Self::Copy,
             "move" | "renmov" | "rename" => Self::Move,
             "delete" | "filedelete" | "remove" => Self::Delete,
+            "canceljob" | "jobcancel" => Self::CancelJob,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
@@ -428,12 +430,13 @@ Reread = ctrl-r; r
     }
 
     #[test]
-    fn parser_maps_copy_move_delete_actions() {
+    fn parser_maps_copy_move_delete_and_cancel_actions() {
         let source = r#"
 [filemanager]
 Copy = f5
 RenMov = f6
 Delete = f8
+CancelJob = alt-j
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -448,6 +451,18 @@ Delete = f8
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(8))),
             Some(&KeyCommand::Delete)
+        );
+        let cancel_job = KeyChord {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, cancel_job),
+            Some(&KeyCommand::CancelJob)
         );
     }
 

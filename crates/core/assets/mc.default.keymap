@@ -15,6 +15,7 @@ InvertTags = alt-asterisk
 Copy = f5
 Move = f6
 Delete = f8
+CancelJob = alt-j
 SortNext = shift-f6
 SortReverse = shift-f8
 OpenConfirmDialog = f2

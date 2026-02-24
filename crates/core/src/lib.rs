@@ -13,8 +13,8 @@ use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use jobs::{
-    JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest, JobStatus,
-    JobStatusCounts, WorkerCommand, WorkerJob, run_worker,
+    JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
+    JobStatus, JobStatusCounts, WorkerCommand, WorkerJob, run_worker,
 };
 
 use crate::dialog::DialogEvent;
@@ -37,6 +37,7 @@ pub enum AppCommand {
     Copy,
     Move,
     Delete,
+    CancelJob,
     OpenEntry,
     CdUp,
     Reread,
@@ -70,6 +71,7 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::Copy) => Some(Self::Copy),
             (KeyContext::FileManager, KeyCommand::Move) => Some(Self::Move),
             (KeyContext::FileManager, KeyCommand::Delete) => Some(Self::Delete),
+            (KeyContext::FileManager, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
@@ -391,7 +393,7 @@ pub struct AppState {
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
     routes: Vec<Route>,
-    pending_worker_jobs: Vec<WorkerJob>,
+    pending_worker_commands: Vec<WorkerCommand>,
 }
 
 impl AppState {
@@ -403,12 +405,12 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "Ins tag | F5 copy | F6 move | F8 delete | Shift-F6/F8 sort | q quit",
+                "Ins tag | F5 copy | F6 move | F8 delete | Alt-J cancel job | Shift-F6/F8 sort | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
             routes: vec![Route::FileManager],
-            pending_worker_jobs: Vec::new(),
+            pending_worker_commands: Vec::new(),
         })
     }
 
@@ -464,8 +466,8 @@ impl AppState {
         self.status_line = message.into();
     }
 
-    pub fn take_pending_worker_jobs(&mut self) -> Vec<WorkerJob> {
-        std::mem::take(&mut self.pending_worker_jobs)
+    pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
+        std::mem::take(&mut self.pending_worker_commands)
     }
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
@@ -507,7 +509,11 @@ impl AppState {
                     }
                 }
                 Err(error) => {
-                    self.set_status(format!("Job #{id} failed: {error}"));
+                    if error == JOB_CANCELED_MESSAGE {
+                        self.set_status(format!("Job #{id} canceled"));
+                    } else {
+                        self.set_status(format!("Job #{id} failed: {error}"));
+                    }
                 }
             },
         }
@@ -577,6 +583,7 @@ impl AppState {
             AppCommand::Copy => self.queue_copy_job(),
             AppCommand::Move => self.queue_move_job(),
             AppCommand::Delete => self.queue_delete_job(),
+            AppCommand::CancelJob => self.cancel_latest_job(),
             AppCommand::OpenEntry => {
                 if self.open_selected_directory()? {
                     self.set_status("Opened selected directory");
@@ -666,7 +673,8 @@ impl AppState {
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
-        self.pending_worker_jobs.push(worker_job);
+        self.pending_worker_commands
+            .push(WorkerCommand::Run(worker_job));
         self.set_status(format!("Queued job #{job_id}: {summary}"));
     }
 
@@ -685,7 +693,8 @@ impl AppState {
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
-        self.pending_worker_jobs.push(worker_job);
+        self.pending_worker_commands
+            .push(WorkerCommand::Run(worker_job));
         self.set_status(format!("Queued job #{job_id}: {summary}"));
     }
 
@@ -700,8 +709,24 @@ impl AppState {
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
-        self.pending_worker_jobs.push(worker_job);
+        self.pending_worker_commands
+            .push(WorkerCommand::Run(worker_job));
         self.set_status(format!("Queued job #{job_id}: {summary}"));
+    }
+
+    fn cancel_latest_job(&mut self) {
+        let Some(job_id) = self.jobs.newest_cancelable_job_id() else {
+            self.set_status("No active job to cancel");
+            return;
+        };
+
+        if self.jobs.request_cancel(job_id) {
+            self.pending_worker_commands
+                .push(WorkerCommand::Cancel(job_id));
+            self.set_status(format!("Cancellation requested for job #{job_id}"));
+        } else {
+            self.set_status(format!("Job #{job_id} cannot be canceled"));
+        }
     }
 
     fn handle_dialog_event(&mut self, event: DialogEvent) {
@@ -947,6 +972,10 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::Delete),
             Some(AppCommand::Delete)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CancelJob),
+            Some(AppCommand::CancelJob)
         );
     }
 }

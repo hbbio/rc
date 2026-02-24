@@ -3,9 +3,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct JobId(pub u64);
@@ -123,6 +126,7 @@ pub enum JobStatus {
     Queued,
     Running,
     Succeeded,
+    Canceled,
     Failed,
 }
 
@@ -136,15 +140,23 @@ pub struct JobRecord {
     pub last_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WorkerJob {
     pub id: JobId,
     pub request: JobRequest,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl WorkerJob {
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel_flag)
+    }
 }
 
 #[derive(Debug)]
 pub enum WorkerCommand {
     Run(WorkerJob),
+    Cancel(JobId),
     Shutdown,
 }
 
@@ -168,6 +180,7 @@ pub struct JobManager {
     next_id: u64,
     jobs: Vec<JobRecord>,
     index_by_id: HashMap<JobId, usize>,
+    cancel_flags: HashMap<JobId, Arc<AtomicBool>>,
 }
 
 impl Default for JobManager {
@@ -182,6 +195,7 @@ impl JobManager {
             next_id: 1,
             jobs: Vec::new(),
             index_by_id: HashMap::new(),
+            cancel_flags: HashMap::new(),
         }
     }
 
@@ -199,8 +213,18 @@ impl JobManager {
         };
         self.index_by_id.insert(id, self.jobs.len());
         self.jobs.push(record);
+        self.cancel_flags
+            .insert(id, Arc::new(AtomicBool::new(false)));
 
-        WorkerJob { id, request }
+        WorkerJob {
+            id,
+            request,
+            cancel_flag: self
+                .cancel_flags
+                .get(&id)
+                .expect("job cancellation flag should exist")
+                .clone(),
+        }
     }
 
     pub fn handle_event(&mut self, event: &JobEvent) {
@@ -230,13 +254,48 @@ impl JobManager {
                             job.last_error = None;
                         }
                         Err(message) => {
-                            job.status = JobStatus::Failed;
-                            job.last_error = Some(message.clone());
+                            if is_canceled_message(message) {
+                                job.status = JobStatus::Canceled;
+                                job.last_error = None;
+                            } else {
+                                job.status = JobStatus::Failed;
+                                job.last_error = Some(message.clone());
+                            }
                         }
                     }
                 }
+                self.cancel_flags.remove(id);
             }
         }
+    }
+
+    pub fn request_cancel(&mut self, id: JobId) -> bool {
+        let Some(job) = self.jobs.iter().find(|job| job.id == id) else {
+            return false;
+        };
+        if !matches!(job.status, JobStatus::Queued | JobStatus::Running) {
+            return false;
+        }
+
+        let Some(flag) = self.cancel_flags.get(&id) else {
+            return false;
+        };
+        flag.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn newest_cancelable_job_id(&self) -> Option<JobId> {
+        self.jobs
+            .iter()
+            .rev()
+            .find(|job| job.status == JobStatus::Running)
+            .or_else(|| {
+                self.jobs
+                    .iter()
+                    .rev()
+                    .find(|job| job.status == JobStatus::Queued)
+            })
+            .map(|job| job.id)
     }
 
     pub fn status_counts(&self) -> JobStatusCounts {
@@ -246,6 +305,7 @@ impl JobManager {
                 JobStatus::Queued => counts.queued += 1,
                 JobStatus::Running => counts.running += 1,
                 JobStatus::Succeeded => counts.succeeded += 1,
+                JobStatus::Canceled => counts.canceled += 1,
                 JobStatus::Failed => counts.failed += 1,
             }
         }
@@ -271,6 +331,7 @@ pub struct JobStatusCounts {
     pub queued: usize,
     pub running: usize,
     pub succeeded: usize,
+    pub canceled: usize,
     pub failed: usize,
 }
 
@@ -278,32 +339,45 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
     while let Ok(command) = command_rx.recv() {
         match command {
             WorkerCommand::Run(job) => run_single_job(job, &event_tx),
+            WorkerCommand::Cancel(_) => {}
             WorkerCommand::Shutdown => break,
         }
     }
 }
 
 fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
-    let _ = event_tx.send(JobEvent::Started { id: job.id });
+    let WorkerJob {
+        id,
+        request,
+        cancel_flag,
+    } = job;
+    let _ = event_tx.send(JobEvent::Started { id });
 
-    let totals = match measure_request_totals(&job.request) {
+    let totals = match measure_request_totals(&request) {
         Ok(totals) => totals,
         Err(error) => {
             let _ = event_tx.send(JobEvent::Finished {
-                id: job.id,
+                id,
                 result: Err(error.to_string()),
             });
             return;
         }
     };
 
-    let mut progress = ProgressTracker::new(job.id, totals, event_tx);
+    let mut progress = ProgressTracker::new(id, totals, event_tx, cancel_flag);
     progress.emit();
-    let result = execute_job(job.request, &mut progress).map_err(|error| error.to_string());
+    if let Err(error) = progress.ensure_not_canceled() {
+        let _ = event_tx.send(JobEvent::Finished {
+            id,
+            result: Err(error.to_string()),
+        });
+        return;
+    }
+    let result = execute_job(request, &mut progress).map_err(|error| error.to_string());
     if result.is_ok() {
         progress.mark_done();
     }
-    let _ = event_tx.send(JobEvent::Finished { id: job.id, result });
+    let _ = event_tx.send(JobEvent::Finished { id, result });
 }
 
 fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
@@ -326,6 +400,7 @@ fn copy_paths(
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
     for source in sources {
+        progress.ensure_not_canceled()?;
         let destination = destination_path(source, destination_dir)?;
         copy_path(source, &destination, progress)?;
     }
@@ -338,6 +413,7 @@ fn move_paths(
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
     for source in sources {
+        progress.ensure_not_canceled()?;
         let destination = destination_path(source, destination_dir)?;
         if destination.exists() {
             return Err(io::Error::new(
@@ -367,6 +443,7 @@ fn move_paths(
 
 fn delete_paths(targets: &[PathBuf], progress: &mut ProgressTracker<'_>) -> io::Result<()> {
     for target in targets {
+        progress.ensure_not_canceled()?;
         delete_path(target, progress)?;
     }
     Ok(())
@@ -377,6 +454,7 @@ fn copy_path(
     destination: &Path,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
+    progress.ensure_not_canceled()?;
     let metadata = fs::symlink_metadata(source)?;
     progress.set_current_path(source);
     if metadata.file_type().is_symlink() {
@@ -450,6 +528,7 @@ fn copy_file(
     let mut buffer = [0_u8; COPY_BUFFER_SIZE];
 
     loop {
+        progress.ensure_not_canceled()?;
         let bytes_read = source_file.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
@@ -462,6 +541,7 @@ fn copy_file(
 }
 
 fn delete_path(path: &Path, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
+    progress.ensure_not_canceled()?;
     let metadata = fs::symlink_metadata(path)?;
     progress.set_current_path(path);
 
@@ -509,6 +589,14 @@ fn remove_path(path: &Path) -> io::Result<()> {
 
 fn is_cross_device_error(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::CrossesDevices || error.raw_os_error() == Some(18)
+}
+
+fn canceled_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, JOB_CANCELED_MESSAGE)
+}
+
+fn is_canceled_message(message: &str) -> bool {
+    message == JOB_CANCELED_MESSAGE
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -564,10 +652,16 @@ struct ProgressTracker<'a> {
     job_id: JobId,
     progress: JobProgress,
     event_tx: &'a Sender<JobEvent>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl<'a> ProgressTracker<'a> {
-    fn new(job_id: JobId, totals: JobTotals, event_tx: &'a Sender<JobEvent>) -> Self {
+    fn new(
+        job_id: JobId,
+        totals: JobTotals,
+        event_tx: &'a Sender<JobEvent>,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             job_id,
             progress: JobProgress {
@@ -578,6 +672,7 @@ impl<'a> ProgressTracker<'a> {
                 bytes_done: 0,
             },
             event_tx,
+            cancel_flag,
         }
     }
 
@@ -632,6 +727,13 @@ impl<'a> ProgressTracker<'a> {
         self.progress.items_done = self.progress.items_total;
         self.progress.bytes_done = self.progress.bytes_total;
         self.emit();
+    }
+
+    fn ensure_not_canceled(&self) -> io::Result<()> {
+        if self.cancel_flag.load(Ordering::Relaxed) {
+            return Err(canceled_error());
+        }
+        Ok(())
     }
 }
 
@@ -700,6 +802,60 @@ mod tests {
             result: Ok(()),
         });
         assert_eq!(manager.status_counts().succeeded, 1);
+    }
+
+    #[test]
+    fn worker_honors_cancel_flag() {
+        let root = make_temp_dir("cancel");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let payload = vec![7_u8; 2 * 1024 * 1024];
+        let source_file = source_dir.join("blob.bin");
+        fs::write(&source_file, payload).expect("source payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination,
+        });
+        let copy_id = copy_job.id;
+        assert!(
+            manager.request_cancel(copy_id),
+            "cancel request should succeed for queued job"
+        );
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        command_tx
+            .send(WorkerCommand::Cancel(copy_id))
+            .expect("cancel command should send");
+
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => assert!(
+                is_canceled_message(&error),
+                "finished error should be a cancellation marker"
+            ),
+            _ => panic!("job should finish with a cancellation error"),
+        }
+        assert_eq!(manager.status_counts().canceled, 1);
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
     #[test]
