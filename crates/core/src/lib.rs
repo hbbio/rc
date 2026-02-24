@@ -415,6 +415,7 @@ enum PendingDialogAction {
     TransferDestination {
         kind: TransferKind,
         sources: Vec<PathBuf>,
+        source_base_dir: PathBuf,
     },
     TransferOverwrite {
         kind: TransferKind,
@@ -765,12 +766,16 @@ impl AppState {
         }
 
         let destination_dir = self.passive_panel().cwd.clone();
+        let source_base_dir = self.active_panel().cwd.clone();
         let title = match kind {
             TransferKind::Copy => "Copy",
             TransferKind::Move => "Move",
         };
-        self.pending_dialog_action =
-            Some(PendingDialogAction::TransferDestination { kind, sources });
+        self.pending_dialog_action = Some(PendingDialogAction::TransferDestination {
+            kind,
+            sources,
+            source_base_dir,
+        });
         self.routes.push(Route::Dialog(DialogState::input(
             title,
             "Destination directory:",
@@ -986,7 +991,11 @@ impl AppState {
                 self.set_status("Rename canceled");
             }
             (
-                Some(PendingDialogAction::TransferDestination { kind, sources }),
+                Some(PendingDialogAction::TransferDestination {
+                    kind,
+                    sources,
+                    source_base_dir,
+                }),
                 DialogResult::InputSubmitted(value),
             ) => {
                 let value = value.trim();
@@ -994,7 +1003,12 @@ impl AppState {
                     self.set_status("Copy/Move canceled: empty destination");
                     return;
                 }
-                let destination_dir = PathBuf::from(value);
+                let input_path = PathBuf::from(value);
+                let destination_dir = if input_path.is_absolute() {
+                    input_path
+                } else {
+                    source_base_dir.join(input_path)
+                };
                 let selected = overwrite_policy_index(self.overwrite_policy);
                 self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
                     kind,
@@ -1404,6 +1418,41 @@ mod tests {
                 _ => panic!("expected copy job request"),
             },
             _ => panic!("expected queued worker run command"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn copy_relative_destination_is_resolved_from_active_panel() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-copy-relative-destination-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let source = root.join("a.txt");
+        fs::write(&source, "a").expect("must create source file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let source_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry should be visible");
+        app.active_panel_mut().cursor = source_index;
+
+        app.start_copy_dialog();
+        app.finish_dialog(DialogResult::InputSubmitted(String::from("dest")));
+
+        match app.pending_dialog_action.as_ref() {
+            Some(PendingDialogAction::TransferOverwrite {
+                destination_dir, ..
+            }) => {
+                assert_eq!(destination_dir, &root.join("dest"));
+            }
+            other => panic!("expected transfer overwrite action, got {other:?}"),
         }
 
         fs::remove_dir_all(&root).expect("must remove temp root");
