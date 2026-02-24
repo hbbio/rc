@@ -5,4 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+filetime = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["fs", "user"] }

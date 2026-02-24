@@ -7,6 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
+use filetime::FileTime;
+#[cfg(unix)]
+use nix::errno::Errno;
+#[cfg(unix)]
+use nix::unistd::{Gid, Uid, chown};
+
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
@@ -508,6 +514,7 @@ fn copy_path(
             fs::create_dir_all(parent)?;
         }
         copy_symlink(source, destination)?;
+        preserve_copied_metadata(destination, &metadata)?;
         progress.complete_item(source);
         return Ok(());
     }
@@ -542,6 +549,7 @@ fn copy_path(
             copy_path(&child_source, &child_destination, progress)?;
         }
         fs::set_permissions(destination, metadata.permissions())?;
+        preserve_copied_metadata(destination, &metadata)?;
         progress.complete_item(source);
         return Ok(());
     }
@@ -561,6 +569,7 @@ fn copy_path(
     }
     copy_file(source, destination, progress)?;
     fs::set_permissions(destination, metadata.permissions())?;
+    preserve_copied_metadata(destination, &metadata)?;
     progress.complete_item(source);
     Ok(())
 }
@@ -733,6 +742,41 @@ fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
     }
 }
 
+fn preserve_copied_metadata(destination: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    let atime = FileTime::from_last_access_time(metadata);
+    let mtime = FileTime::from_last_modification_time(metadata);
+
+    if metadata.file_type().is_symlink() {
+        filetime::set_symlink_file_times(destination, atime, mtime)?;
+        return Ok(());
+    }
+
+    filetime::set_file_times(destination, atime, mtime)?;
+    preserve_owner_best_effort(destination, metadata)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn preserve_owner_best_effort(destination: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let uid = Uid::from_raw(metadata.uid());
+    let gid = Gid::from_raw(metadata.gid());
+    match chown(destination, Some(uid), Some(gid)) {
+        Ok(()) => Ok(()),
+        Err(Errno::EPERM) | Err(Errno::EACCES) => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "failed to preserve owner/group for {}: {error}",
+            destination.to_string_lossy()
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn preserve_owner_best_effort(_destination: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
+    Ok(())
+}
+
 fn remove_path(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
@@ -902,6 +946,7 @@ impl<'a> ProgressTracker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use filetime::FileTime;
     use std::env;
     use std::fs;
     #[cfg(unix)]
@@ -1307,6 +1352,57 @@ mod tests {
             .join()
             .expect("worker thread should terminate cleanly");
         reset_file_permissions_for_cleanup(&root.join("source/readonly.txt"));
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_preserves_file_modification_time() {
+        let root = make_temp_dir("mtime");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let source_file = source_dir.join("mtime.txt");
+        fs::write(&source_file, "mtime").expect("source payload should be writable");
+        let expected_mtime = FileTime::from_unix_time(946_684_800, 0);
+        filetime::set_file_mtime(&source_file, expected_mtime)
+            .expect("source mtime should be settable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination.clone(),
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should finish successfully"
+        );
+
+        let copied_metadata = fs::metadata(destination.join("mtime.txt"))
+            .expect("copied metadata should be readable");
+        let copied_mtime = FileTime::from_last_modification_time(&copied_metadata);
+        assert_eq!(
+            copied_mtime.unix_seconds(),
+            expected_mtime.unix_seconds(),
+            "copy should preserve source mtime"
+        );
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
