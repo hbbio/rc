@@ -30,6 +30,7 @@ pub enum JobKind {
     Copy,
     Move,
     Delete,
+    Find,
 }
 
 impl JobKind {
@@ -38,6 +39,7 @@ impl JobKind {
             Self::Copy => "copy",
             Self::Move => "move",
             Self::Delete => "delete",
+            Self::Find => "find",
         }
     }
 }
@@ -75,6 +77,10 @@ pub enum JobRequest {
     Delete {
         targets: Vec<PathBuf>,
     },
+    Find {
+        query: String,
+        base_dir: PathBuf,
+    },
 }
 
 impl JobRequest {
@@ -83,6 +89,7 @@ impl JobRequest {
             Self::Copy { .. } => JobKind::Copy,
             Self::Move { .. } => JobKind::Move,
             Self::Delete { .. } => JobKind::Delete,
+            Self::Find { .. } => JobKind::Find,
         }
     }
 
@@ -91,6 +98,7 @@ impl JobRequest {
             Self::Copy { sources, .. } => sources.len(),
             Self::Move { sources, .. } => sources.len(),
             Self::Delete { targets } => targets.len(),
+            Self::Find { .. } => 1,
         }
     }
 
@@ -117,6 +125,9 @@ impl JobRequest {
                 overwrite.label(),
             ),
             Self::Delete { targets } => format!("delete {} item(s)", targets.len()),
+            Self::Find { query, base_dir } => {
+                format!("find '{}' under {}", query, base_dir.to_string_lossy())
+            }
         }
     }
 }
@@ -346,6 +357,11 @@ impl JobManager {
         &self.jobs
     }
 
+    pub fn job(&self, id: JobId) -> Option<&JobRecord> {
+        let index = *self.index_by_id.get(&id)?;
+        self.jobs.get(index)
+    }
+
     pub fn last_job(&self) -> Option<&JobRecord> {
         self.jobs.last()
     }
@@ -439,6 +455,10 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
             overwrite,
         } => move_paths(&sources, &destination_dir, overwrite, progress),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
+        JobRequest::Find { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "find jobs are executed by the background worker",
+        )),
     }
 }
 
@@ -816,6 +836,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
+        JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
 }
 

@@ -11,6 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering as AtomicOrdering},
+};
 use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
@@ -145,6 +149,7 @@ impl AppCommand {
             (KeyContext::FindResults, KeyCommand::Home) => Some(Self::FindResultsHome),
             (KeyContext::FindResults, KeyCommand::End) => Some(Self::FindResultsEnd),
             (KeyContext::FindResults, KeyCommand::OpenEntry) => Some(Self::FindResultsOpenEntry),
+            (KeyContext::FindResults, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::FileManager, KeyCommand::OpenTree) => Some(Self::OpenTree),
             (KeyContext::Tree, KeyCommand::CursorUp) => Some(Self::TreeMoveUp),
             (KeyContext::Tree, KeyCommand::CursorDown) => Some(Self::TreeMoveDown),
@@ -225,6 +230,7 @@ pub enum ApplyResult {
 const DEFAULT_PAGE_STEP: usize = 10;
 const DEFAULT_VIEWER_PAGE_STEP: usize = 20;
 const MAX_FIND_RESULTS: usize = 2_000;
+const FIND_EVENT_CHUNK_SIZE: usize = 64;
 const TREE_MAX_DEPTH: usize = 6;
 const TREE_MAX_ENTRIES: usize = 2_000;
 
@@ -741,6 +747,7 @@ pub struct FindResultEntry {
 
 #[derive(Clone, Debug)]
 pub struct FindResultsState {
+    pub job_id: JobId,
     pub query: String,
     pub base_dir: PathBuf,
     pub entries: Vec<FindResultEntry>,
@@ -749,8 +756,9 @@ pub struct FindResultsState {
 }
 
 impl FindResultsState {
-    fn loading(query: String, base_dir: PathBuf) -> Self {
+    fn loading(job_id: JobId, query: String, base_dir: PathBuf) -> Self {
         Self {
+            job_id,
             query,
             base_dir,
             entries: Vec::new(),
@@ -920,9 +928,11 @@ pub enum BackgroundCommand {
         path: PathBuf,
     },
     FindEntries {
+        job_id: JobId,
         query: String,
         base_dir: PathBuf,
         max_results: usize,
+        cancel_flag: Arc<AtomicBool>,
     },
     BuildTree {
         root: PathBuf,
@@ -945,10 +955,16 @@ pub enum BackgroundEvent {
         path: PathBuf,
         result: Result<ViewerState, String>,
     },
-    FindEntriesReady {
-        query: String,
-        base_dir: PathBuf,
+    FindEntriesStarted {
+        job_id: JobId,
+    },
+    FindEntriesChunk {
+        job_id: JobId,
         entries: Vec<FindResultEntry>,
+    },
+    FindEntriesFinished {
+        job_id: JobId,
+        result: Result<(), String>,
     },
     TreeReady {
         root: PathBuf,
@@ -961,16 +977,16 @@ pub fn run_background_worker(
     event_tx: Sender<BackgroundEvent>,
 ) {
     while let Ok(command) = command_rx.recv() {
-        let Some(event) = execute_background_command(command) else {
-            break;
-        };
-        if event_tx.send(event).is_err() {
+        if !execute_background_command(command, &event_tx) {
             break;
         }
     }
 }
 
-fn execute_background_command(command: BackgroundCommand) -> Option<BackgroundEvent> {
+fn execute_background_command(
+    command: BackgroundCommand,
+    event_tx: &Sender<BackgroundEvent>,
+) -> bool {
     match command {
         BackgroundCommand::RefreshPanel {
             panel,
@@ -987,40 +1003,210 @@ fn execute_background_command(command: BackgroundCommand) -> Option<BackgroundEv
                         .map_err(|error| error.to_string())
                 }
             };
-            Some(BackgroundEvent::PanelRefreshed {
-                panel,
-                cwd,
-                source,
-                sort_mode,
-                result,
-            })
+            event_tx
+                .send(BackgroundEvent::PanelRefreshed {
+                    panel,
+                    cwd,
+                    source,
+                    sort_mode,
+                    result,
+                })
+                .is_ok()
         }
-        BackgroundCommand::LoadViewer { path } => Some(BackgroundEvent::ViewerLoaded {
-            path: path.clone(),
-            result: ViewerState::open(path).map_err(|error| error.to_string()),
-        }),
+        BackgroundCommand::LoadViewer { path } => event_tx
+            .send(BackgroundEvent::ViewerLoaded {
+                path: path.clone(),
+                result: ViewerState::open(path).map_err(|error| error.to_string()),
+            })
+            .is_ok(),
         BackgroundCommand::FindEntries {
+            job_id,
             query,
             base_dir,
             max_results,
-        } => {
-            let entries = find_entries(&base_dir, &query, max_results);
-            Some(BackgroundEvent::FindEntriesReady {
-                query,
-                base_dir,
-                entries,
-            })
-        }
+            cancel_flag,
+        } => run_find_search(
+            event_tx,
+            job_id,
+            query,
+            base_dir,
+            max_results,
+            cancel_flag.as_ref(),
+        ),
         BackgroundCommand::BuildTree {
             root,
             max_depth,
             max_entries,
         } => {
             let entries = build_tree_entries(&root, max_depth, max_entries);
-            Some(BackgroundEvent::TreeReady { root, entries })
+            event_tx
+                .send(BackgroundEvent::TreeReady { root, entries })
+                .is_ok()
         }
-        BackgroundCommand::Shutdown => None,
+        BackgroundCommand::Shutdown => false,
     }
+}
+
+fn run_find_search(
+    event_tx: &Sender<BackgroundEvent>,
+    job_id: JobId,
+    query: String,
+    base_dir: PathBuf,
+    max_results: usize,
+    cancel_flag: &AtomicBool,
+) -> bool {
+    if event_tx
+        .send(BackgroundEvent::FindEntriesStarted { job_id })
+        .is_err()
+    {
+        return false;
+    }
+
+    let result = stream_find_entries(
+        &base_dir,
+        &query,
+        max_results,
+        cancel_flag,
+        FIND_EVENT_CHUNK_SIZE,
+        |entries| {
+            event_tx
+                .send(BackgroundEvent::FindEntriesChunk { job_id, entries })
+                .is_ok()
+        },
+    );
+
+    event_tx
+        .send(BackgroundEvent::FindEntriesFinished { job_id, result })
+        .is_ok()
+}
+
+fn stream_find_entries<F>(
+    base_dir: &Path,
+    query: &str,
+    max_results: usize,
+    cancel_flag: &AtomicBool,
+    chunk_size: usize,
+    mut emit_chunk: F,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<FindResultEntry>) -> bool,
+{
+    if max_results == 0 {
+        return Ok(());
+    }
+
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Ok(());
+    }
+
+    let wildcard_query = normalized_query.contains('*') || normalized_query.contains('?');
+    let chunk_size = chunk_size.max(1);
+    let mut emitted = Vec::new();
+    let mut matched = 0usize;
+    let mut stack = vec![base_dir.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        if cancel_flag.load(AtomicOrdering::Relaxed) {
+            return Err(String::from(JOB_CANCELED_MESSAGE));
+        }
+
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(_) => continue,
+        };
+        let mut child_dirs = Vec::new();
+
+        for entry in read_dir.flatten() {
+            if cancel_flag.load(AtomicOrdering::Relaxed) {
+                return Err(String::from(JOB_CANCELED_MESSAGE));
+            }
+
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = file_type.is_dir();
+
+            if query_matches_entry(&name, &normalized_query, wildcard_query) {
+                emitted.push(FindResultEntry {
+                    path: path.clone(),
+                    is_dir,
+                });
+                matched = matched.saturating_add(1);
+
+                if emitted.len() >= chunk_size && !emit_chunk(std::mem::take(&mut emitted)) {
+                    return Err(String::from("background event channel disconnected"));
+                }
+
+                if matched >= max_results {
+                    if !emitted.is_empty() && !emit_chunk(std::mem::take(&mut emitted)) {
+                        return Err(String::from("background event channel disconnected"));
+                    }
+                    return Ok(());
+                }
+            }
+
+            if is_dir {
+                child_dirs.push(path);
+            }
+        }
+
+        child_dirs.sort_by_key(|left| path_sort_key(left));
+        for child_dir in child_dirs.into_iter().rev() {
+            stack.push(child_dir);
+        }
+    }
+
+    if !emitted.is_empty() && !emit_chunk(emitted) {
+        return Err(String::from("background event channel disconnected"));
+    }
+    Ok(())
+}
+
+fn query_matches_entry(name: &str, normalized_query: &str, wildcard_query: bool) -> bool {
+    let normalized_name = name.to_lowercase();
+    if wildcard_query {
+        wildcard_match(&normalized_name, normalized_query)
+    } else {
+        normalized_name.contains(normalized_query)
+    }
+}
+
+fn wildcard_match(text: &str, pattern: &str) -> bool {
+    let text: Vec<char> = text.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    let mut text_index = 0usize;
+    let mut pattern_index = 0usize;
+    let mut star_index: Option<usize> = None;
+    let mut match_index = 0usize;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == '?' || pattern[pattern_index] == text[text_index])
+        {
+            text_index += 1;
+            pattern_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == '*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            match_index = text_index;
+        } else if let Some(star) = star_index {
+            pattern_index = star + 1;
+            match_index += 1;
+            text_index = match_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == '*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
 }
 
 #[derive(Debug)]
@@ -1143,6 +1329,20 @@ impl AppState {
         })
     }
 
+    fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
+        self.routes.iter().rev().find_map(|route| match route {
+            Route::FindResults(results) if results.job_id == job_id => Some(results),
+            _ => None,
+        })
+    }
+
+    fn find_results_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut FindResultsState> {
+        self.routes.iter_mut().rev().find_map(|route| match route {
+            Route::FindResults(results) if results.job_id == job_id => Some(results),
+            _ => None,
+        })
+    }
+
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
     }
@@ -1200,8 +1400,13 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
-                    self.refresh_panels();
-                    if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
+                    let should_refresh = self.jobs.job(id).is_some_and(|job| {
+                        matches!(job.kind, JobKind::Copy | JobKind::Move | JobKind::Delete)
+                    });
+                    if should_refresh {
+                        self.refresh_panels();
+                    }
+                    if let Some(job) = self.jobs.job(id) {
                         self.set_status(format!("Job #{id} finished: {}", job.summary));
                     } else {
                         self.set_status(format!("Job #{id} finished"));
@@ -1276,26 +1481,51 @@ impl AppState {
                     self.set_status(format!("Viewer open failed: {error}"));
                 }
             },
-            BackgroundEvent::FindEntriesReady {
-                query,
-                base_dir,
-                entries,
-            } => {
-                let mut replaced = false;
-                for route in self.routes.iter_mut().rev() {
-                    if let Route::FindResults(results) = route
-                        && results.query == query
-                        && results.base_dir == base_dir
-                    {
-                        results.entries = entries.clone();
-                        results.cursor = 0;
-                        results.loading = false;
-                        replaced = true;
-                        break;
-                    }
+            BackgroundEvent::FindEntriesStarted { job_id } => {
+                self.handle_job_event(JobEvent::Started { id: job_id });
+                if let Some(results) = self.find_results_by_job_id_mut(job_id) {
+                    results.loading = true;
                 }
-                if replaced {
-                    self.set_status(format!("Find '{query}': {} result(s)", entries.len()));
+            }
+            BackgroundEvent::FindEntriesChunk { job_id, entries } => {
+                let status_message = if let Some(results) = self.find_results_by_job_id_mut(job_id)
+                {
+                    let was_empty = results.entries.is_empty();
+                    results.entries.extend(entries);
+                    if was_empty && !results.entries.is_empty() {
+                        results.cursor = 0;
+                    }
+                    Some(format!(
+                        "Finding '{}': {} result(s)...",
+                        results.query,
+                        results.entries.len()
+                    ))
+                } else {
+                    None
+                };
+                if let Some(status_message) = status_message {
+                    self.set_status(status_message);
+                }
+            }
+            BackgroundEvent::FindEntriesFinished { job_id, result } => {
+                if let Some(results) = self.find_results_by_job_id_mut(job_id) {
+                    results.loading = false;
+                }
+                let completed_successfully = result.is_ok();
+                self.handle_job_event(JobEvent::Finished { id: job_id, result });
+                let status_message = if completed_successfully {
+                    self.find_results_by_job_id(job_id).map(|results| {
+                        format!(
+                            "Find '{}': {} result(s)",
+                            results.query,
+                            results.entries.len()
+                        )
+                    })
+                } else {
+                    None
+                };
+                if let Some(status_message) = status_message {
+                    self.set_status(status_message);
                 }
             }
             BackgroundEvent::TreeReady { root, entries } => {
@@ -1732,7 +1962,10 @@ impl AppState {
             && !matches!(command, AppCommand::EnterXMap);
 
         match command {
-            AppCommand::Quit => return Ok(ApplyResult::Quit),
+            AppCommand::Quit => {
+                self.request_cancel_for_all_jobs();
+                return Ok(ApplyResult::Quit);
+            }
             AppCommand::CloseViewer => self.close_viewer(),
             AppCommand::OpenFindDialog => self.open_find_dialog(),
             AppCommand::CloseFindResults => self.close_find_results(),
@@ -2136,12 +2369,38 @@ impl AppState {
             return;
         };
 
-        if self.jobs.request_cancel(job_id) {
-            self.pending_worker_commands
-                .push(WorkerCommand::Cancel(job_id));
+        if self.request_cancel_for_job(job_id) {
             self.set_status(format!("Cancellation requested for job #{job_id}"));
         } else {
             self.set_status(format!("Job #{job_id} cannot be canceled"));
+        }
+    }
+
+    fn request_cancel_for_job(&mut self, job_id: JobId) -> bool {
+        if !self.jobs.request_cancel(job_id) {
+            return false;
+        }
+        let is_worker_job = self
+            .jobs
+            .job(job_id)
+            .is_some_and(|job| !matches!(job.kind, JobKind::Find));
+        if is_worker_job {
+            self.pending_worker_commands
+                .push(WorkerCommand::Cancel(job_id));
+        }
+        true
+    }
+
+    fn request_cancel_for_all_jobs(&mut self) {
+        let cancelable_job_ids: Vec<JobId> = self
+            .jobs
+            .jobs()
+            .iter()
+            .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+            .map(|job| job.id)
+            .collect();
+        for job_id in cancelable_job_ids {
+            let _ = self.request_cancel_for_job(job_id);
         }
     }
 
@@ -2306,18 +2565,28 @@ impl AppState {
                 }
 
                 let query = query.to_string();
+                let request = JobRequest::Find {
+                    query: query.clone(),
+                    base_dir: base_dir.clone(),
+                };
+                let summary = request.summary();
+                let worker_job = self.jobs.enqueue(request);
+                let job_id = worker_job.id;
                 self.routes
                     .push(Route::FindResults(FindResultsState::loading(
+                        job_id,
                         query.clone(),
                         base_dir.clone(),
                     )));
                 self.pending_background_commands
                     .push(BackgroundCommand::FindEntries {
+                        job_id,
                         query: query.clone(),
                         base_dir,
                         max_results: MAX_FIND_RESULTS,
+                        cancel_flag: worker_job.cancel_flag(),
                     });
-                self.set_status(format!("Finding '{query}'..."));
+                self.set_status(format!("Queued job #{job_id}: {summary}"));
             }
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
@@ -2460,59 +2729,6 @@ fn find_backward_wrap(content: &str, query: &str, start: usize) -> Option<usize>
     content[start..]
         .rfind(query)
         .map(|relative| start + relative)
-}
-
-fn find_entries(base_dir: &Path, query: &str, max_results: usize) -> Vec<FindResultEntry> {
-    if max_results == 0 {
-        return Vec::new();
-    }
-
-    let normalized_query = query.to_lowercase();
-    if normalized_query.is_empty() {
-        return Vec::new();
-    }
-
-    let mut results = Vec::new();
-    let mut stack = vec![base_dir.to_path_buf()];
-
-    while let Some(dir) = stack.pop() {
-        let read_dir = match fs::read_dir(&dir) {
-            Ok(read_dir) => read_dir,
-            Err(_) => continue,
-        };
-        let mut child_dirs = Vec::new();
-
-        for entry in read_dir.flatten() {
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = file_type.is_dir();
-
-            if name.to_lowercase().contains(&normalized_query) {
-                results.push(FindResultEntry {
-                    path: path.clone(),
-                    is_dir,
-                });
-                if results.len() >= max_results {
-                    return results;
-                }
-            }
-
-            if is_dir {
-                child_dirs.push(path);
-            }
-        }
-
-        child_dirs.sort_by_key(|left| path_sort_key(left));
-        for child_dir in child_dirs.into_iter().rev() {
-            stack.push(child_dir);
-        }
-    }
-
-    results
 }
 
 fn build_tree_entries(root: &Path, max_depth: usize, max_entries: usize) -> Vec<TreeEntry> {
@@ -2819,7 +3035,11 @@ mod tests {
                 break;
             }
             for command in commands {
-                if let Some(event) = execute_background_command(command) {
+                let (event_tx, event_rx) = std::sync::mpsc::channel();
+                if !execute_background_command(command, &event_tx) {
+                    return;
+                }
+                for event in event_rx.try_iter() {
                     app.handle_background_event(event);
                 }
             }
@@ -3414,6 +3634,9 @@ mod tests {
             .expect("find dialog should submit");
         drain_background(&mut app);
         assert_eq!(app.key_context(), KeyContext::FindResults);
+        let find_job = app.jobs.last_job().expect("find job should be recorded");
+        assert_eq!(find_job.kind, JobKind::Find);
+        assert_eq!(find_job.status, JobStatus::Succeeded);
 
         let target_index = match app.top_route() {
             Route::FindResults(results) => results
@@ -3435,6 +3658,153 @@ mod tests {
             panic!("top route should be viewer");
         };
         assert_eq!(viewer.path, target);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn find_cancel_uses_job_flag_without_worker_cancel_command() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.jpg"), "a").expect("must create file");
+        fs::write(root.join("b.jpg"), "b").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should open");
+        for ch in "*.jpg".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing find query should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("find dialog should submit");
+        assert!(
+            app.take_pending_worker_commands().is_empty(),
+            "find should not queue worker commands"
+        );
+
+        app.apply(AppCommand::CancelJob)
+            .expect("cancel job should succeed");
+        assert!(
+            app.take_pending_worker_commands().is_empty(),
+            "canceling find should not send worker cancel command"
+        );
+
+        drain_background(&mut app);
+        let find_job = app.jobs.last_job().expect("find job should be present");
+        assert_eq!(find_job.kind, JobKind::Find);
+        assert_eq!(find_job.status, JobStatus::Canceled);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn quit_requests_cancellation_for_pending_find_job() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-quit-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.jpg"), "a").expect("must create file");
+        fs::write(root.join("b.jpg"), "b").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should open");
+        for ch in "*.jpg".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing find query should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("find dialog should submit");
+
+        assert_eq!(
+            app.apply(AppCommand::Quit).expect("quit should succeed"),
+            ApplyResult::Quit
+        );
+
+        drain_background(&mut app);
+        let find_job = app.jobs.last_job().expect("find job should be present");
+        assert_eq!(find_job.kind, JobKind::Find);
+        assert_eq!(find_job.status, JobStatus::Canceled);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn stream_find_entries_supports_glob_patterns_and_chunking() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-glob-{stamp}"));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("must create temp tree");
+        let jpg_a = root.join("a.jpg");
+        let jpg_b = nested.join("b.JPG");
+        let png = root.join("c.png");
+        fs::write(&jpg_a, "a").expect("must create jpg");
+        fs::write(&jpg_b, "b").expect("must create jpg");
+        fs::write(&png, "c").expect("must create png");
+
+        let cancel_flag = AtomicBool::new(false);
+        let mut chunks = Vec::new();
+        let result = stream_find_entries(&root, "*.jpg", 32, &cancel_flag, 1, |entries| {
+            chunks.push(entries);
+            true
+        });
+        assert_eq!(result, Ok(()));
+        assert!(
+            chunks.len() >= 2,
+            "chunk size 1 should emit multiple chunks for two matches"
+        );
+
+        let flattened: Vec<PathBuf> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter().map(|entry| entry.path.clone()))
+            .collect();
+        assert!(
+            flattened.contains(&jpg_a),
+            "glob should match top-level jpg"
+        );
+        assert!(
+            flattened.contains(&jpg_b),
+            "glob should match nested uppercase extension"
+        );
+        assert!(
+            !flattened.contains(&png),
+            "glob should not match non-jpg file"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn stream_find_entries_stops_after_cancel_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-cancel-flag-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.jpg"), "a").expect("must create file");
+        fs::write(root.join("b.jpg"), "b").expect("must create file");
+        fs::write(root.join("c.jpg"), "c").expect("must create file");
+
+        let cancel_flag = AtomicBool::new(false);
+        let mut chunks_seen = 0usize;
+        let result = stream_find_entries(&root, "*.jpg", 32, &cancel_flag, 1, |_entries| {
+            chunks_seen = chunks_seen.saturating_add(1);
+            cancel_flag.store(true, AtomicOrdering::Relaxed);
+            true
+        });
+        assert_eq!(result, Err(String::from(JOB_CANCELED_MESSAGE)));
+        assert_eq!(chunks_seen, 1, "search should stop shortly after cancel");
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -3701,6 +4071,10 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::OpenEntry),
             Some(AppCommand::FindResultsOpenEntry)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::CancelJob),
+            Some(AppCommand::CancelJob)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::Quit),
