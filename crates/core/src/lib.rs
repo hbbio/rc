@@ -2139,6 +2139,7 @@ impl AppState {
                     self.set_status("Parent entry cannot be tagged");
                 } else {
                     let added = self.active_panel_mut().toggle_tag_on_cursor();
+                    self.active_panel_mut().move_cursor(1);
                     let count = self.active_panel().tagged_count();
                     self.set_status(if added {
                         format!("Tagged entry ({count} total)")
@@ -3388,6 +3389,52 @@ mod tests {
 
         panel.sort_mode.reverse = true;
         assert_eq!(panel.sort_label(), "size desc");
+    }
+
+    #[test]
+    fn toggle_tag_advances_cursor_to_next_entry() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-toggle-tag-cursor-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let alpha = root.join("alpha.txt");
+        let bravo = root.join("bravo.txt");
+        fs::write(&alpha, "a").expect("must create alpha file");
+        fs::write(&bravo, "b").expect("must create bravo file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let alpha_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == alpha)
+            .expect("alpha entry should be visible");
+        app.active_panel_mut().cursor = alpha_index;
+
+        app.apply(AppCommand::ToggleTag)
+            .expect("toggle tag should succeed");
+
+        assert!(
+            app.active_panel().is_tagged(&alpha),
+            "alpha should be tagged after toggle"
+        );
+        assert_eq!(
+            app.active_panel().cursor,
+            alpha_index + 1,
+            "cursor should advance to the next entry"
+        );
+        let selected = app
+            .active_panel()
+            .selected_entry()
+            .expect("next entry should be selected");
+        assert_eq!(
+            selected.path, bravo,
+            "cursor should land on the next file entry"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]
