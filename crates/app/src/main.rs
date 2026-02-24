@@ -251,6 +251,13 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
 
     let code = match key_event.code {
         CrosstermKeyCode::Char(ch) => {
+            let mut ch = ch;
+            if !modifiers.ctrl {
+                if let Some(mapped) = map_macos_option_symbol(ch) {
+                    modifiers.alt = true;
+                    ch = mapped;
+                }
+            }
             if ch.is_ascii_uppercase() {
                 modifiers.shift = true;
                 KeyCode::Char(ch.to_ascii_lowercase())
@@ -281,4 +288,58 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
     };
 
     Some(KeyChord { code, modifiers })
+}
+
+fn map_macos_option_symbol(ch: char) -> Option<char> {
+    match ch {
+        'ƒ' => Some('f'),
+        '†' => Some('t'),
+        '˙' => Some('h'),
+        '∆' => Some('j'),
+        '¬' => Some('l'),
+        '¿' => Some('?'),
+        '•' | '°' => Some('*'),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode as CrosstermKeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn macos_option_symbols_map_to_alt_key_chords() {
+        let chord = map_key_event_to_chord(KeyEvent::new(
+            CrosstermKeyCode::Char('ƒ'),
+            KeyModifiers::NONE,
+        ))
+        .expect("option-f should map to a chord");
+        assert_eq!(chord.code, KeyCode::Char('f'));
+        assert!(chord.modifiers.alt);
+
+        let chord = map_key_event_to_chord(KeyEvent::new(
+            CrosstermKeyCode::Char('†'),
+            KeyModifiers::NONE,
+        ))
+        .expect("option-t should map to a chord");
+        assert_eq!(chord.code, KeyCode::Char('t'));
+        assert!(chord.modifiers.alt);
+
+        let chord = map_key_event_to_chord(KeyEvent::new(
+            CrosstermKeyCode::Char('˙'),
+            KeyModifiers::NONE,
+        ))
+        .expect("option-h should map to a chord");
+        assert_eq!(chord.code, KeyCode::Char('h'));
+        assert!(chord.modifiers.alt);
+
+        let chord = map_key_event_to_chord(KeyEvent::new(
+            CrosstermKeyCode::Char('ƒ'),
+            KeyModifiers::ALT,
+        ))
+        .expect("option-f with ALT modifier should map to a chord");
+        assert_eq!(chord.code, KeyCode::Char('f'));
+        assert!(chord.modifiers.alt);
+    }
 }

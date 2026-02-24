@@ -22,6 +22,9 @@ SortReverse = shift-f8
 OpenConfirmDialog = f2
 OpenInputDialog = f7
 OpenListboxDialog = f9
+OpenFindDialog = alt-f; alt-question; ctrl-slash
+OpenTree = alt-t
+OpenHotlist = alt-h
 
 [dialog]
 Ok = enter
@@ -50,6 +53,38 @@ Up = up
 Down = down
 CancelJob = alt-j
 CloseJobs = esc; q
+
+[findresults]
+Quit = esc; q
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+Enter = enter
+
+[tree]
+Quit = esc; q
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+Enter = enter
+
+[hotlist]
+Quit = esc; q
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+Enter = enter
+AddHotlist = a
+RemoveHotlist = d; delete
 
 [editor]
 Quit = f10

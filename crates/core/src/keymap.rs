@@ -4,7 +4,11 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum KeyContext {
     FileManager,
+    FileManagerXMap,
     Jobs,
+    FindResults,
+    Tree,
+    Hotlist,
     Dialog,
     Input,
     Listbox,
@@ -21,6 +25,9 @@ impl KeyContext {
         if normalized == "viewer:hex" {
             return Some(Self::ViewerHex);
         }
+        if normalized == "filemanager:xmap" || normalized == "panel:xmap" {
+            return Some(Self::FileManagerXMap);
+        }
 
         let base = section_name
             .split(':')
@@ -32,6 +39,9 @@ impl KeyContext {
         match base.as_str() {
             "filemanager" | "panel" => Some(Self::FileManager),
             "jobs" => Some(Self::Jobs),
+            "find" | "findresults" => Some(Self::FindResults),
+            "tree" => Some(Self::Tree),
+            "hotlist" => Some(Self::Hotlist),
             "dialog" => Some(Self::Dialog),
             "input" => Some(Self::Input),
             "listbox" => Some(Self::Listbox),
@@ -113,6 +123,11 @@ pub enum KeyCommand {
     CancelJob,
     OpenJobs,
     CloseJobs,
+    OpenFindDialog,
+    OpenTree,
+    OpenHotlist,
+    AddHotlist,
+    RemoveHotlist,
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -160,6 +175,11 @@ impl KeyCommand {
             "canceljob" | "jobcancel" => Self::CancelJob,
             "openjobs" | "jobsopen" => Self::OpenJobs,
             "closejobs" | "jobsclose" => Self::CloseJobs,
+            "find" | "findfile" | "openfind" | "openfinddialog" => Self::OpenFindDialog,
+            "tree" | "directorytree" | "opentree" => Self::OpenTree,
+            "hotlist" | "directoryhotlist" | "openhotlist" => Self::OpenHotlist,
+            "addhotlist" | "hotlistadd" => Self::AddHotlist,
+            "removehotlist" | "hotlistremove" | "deletehotlist" => Self::RemoveHotlist,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
@@ -309,34 +329,36 @@ impl std::error::Error for KeymapParseError {}
 
 fn parse_key_token(token: &str) -> Result<KeyChord, String> {
     let normalized = token.trim().to_ascii_lowercase();
-    let mut parts = normalized.split('-').peekable();
-    if parts.peek().is_none() {
+    let parts: Vec<&str> = normalized.split('-').collect();
+    if parts.is_empty() {
         return Err(String::from("empty key token"));
     }
 
     let mut modifiers = KeyModifiers::default();
+    let mut index = 0usize;
     loop {
-        let Some(part) = parts.peek().copied() else {
+        if index + 1 >= parts.len() {
             break;
-        };
+        }
+        let part = parts[index];
         match part {
             "ctrl" | "control" | "c" => {
                 modifiers.ctrl = true;
-                parts.next();
+                index += 1;
             }
             "alt" | "meta" | "m" | "a" => {
                 modifiers.alt = true;
-                parts.next();
+                index += 1;
             }
             "shift" | "s" => {
                 modifiers.shift = true;
-                parts.next();
+                index += 1;
             }
             _ => break,
         }
     }
 
-    let key_name = parts.collect::<Vec<_>>().join("-");
+    let key_name = parts[index..].join("-");
     if key_name.is_empty() {
         return Err(String::from("missing key name"));
     }
@@ -469,6 +491,54 @@ CloseJobs = esc
         assert_eq!(
             keymap.resolve(KeyContext::Jobs, KeyChord::new(KeyCode::Esc)),
             Some(&KeyCommand::CloseJobs)
+        );
+    }
+
+    #[test]
+    fn parser_supports_find_tree_and_hotlist_contexts() {
+        let source = r#"
+[findresults]
+Up = up
+Quit = esc
+
+[tree]
+Down = down
+Quit = q
+
+[hotlist]
+OpenHotlist = h
+AddHotlist = a
+RemoveHotlist = d
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::FindResults, KeyChord::new(KeyCode::Up)),
+            Some(&KeyCommand::CursorUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FindResults, KeyChord::new(KeyCode::Esc)),
+            Some(&KeyCommand::Quit)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Tree, KeyChord::new(KeyCode::Down)),
+            Some(&KeyCommand::CursorDown)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Tree, KeyChord::new(KeyCode::Char('q'))),
+            Some(&KeyCommand::Quit)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('h'))),
+            Some(&KeyCommand::OpenHotlist)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('a'))),
+            Some(&KeyCommand::AddHotlist)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('d'))),
+            Some(&KeyCommand::RemoveHotlist)
         );
     }
 
@@ -681,6 +751,28 @@ OpenJobs = f3
     }
 
     #[test]
+    fn parser_maps_ctrl_slash_find_binding() {
+        let source = r#"
+[filemanager]
+OpenFindDialog = ctrl-slash
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        let chord = KeyChord {
+            code: KeyCode::Char('/'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        };
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, chord),
+            Some(&KeyCommand::OpenFindDialog)
+        );
+    }
+
+    #[test]
     fn parser_reports_unknown_actions_instead_of_failing() {
         let source = r#"
 [filemanager]
@@ -738,11 +830,11 @@ Reread = ctrl-r
         };
 
         assert_eq!(
-            keymap.resolve(KeyContext::FileManager, alt_question),
+            keymap.resolve(KeyContext::FileManagerXMap, alt_question),
             Some(&KeyCommand::PanelOther)
         );
         assert_eq!(
-            keymap.resolve(KeyContext::FileManager, ctrl_backslash),
+            keymap.resolve(KeyContext::FileManagerXMap, ctrl_backslash),
             Some(&KeyCommand::Reread)
         );
         assert_eq!(

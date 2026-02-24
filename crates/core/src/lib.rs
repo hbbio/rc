@@ -24,6 +24,12 @@ use crate::keymap::{KeyCommand, KeyContext};
 pub enum AppCommand {
     Quit,
     CloseViewer,
+    OpenFindDialog,
+    CloseFindResults,
+    OpenTree,
+    CloseTree,
+    OpenHotlist,
+    CloseHotlist,
     SwitchPanel,
     MoveUp,
     MoveDown,
@@ -46,6 +52,29 @@ pub enum AppCommand {
     OpenEntry,
     CdUp,
     Reread,
+    FindResultsMoveUp,
+    FindResultsMoveDown,
+    FindResultsPageUp,
+    FindResultsPageDown,
+    FindResultsHome,
+    FindResultsEnd,
+    FindResultsOpenEntry,
+    TreeMoveUp,
+    TreeMoveDown,
+    TreePageUp,
+    TreePageDown,
+    TreeHome,
+    TreeEnd,
+    TreeOpenEntry,
+    HotlistMoveUp,
+    HotlistMoveDown,
+    HotlistPageUp,
+    HotlistPageDown,
+    HotlistHome,
+    HotlistEnd,
+    HotlistOpenEntry,
+    HotlistAddCurrentDirectory,
+    HotlistRemoveSelected,
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -75,6 +104,9 @@ impl AppCommand {
         match (context, key_command) {
             (KeyContext::FileManager, KeyCommand::Quit) => Some(Self::Quit),
             (KeyContext::Viewer, KeyCommand::Quit) => Some(Self::CloseViewer),
+            (KeyContext::FindResults, KeyCommand::Quit) => Some(Self::CloseFindResults),
+            (KeyContext::Tree, KeyCommand::Quit) => Some(Self::CloseTree),
+            (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::CursorUp) => Some(Self::MoveUp),
             (KeyContext::FileManager, KeyCommand::CursorDown) => Some(Self::MoveDown),
@@ -100,6 +132,33 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::Reread) => Some(Self::Reread),
+            (KeyContext::FileManager, KeyCommand::OpenFindDialog) => Some(Self::OpenFindDialog),
+            (KeyContext::FindResults, KeyCommand::CursorUp) => Some(Self::FindResultsMoveUp),
+            (KeyContext::FindResults, KeyCommand::CursorDown) => Some(Self::FindResultsMoveDown),
+            (KeyContext::FindResults, KeyCommand::PageUp) => Some(Self::FindResultsPageUp),
+            (KeyContext::FindResults, KeyCommand::PageDown) => Some(Self::FindResultsPageDown),
+            (KeyContext::FindResults, KeyCommand::Home) => Some(Self::FindResultsHome),
+            (KeyContext::FindResults, KeyCommand::End) => Some(Self::FindResultsEnd),
+            (KeyContext::FindResults, KeyCommand::OpenEntry) => Some(Self::FindResultsOpenEntry),
+            (KeyContext::FileManager, KeyCommand::OpenTree) => Some(Self::OpenTree),
+            (KeyContext::Tree, KeyCommand::CursorUp) => Some(Self::TreeMoveUp),
+            (KeyContext::Tree, KeyCommand::CursorDown) => Some(Self::TreeMoveDown),
+            (KeyContext::Tree, KeyCommand::PageUp) => Some(Self::TreePageUp),
+            (KeyContext::Tree, KeyCommand::PageDown) => Some(Self::TreePageDown),
+            (KeyContext::Tree, KeyCommand::Home) => Some(Self::TreeHome),
+            (KeyContext::Tree, KeyCommand::End) => Some(Self::TreeEnd),
+            (KeyContext::Tree, KeyCommand::OpenEntry) => Some(Self::TreeOpenEntry),
+            (KeyContext::FileManager, KeyCommand::OpenHotlist) => Some(Self::OpenHotlist),
+            (KeyContext::Hotlist, KeyCommand::CursorUp) => Some(Self::HotlistMoveUp),
+            (KeyContext::Hotlist, KeyCommand::CursorDown) => Some(Self::HotlistMoveDown),
+            (KeyContext::Hotlist, KeyCommand::PageUp) => Some(Self::HotlistPageUp),
+            (KeyContext::Hotlist, KeyCommand::PageDown) => Some(Self::HotlistPageDown),
+            (KeyContext::Hotlist, KeyCommand::Home) => Some(Self::HotlistHome),
+            (KeyContext::Hotlist, KeyCommand::End) => Some(Self::HotlistEnd),
+            (KeyContext::Hotlist, KeyCommand::OpenEntry) => Some(Self::HotlistOpenEntry),
+            (KeyContext::Hotlist, KeyCommand::OpenHotlist) => Some(Self::OpenHotlist),
+            (KeyContext::Hotlist, KeyCommand::AddHotlist) => Some(Self::HotlistAddCurrentDirectory),
+            (KeyContext::Hotlist, KeyCommand::RemoveHotlist) => Some(Self::HotlistRemoveSelected),
             (KeyContext::Viewer, KeyCommand::CursorUp) => Some(Self::ViewerMoveUp),
             (KeyContext::Viewer, KeyCommand::CursorDown) => Some(Self::ViewerMoveDown),
             (KeyContext::Viewer, KeyCommand::PageUp) => Some(Self::ViewerPageUp),
@@ -139,6 +198,9 @@ pub enum ApplyResult {
 
 const DEFAULT_PAGE_STEP: usize = 10;
 const DEFAULT_VIEWER_PAGE_STEP: usize = 20;
+const MAX_FIND_RESULTS: usize = 2_000;
+const TREE_MAX_DEPTH: usize = 6;
+const TREE_MAX_ENTRIES: usize = 2_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
@@ -566,11 +628,132 @@ impl ViewerState {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindResultEntry {
+    pub path: PathBuf,
+    pub is_dir: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FindResultsState {
+    pub query: String,
+    pub base_dir: PathBuf,
+    pub entries: Vec<FindResultEntry>,
+    pub cursor: usize,
+}
+
+impl FindResultsState {
+    fn new(query: String, base_dir: PathBuf, entries: Vec<FindResultEntry>) -> Self {
+        Self {
+            query,
+            base_dir,
+            entries,
+            cursor: 0,
+        }
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+
+        let last = self.entries.len() - 1;
+        let next = if delta.is_negative() {
+            self.cursor.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.cursor.saturating_add(delta as usize).min(last)
+        };
+        self.cursor = next;
+    }
+
+    fn move_page(&mut self, pages: isize) {
+        self.move_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        if self.entries.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor = self.entries.len() - 1;
+        }
+    }
+
+    fn selected_entry(&self) -> Option<&FindResultEntry> {
+        self.entries.get(self.cursor)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeEntry {
+    pub path: PathBuf,
+    pub depth: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeState {
+    pub root: PathBuf,
+    pub entries: Vec<TreeEntry>,
+    pub cursor: usize,
+}
+
+impl TreeState {
+    fn new(root: PathBuf, entries: Vec<TreeEntry>) -> Self {
+        Self {
+            root,
+            entries,
+            cursor: 0,
+        }
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+
+        let last = self.entries.len() - 1;
+        let next = if delta.is_negative() {
+            self.cursor.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.cursor.saturating_add(delta as usize).min(last)
+        };
+        self.cursor = next;
+    }
+
+    fn move_page(&mut self, pages: isize) {
+        self.move_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        if self.entries.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor = self.entries.len() - 1;
+        }
+    }
+
+    fn selected_entry(&self) -> Option<&TreeEntry> {
+        self.entries.get(self.cursor)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
     Jobs,
     Viewer(ViewerState),
+    FindResults(FindResultsState),
+    Tree(TreeState),
+    Hotlist,
     Dialog(DialogState),
 }
 
@@ -606,6 +789,9 @@ enum PendingDialogAction {
         direction: ViewerSearchDirection,
     },
     ViewerGoto,
+    FindQuery {
+        base_dir: PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -617,6 +803,8 @@ pub struct AppState {
     pub jobs: JobManager,
     pub overwrite_policy: OverwritePolicy,
     pub jobs_cursor: usize,
+    pub hotlist: Vec<PathBuf>,
+    pub hotlist_cursor: usize,
     routes: Vec<Route>,
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
@@ -631,12 +819,14 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "F2 rename | Ctrl-J jobs | F3/Enter view | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
+                "F2 rename | F3/Enter view | Alt-F find | Alt-T tree | Alt-H hotlist | Ctrl-J jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
             overwrite_policy: OverwritePolicy::Skip,
             jobs_cursor: 0,
+            hotlist: Vec::new(),
+            hotlist_cursor: 0,
             routes: vec![Route::FileManager],
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
@@ -809,6 +999,269 @@ impl AppState {
         }
     }
 
+    fn open_find_dialog(&mut self) {
+        let base_dir = self.active_panel().cwd.clone();
+        self.pending_dialog_action = Some(PendingDialogAction::FindQuery { base_dir });
+        self.routes.push(Route::Dialog(DialogState::input(
+            "Find file",
+            "Name contains:",
+            "",
+        )));
+        self.set_status("Find file");
+    }
+
+    fn close_find_results(&mut self) {
+        if matches!(self.top_route(), Route::FindResults(_)) {
+            self.routes.pop();
+            self.set_status("Closed find results");
+        }
+    }
+
+    fn move_find_results_cursor(&mut self, delta: isize) {
+        let Some(Route::FindResults(results)) = self.routes.last_mut() else {
+            return;
+        };
+        results.move_cursor(delta);
+    }
+
+    fn move_find_results_page(&mut self, pages: isize) {
+        let Some(Route::FindResults(results)) = self.routes.last_mut() else {
+            return;
+        };
+        results.move_page(pages);
+    }
+
+    fn move_find_results_home(&mut self) {
+        let Some(Route::FindResults(results)) = self.routes.last_mut() else {
+            return;
+        };
+        results.move_home();
+    }
+
+    fn move_find_results_end(&mut self) {
+        let Some(Route::FindResults(results)) = self.routes.last_mut() else {
+            return;
+        };
+        results.move_end();
+    }
+
+    fn open_selected_find_result(&mut self) -> io::Result<()> {
+        let selected = match self.top_route() {
+            Route::FindResults(results) => results.selected_entry().cloned(),
+            _ => None,
+        };
+        let Some(selected) = selected else {
+            self.set_status("No find result selected");
+            return Ok(());
+        };
+
+        if selected.is_dir {
+            if self.set_active_panel_directory(selected.path.clone())? {
+                self.routes.pop();
+                self.set_status(format!(
+                    "Opened directory {}",
+                    selected.path.to_string_lossy()
+                ));
+            } else {
+                self.set_status("Selected result is not an accessible directory");
+            }
+            return Ok(());
+        }
+
+        match ViewerState::open(selected.path.clone()) {
+            Ok(viewer) => {
+                self.routes.pop();
+                self.routes.push(Route::Viewer(viewer));
+                self.set_status(format!("Opened viewer {}", selected.path.to_string_lossy()));
+            }
+            Err(error) => {
+                self.set_status(format!("Viewer open failed: {error}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn open_tree_screen(&mut self) {
+        if matches!(self.top_route(), Route::Tree(_)) {
+            return;
+        }
+        let root = self.active_panel().cwd.clone();
+        let entries = build_tree_entries(&root, TREE_MAX_DEPTH, TREE_MAX_ENTRIES);
+        self.routes.push(Route::Tree(TreeState::new(root, entries)));
+        self.set_status("Opened directory tree");
+    }
+
+    fn close_tree_screen(&mut self) {
+        if matches!(self.top_route(), Route::Tree(_)) {
+            self.routes.pop();
+            self.set_status("Closed directory tree");
+        }
+    }
+
+    fn move_tree_cursor(&mut self, delta: isize) {
+        let Some(Route::Tree(tree)) = self.routes.last_mut() else {
+            return;
+        };
+        tree.move_cursor(delta);
+    }
+
+    fn move_tree_page(&mut self, pages: isize) {
+        let Some(Route::Tree(tree)) = self.routes.last_mut() else {
+            return;
+        };
+        tree.move_page(pages);
+    }
+
+    fn move_tree_home(&mut self) {
+        let Some(Route::Tree(tree)) = self.routes.last_mut() else {
+            return;
+        };
+        tree.move_home();
+    }
+
+    fn move_tree_end(&mut self) {
+        let Some(Route::Tree(tree)) = self.routes.last_mut() else {
+            return;
+        };
+        tree.move_end();
+    }
+
+    fn open_selected_tree_entry(&mut self) -> io::Result<()> {
+        let selected = match self.top_route() {
+            Route::Tree(tree) => tree.selected_entry().cloned(),
+            _ => None,
+        };
+        let Some(selected) = selected else {
+            self.set_status("No tree entry selected");
+            return Ok(());
+        };
+
+        if self.set_active_panel_directory(selected.path.clone())? {
+            self.routes.pop();
+            self.set_status(format!(
+                "Opened directory {}",
+                selected.path.to_string_lossy()
+            ));
+        } else {
+            self.set_status("Selected tree entry is not an accessible directory");
+        }
+        Ok(())
+    }
+
+    fn open_hotlist_screen(&mut self) {
+        if !matches!(self.top_route(), Route::Hotlist) {
+            self.routes.push(Route::Hotlist);
+        }
+        self.clamp_hotlist_cursor();
+        self.set_status("Opened directory hotlist");
+    }
+
+    fn close_hotlist_screen(&mut self) {
+        if matches!(self.top_route(), Route::Hotlist) {
+            self.routes.pop();
+            self.set_status("Closed directory hotlist");
+        }
+    }
+
+    fn clamp_hotlist_cursor(&mut self) {
+        if self.hotlist.is_empty() {
+            self.hotlist_cursor = 0;
+        } else if self.hotlist_cursor >= self.hotlist.len() {
+            self.hotlist_cursor = self.hotlist.len() - 1;
+        }
+    }
+
+    fn move_hotlist_cursor(&mut self, delta: isize) {
+        if self.hotlist.is_empty() {
+            self.hotlist_cursor = 0;
+            return;
+        }
+        let last = self.hotlist.len() - 1;
+        let next = if delta.is_negative() {
+            self.hotlist_cursor.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.hotlist_cursor.saturating_add(delta as usize).min(last)
+        };
+        self.hotlist_cursor = next;
+    }
+
+    fn move_hotlist_page(&mut self, pages: isize) {
+        self.move_hotlist_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    }
+
+    fn move_hotlist_home(&mut self) {
+        self.hotlist_cursor = 0;
+    }
+
+    fn move_hotlist_end(&mut self) {
+        if self.hotlist.is_empty() {
+            self.hotlist_cursor = 0;
+        } else {
+            self.hotlist_cursor = self.hotlist.len() - 1;
+        }
+    }
+
+    fn add_current_directory_to_hotlist(&mut self) {
+        let cwd = self.active_panel().cwd.clone();
+        if self.hotlist.iter().any(|entry| entry == &cwd) {
+            self.hotlist_cursor = self
+                .hotlist
+                .iter()
+                .position(|entry| entry == &cwd)
+                .unwrap_or(self.hotlist_cursor);
+            self.set_status("Directory already exists in hotlist");
+            return;
+        }
+        self.hotlist.push(cwd.clone());
+        self.hotlist_cursor = self.hotlist.len() - 1;
+        self.set_status(format!("Added {} to hotlist", cwd.to_string_lossy()));
+    }
+
+    fn remove_selected_hotlist_entry(&mut self) {
+        if self.hotlist.is_empty() {
+            self.set_status("Hotlist is empty");
+            return;
+        }
+        let removed = self.hotlist.remove(self.hotlist_cursor);
+        self.clamp_hotlist_cursor();
+        self.set_status(format!(
+            "Removed {} from hotlist",
+            removed.to_string_lossy()
+        ));
+    }
+
+    fn open_selected_hotlist_entry(&mut self) -> io::Result<()> {
+        let Some(path) = self.hotlist.get(self.hotlist_cursor).cloned() else {
+            self.set_status("No hotlist entry selected");
+            return Ok(());
+        };
+
+        if self.set_active_panel_directory(path.clone())? {
+            self.routes.pop();
+            self.set_status(format!("Opened directory {}", path.to_string_lossy()));
+        } else {
+            self.set_status("Selected hotlist path is not an accessible directory");
+        }
+        Ok(())
+    }
+
+    fn set_active_panel_directory(&mut self, destination: PathBuf) -> io::Result<bool> {
+        let metadata = match fs::metadata(&destination) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(false),
+        };
+        if !metadata.is_dir() {
+            return Ok(false);
+        }
+
+        let panel = self.active_panel_mut();
+        panel.cwd = destination;
+        panel.cursor = 0;
+        panel.tagged.clear();
+        panel.refresh()?;
+        Ok(true)
+    }
+
     fn clamp_jobs_cursor(&mut self) {
         let len = self.jobs.jobs().len();
         if len == 0 {
@@ -899,6 +1352,12 @@ impl AppState {
         match command {
             AppCommand::Quit => return Ok(ApplyResult::Quit),
             AppCommand::CloseViewer => self.close_viewer(),
+            AppCommand::OpenFindDialog => self.open_find_dialog(),
+            AppCommand::CloseFindResults => self.close_find_results(),
+            AppCommand::OpenTree => self.open_tree_screen(),
+            AppCommand::CloseTree => self.close_tree_screen(),
+            AppCommand::OpenHotlist => self.open_hotlist_screen(),
+            AppCommand::CloseHotlist => self.close_hotlist_screen(),
             AppCommand::SwitchPanel => {
                 self.toggle_active_panel();
                 self.set_status(format!(
@@ -974,6 +1433,35 @@ impl AppState {
                 self.refresh_active_panel()?;
                 self.set_status("Refreshed active panel");
             }
+            AppCommand::FindResultsMoveUp => self.move_find_results_cursor(-1),
+            AppCommand::FindResultsMoveDown => self.move_find_results_cursor(1),
+            AppCommand::FindResultsPageUp => self.move_find_results_page(-1),
+            AppCommand::FindResultsPageDown => self.move_find_results_page(1),
+            AppCommand::FindResultsHome => self.move_find_results_home(),
+            AppCommand::FindResultsEnd => self.move_find_results_end(),
+            AppCommand::FindResultsOpenEntry => {
+                self.open_selected_find_result()?;
+            }
+            AppCommand::TreeMoveUp => self.move_tree_cursor(-1),
+            AppCommand::TreeMoveDown => self.move_tree_cursor(1),
+            AppCommand::TreePageUp => self.move_tree_page(-1),
+            AppCommand::TreePageDown => self.move_tree_page(1),
+            AppCommand::TreeHome => self.move_tree_home(),
+            AppCommand::TreeEnd => self.move_tree_end(),
+            AppCommand::TreeOpenEntry => {
+                self.open_selected_tree_entry()?;
+            }
+            AppCommand::HotlistMoveUp => self.move_hotlist_cursor(-1),
+            AppCommand::HotlistMoveDown => self.move_hotlist_cursor(1),
+            AppCommand::HotlistPageUp => self.move_hotlist_page(-1),
+            AppCommand::HotlistPageDown => self.move_hotlist_page(1),
+            AppCommand::HotlistHome => self.move_hotlist_home(),
+            AppCommand::HotlistEnd => self.move_hotlist_end(),
+            AppCommand::HotlistOpenEntry => {
+                self.open_selected_hotlist_entry()?;
+            }
+            AppCommand::HotlistAddCurrentDirectory => self.add_current_directory_to_hotlist(),
+            AppCommand::HotlistRemoveSelected => self.remove_selected_hotlist_entry(),
             AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
@@ -1064,6 +1552,9 @@ impl AppState {
             Route::FileManager => KeyContext::FileManager,
             Route::Jobs => KeyContext::Jobs,
             Route::Viewer(_) => KeyContext::Viewer,
+            Route::FindResults(_) => KeyContext::FindResults,
+            Route::Tree(_) => KeyContext::Tree,
+            Route::Hotlist => KeyContext::Hotlist,
             Route::Dialog(dialog) => dialog.key_context(),
         }
     }
@@ -1396,6 +1887,28 @@ impl AppState {
                 self.set_status("Overwrite policy unchanged");
             }
             (
+                Some(PendingDialogAction::FindQuery { base_dir }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let query = value.trim();
+                if query.is_empty() {
+                    self.set_status("Find canceled: empty query");
+                    return;
+                }
+
+                let results = find_entries(&base_dir, query, MAX_FIND_RESULTS);
+                let result_count = results.len();
+                self.routes.push(Route::FindResults(FindResultsState::new(
+                    query.to_string(),
+                    base_dir,
+                    results,
+                )));
+                self.set_status(format!("Find '{query}': {result_count} result(s)"));
+            }
+            (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
+                self.set_status("Find canceled");
+            }
+            (
                 Some(PendingDialogAction::ViewerSearch { direction }),
                 DialogResult::InputSubmitted(value),
             ) => {
@@ -1488,6 +2001,116 @@ fn find_backward_wrap(content: &str, query: &str, start: usize) -> Option<usize>
     content[start..]
         .rfind(query)
         .map(|relative| start + relative)
+}
+
+fn find_entries(base_dir: &Path, query: &str, max_results: usize) -> Vec<FindResultEntry> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+
+    let normalized_query = query.to_lowercase();
+    if normalized_query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    let mut stack = vec![base_dir.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(_) => continue,
+        };
+        let mut child_dirs = Vec::new();
+
+        for entry in read_dir.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = file_type.is_dir();
+
+            if name.to_lowercase().contains(&normalized_query) {
+                results.push(FindResultEntry {
+                    path: path.clone(),
+                    is_dir,
+                });
+                if results.len() >= max_results {
+                    return results;
+                }
+            }
+
+            if is_dir {
+                child_dirs.push(path);
+            }
+        }
+
+        child_dirs.sort_by(|left, right| path_sort_key(left).cmp(&path_sort_key(right)));
+        for child_dir in child_dirs.into_iter().rev() {
+            stack.push(child_dir);
+        }
+    }
+
+    results
+}
+
+fn build_tree_entries(root: &Path, max_depth: usize, max_entries: usize) -> Vec<TreeEntry> {
+    if max_entries == 0 {
+        return Vec::new();
+    }
+
+    let root = root.to_path_buf();
+    let mut entries = vec![TreeEntry {
+        path: root.clone(),
+        depth: 0,
+    }];
+
+    let mut stack = vec![(root, 0usize)];
+    while let Some((directory, depth)) = stack.pop() {
+        if depth >= max_depth || entries.len() >= max_entries {
+            continue;
+        }
+
+        let read_dir = match fs::read_dir(&directory) {
+            Ok(read_dir) => read_dir,
+            Err(_) => continue,
+        };
+        let mut child_dirs = Vec::new();
+
+        for entry in read_dir.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                child_dirs.push(entry.path());
+            }
+        }
+
+        child_dirs.sort_by(|left, right| path_sort_key(left).cmp(&path_sort_key(right)));
+
+        for child_dir in child_dirs.into_iter().rev() {
+            if entries.len() >= max_entries {
+                return entries;
+            }
+
+            entries.push(TreeEntry {
+                path: child_dir.clone(),
+                depth: depth + 1,
+            });
+            stack.push((child_dir, depth + 1));
+        }
+    }
+
+    entries
+}
+
+fn path_sort_key(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| path.to_string_lossy().to_lowercase())
 }
 
 fn parse_viewer_goto_target(input: &str) -> Result<ViewerGotoTarget, String> {
@@ -2105,6 +2728,128 @@ mod tests {
     }
 
     #[test]
+    fn find_dialog_builds_results_and_opens_selected_entry() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-results-{stamp}"));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("must create temp tree");
+        let target = nested.join("needle.txt");
+        fs::write(&target, "needle").expect("must create target file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should open");
+        for ch in "needle".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing find query should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("find dialog should submit");
+        assert_eq!(app.key_context(), KeyContext::FindResults);
+
+        let target_index = match app.top_route() {
+            Route::FindResults(results) => results
+                .entries
+                .iter()
+                .position(|entry| entry.path == target)
+                .expect("target should be present in find results"),
+            _ => panic!("top route should be find results"),
+        };
+        let Some(Route::FindResults(results)) = app.routes.last_mut() else {
+            panic!("top route should be find results");
+        };
+        results.cursor = target_index;
+
+        app.apply(AppCommand::FindResultsOpenEntry)
+            .expect("opening find result should succeed");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.path, target);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn tree_screen_selects_directory_for_active_panel() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-tree-screen-{stamp}"));
+        let branch = root.join("branch");
+        fs::create_dir_all(&branch).expect("must create temp tree");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenTree)
+            .expect("tree screen should open");
+        assert_eq!(app.key_context(), KeyContext::Tree);
+
+        let branch_index = match app.top_route() {
+            Route::Tree(tree) => tree
+                .entries
+                .iter()
+                .position(|entry| entry.path == branch)
+                .expect("branch should appear in tree"),
+            _ => panic!("top route should be tree"),
+        };
+        let Some(Route::Tree(tree)) = app.routes.last_mut() else {
+            panic!("top route should be tree");
+        };
+        tree.cursor = branch_index;
+
+        app.apply(AppCommand::TreeOpenEntry)
+            .expect("tree open should succeed");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        assert_eq!(app.active_panel().cwd, branch);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn hotlist_supports_add_remove_and_open() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-hotlist-{stamp}"));
+        let branch = root.join("branch");
+        fs::create_dir_all(&branch).expect("must create temp tree");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenHotlist)
+            .expect("hotlist should open");
+        app.apply(AppCommand::HotlistAddCurrentDirectory)
+            .expect("hotlist add should succeed");
+        assert_eq!(app.hotlist, vec![root.clone()]);
+
+        {
+            let panel = app.active_panel_mut();
+            panel.cwd = branch.clone();
+            panel.refresh().expect("panel should refresh");
+        }
+        app.apply(AppCommand::HotlistAddCurrentDirectory)
+            .expect("hotlist add should succeed");
+        assert_eq!(app.hotlist, vec![root.clone(), branch.clone()]);
+
+        app.hotlist_cursor = 0;
+        app.apply(AppCommand::HotlistRemoveSelected)
+            .expect("hotlist remove should succeed");
+        assert_eq!(app.hotlist, vec![branch.clone()]);
+
+        app.hotlist_cursor = 0;
+        app.apply(AppCommand::HotlistOpenEntry)
+            .expect("hotlist open should succeed");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        assert_eq!(app.active_panel().cwd, branch);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn app_command_mapping_is_context_aware() {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
@@ -2145,6 +2890,58 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenJobs),
             Some(AppCommand::OpenJobsScreen)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenFindDialog),
+            Some(AppCommand::OpenFindDialog)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::CursorDown),
+            Some(AppCommand::FindResultsMoveDown)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::OpenEntry),
+            Some(AppCommand::FindResultsOpenEntry)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::Quit),
+            Some(AppCommand::CloseFindResults)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenTree),
+            Some(AppCommand::OpenTree)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::CursorUp),
+            Some(AppCommand::TreeMoveUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::OpenEntry),
+            Some(AppCommand::TreeOpenEntry)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Quit),
+            Some(AppCommand::CloseTree)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenHotlist),
+            Some(AppCommand::OpenHotlist)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::AddHotlist),
+            Some(AppCommand::HotlistAddCurrentDirectory)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::RemoveHotlist),
+            Some(AppCommand::HotlistRemoveSelected)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::OpenEntry),
+            Some(AppCommand::HotlistOpenEntry)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::Quit),
+            Some(AppCommand::CloseHotlist)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CursorUp),

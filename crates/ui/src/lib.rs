@@ -8,9 +8,10 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
 use rc_core::{
-    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, JobRecord, JobStatus,
-    PanelState, Route, ViewerState,
+    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FindResultsState, JobRecord,
+    JobStatus, PanelState, Route, TreeState, ViewerState,
 };
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme};
@@ -93,6 +94,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Dialog(dialog) => render_dialog(frame, dialog),
         Route::Jobs => render_jobs_screen(frame, state),
         Route::Viewer(_) => {}
+        Route::FindResults(results) => render_find_results_screen(frame, results),
+        Route::Tree(tree) => render_tree_screen(frame, tree),
+        Route::Hotlist => render_hotlist_screen(frame, state),
         Route::FileManager => {}
     }
 }
@@ -524,6 +528,175 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState) {
         table_state.select(Some(state.jobs_cursor));
     }
     frame.render_stateful_widget(table, inner, &mut table_state);
+}
+
+fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
+    let area = centered_rect(frame.area(), 96, 28);
+    frame.render_widget(Clear, area);
+
+    let title = format!(
+        "Find results: '{}' ({})",
+        results.query,
+        results.entries.len()
+    );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let root = format!("Root: {}", results.base_dir.to_string_lossy());
+    frame.render_widget(
+        Paragraph::new(root).style(Style::default().fg(Color::Gray)),
+        layout[0],
+    );
+
+    let items: Vec<ListItem<'_>> = if results.entries.is_empty() {
+        vec![ListItem::new("<no matches>")]
+    } else {
+        results
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut label = entry.path.to_string_lossy().into_owned();
+                if entry.is_dir && !label.ends_with('/') {
+                    label.push('/');
+                }
+                ListItem::new(label)
+            })
+            .collect()
+    };
+    let list = List::new(items)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+    let mut state = ListState::default();
+    if !results.entries.is_empty() {
+        state.select(Some(results.cursor));
+    }
+    frame.render_stateful_widget(list, layout[1], &mut state);
+
+    frame.render_widget(
+        Paragraph::new("Enter open | Up/Down move | PgUp/PgDn | Home/End | Esc/q close")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[2],
+    );
+}
+
+fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
+    let area = centered_rect(frame.area(), 88, 28);
+    frame.render_widget(Clear, area);
+
+    let title = format!("Directory tree ({})", tree.entries.len());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let root = format!("Root: {}", tree.root.to_string_lossy());
+    frame.render_widget(
+        Paragraph::new(root).style(Style::default().fg(Color::Gray)),
+        layout[0],
+    );
+
+    let items: Vec<ListItem<'_>> = if tree.entries.is_empty() {
+        vec![ListItem::new("<empty tree>")]
+    } else {
+        tree.entries
+            .iter()
+            .map(|entry| {
+                let name = if entry.depth == 0 {
+                    entry.path.to_string_lossy().into_owned()
+                } else {
+                    let leaf = path_leaf_label(&entry.path);
+                    format!("{}{leaf}/", "  ".repeat(entry.depth))
+                };
+                ListItem::new(name)
+            })
+            .collect()
+    };
+    let list = List::new(items)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+    let mut state = ListState::default();
+    if !tree.entries.is_empty() {
+        state.select(Some(tree.cursor));
+    }
+    frame.render_stateful_widget(list, layout[1], &mut state);
+
+    frame.render_widget(
+        Paragraph::new("Enter open | Up/Down move | PgUp/PgDn | Home/End | Esc/q close")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[2],
+    );
+}
+
+fn render_hotlist_screen(frame: &mut Frame, app: &AppState) {
+    let area = centered_rect(frame.area(), 88, 22);
+    frame.render_widget(Clear, area);
+
+    let title = format!("Directory hotlist ({})", app.hotlist.len());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem<'_>> = if app.hotlist.is_empty() {
+        vec![ListItem::new("<empty hotlist>")]
+    } else {
+        app.hotlist
+            .iter()
+            .map(|path| ListItem::new(path.to_string_lossy().into_owned()))
+            .collect()
+    };
+    let list = List::new(items)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+
+    let mut state = ListState::default();
+    if !app.hotlist.is_empty() {
+        state.select(Some(app.hotlist_cursor));
+    }
+    frame.render_stateful_widget(list, layout[0], &mut state);
+
+    frame.render_widget(
+        Paragraph::new("Enter open | a add current dir | d/delete remove | Esc/q close")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[1],
+    );
+}
+
+fn path_leaf_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 fn job_row(job: &JobRecord) -> Row<'_> {
