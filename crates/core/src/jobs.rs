@@ -455,6 +455,7 @@ fn move_paths(
         else {
             continue;
         };
+        validate_move_destination(source, &destination)?;
         progress.set_current_path(source);
         match fs::rename(source, &destination) {
             Ok(()) => {
@@ -487,13 +488,12 @@ fn copy_path(
     let metadata = fs::symlink_metadata(source)?;
     progress.set_current_path(source);
     if metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "symlink copy is not implemented yet: {}",
-                source.to_string_lossy()
-            ),
-        ));
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        copy_symlink(source, destination)?;
+        progress.complete_item(source);
+        return Ok(());
     }
 
     if metadata.is_dir() {
@@ -525,6 +525,7 @@ fn copy_path(
             let child_destination = destination.join(entry.file_name());
             copy_path(&child_source, &child_destination, progress)?;
         }
+        fs::set_permissions(destination, metadata.permissions())?;
         progress.complete_item(source);
         return Ok(());
     }
@@ -543,6 +544,7 @@ fn copy_path(
         fs::create_dir_all(parent)?;
     }
     copy_file(source, destination, progress)?;
+    fs::set_permissions(destination, metadata.permissions())?;
     progress.complete_item(source);
     Ok(())
 }
@@ -664,6 +666,55 @@ fn renamed_destination(destination: &Path) -> PathBuf {
     }
 
     unreachable!("rename candidate generator should always return");
+}
+
+fn validate_move_destination(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.is_dir() && destination.starts_with(source) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cannot move directory into itself: {} -> {}",
+                source.to_string_lossy(),
+                destination.to_string_lossy()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+    let target = fs::read_link(source)?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target, destination)
+    }
+    #[cfg(windows)]
+    {
+        let parent = source.parent().unwrap_or(Path::new("."));
+        let resolved_target = if target.is_absolute() {
+            target.clone()
+        } else {
+            parent.join(&target)
+        };
+        let is_dir_target = fs::metadata(&resolved_target)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if is_dir_target {
+            std::os::windows::fs::symlink_dir(&target, destination)
+        } else {
+            std::os::windows::fs::symlink_file(&target, destination)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = target;
+        let _ = destination;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlink copy is not supported on this platform",
+        ))
+    }
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
@@ -1083,6 +1134,152 @@ mod tests {
         let content_renamed =
             fs::read_to_string(&renamed_file).expect("renamed destination should be readable");
         assert_eq!(content_renamed, "source");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_preserves_readonly_permission_bit() {
+        let root = make_temp_dir("permissions");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let source_file = source_dir.join("readonly.txt");
+        fs::write(&source_file, "readonly").expect("source payload should be writable");
+        let mut permissions = fs::metadata(&source_file)
+            .expect("source metadata should be readable")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source_file, permissions).expect("source should become readonly");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination.clone(),
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should finish successfully"
+        );
+
+        let copied_metadata = fs::metadata(destination.join("readonly.txt"))
+            .expect("copied metadata should be readable");
+        assert!(
+            copied_metadata.permissions().readonly(),
+            "readonly bit should be preserved"
+        );
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        let mut reset_permissions = fs::metadata(root.join("source/readonly.txt"))
+            .expect("source metadata should be readable")
+            .permissions();
+        reset_permissions.set_readonly(false);
+        let _ = fs::set_permissions(root.join("source/readonly.txt"), reset_permissions);
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_preserves_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_dir("symlink");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        fs::write(source_dir.join("target.txt"), "target").expect("target file should exist");
+        symlink("target.txt", source_dir.join("link.txt")).expect("symlink should be creatable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_dir.join("link.txt")],
+            destination_dir: destination.clone(),
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should finish successfully"
+        );
+
+        let copied_link = destination.join("link.txt");
+        let copied_target = fs::read_link(&copied_link).expect("copied symlink should be readable");
+        assert_eq!(
+            copied_target,
+            PathBuf::from("target.txt"),
+            "symlink target should be preserved"
+        );
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn move_rejects_destination_inside_source_tree() {
+        let root = make_temp_dir("move-self");
+        let source_root = root.join("source");
+        fs::create_dir_all(source_root.join("child")).expect("source tree should exist");
+        fs::write(source_root.join("child/data.txt"), "x").expect("source file should exist");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let move_job = manager.enqueue(JobRequest::Move {
+            sources: vec![source_root.clone()],
+            destination_dir: source_root.clone(),
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(move_job))
+            .expect("move command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => assert!(
+                error.contains("cannot move directory into itself"),
+                "move should reject recursive destination"
+            ),
+            _ => panic!("move should fail for recursive destination"),
+        }
 
         command_tx
             .send(WorkerCommand::Shutdown)
