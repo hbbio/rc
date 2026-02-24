@@ -3318,7 +3318,11 @@ mod tests {
         let Route::Viewer(viewer) = app.top_route() else {
             panic!("top route should be viewer");
         };
-        assert_eq!(viewer.line_count(), 3, "48 bytes should render as 3 hex rows");
+        assert_eq!(
+            viewer.line_count(),
+            3,
+            "48 bytes should render as 3 hex rows"
+        );
 
         app.apply(AppCommand::ViewerMoveDown)
             .expect("viewer should move by hex row");
