@@ -5,7 +5,7 @@ pub mod jobs;
 pub mod keymap;
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
+use std::thread;
+use std::time::Duration;
 use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
@@ -933,6 +935,7 @@ pub enum BackgroundCommand {
         base_dir: PathBuf,
         max_results: usize,
         cancel_flag: Arc<AtomicBool>,
+        pause_flag: Arc<AtomicBool>,
     },
     BuildTree {
         root: PathBuf,
@@ -1025,14 +1028,37 @@ fn execute_background_command(
             base_dir,
             max_results,
             cancel_flag,
-        } => run_find_search(
-            event_tx,
-            job_id,
-            query,
-            base_dir,
-            max_results,
-            cancel_flag.as_ref(),
-        ),
+            pause_flag,
+        } => {
+            #[cfg(test)]
+            {
+                run_find_search(
+                    event_tx,
+                    job_id,
+                    query,
+                    base_dir,
+                    max_results,
+                    cancel_flag.as_ref(),
+                    pause_flag.as_ref(),
+                )
+            }
+            #[cfg(not(test))]
+            {
+                let event_tx = event_tx.clone();
+                thread::spawn(move || {
+                    let _ = run_find_search(
+                        &event_tx,
+                        job_id,
+                        query,
+                        base_dir,
+                        max_results,
+                        cancel_flag.as_ref(),
+                        pause_flag.as_ref(),
+                    );
+                });
+                true
+            }
+        }
         BackgroundCommand::BuildTree {
             root,
             max_depth,
@@ -1054,6 +1080,7 @@ fn run_find_search(
     base_dir: PathBuf,
     max_results: usize,
     cancel_flag: &AtomicBool,
+    pause_flag: &AtomicBool,
 ) -> bool {
     if event_tx
         .send(BackgroundEvent::FindEntriesStarted { job_id })
@@ -1067,6 +1094,7 @@ fn run_find_search(
         &query,
         max_results,
         cancel_flag,
+        pause_flag,
         FIND_EVENT_CHUNK_SIZE,
         |entries| {
             event_tx
@@ -1085,6 +1113,7 @@ fn stream_find_entries<F>(
     query: &str,
     max_results: usize,
     cancel_flag: &AtomicBool,
+    pause_flag: &AtomicBool,
     chunk_size: usize,
     mut emit_chunk: F,
 ) -> Result<(), String>
@@ -1107,9 +1136,7 @@ where
     let mut stack = vec![base_dir.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
-        if cancel_flag.load(AtomicOrdering::Relaxed) {
-            return Err(String::from(JOB_CANCELED_MESSAGE));
-        }
+        wait_for_find_resume(cancel_flag, pause_flag)?;
 
         let read_dir = match fs::read_dir(&dir) {
             Ok(read_dir) => read_dir,
@@ -1118,9 +1145,7 @@ where
         let mut child_dirs = Vec::new();
 
         for entry in read_dir.flatten() {
-            if cancel_flag.load(AtomicOrdering::Relaxed) {
-                return Err(String::from(JOB_CANCELED_MESSAGE));
-            }
+            wait_for_find_resume(cancel_flag, pause_flag)?;
 
             let file_type = match entry.file_type() {
                 Ok(file_type) => file_type,
@@ -1164,6 +1189,18 @@ where
         return Err(String::from("background event channel disconnected"));
     }
     Ok(())
+}
+
+fn wait_for_find_resume(cancel_flag: &AtomicBool, pause_flag: &AtomicBool) -> Result<(), String> {
+    loop {
+        if cancel_flag.load(AtomicOrdering::Relaxed) {
+            return Err(String::from(JOB_CANCELED_MESSAGE));
+        }
+        if !pause_flag.load(AtomicOrdering::Relaxed) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn query_matches_entry(name: &str, normalized_query: &str, wildcard_query: bool) -> bool {
@@ -1221,9 +1258,12 @@ pub struct AppState {
     pub hotlist: Vec<PathBuf>,
     pub hotlist_cursor: usize,
     routes: Vec<Route>,
+    paused_find_results: Option<FindResultsState>,
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_background_commands: Vec<BackgroundCommand>,
+    pending_panel_focus: Option<(ActivePanel, PathBuf)>,
+    find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
     xmap_pending: bool,
 }
@@ -1237,7 +1277,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "F2 rename | F3/Enter view | Alt-F find | Alt-T tree | Alt-H hotlist | Alt/ Ctrl-P panelize | Ctrl-J jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
+                "F2 rename | F3/Enter view | Alt-F find/back | Alt-T tree | Alt-H hotlist | Alt/ Ctrl-P panelize | Ctrl-J jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
@@ -1246,9 +1286,12 @@ impl AppState {
             hotlist: Vec::new(),
             hotlist_cursor: 0,
             routes: vec![Route::FileManager],
+            paused_find_results: None,
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
             pending_background_commands: Vec::new(),
+            pending_panel_focus: None,
+            find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
             xmap_pending: false,
         })
@@ -1330,17 +1373,58 @@ impl AppState {
     }
 
     fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
-        self.routes.iter().rev().find_map(|route| match route {
-            Route::FindResults(results) if results.job_id == job_id => Some(results),
-            _ => None,
-        })
+        self.routes
+            .iter()
+            .rev()
+            .find_map(|route| match route {
+                Route::FindResults(results) if results.job_id == job_id => Some(results),
+                _ => None,
+            })
+            .or_else(|| {
+                self.paused_find_results
+                    .as_ref()
+                    .filter(|results| results.job_id == job_id)
+            })
     }
 
     fn find_results_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut FindResultsState> {
-        self.routes.iter_mut().rev().find_map(|route| match route {
+        if let Some(results) = self.routes.iter_mut().rev().find_map(|route| match route {
             Route::FindResults(results) if results.job_id == job_id => Some(results),
             _ => None,
-        })
+        }) {
+            return Some(results);
+        }
+
+        self.paused_find_results
+            .as_mut()
+            .filter(|results| results.job_id == job_id)
+    }
+
+    fn set_find_job_paused(&self, job_id: JobId, paused: bool) {
+        if let Some(flag) = self.find_pause_flags.get(&job_id) {
+            flag.store(paused, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn pause_active_find_results(&mut self) -> bool {
+        let Some(Route::FindResults(results)) = self.routes.pop() else {
+            return false;
+        };
+        self.set_find_job_paused(results.job_id, true);
+        self.paused_find_results = Some(results);
+        true
+    }
+
+    fn resume_paused_find_results(&mut self) -> bool {
+        if matches!(self.top_route(), Route::FindResults(_)) {
+            return true;
+        }
+        let Some(results) = self.paused_find_results.take() else {
+            return false;
+        };
+        self.set_find_job_paused(results.job_id, false);
+        self.routes.push(Route::FindResults(results));
+        true
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
@@ -1372,6 +1456,9 @@ impl AppState {
     }
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
+        if let JobEvent::Finished { id, .. } = &event {
+            self.find_pause_flags.remove(id);
+        }
         self.jobs.handle_event(&event);
         self.clamp_jobs_cursor();
         match event {
@@ -1440,36 +1527,70 @@ impl AppState {
                     return;
                 }
 
-                let panel_state = &mut self.panels[panel.index()];
-                panel_state.loading = false;
-                match result {
-                    Ok(entries) => {
-                        panel_state.apply_entries(entries);
-                        if self
-                            .pending_panelize_revert
-                            .as_ref()
-                            .is_some_and(|(pending_panel, _)| *pending_panel == panel)
-                        {
-                            self.pending_panelize_revert = None;
-                        }
-                    }
-                    Err(error) => {
-                        let is_panelize = matches!(source, PanelListingSource::Panelize { .. });
-                        if let Some((pending_panel, revert_source)) =
-                            self.pending_panelize_revert.take()
-                        {
-                            if pending_panel == panel {
-                                panel_state.source = revert_source;
-                            } else {
-                                self.pending_panelize_revert = Some((pending_panel, revert_source));
+                let focus_target =
+                    self.pending_panel_focus
+                        .as_ref()
+                        .and_then(|(pending_panel, path)| {
+                            (*pending_panel == panel).then(|| path.clone())
+                        });
+                let mut clear_focus_target = false;
+                let mut focus_status = None;
+                {
+                    let panel_state = &mut self.panels[panel.index()];
+                    panel_state.loading = false;
+                    match result {
+                        Ok(entries) => {
+                            panel_state.apply_entries(entries);
+                            if self
+                                .pending_panelize_revert
+                                .as_ref()
+                                .is_some_and(|(pending_panel, _)| *pending_panel == panel)
+                            {
+                                self.pending_panelize_revert = None;
+                            }
+                            if let Some(target_path) = focus_target {
+                                clear_focus_target = true;
+                                if let Some(index) = panel_state
+                                    .entries
+                                    .iter()
+                                    .position(|entry| entry.path == target_path)
+                                {
+                                    panel_state.cursor = index;
+                                    focus_status =
+                                        Some(format!("Located {}", target_path.to_string_lossy()));
+                                } else {
+                                    focus_status = Some(format!(
+                                        "Opened {} (target not found in listing)",
+                                        panel_state.cwd.to_string_lossy()
+                                    ));
+                                }
                             }
                         }
-                        if is_panelize {
-                            self.set_status(format!("Panelize failed: {error}"));
-                        } else {
-                            self.set_status(format!("Panel refresh failed: {error}"));
+                        Err(error) => {
+                            let is_panelize = matches!(source, PanelListingSource::Panelize { .. });
+                            if let Some((pending_panel, revert_source)) =
+                                self.pending_panelize_revert.take()
+                            {
+                                if pending_panel == panel {
+                                    panel_state.source = revert_source;
+                                } else {
+                                    self.pending_panelize_revert =
+                                        Some((pending_panel, revert_source));
+                                }
+                            }
+                            if is_panelize {
+                                self.set_status(format!("Panelize failed: {error}"));
+                            } else {
+                                self.set_status(format!("Panel refresh failed: {error}"));
+                            }
                         }
                     }
+                }
+                if clear_focus_target {
+                    self.pending_panel_focus = None;
+                }
+                if let Some(focus_status) = focus_status {
+                    self.set_status(focus_status);
                 }
             }
             BackgroundEvent::ViewerLoaded { path, result } => match result {
@@ -1582,6 +1703,11 @@ impl AppState {
     }
 
     fn open_find_dialog(&mut self) {
+        if self.resume_paused_find_results() {
+            self.set_status("Resumed find results");
+            return;
+        }
+
         let base_dir = self.active_panel().cwd.clone();
         self.pending_dialog_action = Some(PendingDialogAction::FindQuery { base_dir });
         self.routes.push(Route::Dialog(DialogState::input(
@@ -1651,12 +1777,13 @@ impl AppState {
             self.set_status("No find result selected");
             return Ok(());
         };
+        self.pending_panel_focus = None;
 
         if selected.is_dir {
             if self.set_active_panel_directory(selected.path.clone())? {
-                self.routes.pop();
+                self.pause_active_find_results();
                 self.set_status(format!(
-                    "Opened directory {}",
+                    "Opened directory {} (Alt-F back to find)",
                     selected.path.to_string_lossy()
                 ));
             } else {
@@ -1665,15 +1792,25 @@ impl AppState {
             return Ok(());
         }
 
-        self.routes.pop();
-        self.pending_background_commands
-            .push(BackgroundCommand::LoadViewer {
-                path: selected.path.clone(),
-            });
-        self.set_status(format!(
-            "Opening viewer {}",
-            selected.path.to_string_lossy()
-        ));
+        let Some(parent_dir) = selected.path.parent().map(Path::to_path_buf) else {
+            self.set_status("Selected result has no parent directory");
+            return Ok(());
+        };
+        if self.set_active_panel_directory(parent_dir.clone())? {
+            self.pending_panel_focus = Some((self.active_panel, selected.path.clone()));
+            self.pause_active_find_results();
+            self.set_status(format!(
+                "Locating {} in {} (Alt-F back to find)",
+                selected
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| selected.path.to_string_lossy().into_owned()),
+                parent_dir.to_string_lossy()
+            ));
+        } else {
+            self.set_status("Selected result parent directory is not accessible");
+        }
         Ok(())
     }
 
@@ -2572,6 +2709,8 @@ impl AppState {
                 let summary = request.summary();
                 let worker_job = self.jobs.enqueue(request);
                 let job_id = worker_job.id;
+                let pause_flag = Arc::new(AtomicBool::new(false));
+                self.find_pause_flags.insert(job_id, pause_flag.clone());
                 self.routes
                     .push(Route::FindResults(FindResultsState::loading(
                         job_id,
@@ -2585,6 +2724,7 @@ impl AppState {
                         base_dir,
                         max_results: MAX_FIND_RESULTS,
                         cancel_flag: worker_job.cancel_flag(),
+                        pause_flag,
                     });
                 self.set_status(format!("Queued job #{job_id}: {summary}"));
             }
@@ -3612,7 +3752,7 @@ mod tests {
     }
 
     #[test]
-    fn find_dialog_builds_results_and_opens_selected_entry() {
+    fn find_dialog_locates_selected_entry_in_panel_and_supports_resume() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -3654,10 +3794,25 @@ mod tests {
         app.apply(AppCommand::FindResultsOpenEntry)
             .expect("opening find result should succeed");
         drain_background(&mut app);
-        let Route::Viewer(viewer) = app.top_route() else {
-            panic!("top route should be viewer");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        assert_eq!(app.active_panel().cwd, nested);
+
+        let focused_entry = app
+            .active_panel()
+            .selected_entry()
+            .expect("selected panel entry should be present");
+        assert_eq!(focused_entry.path, target);
+
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("open find should resume results");
+        assert_eq!(app.key_context(), KeyContext::FindResults);
+        let Route::FindResults(results) = app.top_route() else {
+            panic!("top route should be find results");
         };
-        assert_eq!(viewer.path, target);
+        assert_eq!(
+            results.entries.get(results.cursor).map(|entry| &entry.path),
+            Some(&target)
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -3753,11 +3908,20 @@ mod tests {
         fs::write(&png, "c").expect("must create png");
 
         let cancel_flag = AtomicBool::new(false);
+        let pause_flag = AtomicBool::new(false);
         let mut chunks = Vec::new();
-        let result = stream_find_entries(&root, "*.jpg", 32, &cancel_flag, 1, |entries| {
-            chunks.push(entries);
-            true
-        });
+        let result = stream_find_entries(
+            &root,
+            "*.jpg",
+            32,
+            &cancel_flag,
+            &pause_flag,
+            1,
+            |entries| {
+                chunks.push(entries);
+                true
+            },
+        );
         assert_eq!(result, Ok(()));
         assert!(
             chunks.len() >= 2,
@@ -3797,14 +3961,63 @@ mod tests {
         fs::write(root.join("c.jpg"), "c").expect("must create file");
 
         let cancel_flag = AtomicBool::new(false);
+        let pause_flag = AtomicBool::new(false);
         let mut chunks_seen = 0usize;
-        let result = stream_find_entries(&root, "*.jpg", 32, &cancel_flag, 1, |_entries| {
-            chunks_seen = chunks_seen.saturating_add(1);
-            cancel_flag.store(true, AtomicOrdering::Relaxed);
-            true
-        });
+        let result = stream_find_entries(
+            &root,
+            "*.jpg",
+            32,
+            &cancel_flag,
+            &pause_flag,
+            1,
+            |_entries| {
+                chunks_seen = chunks_seen.saturating_add(1);
+                cancel_flag.store(true, AtomicOrdering::Relaxed);
+                true
+            },
+        );
         assert_eq!(result, Err(String::from(JOB_CANCELED_MESSAGE)));
         assert_eq!(chunks_seen, 1, "search should stop shortly after cancel");
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn stream_find_entries_waits_while_paused_and_resumes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-paused-resume-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.jpg"), "a").expect("must create file");
+
+        let cancel_flag = AtomicBool::new(false);
+        let pause_flag = Arc::new(AtomicBool::new(true));
+        let pause_flag_for_thread = Arc::clone(&pause_flag);
+        let resumer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            pause_flag_for_thread.store(false, AtomicOrdering::Relaxed);
+        });
+
+        let started = std::time::Instant::now();
+        let result = stream_find_entries(
+            &root,
+            "*.jpg",
+            32,
+            &cancel_flag,
+            pause_flag.as_ref(),
+            1,
+            |_entries| true,
+        );
+        let elapsed = started.elapsed();
+        resumer.join().expect("resume thread should complete");
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            elapsed >= Duration::from_millis(25),
+            "search should wait for resume while paused"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

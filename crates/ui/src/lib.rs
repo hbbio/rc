@@ -669,8 +669,10 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
     frame.render_stateful_widget(list, layout[1], &mut state);
 
     frame.render_widget(
-        Paragraph::new("Enter open | Up/Down move | PgUp/PgDn | Home/End | Esc/q close")
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(
+            "Enter locate | Up/Down move | PgUp/PgDn | Home/End | Alt-J cancel | Esc/q close",
+        )
+        .style(Style::default().fg(Color::DarkGray)),
         layout[2],
     );
 }
