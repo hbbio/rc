@@ -33,6 +33,7 @@ pub enum AppCommand {
     OpenHotlist,
     CloseHotlist,
     OpenPanelizeDialog,
+    EnterXMap,
     SwitchPanel,
     MoveUp,
     MoveDown,
@@ -155,6 +156,7 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenPanelizeDialog) => {
                 Some(Self::OpenPanelizeDialog)
             }
+            (KeyContext::FileManager, KeyCommand::EnterXMap) => Some(Self::EnterXMap),
             (KeyContext::Hotlist, KeyCommand::CursorUp) => Some(Self::HotlistMoveUp),
             (KeyContext::Hotlist, KeyCommand::CursorDown) => Some(Self::HotlistMoveDown),
             (KeyContext::Hotlist, KeyCommand::PageUp) => Some(Self::HotlistPageUp),
@@ -984,6 +986,7 @@ pub struct AppState {
     pending_worker_commands: Vec<WorkerCommand>,
     pending_background_commands: Vec<BackgroundCommand>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
+    xmap_pending: bool,
 }
 
 impl AppState {
@@ -1008,6 +1011,7 @@ impl AppState {
             pending_worker_commands: Vec::new(),
             pending_background_commands: Vec::new(),
             pending_panelize_revert: None,
+            xmap_pending: false,
         })
     }
 
@@ -1088,6 +1092,10 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
+    }
+
+    pub fn clear_xmap(&mut self) {
+        self.xmap_pending = false;
     }
 
     fn queue_panel_refresh(&mut self, panel: ActivePanel) {
@@ -1663,6 +1671,13 @@ impl AppState {
     }
 
     pub fn apply(&mut self, command: AppCommand) -> io::Result<ApplyResult> {
+        if self.xmap_pending && !matches!(self.top_route(), Route::FileManager) {
+            self.xmap_pending = false;
+        }
+        let clear_xmap_after_command = self.xmap_pending
+            && matches!(self.top_route(), Route::FileManager)
+            && !matches!(command, AppCommand::EnterXMap);
+
         match command {
             AppCommand::Quit => return Ok(ApplyResult::Quit),
             AppCommand::CloseViewer => self.close_viewer(),
@@ -1673,6 +1688,10 @@ impl AppState {
             AppCommand::OpenHotlist => self.open_hotlist_screen(),
             AppCommand::CloseHotlist => self.close_hotlist_screen(),
             AppCommand::OpenPanelizeDialog => self.open_panelize_dialog(),
+            AppCommand::EnterXMap => {
+                self.xmap_pending = true;
+                self.set_status("Extended keymap mode");
+            }
             AppCommand::SwitchPanel => {
                 self.toggle_active_panel();
                 self.set_status(format!(
@@ -1853,6 +1872,10 @@ impl AppState {
             }
         }
 
+        if clear_xmap_after_command {
+            self.xmap_pending = false;
+        }
+
         Ok(ApplyResult::Continue)
     }
 
@@ -1868,7 +1891,13 @@ impl AppState {
 
     pub fn key_context(&self) -> KeyContext {
         match self.top_route() {
-            Route::FileManager => KeyContext::FileManager,
+            Route::FileManager => {
+                if self.xmap_pending {
+                    KeyContext::FileManagerXMap
+                } else {
+                    KeyContext::FileManager
+                }
+            }
             Route::Jobs => KeyContext::Jobs,
             Route::Viewer(_) => KeyContext::Viewer,
             Route::FindResults(_) => KeyContext::FindResults,
@@ -3421,6 +3450,27 @@ mod tests {
     }
 
     #[test]
+    fn xmap_mode_applies_to_next_file_manager_command_only() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-xmap-mode-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        app.apply(AppCommand::EnterXMap)
+            .expect("xmap mode should activate");
+        assert_eq!(app.key_context(), KeyContext::FileManagerXMap);
+        app.apply(AppCommand::MoveDown)
+            .expect("next command should execute");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn app_command_mapping_is_context_aware() {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
@@ -3501,6 +3551,10 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenPanelizeDialog),
             Some(AppCommand::OpenPanelizeDialog)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::EnterXMap),
+            Some(AppCommand::EnterXMap)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::AddHotlist),

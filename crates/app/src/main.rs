@@ -186,6 +186,10 @@ fn handle_key(
         return Ok(false);
     };
     let Some(key_command) = keymap.resolve(context, chord) else {
+        if context == KeyContext::FileManagerXMap {
+            state.clear_xmap();
+            state.set_status("Extended keymap command not found");
+        }
         return Ok(false);
     };
     let Some(command) = AppCommand::from_key_command(context, key_command) else {

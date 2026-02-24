@@ -104,6 +104,7 @@ impl KeyChord {
 pub enum KeyCommand {
     Quit,
     PanelOther,
+    EnterXMap,
     CursorUp,
     CursorDown,
     PageUp,
@@ -157,6 +158,7 @@ impl KeyCommand {
         match normalized.as_str() {
             "quit" => Self::Quit,
             "panelother" => Self::PanelOther,
+            "extendedkeymap" => Self::EnterXMap,
             "up" => Self::CursorUp,
             "down" => Self::CursorDown,
             "pageup" | "pgup" => Self::PageUp,
@@ -175,6 +177,7 @@ impl KeyCommand {
             "delete" | "filedelete" | "remove" => Self::Delete,
             "canceljob" | "jobcancel" => Self::CancelJob,
             "openjobs" | "jobsopen" => Self::OpenJobs,
+            "jobs" => Self::OpenJobs,
             "closejobs" | "jobsclose" => Self::CloseJobs,
             "find" | "findfile" | "openfind" | "openfinddialog" => Self::OpenFindDialog,
             "tree" | "directorytree" | "opentree" => Self::OpenTree,
@@ -406,7 +409,9 @@ fn parse_key_code(name: String) -> Result<KeyCode, String> {
         "less" => return Ok(KeyCode::Char('<')),
         "greater" => return Ok(KeyCode::Char('>')),
         "asterisk" => return Ok(KeyCode::Char('*')),
+        "exclamation" => return Ok(KeyCode::Char('!')),
         "space" => return Ok(KeyCode::Char(' ')),
+        "prime" => return Ok(KeyCode::Char('\'')),
         "kpplus" => return Ok(KeyCode::Char('+')),
         "kpminus" => return Ok(KeyCode::Char('-')),
         "kpmultiply" => return Ok(KeyCode::Char('*')),
@@ -807,6 +812,46 @@ Panelize = ctrl-p
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, ctrl_p),
+            Some(&KeyCommand::OpenPanelizeDialog)
+        );
+    }
+
+    #[test]
+    fn parser_maps_extended_keymap_and_xmap_commands() {
+        let source = r#"
+[filemanager]
+ExtendedKeyMap = ctrl-x
+
+[filemanager:xmap]
+Jobs = j
+ExternalPanelize = exclamation
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        let ctrl_x = KeyChord {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        };
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, ctrl_x),
+            Some(&KeyCommand::EnterXMap)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('j'))
+            ),
+            Some(&KeyCommand::OpenJobs)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('!'))
+            ),
             Some(&KeyCommand::OpenPanelizeDialog)
         );
     }
