@@ -39,8 +39,53 @@ Down = down
 Ok = enter
 Cancel = esc
 
+[menu]
+Up = up
+Down = down
+Ok = enter
+Cancel = esc
+
 [jobs]
 Up = up
 Down = down
 CancelJob = alt-j
 CloseJobs = esc; q
+
+[editor]
+Quit = f10
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+
+[viewer]
+Quit = f10
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+
+[viewer:hex]
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+
+[diffviewer]
+Quit = f10
+Up = up
+Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
+
+[filemanager:xmap]
+PanelOther = alt-question
+Reread = ctrl-backslash

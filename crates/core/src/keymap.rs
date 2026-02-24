@@ -9,10 +9,19 @@ pub enum KeyContext {
     Input,
     Listbox,
     Menu,
+    Editor,
+    Viewer,
+    ViewerHex,
+    DiffViewer,
 }
 
 impl KeyContext {
     fn from_section(section_name: &str) -> Option<Self> {
+        let normalized = section_name.trim().to_ascii_lowercase();
+        if normalized == "viewer:hex" {
+            return Some(Self::ViewerHex);
+        }
+
         let base = section_name
             .split(':')
             .next()
@@ -27,6 +36,9 @@ impl KeyContext {
             "input" => Some(Self::Input),
             "listbox" => Some(Self::Listbox),
             "menu" => Some(Self::Menu),
+            "editor" => Some(Self::Editor),
+            "viewer" => Some(Self::Viewer),
+            "diffviewer" => Some(Self::DiffViewer),
             _ => None,
         }
     }
@@ -362,6 +374,26 @@ fn parse_key_code(name: String) -> Result<KeyCode, String> {
         "kpperiod" | "kpdot" => return Ok(KeyCode::Char('.')),
         "kpcomma" => return Ok(KeyCode::Char(',')),
         "kpenter" => return Ok(KeyCode::Enter),
+        "kp0" => return Ok(KeyCode::Char('0')),
+        "kp1" => return Ok(KeyCode::Char('1')),
+        "kp2" => return Ok(KeyCode::Char('2')),
+        "kp3" => return Ok(KeyCode::Char('3')),
+        "kp4" => return Ok(KeyCode::Char('4')),
+        "kp5" => return Ok(KeyCode::Char('5')),
+        "kp6" => return Ok(KeyCode::Char('6')),
+        "kp7" => return Ok(KeyCode::Char('7')),
+        "kp8" => return Ok(KeyCode::Char('8')),
+        "kp9" => return Ok(KeyCode::Char('9')),
+        "kphome" => return Ok(KeyCode::Home),
+        "kpend" => return Ok(KeyCode::End),
+        "kpup" => return Ok(KeyCode::Up),
+        "kpdown" => return Ok(KeyCode::Down),
+        "kpleft" => return Ok(KeyCode::Left),
+        "kpright" => return Ok(KeyCode::Right),
+        "kppgup" => return Ok(KeyCode::PageUp),
+        "kppgdn" => return Ok(KeyCode::PageDown),
+        "kpinsert" => return Ok(KeyCode::Insert),
+        "kpdelete" => return Ok(KeyCode::Delete),
         _ => {}
     }
 
@@ -423,6 +455,85 @@ CloseJobs = esc
         assert_eq!(
             keymap.resolve(KeyContext::Jobs, KeyChord::new(KeyCode::Esc)),
             Some(&KeyCommand::CloseJobs)
+        );
+    }
+
+    #[test]
+    fn parser_supports_editor_viewer_and_diffviewer_contexts() {
+        let source = r#"
+[editor]
+Up = up
+
+[viewer]
+PageDown = pgdn
+
+[viewer:hex]
+Home = home
+
+[diffviewer]
+End = end
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::Editor, KeyChord::new(KeyCode::Up)),
+            Some(&KeyCommand::CursorUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::PageDown)),
+            Some(&KeyCommand::PageDown)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::ViewerHex, KeyChord::new(KeyCode::Home)),
+            Some(&KeyCommand::Home)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::DiffViewer, KeyChord::new(KeyCode::End)),
+            Some(&KeyCommand::End)
+        );
+    }
+
+    #[test]
+    fn parser_maps_keypad_named_keys() {
+        let source = r#"
+[filemanager]
+Up = kpup
+Down = kpdown
+Home = kphome
+End = kpend
+PageUp = kppgup
+PageDown = kppgdn
+Reread = kp1
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Up)),
+            Some(&KeyCommand::CursorUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Down)),
+            Some(&KeyCommand::CursorDown)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Home)),
+            Some(&KeyCommand::Home)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::End)),
+            Some(&KeyCommand::End)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::PageUp)),
+            Some(&KeyCommand::PageUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::PageDown)),
+            Some(&KeyCommand::PageDown)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char('1'))),
+            Some(&KeyCommand::Reread)
         );
     }
 
