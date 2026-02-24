@@ -1102,14 +1102,21 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
 
 fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
+    let include_metadata = !matches!(sort_mode.field, SortField::Name);
     for entry_result in fs::read_dir(dir)? {
         let entry = entry_result?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let file_type = entry.file_type()?;
-        let metadata = entry.metadata().ok();
-        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+        let (size, modified) = if include_metadata {
+            let metadata = entry.metadata().ok();
+            (
+                metadata.as_ref().map_or(0, std::fs::Metadata::len),
+                metadata.as_ref().and_then(|meta| meta.modified().ok()),
+            )
+        } else {
+            (0, None)
+        };
         if file_type.is_dir() {
             entries.push(FileEntry::directory(name, path, size, modified));
         } else {
@@ -1214,6 +1221,73 @@ mod tests {
         assert_eq!(first.path, root);
 
         fs::remove_dir_all(&root).expect("must remove temp tree");
+    }
+
+    #[test]
+    fn name_sort_listing_omits_metadata_population() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-name-sort-metadata-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("entry.txt");
+        fs::write(&file_path, "payload").expect("must create source file");
+
+        let entries = read_entries(
+            &root,
+            SortMode {
+                field: SortField::Name,
+                reverse: false,
+            },
+        )
+        .expect("listing should load");
+        let file_entry = entries
+            .iter()
+            .find(|entry| entry.path == file_path)
+            .expect("file entry should be present");
+        assert_eq!(file_entry.size, 0, "name sort should skip size metadata");
+        assert_eq!(
+            file_entry.modified, None,
+            "name sort should skip mtime metadata"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn size_sort_listing_populates_metadata_fields() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-size-sort-metadata-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("entry.txt");
+        fs::write(&file_path, "payload").expect("must create source file");
+
+        let entries = read_entries(
+            &root,
+            SortMode {
+                field: SortField::Size,
+                reverse: false,
+            },
+        )
+        .expect("listing should load");
+        let file_entry = entries
+            .iter()
+            .find(|entry| entry.path == file_path)
+            .expect("file entry should be present");
+        assert!(
+            file_entry.size >= 7,
+            "size sort should include file metadata size"
+        );
+        assert!(
+            file_entry.modified.is_some(),
+            "size sort should include file metadata mtime"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]
