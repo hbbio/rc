@@ -904,6 +904,8 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{self, Receiver};
@@ -918,6 +920,24 @@ mod tests {
         let root = env::temp_dir().join(format!("rc-jobs-{label}-{stamp}"));
         fs::create_dir_all(&root).expect("temp dir should be creatable");
         root
+    }
+
+    #[cfg(unix)]
+    fn reset_file_permissions_for_cleanup(path: &Path) {
+        let metadata = fs::metadata(path).expect("metadata should be readable");
+        let mode = metadata.permissions().mode();
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(mode | 0o200);
+        let _ = fs::set_permissions(path, permissions);
+    }
+
+    #[cfg(not(unix))]
+    fn reset_file_permissions_for_cleanup(path: &Path) {
+        let mut permissions = fs::metadata(path)
+            .expect("metadata should be readable")
+            .permissions();
+        permissions.set_readonly(false);
+        let _ = fs::set_permissions(path, permissions);
     }
 
     fn recv_until_finished(event_rx: &Receiver<JobEvent>, manager: &mut JobManager) -> JobEvent {
@@ -1286,11 +1306,7 @@ mod tests {
         worker
             .join()
             .expect("worker thread should terminate cleanly");
-        let mut reset_permissions = fs::metadata(root.join("source/readonly.txt"))
-            .expect("source metadata should be readable")
-            .permissions();
-        reset_permissions.set_readonly(false);
-        let _ = fs::set_permissions(root.join("source/readonly.txt"), reset_permissions);
+        reset_file_permissions_for_cleanup(&root.join("source/readonly.txt"));
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 

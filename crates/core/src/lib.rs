@@ -2047,7 +2047,7 @@ fn find_entries(base_dir: &Path, query: &str, max_results: usize) -> Vec<FindRes
             }
         }
 
-        child_dirs.sort_by(|left, right| path_sort_key(left).cmp(&path_sort_key(right)));
+        child_dirs.sort_by_key(|left| path_sort_key(left));
         for child_dir in child_dirs.into_iter().rev() {
             stack.push(child_dir);
         }
@@ -2089,7 +2089,7 @@ fn build_tree_entries(root: &Path, max_depth: usize, max_entries: usize) -> Vec<
             }
         }
 
-        child_dirs.sort_by(|left, right| path_sort_key(left).cmp(&path_sort_key(right)));
+        child_dirs.sort_by_key(|left| path_sort_key(left));
 
         for child_dir in child_dirs.into_iter().rev() {
             if entries.len() >= max_entries {

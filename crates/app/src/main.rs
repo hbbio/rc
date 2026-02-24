@@ -123,14 +123,12 @@ fn run_event_loop(
             .context("failed to draw frame")?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout).context("failed to poll input")? {
-            if let Event::Key(key_event) = event::read().context("failed to read input event")? {
-                if key_event.kind == KeyEventKind::Press
-                    && handle_key(state, keymap, key_event, worker_tx)?
-                {
-                    return Ok(());
-                }
-            }
+        if event::poll(timeout).context("failed to poll input")?
+            && let Event::Key(key_event) = event::read().context("failed to read input event")?
+            && key_event.kind == KeyEventKind::Press
+            && handle_key(state, keymap, key_event, worker_tx)?
+        {
+            return Ok(());
         }
 
         if last_tick.elapsed() >= tick_rate {
@@ -147,10 +145,10 @@ fn handle_key(
 ) -> Result<bool> {
     let context = state.key_context();
 
-    if context == KeyContext::Input {
-        if let Some(command) = input_char_command(&key_event) {
-            return Ok(apply_and_dispatch(state, command, worker_tx)? == ApplyResult::Quit);
-        }
+    if context == KeyContext::Input
+        && let Some(command) = input_char_command(&key_event)
+    {
+        return Ok(apply_and_dispatch(state, command, worker_tx)? == ApplyResult::Quit);
     }
 
     let Some(chord) = map_key_event_to_chord(key_event) else {
@@ -227,10 +225,8 @@ fn input_char_command(key_event: &KeyEvent) -> Option<AppCommand> {
             .modifiers
             .contains(crossterm::event::KeyModifiers::SUPER);
 
-    if no_shortcut_modifiers {
-        if let CrosstermKeyCode::Char(ch) = key_event.code {
-            return Some(AppCommand::DialogInputChar(ch));
-        }
+    if no_shortcut_modifiers && let CrosstermKeyCode::Char(ch) = key_event.code {
+        return Some(AppCommand::DialogInputChar(ch));
     }
 
     None
@@ -252,11 +248,11 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
     let code = match key_event.code {
         CrosstermKeyCode::Char(ch) => {
             let mut ch = ch;
-            if !modifiers.ctrl {
-                if let Some(mapped) = map_macos_option_symbol(ch) {
-                    modifiers.alt = true;
-                    ch = mapped;
-                }
+            if !modifiers.ctrl
+                && let Some(mapped) = map_macos_option_symbol(ch)
+            {
+                modifiers.alt = true;
+                ch = mapped;
             }
             if ch.is_ascii_uppercase() {
                 modifiers.shift = true;
