@@ -395,6 +395,35 @@ pub enum Route {
     Dialog(DialogState),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferKind {
+    Copy,
+    Move,
+}
+
+#[derive(Clone, Debug)]
+enum PendingDialogAction {
+    ConfirmDelete {
+        targets: Vec<PathBuf>,
+    },
+    Mkdir {
+        base_dir: PathBuf,
+    },
+    RenameEntry {
+        source: PathBuf,
+    },
+    TransferDestination {
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+    },
+    TransferOverwrite {
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+    },
+    SetDefaultOverwritePolicy,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub panels: [PanelState; 2],
@@ -405,6 +434,7 @@ pub struct AppState {
     pub overwrite_policy: OverwritePolicy,
     pub jobs_cursor: usize,
     routes: Vec<Route>,
+    pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
 }
 
@@ -417,13 +447,14 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "Ins tag | F3 jobs | F5 copy | F6 move | F8 delete | Alt-J cancel job | Shift-F6/F8 sort | q quit",
+                "F2 rename | F3 jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
             overwrite_policy: OverwritePolicy::Skip,
             jobs_cursor: 0,
             routes: vec![Route::FileManager],
+            pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
         })
     }
@@ -638,9 +669,9 @@ impl AppState {
                 let label = self.active_panel().sort_label();
                 self.set_status(format!("Sort: {label}"));
             }
-            AppCommand::Copy => self.queue_copy_job(),
-            AppCommand::Move => self.queue_move_job(),
-            AppCommand::Delete => self.queue_delete_job(),
+            AppCommand::Copy => self.start_copy_dialog(),
+            AppCommand::Move => self.start_move_dialog(),
+            AppCommand::Delete => self.start_delete_confirmation(),
             AppCommand::CancelJob => self.cancel_latest_job(),
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
@@ -664,18 +695,9 @@ impl AppState {
                 self.refresh_active_panel()?;
                 self.set_status("Refreshed active panel");
             }
-            AppCommand::OpenConfirmDialog => {
-                self.routes.push(Route::Dialog(DialogState::demo_confirm()));
-                self.set_status("Opened confirm dialog");
-            }
-            AppCommand::OpenInputDialog => {
-                self.routes.push(Route::Dialog(DialogState::demo_input()));
-                self.set_status("Opened input dialog");
-            }
-            AppCommand::OpenListboxDialog => {
-                self.routes.push(Route::Dialog(DialogState::demo_listbox()));
-                self.set_status("Opened listbox dialog");
-            }
+            AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
+            AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
+            AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::DialogAccept => self.handle_dialog_event(DialogEvent::Accept),
             AppCommand::DialogCancel => self.handle_dialog_event(DialogEvent::Cancel),
             AppCommand::DialogFocusNext => self.handle_dialog_event(DialogEvent::FocusNext),
@@ -721,56 +743,127 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    fn queue_copy_job(&mut self) {
+    fn selected_non_parent_entry(&self) -> Option<&FileEntry> {
+        self.active_panel()
+            .selected_entry()
+            .filter(|entry| !entry.is_parent)
+    }
+
+    fn start_copy_dialog(&mut self) {
+        self.start_transfer_dialog(TransferKind::Copy);
+    }
+
+    fn start_move_dialog(&mut self) {
+        self.start_transfer_dialog(TransferKind::Move);
+    }
+
+    fn start_transfer_dialog(&mut self, kind: TransferKind) {
         let sources = self.selected_operation_paths();
         if sources.is_empty() {
-            self.set_status("Copy requires a selected or tagged entry");
+            self.set_status("Copy/Move requires a selected or tagged entry");
             return;
         }
 
         let destination_dir = self.passive_panel().cwd.clone();
-        let request = JobRequest::Copy {
-            sources,
-            destination_dir,
-            overwrite: self.overwrite_policy,
+        let title = match kind {
+            TransferKind::Copy => "Copy",
+            TransferKind::Move => "Move",
         };
-        let summary = request.summary();
-        let worker_job = self.jobs.enqueue(request);
-        let job_id = worker_job.id;
-        self.pending_worker_commands
-            .push(WorkerCommand::Run(worker_job));
-        self.set_status(format!("Queued job #{job_id}: {summary}"));
+        self.pending_dialog_action =
+            Some(PendingDialogAction::TransferDestination { kind, sources });
+        self.routes.push(Route::Dialog(DialogState::input(
+            title,
+            "Destination directory:",
+            destination_dir.to_string_lossy(),
+        )));
+        self.set_status(format!("{title}: choose destination"));
     }
 
-    fn queue_move_job(&mut self) {
-        let sources = self.selected_operation_paths();
-        if sources.is_empty() {
-            self.set_status("Move requires a selected or tagged entry");
-            return;
-        }
-
-        let destination_dir = self.passive_panel().cwd.clone();
-        let request = JobRequest::Move {
-            sources,
-            destination_dir,
-            overwrite: self.overwrite_policy,
-        };
-        let summary = request.summary();
-        let worker_job = self.jobs.enqueue(request);
-        let job_id = worker_job.id;
-        self.pending_worker_commands
-            .push(WorkerCommand::Run(worker_job));
-        self.set_status(format!("Queued job #{job_id}: {summary}"));
-    }
-
-    fn queue_delete_job(&mut self) {
+    fn start_delete_confirmation(&mut self) {
         let targets = self.selected_operation_paths();
         if targets.is_empty() {
             self.set_status("Delete requires a selected or tagged entry");
             return;
         }
 
-        let request = JobRequest::Delete { targets };
+        let message = if targets.len() == 1 {
+            let name = targets[0]
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| targets[0].to_string_lossy().into_owned());
+            format!("Delete '{name}'?")
+        } else {
+            format!("Delete {} selected items?", targets.len())
+        };
+        self.pending_dialog_action = Some(PendingDialogAction::ConfirmDelete { targets });
+        self.routes
+            .push(Route::Dialog(DialogState::confirm("Delete", message)));
+        self.set_status("Confirm delete");
+    }
+
+    fn start_rename_dialog(&mut self) {
+        let Some(entry) = self.selected_non_parent_entry() else {
+            self.set_status("Rename requires a selected entry");
+            return;
+        };
+        let tagged_count = self.active_panel().tagged_count();
+        if tagged_count > 1 {
+            self.set_status("Rename supports a single selected entry");
+            return;
+        }
+
+        let source = entry.path.clone();
+        let current_name = entry.name.clone();
+        self.pending_dialog_action = Some(PendingDialogAction::RenameEntry { source });
+        self.routes.push(Route::Dialog(DialogState::input(
+            "Rename/Move",
+            "New name:",
+            current_name,
+        )));
+        self.set_status("Rename/Move: enter new name");
+    }
+
+    fn start_mkdir_dialog(&mut self) {
+        let base_dir = self.active_panel().cwd.clone();
+        self.pending_dialog_action = Some(PendingDialogAction::Mkdir { base_dir });
+        self.routes.push(Route::Dialog(DialogState::input(
+            "Mkdir",
+            "Directory name:",
+            "",
+        )));
+        self.set_status("Mkdir: enter directory name");
+    }
+
+    fn start_overwrite_policy_dialog(&mut self) {
+        let selected = overwrite_policy_index(self.overwrite_policy);
+        self.pending_dialog_action = Some(PendingDialogAction::SetDefaultOverwritePolicy);
+        self.routes.push(Route::Dialog(DialogState::listbox(
+            "Overwrite Policy",
+            overwrite_policy_items(),
+            selected,
+        )));
+        self.set_status("Choose default overwrite policy");
+    }
+
+    fn queue_copy_or_move_job(
+        &mut self,
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+        overwrite: OverwritePolicy,
+    ) {
+        let request = match kind {
+            TransferKind::Copy => JobRequest::Copy {
+                sources,
+                destination_dir,
+                overwrite,
+            },
+            TransferKind::Move => JobRequest::Move {
+                sources,
+                destination_dir,
+                overwrite,
+            },
+        };
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
@@ -799,6 +892,162 @@ impl AppState {
         }
     }
 
+    fn finish_dialog(&mut self, result: DialogResult) {
+        let pending = self.pending_dialog_action.take();
+        match (pending, result) {
+            (None, result) => self.set_status(result.status_line()),
+            (
+                Some(PendingDialogAction::ConfirmDelete { targets }),
+                DialogResult::ConfirmAccepted,
+            ) => {
+                let request = JobRequest::Delete { targets };
+                let summary = request.summary();
+                let worker_job = self.jobs.enqueue(request);
+                let job_id = worker_job.id;
+                self.pending_worker_commands
+                    .push(WorkerCommand::Run(worker_job));
+                self.set_status(format!("Queued job #{job_id}: {summary}"));
+            }
+            (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::ConfirmDeclined)
+            | (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::Canceled) => {
+                self.set_status("Delete canceled");
+            }
+            (
+                Some(PendingDialogAction::Mkdir { base_dir }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    self.set_status("Mkdir canceled: empty name");
+                    return;
+                }
+                let input_path = PathBuf::from(value);
+                let destination = if input_path.is_absolute() {
+                    input_path
+                } else {
+                    base_dir.join(input_path)
+                };
+                match fs::create_dir(&destination) {
+                    Ok(()) => {
+                        if let Err(error) = self.refresh_active_panel() {
+                            self.set_status(format!(
+                                "Directory created, but refresh failed: {error}"
+                            ));
+                        } else {
+                            self.set_status(format!(
+                                "Created directory {}",
+                                destination.to_string_lossy()
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        self.set_status(format!("Mkdir failed: {error}"));
+                    }
+                }
+            }
+            (Some(PendingDialogAction::Mkdir { .. }), DialogResult::Canceled) => {
+                self.set_status("Mkdir canceled");
+            }
+            (
+                Some(PendingDialogAction::RenameEntry { source }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    self.set_status("Rename canceled: empty name");
+                    return;
+                }
+                let Some(parent) = source.parent() else {
+                    self.set_status("Rename failed: source has no parent directory");
+                    return;
+                };
+                let destination = parent.join(value);
+                if destination == source {
+                    self.set_status("Rename skipped: name unchanged");
+                    return;
+                }
+                match fs::rename(&source, &destination) {
+                    Ok(()) => {
+                        if let Err(error) = self.refresh_panels() {
+                            self.set_status(format!("Renamed entry, but refresh failed: {error}"));
+                        } else {
+                            self.set_status(format!(
+                                "Renamed to {}",
+                                destination.to_string_lossy()
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        self.set_status(format!("Rename failed: {error}"));
+                    }
+                }
+            }
+            (Some(PendingDialogAction::RenameEntry { .. }), DialogResult::Canceled) => {
+                self.set_status("Rename canceled");
+            }
+            (
+                Some(PendingDialogAction::TransferDestination { kind, sources }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    self.set_status("Copy/Move canceled: empty destination");
+                    return;
+                }
+                let destination_dir = PathBuf::from(value);
+                let selected = overwrite_policy_index(self.overwrite_policy);
+                self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
+                    kind,
+                    sources,
+                    destination_dir,
+                });
+                self.routes.push(Route::Dialog(DialogState::listbox(
+                    "Overwrite Policy",
+                    overwrite_policy_items(),
+                    selected,
+                )));
+                self.set_status("Choose overwrite policy");
+            }
+            (Some(PendingDialogAction::TransferDestination { .. }), DialogResult::Canceled) => {
+                self.set_status("Copy/Move canceled");
+            }
+            (
+                Some(PendingDialogAction::TransferOverwrite {
+                    kind,
+                    sources,
+                    destination_dir,
+                }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                let overwrite = index
+                    .map(overwrite_policy_from_index)
+                    .unwrap_or(self.overwrite_policy);
+                self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite);
+            }
+            (Some(PendingDialogAction::TransferOverwrite { .. }), DialogResult::Canceled) => {
+                self.set_status("Copy/Move canceled");
+            }
+            (
+                Some(PendingDialogAction::SetDefaultOverwritePolicy),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(index) = index {
+                    self.overwrite_policy = overwrite_policy_from_index(index);
+                    self.set_status(format!(
+                        "Default overwrite policy: {}",
+                        self.overwrite_policy.label()
+                    ));
+                } else {
+                    self.set_status("Overwrite policy unchanged");
+                }
+            }
+            (Some(PendingDialogAction::SetDefaultOverwritePolicy), DialogResult::Canceled) => {
+                self.set_status("Overwrite policy unchanged");
+            }
+            (_, result) => self.set_status(result.status_line()),
+        }
+    }
+
     fn handle_dialog_event(&mut self, event: DialogEvent) {
         let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
             return;
@@ -807,8 +1056,33 @@ impl AppState {
         if let dialog::DialogTransition::Close(result) = transition {
             self.routes.pop();
             self.last_dialog_result = Some(result.clone());
-            self.set_status(result.status_line());
+            self.finish_dialog(result);
         }
+    }
+}
+
+fn overwrite_policy_items() -> Vec<String> {
+    vec![
+        String::from("Overwrite existing"),
+        String::from("Skip existing"),
+        String::from("Rename destination"),
+    ]
+}
+
+fn overwrite_policy_index(policy: OverwritePolicy) -> usize {
+    match policy {
+        OverwritePolicy::Overwrite => 0,
+        OverwritePolicy::Skip => 1,
+        OverwritePolicy::Rename => 2,
+    }
+}
+
+fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
+    match index {
+        0 => OverwritePolicy::Overwrite,
+        1 => OverwritePolicy::Skip,
+        2 => OverwritePolicy::Rename,
+        _ => OverwritePolicy::Skip,
     }
 }
 
@@ -1007,6 +1281,132 @@ mod tests {
 
         panel.sort_mode.reverse = true;
         assert_eq!(panel.sort_label(), "size desc");
+    }
+
+    #[test]
+    fn mkdir_dialog_creates_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-mkdir-dialog-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenInputDialog)
+            .expect("mkdir dialog should open");
+        for ch in "newdir".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing should be accepted");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("mkdir dialog should submit");
+
+        assert!(
+            root.join("newdir").exists(),
+            "mkdir should create directory"
+        );
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn delete_command_queues_job_only_after_confirmation() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-delete-dialog-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let victim = root.join("victim.txt");
+        fs::write(&victim, "victim").expect("must create victim file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let victim_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == victim)
+            .expect("victim entry should be visible");
+        app.active_panel_mut().cursor = victim_index;
+
+        app.apply(AppCommand::Delete)
+            .expect("delete should open confirm dialog");
+        assert_eq!(app.route_depth(), 2);
+
+        app.apply(AppCommand::DialogAccept)
+            .expect("confirm dialog should submit");
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "delete should enqueue exactly one worker command"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Delete { targets } => {
+                    assert_eq!(targets, &vec![victim.clone()]);
+                }
+                _ => panic!("expected delete job request"),
+            },
+            _ => panic!("expected queued worker run command"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn copy_command_uses_destination_and_policy_dialogs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-copy-dialog-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let source = root.join("a.txt");
+        fs::write(&source, "a").expect("must create source file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let source_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry should be visible");
+        app.active_panel_mut().cursor = source_index;
+
+        app.apply(AppCommand::Copy)
+            .expect("copy should open destination dialog");
+        assert_eq!(app.route_depth(), 2);
+
+        app.apply(AppCommand::DialogAccept)
+            .expect("destination dialog should submit");
+        assert_eq!(
+            app.route_depth(),
+            2,
+            "policy dialog should replace destination dialog"
+        );
+
+        app.apply(AppCommand::DialogAccept)
+            .expect("policy dialog should submit");
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "copy should enqueue one worker command");
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Copy {
+                    sources,
+                    destination_dir,
+                    overwrite,
+                } => {
+                    assert_eq!(sources, &vec![source.clone()]);
+                    assert_eq!(destination_dir, &root);
+                    assert_eq!(*overwrite, app.overwrite_policy);
+                }
+                _ => panic!("expected copy job request"),
+            },
+            _ => panic!("expected queued worker run command"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]

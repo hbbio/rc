@@ -47,38 +47,60 @@ pub struct DialogState {
 }
 
 impl DialogState {
-    pub fn demo_confirm() -> Self {
+    pub fn confirm(title: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            title: String::from("Confirm"),
+            title: title.into(),
             kind: DialogKind::Confirm(ConfirmDialogState {
-                message: String::from("Proceed with this action?"),
+                message: message.into(),
                 focus: DialogButtonFocus::Ok,
             }),
         }
     }
 
-    pub fn demo_input() -> Self {
+    pub fn input(
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        initial_value: impl Into<String>,
+    ) -> Self {
         Self {
-            title: String::from("Input"),
+            title: title.into(),
             kind: DialogKind::Input(InputDialogState {
-                prompt: String::from("New name:"),
-                value: String::new(),
+                prompt: prompt.into(),
+                value: initial_value.into(),
             }),
         }
     }
 
-    pub fn demo_listbox() -> Self {
+    pub fn listbox(title: impl Into<String>, items: Vec<String>, selected: usize) -> Self {
+        let selected = if items.is_empty() {
+            0
+        } else {
+            selected.min(items.len() - 1)
+        };
         Self {
-            title: String::from("Listbox"),
-            kind: DialogKind::Listbox(ListboxDialogState {
-                items: vec![
-                    String::from("Sort by name"),
-                    String::from("Sort by size"),
-                    String::from("Sort by mtime"),
-                ],
-                selected: 0,
-            }),
+            title: title.into(),
+            kind: DialogKind::Listbox(ListboxDialogState { items, selected }),
         }
+    }
+
+    pub fn demo_confirm() -> Self {
+        Self::confirm("Confirm", "Proceed with this action?")
+    }
+
+    pub fn demo_input() -> Self {
+        Self::input("Input", "New name:", "")
+    }
+
+    pub fn demo_listbox() -> Self {
+        Self::listbox(
+            "Listbox",
+            vec![
+                String::from("Sort by name"),
+                String::from("Sort by size"),
+                String::from("Sort by mtime"),
+            ],
+            0,
+        )
     }
 
     pub fn key_context(&self) -> KeyContext {
