@@ -298,12 +298,11 @@ fn parse_color_token(
         return None;
     }
 
-    if visiting.insert(normalized.clone()) {
-        if let Some(alias_value) = aliases.get(&normalized)
-            && let Some(color) = parse_color_token(alias_value, aliases, visiting)
-        {
-            return Some(color);
-        }
+    if visiting.insert(normalized.clone())
+        && let Some(alias_value) = aliases.get(&normalized)
+        && let Some(color) = parse_color_token(alias_value, aliases, visiting)
+    {
+        return Some(color);
     }
 
     parse_direct_color(&normalized)
