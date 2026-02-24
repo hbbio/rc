@@ -1,0 +1,33 @@
+[filemanager]
+Quit = f10; q; esc
+PanelOther = tab
+Up = up
+Down = down
+Enter = enter
+CdUp = backspace
+Reread = ctrl-r
+OpenConfirmDialog = f2
+OpenInputDialog = f7
+OpenListboxDialog = f9
+UnmappedFutureAction = f14
+
+[dialog]
+Ok = enter
+Cancel = esc; f10
+FocusNext = tab; right
+
+[input]
+Ok = enter
+Cancel = esc
+Backspace = backspace
+
+[listbox]
+Up = up
+Down = down
+Ok = enter
+Cancel = esc
+
+[filemanager:xmap]
+PanelOther = alt-question
+Reread = ctrl-backslash
+

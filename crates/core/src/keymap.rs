@@ -124,6 +124,28 @@ impl KeyCommand {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UnknownAction {
+    pub line: usize,
+    pub context: KeyContext,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SkippedKeyBinding {
+    pub line: usize,
+    pub context: KeyContext,
+    pub action: String,
+    pub key_spec: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct KeymapParseReport {
+    pub unknown_actions: Vec<UnknownAction>,
+    pub skipped_bindings: Vec<SkippedKeyBinding>,
+}
+
 #[derive(Debug, Default)]
 pub struct Keymap {
     bindings: HashMap<KeyContext, HashMap<KeyChord, KeyCommand>>,
@@ -135,7 +157,13 @@ impl Keymap {
     }
 
     pub fn parse(source: &str) -> Result<Self, KeymapParseError> {
+        let (keymap, _) = Self::parse_with_report(source)?;
+        Ok(keymap)
+    }
+
+    pub fn parse_with_report(source: &str) -> Result<(Self, KeymapParseReport), KeymapParseError> {
         let mut keymap = Self::default();
+        let mut report = KeymapParseReport::default();
         let mut context: Option<KeyContext> = None;
 
         for (line_index, raw_line) in source.lines().enumerate() {
@@ -160,15 +188,33 @@ impl Keymap {
             };
 
             let command = KeyCommand::from_name(action_name);
+            if let KeyCommand::Unknown(unknown_action) = command {
+                report.unknown_actions.push(UnknownAction {
+                    line: line_number,
+                    context: current_context,
+                    action: unknown_action,
+                });
+                continue;
+            }
+
             for token in chord_spec.split(';') {
                 let token = token.trim();
                 if token.is_empty() {
                     continue;
                 }
-                let chord = parse_key_token(token).map_err(|msg| KeymapParseError {
-                    line: line_number,
-                    message: msg,
-                })?;
+                let chord = match parse_key_token(token) {
+                    Ok(chord) => chord,
+                    Err(reason) => {
+                        report.skipped_bindings.push(SkippedKeyBinding {
+                            line: line_number,
+                            context: current_context,
+                            action: action_name.trim().to_string(),
+                            key_spec: token.to_string(),
+                            reason,
+                        });
+                        continue;
+                    }
+                };
                 keymap
                     .bindings
                     .entry(current_context)
@@ -177,7 +223,7 @@ impl Keymap {
             }
         }
 
-        Ok(keymap)
+        Ok((keymap, report))
     }
 
     pub fn resolve(&self, context: KeyContext, chord: KeyChord) -> Option<&KeyCommand> {
@@ -207,34 +253,50 @@ impl std::error::Error for KeymapParseError {}
 
 fn parse_key_token(token: &str) -> Result<KeyChord, String> {
     let normalized = token.trim().to_ascii_lowercase();
-    let parts: Vec<&str> = normalized
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.is_empty() {
+    let mut parts = normalized.split('-').peekable();
+    if parts.peek().is_none() {
         return Err(String::from("empty key token"));
     }
 
     let mut modifiers = KeyModifiers::default();
-    for modifier in &parts[..parts.len() - 1] {
-        match *modifier {
-            "ctrl" | "control" => modifiers.ctrl = true,
-            "alt" | "meta" => modifiers.alt = true,
-            "shift" => modifiers.shift = true,
-            other => return Err(format!("unsupported modifier '{other}'")),
+    loop {
+        let Some(part) = parts.peek().copied() else {
+            break;
+        };
+        match part {
+            "ctrl" | "control" | "c" => {
+                modifiers.ctrl = true;
+                parts.next();
+            }
+            "alt" | "meta" | "m" | "a" => {
+                modifiers.alt = true;
+                parts.next();
+            }
+            "shift" | "s" => {
+                modifiers.shift = true;
+                parts.next();
+            }
+            _ => break,
         }
     }
 
-    let key_name = parts[parts.len() - 1];
+    let key_name = parts.collect::<Vec<_>>().join("-");
+    if key_name.is_empty() {
+        return Err(String::from("missing key name"));
+    }
     let code = parse_key_code(key_name)?;
     Ok(KeyChord { code, modifiers })
 }
 
-fn parse_key_code(name: &str) -> Result<KeyCode, String> {
+fn parse_key_code(name: String) -> Result<KeyCode, String> {
+    let name = name.as_str();
     match name {
         "enter" | "return" => return Ok(KeyCode::Enter),
         "esc" | "escape" => return Ok(KeyCode::Esc),
         "tab" => return Ok(KeyCode::Tab),
+        "backtab" => {
+            return Ok(KeyCode::Tab);
+        }
         "backspace" | "bs" => return Ok(KeyCode::Backspace),
         "up" => return Ok(KeyCode::Up),
         "down" => return Ok(KeyCode::Down),
@@ -246,7 +308,30 @@ fn parse_key_code(name: &str) -> Result<KeyCode, String> {
         "pgdn" | "pagedown" => return Ok(KeyCode::PageDown),
         "insert" | "ins" => return Ok(KeyCode::Insert),
         "delete" | "del" => return Ok(KeyCode::Delete),
+        "question" => return Ok(KeyCode::Char('?')),
+        "backslash" => return Ok(KeyCode::Char('\\')),
+        "slash" => return Ok(KeyCode::Char('/')),
+        "comma" => return Ok(KeyCode::Char(',')),
+        "period" | "dot" => return Ok(KeyCode::Char('.')),
+        "plus" => return Ok(KeyCode::Char('+')),
+        "minus" => return Ok(KeyCode::Char('-')),
+        "underscore" => return Ok(KeyCode::Char('_')),
+        "equal" => return Ok(KeyCode::Char('=')),
+        "semicolon" => return Ok(KeyCode::Char(';')),
+        "colon" => return Ok(KeyCode::Char(':')),
+        "quote" | "apostrophe" => return Ok(KeyCode::Char('\'')),
+        "backquote" | "grave" => return Ok(KeyCode::Char('`')),
+        "less" => return Ok(KeyCode::Char('<')),
+        "greater" => return Ok(KeyCode::Char('>')),
+        "asterisk" => return Ok(KeyCode::Char('*')),
         "space" => return Ok(KeyCode::Char(' ')),
+        "kpplus" => return Ok(KeyCode::Char('+')),
+        "kpminus" => return Ok(KeyCode::Char('-')),
+        "kpmultiply" => return Ok(KeyCode::Char('*')),
+        "kpdivide" => return Ok(KeyCode::Char('/')),
+        "kpperiod" | "kpdot" => return Ok(KeyCode::Char('.')),
+        "kpcomma" => return Ok(KeyCode::Char(',')),
+        "kpenter" => return Ok(KeyCode::Enter),
         _ => {}
     }
 
@@ -317,6 +402,72 @@ Reread = ctrl-r; r
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, reread_plain),
             Some(&KeyCommand::Reread)
+        );
+    }
+
+    #[test]
+    fn parser_reports_unknown_actions_instead_of_failing() {
+        let source = r#"
+[filemanager]
+TotallyUnknownAction = f1
+Reread = ctrl-r
+"#;
+
+        let (keymap, report) = Keymap::parse_with_report(source).expect("keymap should parse");
+        assert_eq!(report.unknown_actions.len(), 1);
+        assert_eq!(report.unknown_actions[0].action, "TotallyUnknownAction");
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManager,
+                KeyChord {
+                    code: KeyCode::Char('r'),
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: false,
+                    }
+                }
+            ),
+            Some(&KeyCommand::Reread)
+        );
+    }
+
+    #[test]
+    fn parser_handles_fixture_with_xmap_and_named_keys() {
+        let fixture = include_str!("../assets/mc.default.keymap.fixture");
+        let (keymap, report) = Keymap::parse_with_report(fixture).expect("fixture should parse");
+
+        let alt_question = KeyChord {
+            code: KeyCode::Char('?'),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+        let ctrl_backslash = KeyChord {
+            code: KeyCode::Char('\\'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        };
+
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt_question),
+            Some(&KeyCommand::PanelOther)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, ctrl_backslash),
+            Some(&KeyCommand::Reread)
+        );
+        assert!(
+            report
+                .unknown_actions
+                .iter()
+                .any(|unknown| unknown.action == "UnmappedFutureAction"),
+            "fixture should exercise unknown action reporting",
         );
     }
 }
