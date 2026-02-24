@@ -109,13 +109,18 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
     };
 
     let title = format!(
-        "{} | sort:{} | tagged:{}",
+        "{} | sort:{} | tagged:{}{}",
         panel.cwd.to_string_lossy(),
         panel.sort_label(),
-        panel.tagged_count()
+        panel.tagged_count(),
+        if panel.loading { " | loading..." } else { "" }
     );
     let items = if panel.entries.is_empty() {
-        vec![ListItem::new("<empty>")]
+        if panel.loading {
+            vec![ListItem::new("<loading...>")]
+        } else {
+            vec![ListItem::new("<empty>")]
+        }
     } else {
         panel
             .entries
@@ -535,9 +540,10 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
     frame.render_widget(Clear, area);
 
     let title = format!(
-        "Find results: '{}' ({})",
+        "Find results: '{}' ({}){}",
         results.query,
-        results.entries.len()
+        results.entries.len(),
+        if results.loading { " | loading..." } else { "" }
     );
     let block = Block::default()
         .title(title)
@@ -562,7 +568,11 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
     );
 
     let items: Vec<ListItem<'_>> = if results.entries.is_empty() {
-        vec![ListItem::new("<no matches>")]
+        if results.loading {
+            vec![ListItem::new("<searching...>")]
+        } else {
+            vec![ListItem::new("<no matches>")]
+        }
     } else {
         results
             .entries
@@ -596,7 +606,11 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
     let area = centered_rect(frame.area(), 88, 28);
     frame.render_widget(Clear, area);
 
-    let title = format!("Directory tree ({})", tree.entries.len());
+    let title = format!(
+        "Directory tree ({}){}",
+        tree.entries.len(),
+        if tree.loading { " | loading..." } else { "" }
+    );
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)

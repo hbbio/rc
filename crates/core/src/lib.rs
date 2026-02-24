@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
@@ -314,8 +315,8 @@ impl FileEntry {
     }
 }
 
-#[derive(Clone, Debug)]
-enum PanelSource {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PanelListingSource {
     Directory,
     Panelize { command: String },
 }
@@ -326,8 +327,9 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
-    source: PanelSource,
+    source: PanelListingSource,
     tagged: HashSet<PathBuf>,
+    pub loading: bool,
 }
 
 impl PanelState {
@@ -337,8 +339,9 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
-            source: PanelSource::Directory,
+            source: PanelListingSource::Directory,
             tagged: HashSet::new(),
+            loading: false,
         };
         panel.refresh()?;
         Ok(panel)
@@ -346,11 +349,17 @@ impl PanelState {
 
     pub fn refresh(&mut self) -> io::Result<()> {
         let entries = match &self.source {
-            PanelSource::Directory => read_entries(&self.cwd, self.sort_mode)?,
-            PanelSource::Panelize { command } => {
+            PanelListingSource::Directory => read_entries(&self.cwd, self.sort_mode)?,
+            PanelListingSource::Panelize { command } => {
                 read_panelized_entries(&self.cwd, command, self.sort_mode)?
             }
         };
+        self.apply_entries(entries);
+        self.loading = false;
+        Ok(())
+    }
+
+    fn apply_entries(&mut self, entries: Vec<FileEntry>) {
         self.entries = entries;
         self.tagged.retain(|tag| {
             self.entries
@@ -362,7 +371,6 @@ impl PanelState {
         } else if self.cursor >= self.entries.len() {
             self.cursor = self.entries.len() - 1;
         }
-        Ok(())
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -460,48 +468,48 @@ impl PanelState {
         )
     }
 
-    pub fn cycle_sort_field(&mut self) -> io::Result<()> {
+    pub fn cycle_sort_field(&mut self) {
         self.sort_mode.field = self.sort_mode.field.next();
-        self.refresh()
     }
 
-    pub fn toggle_sort_direction(&mut self) -> io::Result<()> {
+    pub fn toggle_sort_direction(&mut self) {
         self.sort_mode.reverse = !self.sort_mode.reverse;
-        self.refresh()
     }
 
-    pub fn open_selected_directory(&mut self) -> io::Result<bool> {
+    pub fn open_selected_directory(&mut self) -> bool {
         let Some(entry) = self.selected_entry() else {
-            return Ok(false);
+            return false;
         };
         if !entry.is_dir {
-            return Ok(false);
+            return false;
         }
 
         self.cwd = entry.path.clone();
         self.cursor = 0;
-        self.source = PanelSource::Directory;
+        self.source = PanelListingSource::Directory;
         self.tagged.clear();
-        self.refresh()?;
-        Ok(true)
+        self.entries.clear();
+        self.loading = true;
+        true
     }
 
-    pub fn go_parent(&mut self) -> io::Result<bool> {
+    pub fn go_parent(&mut self) -> bool {
         let Some(parent) = self.cwd.parent() else {
-            return Ok(false);
+            return false;
         };
 
         self.cwd = parent.to_path_buf();
         self.cursor = 0;
-        self.source = PanelSource::Directory;
+        self.source = PanelListingSource::Directory;
         self.tagged.clear();
-        self.refresh()?;
-        Ok(true)
+        self.entries.clear();
+        self.loading = true;
+        true
     }
 
     pub fn panelize_with_command(&mut self, command: String) -> io::Result<usize> {
         let previous_source = self.source.clone();
-        self.source = PanelSource::Panelize { command };
+        self.source = PanelListingSource::Panelize { command };
         self.cursor = 0;
         self.tagged.clear();
 
@@ -515,8 +523,8 @@ impl PanelState {
 
     pub fn panelize_command(&self) -> Option<&str> {
         match &self.source {
-            PanelSource::Panelize { command } => Some(command.as_str()),
-            PanelSource::Directory => None,
+            PanelListingSource::Panelize { command } => Some(command.as_str()),
+            PanelListingSource::Directory => None,
         }
     }
 }
@@ -682,15 +690,17 @@ pub struct FindResultsState {
     pub base_dir: PathBuf,
     pub entries: Vec<FindResultEntry>,
     pub cursor: usize,
+    pub loading: bool,
 }
 
 impl FindResultsState {
-    fn new(query: String, base_dir: PathBuf, entries: Vec<FindResultEntry>) -> Self {
+    fn loading(query: String, base_dir: PathBuf) -> Self {
         Self {
             query,
             base_dir,
-            entries,
+            entries: Vec::new(),
             cursor: 0,
+            loading: true,
         }
     }
 
@@ -741,14 +751,20 @@ pub struct TreeState {
     pub root: PathBuf,
     pub entries: Vec<TreeEntry>,
     pub cursor: usize,
+    pub loading: bool,
 }
 
 impl TreeState {
-    fn new(root: PathBuf, entries: Vec<TreeEntry>) -> Self {
+    fn loading(root: PathBuf) -> Self {
+        let entries = vec![TreeEntry {
+            path: root.clone(),
+            depth: 0,
+        }];
         Self {
             root,
             entries,
             cursor: 0,
+            loading: true,
         }
     }
 
@@ -837,6 +853,121 @@ enum PendingDialogAction {
     PanelizeCommand,
 }
 
+#[derive(Clone, Debug)]
+pub enum BackgroundCommand {
+    RefreshPanel {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+    },
+    LoadViewer {
+        path: PathBuf,
+    },
+    FindEntries {
+        query: String,
+        base_dir: PathBuf,
+        max_results: usize,
+    },
+    BuildTree {
+        root: PathBuf,
+        max_depth: usize,
+        max_entries: usize,
+    },
+    Shutdown,
+}
+
+#[derive(Clone, Debug)]
+pub enum BackgroundEvent {
+    PanelRefreshed {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+        result: Result<Vec<FileEntry>, String>,
+    },
+    ViewerLoaded {
+        path: PathBuf,
+        result: Result<ViewerState, String>,
+    },
+    FindEntriesReady {
+        query: String,
+        base_dir: PathBuf,
+        entries: Vec<FindResultEntry>,
+    },
+    TreeReady {
+        root: PathBuf,
+        entries: Vec<TreeEntry>,
+    },
+}
+
+pub fn run_background_worker(
+    command_rx: Receiver<BackgroundCommand>,
+    event_tx: Sender<BackgroundEvent>,
+) {
+    while let Ok(command) = command_rx.recv() {
+        let Some(event) = execute_background_command(command) else {
+            break;
+        };
+        if event_tx.send(event).is_err() {
+            break;
+        }
+    }
+}
+
+fn execute_background_command(command: BackgroundCommand) -> Option<BackgroundEvent> {
+    match command {
+        BackgroundCommand::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+        } => {
+            let result = match &source {
+                PanelListingSource::Directory => {
+                    read_entries(&cwd, sort_mode).map_err(|error| error.to_string())
+                }
+                PanelListingSource::Panelize { command } => {
+                    read_panelized_entries(&cwd, command, sort_mode)
+                        .map_err(|error| error.to_string())
+                }
+            };
+            Some(BackgroundEvent::PanelRefreshed {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                result,
+            })
+        }
+        BackgroundCommand::LoadViewer { path } => Some(BackgroundEvent::ViewerLoaded {
+            path: path.clone(),
+            result: ViewerState::open(path).map_err(|error| error.to_string()),
+        }),
+        BackgroundCommand::FindEntries {
+            query,
+            base_dir,
+            max_results,
+        } => {
+            let entries = find_entries(&base_dir, &query, max_results);
+            Some(BackgroundEvent::FindEntriesReady {
+                query,
+                base_dir,
+                entries,
+            })
+        }
+        BackgroundCommand::BuildTree {
+            root,
+            max_depth,
+            max_entries,
+        } => {
+            let entries = build_tree_entries(&root, max_depth, max_entries);
+            Some(BackgroundEvent::TreeReady { root, entries })
+        }
+        BackgroundCommand::Shutdown => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub panels: [PanelState; 2],
@@ -851,6 +982,8 @@ pub struct AppState {
     routes: Vec<Route>,
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
+    pending_background_commands: Vec<BackgroundCommand>,
+    pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
 }
 
 impl AppState {
@@ -873,6 +1006,8 @@ impl AppState {
             routes: vec![Route::FileManager],
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
+            pending_background_commands: Vec::new(),
+            pending_panelize_revert: None,
         })
     }
 
@@ -901,40 +1036,40 @@ impl AppState {
         self.active_panel.toggle();
     }
 
-    pub fn refresh_active_panel(&mut self) -> io::Result<()> {
-        self.active_panel_mut().refresh()
+    pub fn refresh_active_panel(&mut self) {
+        self.queue_panel_refresh(self.active_panel);
     }
 
-    pub fn refresh_panels(&mut self) -> io::Result<()> {
-        for panel in &mut self.panels {
-            panel.refresh()?;
-        }
-        Ok(())
+    pub fn refresh_panels(&mut self) {
+        self.queue_panel_refresh(ActivePanel::Left);
+        self.queue_panel_refresh(ActivePanel::Right);
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
         self.active_panel_mut().move_cursor(delta);
     }
 
-    pub fn open_selected_directory(&mut self) -> io::Result<bool> {
+    pub fn open_selected_directory(&mut self) -> bool {
         self.active_panel_mut().open_selected_directory()
     }
 
-    pub fn go_parent_directory(&mut self) -> io::Result<bool> {
+    pub fn go_parent_directory(&mut self) -> bool {
         self.active_panel_mut().go_parent()
     }
 
-    fn open_selected_file_in_viewer(&mut self) -> io::Result<bool> {
+    fn open_selected_file_in_viewer(&mut self) -> bool {
         let Some(entry) = self.selected_non_parent_entry() else {
-            return Ok(false);
+            return false;
         };
         if entry.is_dir {
-            return Ok(false);
+            return false;
         }
 
-        let viewer = ViewerState::open(entry.path.clone())?;
-        self.routes.push(Route::Viewer(viewer));
-        Ok(true)
+        self.pending_background_commands
+            .push(BackgroundCommand::LoadViewer {
+                path: entry.path.clone(),
+            });
+        true
     }
 
     pub fn active_viewer(&self) -> Option<&ViewerState> {
@@ -955,8 +1090,24 @@ impl AppState {
         self.status_line = message.into();
     }
 
+    fn queue_panel_refresh(&mut self, panel: ActivePanel) {
+        let panel_state = &mut self.panels[panel.index()];
+        panel_state.loading = true;
+        self.pending_background_commands
+            .push(BackgroundCommand::RefreshPanel {
+                panel,
+                cwd: panel_state.cwd.clone(),
+                source: panel_state.source.clone(),
+                sort_mode: panel_state.sort_mode,
+            });
+    }
+
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
         std::mem::take(&mut self.pending_worker_commands)
+    }
+
+    pub fn take_pending_background_commands(&mut self) -> Vec<BackgroundCommand> {
+        std::mem::take(&mut self.pending_background_commands)
     }
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
@@ -988,10 +1139,7 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
-                    if let Err(error) = self.refresh_panels() {
-                        self.set_status(format!("Job #{id} finished, refresh failed: {error}"));
-                        return;
-                    }
+                    self.refresh_panels();
                     if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
                         self.set_status(format!("Job #{id} finished: {}", job.summary));
                     } else {
@@ -1006,6 +1154,106 @@ impl AppState {
                     }
                 }
             },
+        }
+    }
+
+    pub fn handle_background_event(&mut self, event: BackgroundEvent) {
+        match event {
+            BackgroundEvent::PanelRefreshed {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                result,
+            } => {
+                let panel_state = &self.panels[panel.index()];
+                let still_current = panel_state.cwd == cwd
+                    && panel_state.source == source
+                    && panel_state.sort_mode == sort_mode;
+                if !still_current {
+                    return;
+                }
+
+                let panel_state = &mut self.panels[panel.index()];
+                panel_state.loading = false;
+                match result {
+                    Ok(entries) => {
+                        panel_state.apply_entries(entries);
+                        if self
+                            .pending_panelize_revert
+                            .as_ref()
+                            .is_some_and(|(pending_panel, _)| *pending_panel == panel)
+                        {
+                            self.pending_panelize_revert = None;
+                        }
+                    }
+                    Err(error) => {
+                        let is_panelize = matches!(source, PanelListingSource::Panelize { .. });
+                        if let Some((pending_panel, revert_source)) =
+                            self.pending_panelize_revert.take()
+                        {
+                            if pending_panel == panel {
+                                panel_state.source = revert_source;
+                            } else {
+                                self.pending_panelize_revert = Some((pending_panel, revert_source));
+                            }
+                        }
+                        if is_panelize {
+                            self.set_status(format!("Panelize failed: {error}"));
+                        } else {
+                            self.set_status(format!("Panel refresh failed: {error}"));
+                        }
+                    }
+                }
+            }
+            BackgroundEvent::ViewerLoaded { path, result } => match result {
+                Ok(viewer) => {
+                    self.routes.push(Route::Viewer(viewer));
+                    self.set_status(format!("Opened viewer {}", path.to_string_lossy()));
+                }
+                Err(error) => {
+                    self.set_status(format!("Viewer open failed: {error}"));
+                }
+            },
+            BackgroundEvent::FindEntriesReady {
+                query,
+                base_dir,
+                entries,
+            } => {
+                let mut replaced = false;
+                for route in self.routes.iter_mut().rev() {
+                    if let Route::FindResults(results) = route
+                        && results.query == query
+                        && results.base_dir == base_dir
+                    {
+                        results.entries = entries.clone();
+                        results.cursor = 0;
+                        results.loading = false;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if replaced {
+                    self.set_status(format!("Find '{query}': {} result(s)", entries.len()));
+                }
+            }
+            BackgroundEvent::TreeReady { root, entries } => {
+                let mut replaced = false;
+                for route in self.routes.iter_mut().rev() {
+                    if let Route::Tree(tree) = route
+                        && tree.root == root
+                    {
+                        tree.entries = entries.clone();
+                        tree.cursor = 0;
+                        tree.loading = false;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if replaced {
+                    self.set_status(format!("Opened directory tree ({})", entries.len()));
+                }
+            }
         }
     }
 
@@ -1126,16 +1374,15 @@ impl AppState {
             return Ok(());
         }
 
-        match ViewerState::open(selected.path.clone()) {
-            Ok(viewer) => {
-                self.routes.pop();
-                self.routes.push(Route::Viewer(viewer));
-                self.set_status(format!("Opened viewer {}", selected.path.to_string_lossy()));
-            }
-            Err(error) => {
-                self.set_status(format!("Viewer open failed: {error}"));
-            }
-        }
+        self.routes.pop();
+        self.pending_background_commands
+            .push(BackgroundCommand::LoadViewer {
+                path: selected.path.clone(),
+            });
+        self.set_status(format!(
+            "Opening viewer {}",
+            selected.path.to_string_lossy()
+        ));
         Ok(())
     }
 
@@ -1144,9 +1391,15 @@ impl AppState {
             return;
         }
         let root = self.active_panel().cwd.clone();
-        let entries = build_tree_entries(&root, TREE_MAX_DEPTH, TREE_MAX_ENTRIES);
-        self.routes.push(Route::Tree(TreeState::new(root, entries)));
-        self.set_status("Opened directory tree");
+        self.routes
+            .push(Route::Tree(TreeState::loading(root.clone())));
+        self.pending_background_commands
+            .push(BackgroundCommand::BuildTree {
+                root,
+                max_depth: TREE_MAX_DEPTH,
+                max_entries: TREE_MAX_ENTRIES,
+            });
+        self.set_status("Loading directory tree...");
     }
 
     fn close_tree_screen(&mut self) {
@@ -1315,9 +1568,11 @@ impl AppState {
         let panel = self.active_panel_mut();
         panel.cwd = destination;
         panel.cursor = 0;
-        panel.source = PanelSource::Directory;
+        panel.source = PanelListingSource::Directory;
         panel.tagged.clear();
-        panel.refresh()?;
+        panel.entries.clear();
+        panel.loading = true;
+        self.queue_panel_refresh(self.active_panel);
         Ok(true)
     }
 
@@ -1456,12 +1711,14 @@ impl AppState {
                 self.set_status(format!("Inverted tags ({count} selected)"));
             }
             AppCommand::SortNext => {
-                self.active_panel_mut().cycle_sort_field()?;
+                self.active_panel_mut().cycle_sort_field();
+                self.refresh_active_panel();
                 let label = self.active_panel().sort_label();
                 self.set_status(format!("Sort: {label}"));
             }
             AppCommand::SortReverse => {
-                self.active_panel_mut().toggle_sort_direction()?;
+                self.active_panel_mut().toggle_sort_direction();
+                self.refresh_active_panel();
                 let label = self.active_panel().sort_label();
                 self.set_status(format!("Sort: {label}"));
             }
@@ -1474,24 +1731,26 @@ impl AppState {
             AppCommand::JobsMoveUp => self.move_jobs_cursor(-1),
             AppCommand::JobsMoveDown => self.move_jobs_cursor(1),
             AppCommand::OpenEntry => {
-                if self.open_selected_directory()? {
-                    self.set_status("Opened selected directory");
-                } else if self.open_selected_file_in_viewer()? {
-                    self.set_status("Opened viewer");
+                if self.open_selected_directory() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Loading selected directory...");
+                } else if self.open_selected_file_in_viewer() {
+                    self.set_status("Opening viewer...");
                 } else {
                     self.set_status("No entry selected");
                 }
             }
             AppCommand::CdUp => {
-                if self.go_parent_directory()? {
-                    self.set_status("Moved to parent directory");
+                if self.go_parent_directory() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Loading parent directory...");
                 } else {
                     self.set_status("Already at filesystem root");
                 }
             }
             AppCommand::Reread => {
-                self.refresh_active_panel()?;
-                self.set_status("Refreshed active panel");
+                self.refresh_active_panel();
+                self.set_status("Refreshing active panel...");
             }
             AppCommand::FindResultsMoveUp => self.move_find_results_cursor(-1),
             AppCommand::FindResultsMoveDown => self.move_find_results_cursor(1),
@@ -1822,16 +2081,11 @@ impl AppState {
                 };
                 match fs::create_dir(&destination) {
                     Ok(()) => {
-                        if let Err(error) = self.refresh_active_panel() {
-                            self.set_status(format!(
-                                "Directory created, but refresh failed: {error}"
-                            ));
-                        } else {
-                            self.set_status(format!(
-                                "Created directory {}",
-                                destination.to_string_lossy()
-                            ));
-                        }
+                        self.refresh_active_panel();
+                        self.set_status(format!(
+                            "Created directory {}",
+                            destination.to_string_lossy()
+                        ));
                     }
                     Err(error) => {
                         self.set_status(format!("Mkdir failed: {error}"));
@@ -1861,14 +2115,8 @@ impl AppState {
                 }
                 match fs::rename(&source, &destination) {
                     Ok(()) => {
-                        if let Err(error) = self.refresh_panels() {
-                            self.set_status(format!("Renamed entry, but refresh failed: {error}"));
-                        } else {
-                            self.set_status(format!(
-                                "Renamed to {}",
-                                destination.to_string_lossy()
-                            ));
-                        }
+                        self.refresh_panels();
+                        self.set_status(format!("Renamed to {}", destination.to_string_lossy()));
                     }
                     Err(error) => {
                         self.set_status(format!("Rename failed: {error}"));
@@ -1956,14 +2204,19 @@ impl AppState {
                     return;
                 }
 
-                let results = find_entries(&base_dir, query, MAX_FIND_RESULTS);
-                let result_count = results.len();
-                self.routes.push(Route::FindResults(FindResultsState::new(
-                    query.to_string(),
-                    base_dir,
-                    results,
-                )));
-                self.set_status(format!("Find '{query}': {result_count} result(s)"));
+                let query = query.to_string();
+                self.routes
+                    .push(Route::FindResults(FindResultsState::loading(
+                        query.clone(),
+                        base_dir.clone(),
+                    )));
+                self.pending_background_commands
+                    .push(BackgroundCommand::FindEntries {
+                        query: query.clone(),
+                        base_dir,
+                        max_results: MAX_FIND_RESULTS,
+                    });
+                self.set_status(format!("Finding '{query}'..."));
             }
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
@@ -1975,17 +2228,20 @@ impl AppState {
                     return;
                 }
 
-                match self
-                    .active_panel_mut()
-                    .panelize_with_command(command.to_string())
+                let active_panel = self.active_panel;
+                let previous_source = self.active_panel().source.clone();
                 {
-                    Ok(count) => {
-                        self.set_status(format!("Panelized {} item(s)", count));
-                    }
-                    Err(error) => {
-                        self.set_status(format!("Panelize failed: {error}"));
-                    }
+                    let panel = self.active_panel_mut();
+                    panel.source = PanelListingSource::Panelize {
+                        command: command.to_string(),
+                    };
+                    panel.cursor = 0;
+                    panel.tagged.clear();
+                    panel.loading = true;
                 }
+                self.pending_panelize_revert = Some((active_panel, previous_source));
+                self.queue_panel_refresh(active_panel);
+                self.set_status("Panelize running...");
             }
             (Some(PendingDialogAction::PanelizeCommand), DialogResult::Canceled) => {
                 self.set_status("Panelize canceled");
@@ -2435,6 +2691,20 @@ mod tests {
         }
     }
 
+    fn drain_background(app: &mut AppState) {
+        loop {
+            let commands = app.take_pending_background_commands();
+            if commands.is_empty() {
+                break;
+            }
+            for command in commands {
+                if let Some(event) = execute_background_command(command) {
+                    app.handle_background_event(event);
+                }
+            }
+        }
+    }
+
     #[test]
     fn toggle_panel_flips_between_left_and_right() {
         let mut panel = ActivePanel::Left;
@@ -2451,8 +2721,9 @@ mod tests {
             entries: vec![file_entry("a"), file_entry("b")],
             cursor: 0,
             sort_mode: SortMode::default(),
-            source: PanelSource::Directory,
+            source: PanelListingSource::Directory,
             tagged: HashSet::new(),
+            loading: false,
         };
 
         panel.move_cursor(-1);
@@ -2562,8 +2833,9 @@ mod tests {
             ],
             cursor: 0,
             sort_mode: SortMode::default(),
-            source: PanelSource::Directory,
+            source: PanelListingSource::Directory,
             tagged: HashSet::new(),
+            loading: false,
         };
 
         assert!(
@@ -2596,8 +2868,9 @@ mod tests {
             entries,
             cursor: 1,
             sort_mode: SortMode::default(),
-            source: PanelSource::Directory,
+            source: PanelListingSource::Directory,
             tagged: HashSet::new(),
+            loading: false,
         };
 
         panel.move_cursor_home();
@@ -2620,8 +2893,9 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
-            source: PanelSource::Directory,
+            source: PanelListingSource::Directory,
             tagged: HashSet::new(),
+            loading: false,
         };
 
         panel.sort_mode.field = SortField::Name;
@@ -2818,6 +3092,7 @@ mod tests {
 
         app.apply(AppCommand::OpenEntry)
             .expect("open entry should open viewer");
+        drain_background(&mut app);
         assert_eq!(app.key_context(), KeyContext::Viewer);
 
         let Route::Viewer(viewer) = app.top_route() else {
@@ -2851,6 +3126,7 @@ mod tests {
         app.active_panel_mut().cursor = file_index;
         app.apply(AppCommand::OpenEntry)
             .expect("open entry should open viewer");
+        drain_background(&mut app);
 
         app.apply(AppCommand::ViewerMoveDown)
             .expect("viewer should move down");
@@ -2929,6 +3205,7 @@ mod tests {
         }
         app.apply(AppCommand::DialogAccept)
             .expect("find dialog should submit");
+        drain_background(&mut app);
         assert_eq!(app.key_context(), KeyContext::FindResults);
 
         let target_index = match app.top_route() {
@@ -2946,6 +3223,7 @@ mod tests {
 
         app.apply(AppCommand::FindResultsOpenEntry)
             .expect("opening find result should succeed");
+        drain_background(&mut app);
         let Route::Viewer(viewer) = app.top_route() else {
             panic!("top route should be viewer");
         };
@@ -2967,6 +3245,7 @@ mod tests {
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.apply(AppCommand::OpenTree)
             .expect("tree screen should open");
+        drain_background(&mut app);
         assert_eq!(app.key_context(), KeyContext::Tree);
 
         let branch_index = match app.top_route() {
@@ -3046,6 +3325,7 @@ mod tests {
         app.finish_dialog(DialogResult::InputSubmitted(String::from(
             "printf 'a.txt\\nsub\\nmissing\\n'",
         )));
+        drain_background(&mut app);
 
         let panel = app.active_panel();
         assert_eq!(
@@ -3092,6 +3372,7 @@ mod tests {
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.open_panelize_dialog();
         app.finish_dialog(DialogResult::InputSubmitted(String::from("printf ''")));
+        drain_background(&mut app);
 
         assert_eq!(
             app.active_panel().entries.len(),
@@ -3119,6 +3400,7 @@ mod tests {
 
         app.open_panelize_dialog();
         app.finish_dialog(DialogResult::InputSubmitted(String::from("exit 42")));
+        drain_background(&mut app);
 
         assert!(
             app.status_line.contains("Panelize failed:"),

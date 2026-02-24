@@ -16,7 +16,10 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap};
-use rc_core::{AppCommand, AppState, ApplyResult, JobEvent, WorkerCommand, run_worker};
+use rc_core::{
+    AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, JobEvent, WorkerCommand,
+    run_background_worker, run_worker,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -59,6 +62,12 @@ fn run_app(state: &mut AppState, keymap: &Keymap, tick_rate: Duration) -> Result
         .name(String::from("rc-worker"))
         .spawn(move || run_worker(worker_rx, worker_event_tx))
         .map_err(|error| anyhow!("failed to spawn worker thread: {error}"))?;
+    let (background_tx, background_rx) = mpsc::channel();
+    let (background_event_tx, background_event_rx) = mpsc::channel();
+    let background_handle = thread::Builder::new()
+        .name(String::from("rc-background"))
+        .spawn(move || run_background_worker(background_rx, background_event_tx))
+        .map_err(|error| anyhow!("failed to spawn background worker thread: {error}"))?;
 
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
@@ -75,12 +84,16 @@ fn run_app(state: &mut AppState, keymap: &Keymap, tick_rate: Duration) -> Result
         tick_rate,
         &worker_tx,
         &worker_event_rx,
+        &background_tx,
+        &background_event_rx,
     );
     let shutdown_result = shutdown_worker(worker_tx, worker_handle);
+    let shutdown_background_result = shutdown_background_worker(background_tx, background_handle);
     let restore_result = restore_terminal(&mut terminal);
 
     loop_result?;
     shutdown_result?;
+    shutdown_background_result?;
     restore_result?;
     Ok(())
 }
@@ -93,6 +106,17 @@ fn shutdown_worker(
     worker_handle
         .join()
         .map_err(|_| anyhow!("worker thread panicked"))?;
+    Ok(())
+}
+
+fn shutdown_background_worker(
+    background_tx: Sender<BackgroundCommand>,
+    background_handle: thread::JoinHandle<()>,
+) -> Result<()> {
+    let _ = background_tx.send(BackgroundCommand::Shutdown);
+    background_handle
+        .join()
+        .map_err(|_| anyhow!("background worker thread panicked"))?;
     Ok(())
 }
 
@@ -111,12 +135,16 @@ fn run_event_loop(
     tick_rate: Duration,
     worker_tx: &Sender<WorkerCommand>,
     worker_event_rx: &Receiver<JobEvent>,
+    background_tx: &Sender<BackgroundCommand>,
+    background_event_rx: &Receiver<BackgroundEvent>,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
     let mut worker_disconnected = false;
+    let mut background_disconnected = false;
 
     loop {
         drain_worker_events(state, worker_event_rx, &mut worker_disconnected);
+        drain_background_events(state, background_event_rx, &mut background_disconnected);
 
         terminal
             .draw(|frame| rc_ui::render(frame, state))
@@ -126,7 +154,7 @@ fn run_event_loop(
         if event::poll(timeout).context("failed to poll input")?
             && let Event::Key(key_event) = event::read().context("failed to read input event")?
             && key_event.kind == KeyEventKind::Press
-            && handle_key(state, keymap, key_event, worker_tx)?
+            && handle_key(state, keymap, key_event, worker_tx, background_tx)?
         {
             return Ok(());
         }
@@ -142,13 +170,16 @@ fn handle_key(
     keymap: &Keymap,
     key_event: KeyEvent,
     worker_tx: &Sender<WorkerCommand>,
+    background_tx: &Sender<BackgroundCommand>,
 ) -> Result<bool> {
     let context = state.key_context();
 
     if context == KeyContext::Input
         && let Some(command) = input_char_command(&key_event)
     {
-        return Ok(apply_and_dispatch(state, command, worker_tx)? == ApplyResult::Quit);
+        return Ok(
+            apply_and_dispatch(state, command, worker_tx, background_tx)? == ApplyResult::Quit,
+        );
     }
 
     let Some(chord) = map_key_event_to_chord(key_event) else {
@@ -161,16 +192,18 @@ fn handle_key(
         return Ok(false);
     };
 
-    Ok(apply_and_dispatch(state, command, worker_tx)? == ApplyResult::Quit)
+    Ok(apply_and_dispatch(state, command, worker_tx, background_tx)? == ApplyResult::Quit)
 }
 
 fn apply_and_dispatch(
     state: &mut AppState,
     command: AppCommand,
     worker_tx: &Sender<WorkerCommand>,
+    background_tx: &Sender<BackgroundCommand>,
 ) -> Result<ApplyResult> {
     let result = state.apply(command)?;
     dispatch_pending_worker_commands(state, worker_tx);
+    dispatch_pending_background_commands(state, background_tx);
     Ok(result)
 }
 
@@ -194,6 +227,18 @@ fn dispatch_pending_worker_commands(state: &mut AppState, worker_tx: &Sender<Wor
     }
 }
 
+fn dispatch_pending_background_commands(
+    state: &mut AppState,
+    background_tx: &Sender<BackgroundCommand>,
+) {
+    for command in state.take_pending_background_commands() {
+        if let Err(error) = background_tx.send(command) {
+            state.set_status(format!("background worker channel is unavailable: {error}"));
+            break;
+        }
+    }
+}
+
 fn drain_worker_events(
     state: &mut AppState,
     worker_event_rx: &Receiver<JobEvent>,
@@ -207,6 +252,26 @@ fn drain_worker_events(
                 if !*worker_disconnected {
                     state.set_status("Worker channel disconnected");
                     *worker_disconnected = true;
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn drain_background_events(
+    state: &mut AppState,
+    background_event_rx: &Receiver<BackgroundEvent>,
+    background_disconnected: &mut bool,
+) {
+    loop {
+        match background_event_rx.try_recv() {
+            Ok(event) => state.handle_background_event(event),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                if !*background_disconnected {
+                    state.set_status("Background worker channel disconnected");
+                    *background_disconnected = true;
                 }
                 break;
             }
