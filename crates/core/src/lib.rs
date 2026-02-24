@@ -7,7 +7,63 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::keymap::KeyContext;
+use crate::keymap::{KeyCommand, KeyContext};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppCommand {
+    Quit,
+    SwitchPanel,
+    MoveUp,
+    MoveDown,
+    OpenEntry,
+    CdUp,
+    Reread,
+    OpenConfirmDialog,
+    OpenInputDialog,
+    OpenListboxDialog,
+    DialogAccept,
+    DialogCancel,
+    DialogFocusNext,
+    DialogBackspace,
+    DialogInputChar(char),
+    DialogListboxUp,
+    DialogListboxDown,
+}
+
+impl AppCommand {
+    pub fn from_key_command(context: KeyContext, key_command: &KeyCommand) -> Option<Self> {
+        match (context, key_command) {
+            (_, KeyCommand::Quit) => Some(Self::Quit),
+            (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
+            (KeyContext::FileManager, KeyCommand::CursorUp) => Some(Self::MoveUp),
+            (KeyContext::FileManager, KeyCommand::CursorDown) => Some(Self::MoveDown),
+            (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
+            (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
+            (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
+            (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
+            (KeyContext::FileManager, KeyCommand::Reread) => Some(Self::Reread),
+            (KeyContext::FileManager, KeyCommand::OpenConfirmDialog) => {
+                Some(Self::OpenConfirmDialog)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenInputDialog) => Some(Self::OpenInputDialog),
+            (KeyContext::FileManager, KeyCommand::OpenListboxDialog) => {
+                Some(Self::OpenListboxDialog)
+            }
+            (_, KeyCommand::DialogAccept) => Some(Self::DialogAccept),
+            (_, KeyCommand::DialogCancel) => Some(Self::DialogCancel),
+            (_, KeyCommand::DialogFocusNext) => Some(Self::DialogFocusNext),
+            (_, KeyCommand::DialogBackspace) => Some(Self::DialogBackspace),
+            (_, KeyCommand::Unknown(_)) => None,
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplyResult {
+    Continue,
+    Quit,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActivePanel {
@@ -285,6 +341,81 @@ impl AppState {
         self.status_line = message.into();
     }
 
+    pub fn apply(&mut self, command: AppCommand) -> io::Result<ApplyResult> {
+        match command {
+            AppCommand::Quit => return Ok(ApplyResult::Quit),
+            AppCommand::SwitchPanel => {
+                self.toggle_active_panel();
+                self.set_status(format!(
+                    "Active panel: {}",
+                    match self.active_panel {
+                        ActivePanel::Left => "left",
+                        ActivePanel::Right => "right",
+                    }
+                ));
+            }
+            AppCommand::MoveUp => self.move_cursor(-1),
+            AppCommand::MoveDown => self.move_cursor(1),
+            AppCommand::OpenEntry => {
+                if self.open_selected_directory()? {
+                    self.set_status("Opened selected directory");
+                } else {
+                    self.set_status("Selected entry is not a directory");
+                }
+            }
+            AppCommand::CdUp => {
+                if self.go_parent_directory()? {
+                    self.set_status("Moved to parent directory");
+                } else {
+                    self.set_status("Already at filesystem root");
+                }
+            }
+            AppCommand::Reread => {
+                self.refresh_active_panel()?;
+                self.set_status("Refreshed active panel");
+            }
+            AppCommand::OpenConfirmDialog => {
+                self.open_confirm_dialog();
+                self.set_status("Opened confirm dialog");
+            }
+            AppCommand::OpenInputDialog => {
+                self.open_input_dialog();
+                self.set_status("Opened input dialog");
+            }
+            AppCommand::OpenListboxDialog => {
+                self.open_listbox_dialog();
+                self.set_status("Opened listbox dialog");
+            }
+            AppCommand::DialogAccept => {
+                if let Some(status) = self.accept_dialog() {
+                    self.set_status(status);
+                }
+            }
+            AppCommand::DialogCancel => {
+                if let Some(status) = self.cancel_dialog() {
+                    self.set_status(status);
+                }
+            }
+            AppCommand::DialogFocusNext => {
+                self.dialog_focus_next();
+            }
+            AppCommand::DialogBackspace => {
+                self.dialog_input_backspace();
+            }
+            AppCommand::DialogInputChar(ch) => {
+                self.dialog_input_insert(ch);
+            }
+            AppCommand::DialogListboxUp => {
+                self.dialog_listbox_move(-1);
+            }
+            AppCommand::DialogListboxDown => {
+                self.dialog_listbox_move(1);
+            }
+        }
+
+        Ok(ApplyResult::Continue)
+    }
+
     pub fn top_route(&self) -> &Route {
         self.routes
             .last()
@@ -498,5 +629,21 @@ mod tests {
         assert_eq!(first.path, root);
 
         fs::remove_dir_all(&root).expect("must remove temp tree");
+    }
+
+    #[test]
+    fn app_command_mapping_is_context_aware() {
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
+            Some(AppCommand::MoveUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::CursorUp),
+            Some(AppCommand::DialogListboxUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::DialogAccept),
+            Some(AppCommand::DialogAccept)
+        );
     }
 }

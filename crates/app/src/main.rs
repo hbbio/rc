@@ -13,8 +13,8 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rc_core::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, KeyModifiers, Keymap};
-use rc_core::{ActivePanel, AppState};
+use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap};
+use rc_core::{AppCommand, AppState, ApplyResult};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -106,107 +106,26 @@ fn run_event_loop(
 fn handle_key(state: &mut AppState, keymap: &Keymap, key_event: KeyEvent) -> Result<bool> {
     let context = state.key_context();
 
-    if context == KeyContext::Input && try_insert_input_char(state, key_event) {
-        return Ok(false);
+    if context == KeyContext::Input {
+        if let Some(command) = input_char_command(&key_event) {
+            return Ok(state.apply(command)? == ApplyResult::Quit);
+        }
     }
 
     let Some(chord) = map_key_event_to_chord(key_event) else {
         return Ok(false);
     };
-    let Some(command) = keymap.resolve(context, chord) else {
+    let Some(key_command) = keymap.resolve(context, chord) else {
+        return Ok(false);
+    };
+    let Some(command) = AppCommand::from_key_command(context, key_command) else {
         return Ok(false);
     };
 
-    match command {
-        KeyCommand::Quit => return Ok(true),
-        KeyCommand::PanelOther => {
-            if context == KeyContext::FileManager {
-                state.toggle_active_panel();
-                state.set_status(format!(
-                    "Active panel: {}",
-                    active_panel_label(state.active_panel)
-                ));
-            }
-        }
-        KeyCommand::CursorUp => match context {
-            KeyContext::FileManager => state.move_cursor(-1),
-            KeyContext::Listbox => {
-                state.dialog_listbox_move(-1);
-            }
-            _ => {}
-        },
-        KeyCommand::CursorDown => match context {
-            KeyContext::FileManager => state.move_cursor(1),
-            KeyContext::Listbox => {
-                state.dialog_listbox_move(1);
-            }
-            _ => {}
-        },
-        KeyCommand::OpenEntry => {
-            if context == KeyContext::FileManager {
-                if state.open_selected_directory()? {
-                    state.set_status("Opened selected directory");
-                } else {
-                    state.set_status("Selected entry is not a directory");
-                }
-            }
-        }
-        KeyCommand::CdUp => {
-            if context == KeyContext::FileManager {
-                if state.go_parent_directory()? {
-                    state.set_status("Moved to parent directory");
-                } else {
-                    state.set_status("Already at filesystem root");
-                }
-            }
-        }
-        KeyCommand::Reread => {
-            if context == KeyContext::FileManager {
-                state.refresh_active_panel()?;
-                state.set_status("Refreshed active panel");
-            }
-        }
-        KeyCommand::OpenConfirmDialog => {
-            if context == KeyContext::FileManager {
-                state.open_confirm_dialog();
-                state.set_status("Opened confirm dialog");
-            }
-        }
-        KeyCommand::OpenInputDialog => {
-            if context == KeyContext::FileManager {
-                state.open_input_dialog();
-                state.set_status("Opened input dialog");
-            }
-        }
-        KeyCommand::OpenListboxDialog => {
-            if context == KeyContext::FileManager {
-                state.open_listbox_dialog();
-                state.set_status("Opened listbox dialog");
-            }
-        }
-        KeyCommand::DialogAccept => {
-            if let Some(status) = state.accept_dialog() {
-                state.set_status(status);
-            }
-        }
-        KeyCommand::DialogCancel => {
-            if let Some(status) = state.cancel_dialog() {
-                state.set_status(status);
-            }
-        }
-        KeyCommand::DialogFocusNext => {
-            state.dialog_focus_next();
-        }
-        KeyCommand::DialogBackspace => {
-            state.dialog_input_backspace();
-        }
-        KeyCommand::Unknown(_) => {}
-    }
-
-    Ok(false)
+    Ok(state.apply(command)? == ApplyResult::Quit)
 }
 
-fn try_insert_input_char(state: &mut AppState, key_event: KeyEvent) -> bool {
+fn input_char_command(key_event: &KeyEvent) -> Option<AppCommand> {
     let no_shortcut_modifiers = !key_event
         .modifiers
         .contains(crossterm::event::KeyModifiers::CONTROL)
@@ -219,11 +138,11 @@ fn try_insert_input_char(state: &mut AppState, key_event: KeyEvent) -> bool {
 
     if no_shortcut_modifiers {
         if let CrosstermKeyCode::Char(ch) = key_event.code {
-            return state.dialog_input_insert(ch);
+            return Some(AppCommand::DialogInputChar(ch));
         }
     }
 
-    false
+    None
 }
 
 fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
@@ -271,11 +190,4 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
     };
 
     Some(KeyChord { code, modifiers })
-}
-
-fn active_panel_label(panel: ActivePanel) -> &'static str {
-    match panel {
-        ActivePanel::Left => "left",
-        ActivePanel::Right => "right",
-    }
 }
