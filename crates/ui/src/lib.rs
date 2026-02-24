@@ -825,3 +825,127 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 
     vertical[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use rc_core::{AppCommand, AppState, BackgroundCommand, run_background_worker};
+    use std::env;
+    use std::fs;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        terminal
+            .draw(|frame| render(frame, state))
+            .expect("render should succeed");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn drain_background(state: &mut AppState) {
+        loop {
+            let commands = state.take_pending_background_commands();
+            if commands.is_empty() {
+                break;
+            }
+
+            let (command_tx, command_rx) = mpsc::channel();
+            let (event_tx, event_rx) = mpsc::channel();
+            let handle = thread::spawn(move || run_background_worker(command_rx, event_tx));
+
+            for command in commands {
+                command_tx
+                    .send(command)
+                    .expect("background command should send");
+                let event = event_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("background event should arrive");
+                state.handle_background_event(event);
+            }
+            command_tx
+                .send(BackgroundCommand::Shutdown)
+                .expect("background shutdown should send");
+            handle
+                .join()
+                .expect("background worker should shut down cleanly");
+        }
+    }
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("rc-ui-test-{label}-{stamp}"));
+        fs::create_dir_all(&path).expect("temp root should be creatable");
+        path
+    }
+
+    #[test]
+    fn render_draws_file_manager_panels() {
+        let root = temp_root("panels");
+        fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
+        let app = AppState::new(root.clone()).expect("app should initialize");
+        let frame = render_to_text(&app, 100, 30);
+        assert!(
+            frame.contains("context: FileManager"),
+            "frame should include file manager context header"
+        );
+        assert!(
+            frame.contains("entry.txt"),
+            "frame should include panel entry names"
+        );
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_draws_viewer_hex_mode() {
+        let root = temp_root("viewer-hex");
+        let file_path = root.join("bin.dat");
+        fs::write(
+            &file_path,
+            b"0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("file should be creatable");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("file should be listed");
+        app.active_panel_mut().cursor = index;
+        app.apply(AppCommand::OpenEntry)
+            .expect("viewer command should succeed");
+        drain_background(&mut app);
+        app.apply(AppCommand::ViewerToggleHex)
+            .expect("hex mode should toggle");
+
+        let frame = render_to_text(&app, 120, 40);
+        assert!(
+            frame.contains("context: ViewerHex"),
+            "frame should show viewer hex key context"
+        );
+        assert!(
+            frame.contains("00000000"),
+            "frame should render hex offsets"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+}
