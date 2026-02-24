@@ -25,6 +25,7 @@ OpenListboxDialog = f9
 OpenFindDialog = alt-f; alt-question; ctrl-slash
 OpenTree = alt-t
 OpenHotlist = alt-h
+OpenPanelizeDialog = alt-p; ctrl-p
 
 [dialog]
 Ok = enter

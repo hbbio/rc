@@ -126,6 +126,7 @@ pub enum KeyCommand {
     OpenFindDialog,
     OpenTree,
     OpenHotlist,
+    OpenPanelizeDialog,
     AddHotlist,
     RemoveHotlist,
     OpenConfirmDialog,
@@ -178,6 +179,9 @@ impl KeyCommand {
             "find" | "findfile" | "openfind" | "openfinddialog" => Self::OpenFindDialog,
             "tree" | "directorytree" | "opentree" => Self::OpenTree,
             "hotlist" | "directoryhotlist" | "openhotlist" => Self::OpenHotlist,
+            "panelize" | "externalpanelize" | "openpanelize" | "openpanelizedialog" => {
+                Self::OpenPanelizeDialog
+            }
             "addhotlist" | "hotlistadd" => Self::AddHotlist,
             "removehotlist" | "hotlistremove" | "deletehotlist" => Self::RemoveHotlist,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,

@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
@@ -30,6 +31,7 @@ pub enum AppCommand {
     CloseTree,
     OpenHotlist,
     CloseHotlist,
+    OpenPanelizeDialog,
     SwitchPanel,
     MoveUp,
     MoveDown,
@@ -149,6 +151,9 @@ impl AppCommand {
             (KeyContext::Tree, KeyCommand::End) => Some(Self::TreeEnd),
             (KeyContext::Tree, KeyCommand::OpenEntry) => Some(Self::TreeOpenEntry),
             (KeyContext::FileManager, KeyCommand::OpenHotlist) => Some(Self::OpenHotlist),
+            (KeyContext::FileManager, KeyCommand::OpenPanelizeDialog) => {
+                Some(Self::OpenPanelizeDialog)
+            }
             (KeyContext::Hotlist, KeyCommand::CursorUp) => Some(Self::HotlistMoveUp),
             (KeyContext::Hotlist, KeyCommand::CursorDown) => Some(Self::HotlistMoveDown),
             (KeyContext::Hotlist, KeyCommand::PageUp) => Some(Self::HotlistPageUp),
@@ -310,11 +315,18 @@ impl FileEntry {
 }
 
 #[derive(Clone, Debug)]
+enum PanelSource {
+    Directory,
+    Panelize { command: String },
+}
+
+#[derive(Clone, Debug)]
 pub struct PanelState {
     pub cwd: PathBuf,
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    source: PanelSource,
     tagged: HashSet<PathBuf>,
 }
 
@@ -325,6 +337,7 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            source: PanelSource::Directory,
             tagged: HashSet::new(),
         };
         panel.refresh()?;
@@ -332,7 +345,13 @@ impl PanelState {
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
-        self.entries = read_entries(&self.cwd, self.sort_mode)?;
+        let entries = match &self.source {
+            PanelSource::Directory => read_entries(&self.cwd, self.sort_mode)?,
+            PanelSource::Panelize { command } => {
+                read_panelized_entries(&self.cwd, command, self.sort_mode)?
+            }
+        };
+        self.entries = entries;
         self.tagged.retain(|tag| {
             self.entries
                 .iter()
@@ -461,6 +480,7 @@ impl PanelState {
 
         self.cwd = entry.path.clone();
         self.cursor = 0;
+        self.source = PanelSource::Directory;
         self.tagged.clear();
         self.refresh()?;
         Ok(true)
@@ -473,9 +493,31 @@ impl PanelState {
 
         self.cwd = parent.to_path_buf();
         self.cursor = 0;
+        self.source = PanelSource::Directory;
         self.tagged.clear();
         self.refresh()?;
         Ok(true)
+    }
+
+    pub fn panelize_with_command(&mut self, command: String) -> io::Result<usize> {
+        let previous_source = self.source.clone();
+        self.source = PanelSource::Panelize { command };
+        self.cursor = 0;
+        self.tagged.clear();
+
+        if let Err(error) = self.refresh() {
+            self.source = previous_source;
+            return Err(error);
+        }
+
+        Ok(self.entries.len())
+    }
+
+    pub fn panelize_command(&self) -> Option<&str> {
+        match &self.source {
+            PanelSource::Panelize { command } => Some(command.as_str()),
+            PanelSource::Directory => None,
+        }
     }
 }
 
@@ -792,6 +834,7 @@ enum PendingDialogAction {
     FindQuery {
         base_dir: PathBuf,
     },
+    PanelizeCommand,
 }
 
 #[derive(Debug)]
@@ -819,7 +862,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "F2 rename | F3/Enter view | Alt-F find | Alt-T tree | Alt-H hotlist | Ctrl-J jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
+                "F2 rename | F3/Enter view | Alt-F find | Alt-T tree | Alt-H hotlist | Alt/ Ctrl-P panelize | Ctrl-J jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
@@ -1008,6 +1051,21 @@ impl AppState {
             "",
         )));
         self.set_status("Find file");
+    }
+
+    fn open_panelize_dialog(&mut self) {
+        let initial = self
+            .active_panel()
+            .panelize_command()
+            .unwrap_or("find . -type f")
+            .to_string();
+        self.pending_dialog_action = Some(PendingDialogAction::PanelizeCommand);
+        self.routes.push(Route::Dialog(DialogState::input(
+            "External panelize",
+            "Command (stdout paths):",
+            initial,
+        )));
+        self.set_status("External panelize");
     }
 
     fn close_find_results(&mut self) {
@@ -1257,6 +1315,7 @@ impl AppState {
         let panel = self.active_panel_mut();
         panel.cwd = destination;
         panel.cursor = 0;
+        panel.source = PanelSource::Directory;
         panel.tagged.clear();
         panel.refresh()?;
         Ok(true)
@@ -1358,6 +1417,7 @@ impl AppState {
             AppCommand::CloseTree => self.close_tree_screen(),
             AppCommand::OpenHotlist => self.open_hotlist_screen(),
             AppCommand::CloseHotlist => self.close_hotlist_screen(),
+            AppCommand::OpenPanelizeDialog => self.open_panelize_dialog(),
             AppCommand::SwitchPanel => {
                 self.toggle_active_panel();
                 self.set_status(format!(
@@ -1908,6 +1968,28 @@ impl AppState {
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
             }
+            (Some(PendingDialogAction::PanelizeCommand), DialogResult::InputSubmitted(value)) => {
+                let command = value.trim();
+                if command.is_empty() {
+                    self.set_status("Panelize canceled: empty command");
+                    return;
+                }
+
+                match self
+                    .active_panel_mut()
+                    .panelize_with_command(command.to_string())
+                {
+                    Ok(count) => {
+                        self.set_status(format!("Panelized {} item(s)", count));
+                    }
+                    Err(error) => {
+                        self.set_status(format!("Panelize failed: {error}"));
+                    }
+                }
+            }
+            (Some(PendingDialogAction::PanelizeCommand), DialogResult::Canceled) => {
+                self.set_status("Panelize canceled");
+            }
             (
                 Some(PendingDialogAction::ViewerSearch { direction }),
                 DialogResult::InputSubmitted(value),
@@ -2207,6 +2289,75 @@ fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
         }
     }
 
+    sort_file_entries(&mut entries, sort_mode);
+
+    if let Some(parent) = dir.parent() {
+        entries.insert(0, FileEntry::parent(parent.to_path_buf()));
+    }
+    Ok(entries)
+}
+
+fn read_panelized_entries(
+    base_dir: &Path,
+    command: &str,
+    sort_mode: SortMode,
+) -> io::Result<Vec<FileEntry>> {
+    let output = run_shell_command(base_dir, command)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let detail = if stderr.is_empty() {
+            format!("exit {}", output.status)
+        } else {
+            stderr.to_string()
+        };
+        return Err(io::Error::other(format!("command failed: {detail}")));
+    }
+
+    let include_metadata = !matches!(sort_mode.field, SortField::Name);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+
+    for raw_line in stdout.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let input_path = PathBuf::from(trimmed);
+        let path = if input_path.is_absolute() {
+            input_path
+        } else {
+            base_dir.join(input_path)
+        };
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let (size, modified) = if include_metadata {
+            (metadata.len(), metadata.modified().ok())
+        } else {
+            (0, None)
+        };
+
+        let name = panelized_entry_label(base_dir, &path);
+        if metadata.is_dir() {
+            entries.push(FileEntry::directory(name, path, size, modified));
+        } else {
+            entries.push(FileEntry::file(name, path, size, modified));
+        }
+    }
+
+    sort_file_entries(&mut entries, sort_mode);
+    Ok(entries)
+}
+
+fn sort_file_entries(entries: &mut [FileEntry], sort_mode: SortMode) {
     entries.sort_by(|left, right| {
         let dir_order = match (left.is_dir, right.is_dir) {
             (true, false) => Ordering::Less,
@@ -2233,11 +2384,37 @@ fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
         }
         order
     });
+}
 
-    if let Some(parent) = dir.parent() {
-        entries.insert(0, FileEntry::parent(parent.to_path_buf()));
+fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(base_dir) {
+        let relative = relative.to_string_lossy();
+        if relative.is_empty() {
+            String::from(".")
+        } else {
+            relative.into_owned()
+        }
+    } else {
+        path.to_string_lossy().into_owned()
     }
-    Ok(entries)
+}
+
+#[cfg(unix)]
+fn run_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Output> {
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .output()
+}
+
+#[cfg(windows)]
+fn run_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Output> {
+    Command::new("cmd")
+        .arg("/C")
+        .arg(command)
+        .current_dir(cwd)
+        .output()
 }
 
 #[cfg(test)]
@@ -2274,6 +2451,7 @@ mod tests {
             entries: vec![file_entry("a"), file_entry("b")],
             cursor: 0,
             sort_mode: SortMode::default(),
+            source: PanelSource::Directory,
             tagged: HashSet::new(),
         };
 
@@ -2384,6 +2562,7 @@ mod tests {
             ],
             cursor: 0,
             sort_mode: SortMode::default(),
+            source: PanelSource::Directory,
             tagged: HashSet::new(),
         };
 
@@ -2417,6 +2596,7 @@ mod tests {
             entries,
             cursor: 1,
             sort_mode: SortMode::default(),
+            source: PanelSource::Directory,
             tagged: HashSet::new(),
         };
 
@@ -2440,6 +2620,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            source: PanelSource::Directory,
             tagged: HashSet::new(),
         };
 
