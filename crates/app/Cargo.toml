@@ -1,0 +1,16 @@
+[package]
+name = "rc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rc-core.workspace = true
+rc-ui.workspace = true
+

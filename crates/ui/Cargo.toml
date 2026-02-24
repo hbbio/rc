@@ -1,0 +1,10 @@
+[package]
+name = "rc-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ratatui.workspace = true
+rc-core.workspace = true
+
