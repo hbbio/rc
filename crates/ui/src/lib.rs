@@ -3,7 +3,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
@@ -11,6 +11,31 @@ use rc_core::{
     ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, JobRecord, JobStatus,
     PanelState, Route, ViewerState,
 };
+use std::sync::{Mutex, OnceLock};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+struct HighlightResources {
+    syntax_set: SyntaxSet,
+    theme: Theme,
+}
+
+static HIGHLIGHT_RESOURCES: OnceLock<Option<HighlightResources>> = OnceLock::new();
+static VIEWER_HIGHLIGHT_CACHE: OnceLock<Mutex<Option<CachedViewerHighlight>>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ViewerHighlightKey {
+    content_ptr: usize,
+    content_len: usize,
+}
+
+struct CachedViewerHighlight {
+    key: ViewerHighlightKey,
+    raw_lines: Vec<String>,
+    highlighted_lines: Vec<Line<'static>>,
+    highlighter: HighlightLines<'static>,
+}
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let job_counts = state.jobs_status_counts();
@@ -127,6 +152,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
 }
 
 fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
+    let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let title = format!(
         "{} | line {}/{} | wrap:{}",
         viewer.path.to_string_lossy(),
@@ -134,18 +160,170 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
         viewer.line_count(),
         if viewer.wrap { "on" } else { "off" }
     );
-    let mut paragraph = Paragraph::new(viewer.content.as_str())
+    let content = highlighted_viewer_window(viewer, visible_lines)
+        .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines));
+    let surface_style = viewer_theme_surface_style().unwrap_or_default();
+    let mut paragraph = Paragraph::new(content)
         .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
+                .border_style(Style::default().fg(Color::Yellow))
+                .style(surface_style),
         )
-        .scroll((viewer.scroll.min(u16::MAX as usize) as u16, 0));
+        .style(surface_style);
     if viewer.wrap {
         paragraph = paragraph.wrap(Wrap { trim: false });
     }
     frame.render_widget(paragraph, area);
+}
+
+fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Option<Text<'static>> {
+    let resources = HIGHLIGHT_RESOURCES.get_or_init(build_highlight_resources);
+    let resources: &'static HighlightResources = resources.as_ref()?;
+    let cache_lock = viewer_highlight_cache();
+    let mut cache_guard = cache_lock.lock().ok()?;
+    let key = viewer_highlight_key(viewer);
+
+    if cache_guard.as_ref().is_none_or(|cached| cached.key != key) {
+        *cache_guard = Some(CachedViewerHighlight::new(viewer, resources));
+    }
+    let cache = cache_guard.as_mut()?;
+    let total_lines = cache.raw_lines.len();
+    if total_lines == 0 {
+        return Some(Text::raw(String::new()));
+    }
+
+    let start = viewer.scroll.min(total_lines.saturating_sub(1));
+    let end = start.saturating_add(visible_lines.max(1)).min(total_lines);
+    cache
+        .ensure_highlighted_up_to(end, &resources.syntax_set)
+        .ok()?;
+
+    Some(Text::from(cache.highlighted_lines[start..end].to_vec()))
+}
+
+fn build_highlight_resources() -> Option<HighlightResources> {
+    let syntax_set = SyntaxSet::load_defaults_newlines();
+    let themes = syntect::highlighting::ThemeSet::load_defaults();
+    let theme = themes
+        .themes
+        .get("base16-ocean.dark")
+        .cloned()
+        .or_else(|| themes.themes.values().next().cloned())?;
+
+    Some(HighlightResources { syntax_set, theme })
+}
+
+fn viewer_syntax<'a>(syntax_set: &'a SyntaxSet, viewer: &ViewerState) -> &'a SyntaxReference {
+    syntax_set
+        .find_syntax_for_file(&viewer.path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
+}
+
+fn viewer_theme_surface_style() -> Option<Style> {
+    let resources = HIGHLIGHT_RESOURCES.get_or_init(build_highlight_resources);
+    let resources = resources.as_ref()?;
+    let mut style = Style::default();
+
+    if let Some(background) = resources.theme.settings.background {
+        style = style.bg(Color::Rgb(background.r, background.g, background.b));
+    }
+    if let Some(foreground) = resources.theme.settings.foreground {
+        style = style.fg(Color::Rgb(foreground.r, foreground.g, foreground.b));
+    }
+
+    Some(style)
+}
+
+fn viewer_highlight_key(viewer: &ViewerState) -> ViewerHighlightKey {
+    ViewerHighlightKey {
+        content_ptr: viewer.content.as_ptr() as usize,
+        content_len: viewer.content.len(),
+    }
+}
+
+fn viewer_highlight_cache() -> &'static Mutex<Option<CachedViewerHighlight>> {
+    VIEWER_HIGHLIGHT_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+impl CachedViewerHighlight {
+    fn new(viewer: &ViewerState, resources: &'static HighlightResources) -> Self {
+        let syntax = viewer_syntax(&resources.syntax_set, viewer);
+        let mut raw_lines: Vec<String> = viewer.content.lines().map(ToOwned::to_owned).collect();
+        if raw_lines.is_empty() {
+            raw_lines.push(String::new());
+        }
+
+        Self {
+            key: viewer_highlight_key(viewer),
+            raw_lines,
+            highlighted_lines: Vec::new(),
+            highlighter: HighlightLines::new(syntax, &resources.theme),
+        }
+    }
+
+    fn ensure_highlighted_up_to(&mut self, end: usize, syntax_set: &SyntaxSet) -> Result<(), ()> {
+        while self.highlighted_lines.len() < end {
+            let index = self.highlighted_lines.len();
+            let raw_line = self.raw_lines.get(index).ok_or(())?;
+            let ranges = self
+                .highlighter
+                .highlight_line(raw_line.as_str(), syntax_set)
+                .map_err(|_| ())?;
+            let spans: Vec<Span<'static>> = ranges
+                .into_iter()
+                .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+                .collect();
+            self.highlighted_lines.push(Line::from(spans));
+        }
+        Ok(())
+    }
+}
+
+fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'static> {
+    let mut raw_lines: Vec<&str> = viewer.content.lines().collect();
+    if raw_lines.is_empty() {
+        raw_lines.push("");
+    }
+    let start = viewer.scroll.min(raw_lines.len().saturating_sub(1));
+    let end = start
+        .saturating_add(visible_lines.max(1))
+        .min(raw_lines.len());
+
+    let lines: Vec<Line<'static>> = raw_lines[start..end]
+        .iter()
+        .map(|line| Line::from((*line).to_string()))
+        .collect();
+    Text::from(lines)
+}
+
+fn syntect_style(style: SyntectStyle) -> Style {
+    let mut ratatui_style = Style::default()
+        .fg(Color::Rgb(
+            style.foreground.r,
+            style.foreground.g,
+            style.foreground.b,
+        ))
+        .bg(Color::Rgb(
+            style.background.r,
+            style.background.g,
+            style.background.b,
+        ));
+
+    if style.font_style.contains(FontStyle::BOLD) {
+        ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        ratatui_style = ratatui_style.add_modifier(Modifier::ITALIC);
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        ratatui_style = ratatui_style.add_modifier(Modifier::UNDERLINED);
+    }
+
+    ratatui_style
 }
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState) {

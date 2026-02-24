@@ -14,7 +14,7 @@ crossterm = "0.28"
 ratatui = "0.28"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
 
 rc-core = { path = "crates/core" }
 rc-ui = { path = "crates/ui" }
-
