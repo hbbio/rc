@@ -163,14 +163,19 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
 fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let title = format!(
-        "{} | line {}/{} | wrap:{}",
+        "{} | {} {}/{} | wrap:{}",
         viewer.path.to_string_lossy(),
+        if viewer.hex_mode { "row" } else { "line" },
         viewer.current_line_number(),
         viewer.line_count(),
         if viewer.wrap { "on" } else { "off" }
     );
-    let content = highlighted_viewer_window(viewer, visible_lines)
-        .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines));
+    let content = if viewer.hex_mode {
+        hex_viewer_window(viewer, visible_lines)
+    } else {
+        highlighted_viewer_window(viewer, visible_lines)
+            .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines))
+    };
     let surface_style = viewer_theme_surface_style().unwrap_or_default();
     let mut paragraph = Paragraph::new(content)
         .block(
@@ -181,7 +186,7 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
                 .style(surface_style),
         )
         .style(surface_style);
-    if viewer.wrap {
+    if viewer.wrap && !viewer.hex_mode {
         paragraph = paragraph.wrap(Wrap { trim: false });
     }
     frame.render_widget(paragraph, area);
@@ -306,6 +311,47 @@ fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'stat
         .iter()
         .map(|line| Line::from((*line).to_string()))
         .collect();
+    Text::from(lines)
+}
+
+fn hex_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'static> {
+    let total_rows = ((viewer.bytes.len().saturating_add(15)).saturating_div(16)).max(1);
+    let start = viewer.scroll.min(total_rows.saturating_sub(1));
+    let end = start.saturating_add(visible_lines.max(1)).min(total_rows);
+    let mut lines = Vec::with_capacity(end.saturating_sub(start));
+
+    for row in start..end {
+        let offset = row.saturating_mul(16);
+        let chunk_end = offset.saturating_add(16).min(viewer.bytes.len());
+        let chunk = &viewer.bytes[offset..chunk_end];
+
+        let mut hex = String::new();
+        let mut ascii = String::new();
+        for index in 0..16 {
+            if index < chunk.len() {
+                let byte = chunk[index];
+                if !hex.is_empty() {
+                    hex.push(' ');
+                }
+                hex.push_str(&format!("{byte:02x}"));
+                let ch = byte as char;
+                if ch.is_ascii_graphic() || ch == ' ' {
+                    ascii.push(ch);
+                } else {
+                    ascii.push('.');
+                }
+            } else {
+                if !hex.is_empty() {
+                    hex.push(' ');
+                }
+                hex.push_str("  ");
+                ascii.push(' ');
+            }
+        }
+
+        lines.push(Line::from(format!("{offset:08x}  {hex}  |{ascii}|")));
+    }
+
     Text::from(lines)
 }
 

@@ -61,6 +61,7 @@ Viewer:
 - `n` / `Shift-n`: continue search forward/backward
 - `g` / `Alt-L`: goto
 - `w`: toggle wrap
+- `h`: toggle hex/text mode
 - `Esc` / `q` / `F10`: close viewer
 
 Notes:

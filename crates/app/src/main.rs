@@ -185,7 +185,14 @@ fn handle_key(
     let Some(chord) = map_key_event_to_chord(key_event) else {
         return Ok(false);
     };
-    let Some(key_command) = keymap.resolve(context, chord) else {
+    let key_command = keymap.resolve(context, chord).or_else(|| {
+        if context == KeyContext::ViewerHex {
+            keymap.resolve(KeyContext::Viewer, chord)
+        } else {
+            None
+        }
+    });
+    let Some(key_command) = key_command else {
         if context == KeyContext::FileManagerXMap {
             state.clear_xmap();
             state.set_status("Extended keymap command not found");

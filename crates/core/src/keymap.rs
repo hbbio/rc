@@ -139,6 +139,7 @@ pub enum KeyCommand {
     SearchContinueBackward,
     Goto,
     ToggleWrap,
+    ToggleHex,
     DialogAccept,
     DialogCancel,
     DialogFocusNext,
@@ -198,6 +199,7 @@ impl KeyCommand {
             }
             "goto" => Self::Goto,
             "togglewrap" | "togglewrapmode" | "wrapmode" => Self::ToggleWrap,
+            "togglehex" | "togglehexmode" | "hexmode" => Self::ToggleHex,
             "ok" | "dialogaccept" => Self::DialogAccept,
             "cancel" | "dialogcancel" => Self::DialogCancel,
             "focusnext" | "dialogfocusnext" => Self::DialogFocusNext,
@@ -596,6 +598,7 @@ SearchContinue = n
 SearchContinueBackward = s-n
 Goto = g
 ToggleWrap = w
+ToggleHex = h
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -642,6 +645,10 @@ ToggleWrap = w
         assert_eq!(
             keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::Char('w'))),
             Some(&KeyCommand::ToggleWrap)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::Char('h'))),
+            Some(&KeyCommand::ToggleHex)
         );
     }
 

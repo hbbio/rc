@@ -101,6 +101,7 @@ pub enum AppCommand {
     ViewerSearchContinueBackward,
     ViewerGoto,
     ViewerToggleWrap,
+    ViewerToggleHex,
 }
 
 impl AppCommand {
@@ -173,6 +174,13 @@ impl AppCommand {
             (KeyContext::Viewer, KeyCommand::PageDown) => Some(Self::ViewerPageDown),
             (KeyContext::Viewer, KeyCommand::Home) => Some(Self::ViewerHome),
             (KeyContext::Viewer, KeyCommand::End) => Some(Self::ViewerEnd),
+            (KeyContext::ViewerHex, KeyCommand::Quit) => Some(Self::CloseViewer),
+            (KeyContext::ViewerHex, KeyCommand::CursorUp) => Some(Self::ViewerMoveUp),
+            (KeyContext::ViewerHex, KeyCommand::CursorDown) => Some(Self::ViewerMoveDown),
+            (KeyContext::ViewerHex, KeyCommand::PageUp) => Some(Self::ViewerPageUp),
+            (KeyContext::ViewerHex, KeyCommand::PageDown) => Some(Self::ViewerPageDown),
+            (KeyContext::ViewerHex, KeyCommand::Home) => Some(Self::ViewerHome),
+            (KeyContext::ViewerHex, KeyCommand::End) => Some(Self::ViewerEnd),
             (KeyContext::Viewer, KeyCommand::Search) => Some(Self::ViewerSearchForward),
             (KeyContext::Viewer, KeyCommand::SearchBackward) => Some(Self::ViewerSearchBackward),
             (KeyContext::Viewer, KeyCommand::SearchContinue) => Some(Self::ViewerSearchContinue),
@@ -181,6 +189,16 @@ impl AppCommand {
             }
             (KeyContext::Viewer, KeyCommand::Goto) => Some(Self::ViewerGoto),
             (KeyContext::Viewer, KeyCommand::ToggleWrap) => Some(Self::ViewerToggleWrap),
+            (KeyContext::ViewerHex, KeyCommand::Search) => Some(Self::ViewerSearchForward),
+            (KeyContext::ViewerHex, KeyCommand::SearchBackward) => Some(Self::ViewerSearchBackward),
+            (KeyContext::ViewerHex, KeyCommand::SearchContinue) => Some(Self::ViewerSearchContinue),
+            (KeyContext::ViewerHex, KeyCommand::SearchContinueBackward) => {
+                Some(Self::ViewerSearchContinueBackward)
+            }
+            (KeyContext::ViewerHex, KeyCommand::Goto) => Some(Self::ViewerGoto),
+            (KeyContext::ViewerHex, KeyCommand::ToggleWrap) => Some(Self::ViewerToggleWrap),
+            (KeyContext::Viewer, KeyCommand::ToggleHex)
+            | (KeyContext::ViewerHex, KeyCommand::ToggleHex) => Some(Self::ViewerToggleHex),
             (KeyContext::FileManager, KeyCommand::OpenConfirmDialog) => {
                 Some(Self::OpenConfirmDialog)
             }
@@ -546,9 +564,11 @@ enum ViewerGotoTarget {
 #[derive(Clone, Debug)]
 pub struct ViewerState {
     pub path: PathBuf,
+    pub bytes: Vec<u8>,
     pub content: String,
     pub scroll: usize,
     pub wrap: bool,
+    pub hex_mode: bool,
     line_offsets: Vec<usize>,
     last_search_query: Option<String>,
     last_search_match_offset: Option<usize>,
@@ -563,9 +583,11 @@ impl ViewerState {
 
         Ok(Self {
             path,
+            bytes,
             content,
             scroll: 0,
             wrap: false,
+            hex_mode: false,
             line_offsets,
             last_search_query: None,
             last_search_match_offset: None,
@@ -574,7 +596,11 @@ impl ViewerState {
     }
 
     pub fn line_count(&self) -> usize {
-        self.line_offsets.len()
+        if self.hex_mode {
+            self.hex_line_count()
+        } else {
+            self.line_offsets.len()
+        }
     }
 
     pub fn current_line_number(&self) -> usize {
@@ -608,6 +634,11 @@ impl ViewerState {
 
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
+    }
+
+    pub fn toggle_hex_mode(&mut self) {
+        self.hex_mode = !self.hex_mode;
+        self.scroll = self.scroll.min(self.line_count().saturating_sub(1));
     }
 
     fn start_search(&mut self, query: String, direction: ViewerSearchDirection) -> Option<usize> {
@@ -655,7 +686,12 @@ impl ViewerState {
                     .min(self.line_count().saturating_sub(1));
             }
             ViewerGotoTarget::Offset(offset) => {
-                let bounded = offset.min(self.content.len());
+                let max_offset = if self.hex_mode {
+                    self.bytes.len()
+                } else {
+                    self.content.len()
+                };
+                let bounded = offset.min(max_offset);
                 self.scroll = self.line_index_for_offset(bounded);
             }
         }
@@ -663,11 +699,22 @@ impl ViewerState {
     }
 
     fn current_line_offset(&self) -> usize {
+        if self.hex_mode {
+            return self
+                .scroll
+                .saturating_mul(16)
+                .min(self.bytes.len().saturating_sub(1));
+        }
         let index = self.scroll.min(self.line_count().saturating_sub(1));
         self.line_offsets[index]
     }
 
     fn line_index_for_offset(&self, offset: usize) -> usize {
+        if self.hex_mode {
+            return offset
+                .saturating_div(16)
+                .min(self.hex_line_count().saturating_sub(1));
+        }
         if self.line_offsets.is_empty() {
             return 0;
         }
@@ -677,6 +724,11 @@ impl ViewerState {
             Err(0) => 0,
             Err(index) => index.saturating_sub(1),
         }
+    }
+
+    fn hex_line_count(&self) -> usize {
+        let lines = (self.bytes.len().saturating_add(15)).saturating_div(16);
+        lines.max(1)
     }
 }
 
@@ -1870,6 +1922,19 @@ impl AppState {
                     ));
                 }
             }
+            AppCommand::ViewerToggleHex => {
+                let mut next = None;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.toggle_hex_mode();
+                    next = Some(viewer.hex_mode);
+                }
+                if let Some(hex_mode) = next {
+                    self.set_status(format!(
+                        "Viewer mode {}",
+                        if hex_mode { "hex" } else { "text" }
+                    ));
+                }
+            }
         }
 
         if clear_xmap_after_command {
@@ -1899,7 +1964,13 @@ impl AppState {
                 }
             }
             Route::Jobs => KeyContext::Jobs,
-            Route::Viewer(_) => KeyContext::Viewer,
+            Route::Viewer(viewer) => {
+                if viewer.hex_mode {
+                    KeyContext::ViewerHex
+                } else {
+                    KeyContext::Viewer
+                }
+            }
             Route::FindResults(_) => KeyContext::FindResults,
             Route::Tree(_) => KeyContext::Tree,
             Route::Hotlist => KeyContext::Hotlist,
@@ -3214,6 +3285,56 @@ mod tests {
     }
 
     #[test]
+    fn viewer_hex_mode_switches_context_and_navigation_model() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-hex-mode-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("hex.bin");
+        fs::write(
+            &file_path,
+            b"0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("must create viewer content");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("viewer file should be visible");
+        app.active_panel_mut().cursor = file_index;
+        app.apply(AppCommand::OpenEntry)
+            .expect("open entry should open viewer");
+        drain_background(&mut app);
+        assert_eq!(app.key_context(), KeyContext::Viewer);
+
+        app.apply(AppCommand::ViewerToggleHex)
+            .expect("viewer should toggle hex mode");
+        assert_eq!(app.key_context(), KeyContext::ViewerHex);
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.line_count(), 3, "48 bytes should render as 3 hex rows");
+
+        app.apply(AppCommand::ViewerMoveDown)
+            .expect("viewer should move by hex row");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.current_line_number(), 2);
+
+        app.apply(AppCommand::ViewerToggleHex)
+            .expect("viewer should toggle back to text mode");
+        assert_eq!(app.key_context(), KeyContext::Viewer);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn find_dialog_builds_results_and_opens_selected_entry() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3611,6 +3732,14 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::ToggleWrap),
             Some(AppCommand::ViewerToggleWrap)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::ToggleHex),
+            Some(AppCommand::ViewerToggleHex)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::ViewerHex, &KeyCommand::ToggleHex),
+            Some(AppCommand::ViewerToggleHex)
         );
     }
 }

@@ -110,14 +110,17 @@ SearchContinue = n
 SearchContinueBackward = shift-n
 Goto = g; alt-l
 ToggleWrap = w
+ToggleHex = h
 
 [viewer:hex]
+Quit = f10; esc; q
 Up = up
 Down = down
 PageUp = pgup
 PageDown = pgdn
 Home = home
 End = end
+ToggleHex = h
 
 [diffviewer]
 Quit = f10
