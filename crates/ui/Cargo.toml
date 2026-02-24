@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 ratatui.workspace = true
 rc-core.workspace = true
 syntect.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["fs"] }

@@ -3001,21 +3001,14 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
 
 fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
-    let include_metadata = !matches!(sort_mode.field, SortField::Name);
     for entry_result in fs::read_dir(dir)? {
         let entry = entry_result?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let file_type = entry.file_type()?;
-        let (size, modified) = if include_metadata {
-            let metadata = entry.metadata().ok();
-            (
-                metadata.as_ref().map_or(0, std::fs::Metadata::len),
-                metadata.as_ref().and_then(|meta| meta.modified().ok()),
-            )
-        } else {
-            (0, None)
-        };
+        let metadata = entry.metadata().ok();
+        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
         if file_type.is_dir() {
             entries.push(FileEntry::directory(name, path, size, modified));
         } else {
@@ -3048,7 +3041,6 @@ fn read_panelized_entries(
         return Err(io::Error::other(format!("command failed: {detail}")));
     }
 
-    let include_metadata = !matches!(sort_mode.field, SortField::Name);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
@@ -3073,11 +3065,8 @@ fn read_panelized_entries(
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        let (size, modified) = if include_metadata {
-            (metadata.len(), metadata.modified().ok())
-        } else {
-            (0, None)
-        };
+        let size = metadata.len();
+        let modified = metadata.modified().ok();
 
         let name = panelized_entry_label(base_dir, &path);
         if metadata.is_dir() {
@@ -3238,7 +3227,7 @@ mod tests {
     }
 
     #[test]
-    fn name_sort_listing_omits_metadata_population() {
+    fn name_sort_listing_populates_metadata_fields() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -3260,10 +3249,13 @@ mod tests {
             .iter()
             .find(|entry| entry.path == file_path)
             .expect("file entry should be present");
-        assert_eq!(file_entry.size, 0, "name sort should skip size metadata");
-        assert_eq!(
-            file_entry.modified, None,
-            "name sort should skip mtime metadata"
+        assert!(
+            file_entry.size >= 7,
+            "name sort should include file metadata size"
+        );
+        assert!(
+            file_entry.modified.is_some(),
+            "name sort should include file metadata mtime"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

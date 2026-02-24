@@ -2,6 +2,7 @@
 
 mod skin;
 
+use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,14 +11,18 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
 use rc_core::{
-    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FindResultsState, JobRecord,
-    JobStatus, PanelState, Route, TreeState, ViewerState,
+    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry, FindResultsState,
+    JobRecord, JobStatus, PanelState, Route, TreeState, ViewerState,
 };
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+#[cfg(unix)]
+use nix::sys::statvfs::statvfs;
 
 pub use skin::configure_skin;
 use skin::{UiSkin, current_skin};
@@ -52,24 +57,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
-    frame.render_widget(
-        Paragraph::new(Line::from(format!(
-            "rc | skin:{} | context: {:?} | routes: {} | jobs q:{} r:{} ok:{} cx:{} err:{}",
-            skin.name(),
-            state.key_context(),
-            state.route_depth(),
-            job_counts.queued,
-            job_counts.running,
-            job_counts.succeeded,
-            job_counts.canceled,
-            job_counts.failed
-        )))
-        .style(skin.style("core", "header")),
-        root[0],
-    );
+    render_menu_bar(frame, root[0], skin.as_ref());
 
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
@@ -95,10 +87,23 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         );
     }
 
+    let status = format!(
+        "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
+        state.key_context(),
+        state.route_depth(),
+        skin.name(),
+        job_counts.queued,
+        job_counts.running,
+        job_counts.succeeded,
+        job_counts.canceled,
+        job_counts.failed,
+        state.status_line
+    );
     frame.render_widget(
-        Paragraph::new(state.status_line.as_str()).style(skin.style("statusbar", "_default_")),
+        Paragraph::new(status).style(skin.style("statusbar", "_default_")),
         root[2],
     );
+    render_button_bar(frame, root[3], skin.as_ref());
 
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
@@ -111,13 +116,51 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
-    let border_style = if active {
-        skin.style("core", "selected")
-    } else {
-        skin.style("core", "_default_")
-    };
+fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin) {
+    let menu_style = skin.style("menu", "_default_");
+    let hot_style = skin.style("menu", "menuhot");
+    let items = ["Left", "File", "Command", "Options", "Right"];
+    let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
+    for item in items {
+        let mut chars = item.chars();
+        let first = chars.next().unwrap_or_default().to_string();
+        let rest: String = chars.collect();
+        spans.push(Span::styled(first, hot_style));
+        spans.push(Span::styled(rest, menu_style));
+        spans.push(Span::raw("  "));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(menu_style), area);
+}
 
+fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin) {
+    let hotkey_style = skin.style("buttonbar", "hotkey");
+    let button_style = skin.style("buttonbar", "button");
+    let labels = [
+        ("1", "Help"),
+        ("2", "Menu"),
+        ("3", "View"),
+        ("4", "Edit"),
+        ("5", "Copy"),
+        ("6", "RenMov"),
+        ("7", "Mkdir"),
+        ("8", "Delete"),
+        ("9", "PullDn"),
+        ("10", "Quit"),
+    ];
+
+    let mut spans: Vec<Span<'_>> = Vec::new();
+    for (index, (number, label)) in labels.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", button_style));
+        }
+        spans.push(Span::styled(number, hotkey_style));
+        spans.push(Span::styled(label, button_style));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
+}
+
+fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
     let title = format!(
         "{} | sort:{} | tagged:{}{}",
         panel.cwd.to_string_lossy(),
@@ -125,23 +168,50 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
         panel.tagged_count(),
         if panel.loading { " | loading..." } else { "" }
     );
-    let items = if panel.entries.is_empty() {
-        if panel.loading {
-            vec![ListItem::new("<loading...>").style(skin.style("core", "_default_"))]
-        } else {
-            vec![ListItem::new("<empty>").style(skin.style("core", "_default_"))]
-        }
+    let selected_tagged = panel
+        .selected_entry()
+        .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
+    let highlight_style = if !active {
+        skin.style("core", "_default_")
+    } else if selected_tagged {
+        skin.style("core", "markselect")
     } else {
-        panel
+        skin.style("core", "selected")
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_set(skin.panel_border_set())
+        .border_style(skin.style("core", "_default_"))
+        .style(skin.style("core", "_default_"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let panel_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    if panel.entries.is_empty() {
+        let placeholder = if panel.loading {
+            "<loading...>"
+        } else {
+            "<empty>"
+        };
+        frame.render_widget(
+            Paragraph::new(placeholder)
+                .style(skin.style("core", "_default_"))
+                .alignment(Alignment::Left),
+            panel_layout[0],
+        );
+    } else {
+        let rows: Vec<Row<'_>> = panel
             .entries
             .iter()
             .map(|entry| {
-                let tag_marker = if !entry.is_parent && panel.is_tagged(&entry.path) {
-                    '*'
-                } else {
-                    ' '
-                };
-                let mut entry_style = if !entry.is_parent && panel.is_tagged(&entry.path) {
+                let tagged = !entry.is_parent && panel.is_tagged(&entry.path);
+                let mut entry_style = if tagged {
                     skin.style("core", "marked")
                 } else {
                     skin.style("core", "_default_")
@@ -149,45 +219,70 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
                 if entry.is_dir {
                     entry_style = entry_style.patch(skin.style("filehighlight", "directory"));
                 }
+
+                let marker = if tagged { "*" } else { " " };
                 let label = if entry.is_parent {
-                    String::from("..")
+                    String::from("/..")
                 } else if entry.is_dir {
-                    format!("{}/", entry.name)
+                    format!("/{}/", entry.name)
                 } else {
                     entry.name.clone()
                 };
-                ListItem::new(format!("[{tag_marker}] {label}")).style(entry_style)
+                Row::new(vec![
+                    Cell::from(format!("{marker}{label}")),
+                    Cell::from(panel_entry_size_label(entry)),
+                    Cell::from(format_modified(entry.modified)),
+                ])
+                .style(entry_style)
             })
-            .collect()
-    };
+            .collect();
+        let header = Row::new(vec![
+            Cell::from("Name"),
+            Cell::from("Size"),
+            Cell::from("Modify"),
+        ])
+        .style(skin.style("core", "header"));
 
-    let selected_tagged = panel
-        .selected_entry()
-        .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
-    let highlight_style = if selected_tagged {
-        skin.style("core", "markselect")
-    } else {
-        skin.style("core", "selected")
-    };
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_set(skin.panel_border_set())
-                .border_style(border_style)
-                .style(skin.style("core", "_default_")),
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Fill(1),
+                Constraint::Length(11),
+                Constraint::Length(12),
+            ],
         )
+        .header(header)
         .style(skin.style("core", "_default_"))
         .highlight_style(highlight_style)
-        .highlight_symbol(">> ");
+        .column_spacing(1);
 
-    let mut list_state = ListState::default();
-    if !panel.entries.is_empty() {
-        list_state.select(Some(panel.cursor));
+        let mut table_state = TableState::default();
+        table_state.select(Some(panel.cursor));
+        frame.render_stateful_widget(table, panel_layout[0], &mut table_state);
     }
-    frame.render_stateful_widget(list, area, &mut list_state);
+
+    let (selected_count, selected_size) = panel_selected_totals(panel);
+    let selected_summary = format!(
+        "{} in {} {}",
+        format_bytes(selected_size),
+        selected_count,
+        if selected_count == 1 { "file" } else { "files" }
+    );
+    let disk_summary = panel_disk_summary(panel);
+    let footer_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Fill(1), Constraint::Length(22)])
+        .split(panel_layout[1]);
+    frame.render_widget(
+        Paragraph::new(selected_summary).style(skin.style("statusbar", "_default_")),
+        footer_layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(disk_summary)
+            .style(skin.style("statusbar", "_default_"))
+            .alignment(Alignment::Right),
+        footer_layout[1],
+    );
 }
 
 fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiSkin) {
@@ -831,6 +926,121 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
             .style(skin.style("core", "disabled")),
         layout[1],
     );
+}
+
+fn panel_entry_size_label(entry: &FileEntry) -> String {
+    if entry.is_parent {
+        return String::from("UP--DIR");
+    }
+    format_with_commas(entry.size)
+}
+
+fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
+    let mut count = 0usize;
+    let mut size = 0u64;
+
+    for entry in &panel.entries {
+        if entry.is_parent || !panel.is_tagged(&entry.path) {
+            continue;
+        }
+        count = count.saturating_add(1);
+        size = size.saturating_add(entry.size);
+    }
+
+    (count, size)
+}
+
+fn panel_disk_summary(panel: &PanelState) -> String {
+    let Some((free, total)) = disk_usage(panel.cwd.as_path()) else {
+        return String::from("- / - (-%)");
+    };
+    if total == 0 {
+        return String::from("0B / 0B (0%)");
+    }
+    let percent = free.saturating_mul(100) / total;
+    format!(
+        "{} / {} ({}%)",
+        format_capacity(free),
+        format_capacity(total),
+        percent
+    )
+}
+
+#[cfg(unix)]
+fn disk_usage(path: &Path) -> Option<(u64, u64)> {
+    let stats = statvfs(path).ok()?;
+    let fragment_size = stats.fragment_size() as u64;
+    if fragment_size == 0 {
+        return None;
+    }
+
+    let total = bytes_from_blocks(stats.blocks() as u64, fragment_size);
+    let free = bytes_from_blocks(stats.blocks_available() as u64, fragment_size);
+    Some((free, total))
+}
+
+#[cfg(not(unix))]
+fn disk_usage(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+fn bytes_from_blocks(blocks: u64, block_size: u64) -> u64 {
+    ((blocks as u128).saturating_mul(block_size as u128)).min(u64::MAX as u128) as u64
+}
+
+fn format_modified(modified: Option<SystemTime>) -> String {
+    modified
+        .map(|time| {
+            let local: DateTime<Local> = DateTime::from(time);
+            local.format("%b %e %H:%M").to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    format!("{} B", format_with_commas(bytes))
+}
+
+fn format_with_commas(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn format_capacity(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    const TIB: u64 = GIB * 1024;
+
+    if bytes >= TIB {
+        format_capacity_unit(bytes, TIB, "T")
+    } else if bytes >= GIB {
+        format_capacity_unit(bytes, GIB, "G")
+    } else if bytes >= MIB {
+        format_capacity_unit(bytes, MIB, "M")
+    } else if bytes >= KIB {
+        format_capacity_unit(bytes, KIB, "K")
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+fn format_capacity_unit(bytes: u64, unit: u64, suffix: &str) -> String {
+    let value = bytes as f64 / unit as f64;
+    if value < 10.0 {
+        let rounded = format!("{value:.1}");
+        let rounded = rounded.strip_suffix(".0").unwrap_or(&rounded);
+        format!("{rounded}{suffix}")
+    } else {
+        format!("{}{suffix}", value.round() as u64)
+    }
 }
 
 fn path_leaf_label(path: &Path) -> String {
