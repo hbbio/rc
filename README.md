@@ -39,6 +39,16 @@ Optional arguments:
 cargo run -p rc -- --path /some/start/dir --tick-rate-ms 200
 ```
 
+Select an `mc` skin:
+
+```bash
+cargo run -p rc -- --skin modarin256
+cargo run -p rc -- --skin julia256 --skin-dir /path/to/mc/skins
+```
+
+`rc` looks up skins in `crates/ui/assets/skins` (bundled originals) and standard
+system locations like `/usr/share/mc/skins` and Homebrew paths.
+
 ## Key controls (current defaults)
 
 Main file manager:

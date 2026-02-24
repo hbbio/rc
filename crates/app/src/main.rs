@@ -29,6 +29,10 @@ struct Cli {
     tick_rate_ms: u64,
     #[arg(long)]
     path: Option<PathBuf>,
+    #[arg(long, default_value = "default")]
+    skin: String,
+    #[arg(long)]
+    skin_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -39,6 +43,10 @@ fn main() -> Result<()> {
         .path
         .unwrap_or(std::env::current_dir().context("failed to resolve current directory")?);
     let mut state = AppState::new(start_path).context("failed to initialize app state")?;
+    if let Err(error) = rc_ui::configure_skin(&cli.skin, cli.skin_dir.as_deref()) {
+        tracing::warn!("failed to load skin '{}': {error}", cli.skin);
+        state.set_status(format!("Skin '{}' unavailable: {error}", cli.skin));
+    }
     let keymap =
         Keymap::bundled_mc_default().context("failed to load bundled mc.default.keymap")?;
 

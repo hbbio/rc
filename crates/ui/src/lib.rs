@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod skin;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,6 +18,9 @@ use std::sync::{Mutex, OnceLock};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+pub use skin::configure_skin;
+use skin::{UiSkin, current_skin};
 
 struct HighlightResources {
     syntax_set: SyntaxSet,
@@ -39,6 +44,7 @@ struct CachedViewerHighlight {
 }
 
 pub fn render(frame: &mut Frame, state: &AppState) {
+    let skin = current_skin();
     let job_counts = state.jobs_status_counts();
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -51,7 +57,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     frame.render_widget(
         Paragraph::new(Line::from(format!(
-            "rc | context: {:?} | routes: {} | jobs q:{} r:{} ok:{} cx:{} err:{}",
+            "rc | skin:{} | context: {:?} | routes: {} | jobs q:{} r:{} ok:{} cx:{} err:{}",
+            skin.name(),
             state.key_context(),
             state.route_depth(),
             job_counts.queued,
@@ -59,12 +66,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             job_counts.succeeded,
             job_counts.canceled,
             job_counts.failed
-        ))),
+        )))
+        .style(skin.style("core", "header")),
         root[0],
     );
 
     if let Some(viewer) = state.active_viewer() {
-        render_viewer(frame, root[1], viewer);
+        render_viewer(frame, root[1], viewer, skin.as_ref());
     } else {
         let panel_areas = Layout::default()
             .direction(Direction::Horizontal)
@@ -76,36 +84,38 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             panel_areas[0],
             &state.panels[0],
             state.active_panel == ActivePanel::Left,
+            skin.as_ref(),
         );
         render_panel(
             frame,
             panel_areas[1],
             &state.panels[1],
             state.active_panel == ActivePanel::Right,
+            skin.as_ref(),
         );
     }
 
     frame.render_widget(
-        Paragraph::new(state.status_line.as_str()).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(state.status_line.as_str()).style(skin.style("statusbar", "_default_")),
         root[2],
     );
 
     match state.top_route() {
-        Route::Dialog(dialog) => render_dialog(frame, dialog),
-        Route::Jobs => render_jobs_screen(frame, state),
+        Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
+        Route::Jobs => render_jobs_screen(frame, state, skin.as_ref()),
         Route::Viewer(_) => {}
-        Route::FindResults(results) => render_find_results_screen(frame, results),
-        Route::Tree(tree) => render_tree_screen(frame, tree),
-        Route::Hotlist => render_hotlist_screen(frame, state),
+        Route::FindResults(results) => render_find_results_screen(frame, results, skin.as_ref()),
+        Route::Tree(tree) => render_tree_screen(frame, tree, skin.as_ref()),
+        Route::Hotlist => render_hotlist_screen(frame, state, skin.as_ref()),
         Route::FileManager => {}
     }
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool) {
+fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
     let border_style = if active {
-        Style::default().fg(Color::Yellow)
+        skin.style("core", "selected")
     } else {
-        Style::default().fg(Color::Gray)
+        skin.style("core", "_default_")
     };
 
     let title = format!(
@@ -117,9 +127,9 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
     );
     let items = if panel.entries.is_empty() {
         if panel.loading {
-            vec![ListItem::new("<loading...>")]
+            vec![ListItem::new("<loading...>").style(skin.style("core", "_default_"))]
         } else {
-            vec![ListItem::new("<empty>")]
+            vec![ListItem::new("<empty>").style(skin.style("core", "_default_"))]
         }
     } else {
         panel
@@ -131,6 +141,14 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
                 } else {
                     ' '
                 };
+                let mut entry_style = if !entry.is_parent && panel.is_tagged(&entry.path) {
+                    skin.style("core", "marked")
+                } else {
+                    skin.style("core", "_default_")
+                };
+                if entry.is_dir {
+                    entry_style = entry_style.patch(skin.style("filehighlight", "directory"));
+                }
                 let label = if entry.is_parent {
                     String::from("..")
                 } else if entry.is_dir {
@@ -138,9 +156,18 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
                 } else {
                     entry.name.clone()
                 };
-                ListItem::new(format!("[{tag_marker}] {label}"))
+                ListItem::new(format!("[{tag_marker}] {label}")).style(entry_style)
             })
             .collect()
+    };
+
+    let selected_tagged = panel
+        .selected_entry()
+        .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
+    let highlight_style = if selected_tagged {
+        skin.style("core", "markselect")
+    } else {
+        skin.style("core", "selected")
     };
 
     let list = List::new(items)
@@ -148,9 +175,12 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(border_style),
+                .border_set(skin.panel_border_set())
+                .border_style(border_style)
+                .style(skin.style("core", "_default_")),
         )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .style(skin.style("core", "_default_"))
+        .highlight_style(highlight_style)
         .highlight_symbol(">> ");
 
     let mut list_state = ListState::default();
@@ -160,7 +190,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
+fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiSkin) {
     frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(2) as usize;
@@ -178,13 +208,17 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
         highlighted_viewer_window(viewer, visible_lines)
             .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines, content_width))
     };
-    let surface_style = viewer_theme_surface_style().unwrap_or_default();
+    let mut surface_style = skin.style("viewer", "_default_");
+    if surface_style.fg.is_none() && surface_style.bg.is_none() {
+        surface_style = viewer_theme_surface_style().unwrap_or_default();
+    }
     let mut paragraph = Paragraph::new(content)
         .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_set(skin.panel_border_set())
+                .border_style(skin.style("core", "selected"))
                 .style(surface_style),
         )
         .style(surface_style);
@@ -408,7 +442,7 @@ fn syntect_style(style: SyntectStyle) -> Style {
     ratatui_style
 }
 
-fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
+fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 56, 14);
     frame.render_widget(Clear, area);
 
@@ -417,7 +451,9 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
             let block = Block::default()
                 .title(dialog.title.as_str())
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow));
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
@@ -431,25 +467,21 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
                 .split(inner);
 
             frame.render_widget(
-                Paragraph::new(confirm.message.as_str()).alignment(Alignment::Center),
+                Paragraph::new(confirm.message.as_str())
+                    .style(skin.style("dialog", "_default_"))
+                    .alignment(Alignment::Center),
                 layout[0],
             );
 
             let ok_style = if confirm.focus == DialogButtonFocus::Ok {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                skin.style("dialog", "dfocus")
             } else {
-                Style::default().fg(Color::Gray)
+                skin.style("dialog", "_default_")
             };
             let cancel_style = if confirm.focus == DialogButtonFocus::Cancel {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                skin.style("dialog", "dfocus")
             } else {
-                Style::default().fg(Color::Gray)
+                skin.style("dialog", "_default_")
             };
 
             let buttons = Line::from(vec![
@@ -464,7 +496,7 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
 
             frame.render_widget(
                 Paragraph::new("Enter accept | Tab switch | Esc cancel")
-                    .style(Style::default().fg(Color::DarkGray))
+                    .style(skin.style("core", "disabled"))
                     .alignment(Alignment::Center),
                 layout[2],
             );
@@ -473,7 +505,9 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
             let block = Block::default()
                 .title(dialog.title.as_str())
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow));
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
@@ -487,7 +521,7 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
                 .split(inner);
 
             frame.render_widget(
-                Paragraph::new(input.prompt.as_str()).style(Style::default().fg(Color::Gray)),
+                Paragraph::new(input.prompt.as_str()).style(skin.style("dialog", "_default_")),
                 layout[0],
             );
 
@@ -495,14 +529,16 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
                 Paragraph::new(input.value.as_str()).block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Blue)),
+                        .border_set(skin.panel_border_set())
+                        .border_style(skin.style("dialog", "dfocus"))
+                        .style(skin.style("core", "input")),
                 ),
                 layout[1],
             );
 
             frame.render_widget(
                 Paragraph::new("Type text | Enter accept | Backspace delete | Esc cancel")
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(skin.style("core", "disabled")),
                 layout[2],
             );
         }
@@ -510,7 +546,9 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
             let block = Block::default()
                 .title(dialog.title.as_str())
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow));
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
@@ -529,7 +567,8 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
                     .collect()
             };
             let list = List::new(items)
-                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+                .style(skin.style("dialog", "_default_"))
+                .highlight_style(skin.style("dialog", "dfocus"))
                 .highlight_symbol(">> ");
 
             let mut state = ListState::default();
@@ -540,21 +579,23 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
 
             frame.render_widget(
                 Paragraph::new("Up/Down move | Enter accept | Esc cancel")
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(skin.style("core", "disabled")),
                 layout[1],
             );
         }
     }
 }
 
-fn render_jobs_screen(frame: &mut Frame, state: &AppState) {
+fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 92, 24);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
         .title("Jobs")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -566,7 +607,7 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState) {
         Cell::from("current"),
         Cell::from("error"),
     ])
-    .style(Style::default().add_modifier(Modifier::BOLD));
+    .style(skin.style("core", "header"));
 
     let rows: Vec<Row<'_>> = if state.jobs.jobs().is_empty() {
         vec![Row::new(vec![
@@ -593,7 +634,8 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState) {
         ],
     )
     .header(header)
-    .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+    .style(skin.style("dialog", "_default_"))
+    .highlight_style(skin.style("core", "selected"))
     .highlight_symbol(">> ")
     .block(
         Block::default()
@@ -608,7 +650,7 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState) {
     frame.render_stateful_widget(table, inner, &mut table_state);
 }
 
-fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
+fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 96, 28);
     frame.render_widget(Clear, area);
 
@@ -621,7 +663,9 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -636,7 +680,7 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
 
     let root = format!("Root: {}", results.base_dir.to_string_lossy());
     frame.render_widget(
-        Paragraph::new(root).style(Style::default().fg(Color::Gray)),
+        Paragraph::new(root).style(skin.style("dialog", "_default_")),
         layout[0],
     );
 
@@ -660,7 +704,8 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
             .collect()
     };
     let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .style(skin.style("dialog", "_default_"))
+        .highlight_style(skin.style("core", "selected"))
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     if !results.entries.is_empty() {
@@ -672,12 +717,12 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState) {
         Paragraph::new(
             "Enter locate | Up/Down move | PgUp/PgDn | Home/End | Alt-J cancel | Esc/q close",
         )
-        .style(Style::default().fg(Color::DarkGray)),
+        .style(skin.style("core", "disabled")),
         layout[2],
     );
 }
 
-fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
+fn render_tree_screen(frame: &mut Frame, tree: &TreeState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 88, 28);
     frame.render_widget(Clear, area);
 
@@ -689,7 +734,9 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -704,7 +751,7 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
 
     let root = format!("Root: {}", tree.root.to_string_lossy());
     frame.render_widget(
-        Paragraph::new(root).style(Style::default().fg(Color::Gray)),
+        Paragraph::new(root).style(skin.style("dialog", "_default_")),
         layout[0],
     );
 
@@ -725,7 +772,8 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
             .collect()
     };
     let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .style(skin.style("dialog", "_default_"))
+        .highlight_style(skin.style("core", "selected"))
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     if !tree.entries.is_empty() {
@@ -735,12 +783,12 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState) {
 
     frame.render_widget(
         Paragraph::new("Enter open | Up/Down move | PgUp/PgDn | Home/End | Esc/q close")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(skin.style("core", "disabled")),
         layout[2],
     );
 }
 
-fn render_hotlist_screen(frame: &mut Frame, app: &AppState) {
+fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 88, 22);
     frame.render_widget(Clear, area);
 
@@ -748,7 +796,9 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -766,7 +816,8 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState) {
             .collect()
     };
     let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .style(skin.style("dialog", "_default_"))
+        .highlight_style(skin.style("core", "selected"))
         .highlight_symbol(">> ");
 
     let mut state = ListState::default();
@@ -777,7 +828,7 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState) {
 
     frame.render_widget(
         Paragraph::new("Enter open | a add current dir | d/delete remove | Esc/q close")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(skin.style("core", "disabled")),
         layout[1],
     );
 }
