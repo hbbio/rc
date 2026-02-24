@@ -264,7 +264,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
     let (selected_count, selected_size) = panel_selected_totals(panel);
     let selected_summary = format!(
         "{} in {} {}",
-        format_bytes(selected_size),
+        format_human_size(selected_size),
         selected_count,
         if selected_count == 1 { "file" } else { "files" }
     );
@@ -932,7 +932,7 @@ fn panel_entry_size_label(entry: &FileEntry) -> String {
     if entry.is_parent {
         return String::from("UP--DIR");
     }
-    format_with_commas(entry.size)
+    format_human_size_compact(entry.size)
 }
 
 fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
@@ -955,13 +955,13 @@ fn panel_disk_summary(panel: &PanelState) -> String {
         return String::from("- / - (-%)");
     };
     if total == 0 {
-        return String::from("0B / 0B (0%)");
+        return String::from("0b / 0b (0%)");
     }
     let percent = free.saturating_mul(100) / total;
     format!(
         "{} / {} ({}%)",
-        format_capacity(free),
-        format_capacity(total),
+        format_human_size(free),
+        format_human_size(total),
         percent
     )
 }
@@ -997,50 +997,49 @@ fn format_modified(modified: Option<SystemTime>) -> String {
         .unwrap_or_default()
 }
 
-fn format_bytes(bytes: u64) -> String {
-    format!("{} B", format_with_commas(bytes))
+fn format_human_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["b", "kb", "Mb", "Gb", "Tb", "Pb"];
+    format_human_size_with_units(bytes, &UNITS)
 }
 
-fn format_with_commas(value: u64) -> String {
-    let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, ch) in digits.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
+fn format_human_size_compact(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["", "k", "M", "G", "T", "P"];
+    format_human_size_with_units(bytes, &UNITS)
+}
+
+fn format_human_size_with_units(bytes: u64, units: &[&str; 6]) -> String {
+    if bytes == 0 {
+        return format!("0{}", units[0]);
     }
-    out.chars().rev().collect()
-}
 
-fn format_capacity(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    const TIB: u64 = GIB * 1024;
+    let mut value = bytes as f64;
+    let mut unit_index = 0usize;
+    while value >= 1024.0 && unit_index < units.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
 
-    if bytes >= TIB {
-        format_capacity_unit(bytes, TIB, "T")
-    } else if bytes >= GIB {
-        format_capacity_unit(bytes, GIB, "G")
-    } else if bytes >= MIB {
-        format_capacity_unit(bytes, MIB, "M")
-    } else if bytes >= KIB {
-        format_capacity_unit(bytes, KIB, "K")
+    if unit_index == 0 {
+        format!("{bytes}{}", units[0])
+    } else if unit_index == 1 && value >= 10.0 {
+        format!("{}{}", value.round() as u64, units[unit_index])
     } else {
-        format!("{bytes}B")
+        format!(
+            "{}{}",
+            trim_trailing_decimal(format!("{value:.2}")),
+            units[unit_index]
+        )
     }
 }
 
-fn format_capacity_unit(bytes: u64, unit: u64, suffix: &str) -> String {
-    let value = bytes as f64 / unit as f64;
-    if value < 10.0 {
-        let rounded = format!("{value:.1}");
-        let rounded = rounded.strip_suffix(".0").unwrap_or(&rounded);
-        format!("{rounded}{suffix}")
-    } else {
-        format!("{}{suffix}", value.round() as u64)
+fn trim_trailing_decimal(mut value: String) -> String {
+    while value.ends_with('0') {
+        value.pop();
     }
+    if value.ends_with('.') {
+        value.pop();
+    }
+    value
 }
 
 fn path_leaf_label(path: &Path) -> String {
@@ -1183,6 +1182,22 @@ mod tests {
         let path = env::temp_dir().join(format!("rc-ui-test-{label}-{stamp}"));
         fs::create_dir_all(&path).expect("temp root should be creatable");
         path
+    }
+
+    #[test]
+    fn human_size_format_matches_expected_style() {
+        assert_eq!(format_human_size(24 * 1024), "24kb");
+        assert_eq!(
+            format_human_size((5.11_f64 * 1024.0 * 1024.0) as u64),
+            "5.11Mb"
+        );
+        assert_eq!(format_human_size(1_342_177_280), "1.25Gb");
+        assert_eq!(format_human_size_compact(24 * 1024), "24k");
+        assert_eq!(
+            format_human_size_compact((5.11_f64 * 1024.0 * 1024.0) as u64),
+            "5.11M"
+        );
+        assert_eq!(format_human_size_compact(1_342_177_280), "1.25G");
     }
 
     #[test]
