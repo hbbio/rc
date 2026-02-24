@@ -1378,9 +1378,47 @@ pub fn run_background_worker(
     command_rx: Receiver<BackgroundCommand>,
     event_tx: Sender<BackgroundEvent>,
 ) {
+    let mut running_find_tasks = Vec::new();
     while let Ok(command) = command_rx.recv() {
-        if !execute_background_command(command, &event_tx) {
-            break;
+        reap_finished_find_tasks(&mut running_find_tasks);
+        match execute_background_command(command, &event_tx) {
+            BackgroundExecution::Continue => {}
+            #[cfg(not(test))]
+            BackgroundExecution::SpawnFind(task) => running_find_tasks.push(task),
+            BackgroundExecution::Stop => break,
+        }
+    }
+
+    for task in &running_find_tasks {
+        task.cancel_flag.store(true, AtomicOrdering::Relaxed);
+    }
+    for task in running_find_tasks {
+        let _ = task.handle.join();
+    }
+}
+
+#[derive(Debug)]
+struct RunningFindTask {
+    handle: thread::JoinHandle<()>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+enum BackgroundExecution {
+    Continue,
+    #[cfg(not(test))]
+    SpawnFind(RunningFindTask),
+    Stop,
+}
+
+fn reap_finished_find_tasks(tasks: &mut Vec<RunningFindTask>) {
+    let mut index = 0usize;
+    while index < tasks.len() {
+        if tasks[index].handle.is_finished() {
+            let task = tasks.swap_remove(index);
+            let _ = task.handle.join();
+        } else {
+            index += 1;
         }
     }
 }
@@ -1388,7 +1426,7 @@ pub fn run_background_worker(
 fn execute_background_command(
     command: BackgroundCommand,
     event_tx: &Sender<BackgroundEvent>,
-) -> bool {
+) -> BackgroundExecution {
     match command {
         BackgroundCommand::RefreshPanel {
             panel,
@@ -1421,13 +1459,17 @@ fn execute_background_command(
                     result,
                 })
                 .is_ok()
+                .then_some(BackgroundExecution::Continue)
+                .unwrap_or(BackgroundExecution::Stop)
         }
         BackgroundCommand::LoadViewer { path } => event_tx
             .send(BackgroundEvent::ViewerLoaded {
                 path: path.clone(),
                 result: ViewerState::open(path).map_err(|error| error.to_string()),
             })
-            .is_ok(),
+            .is_ok()
+            .then_some(BackgroundExecution::Continue)
+            .unwrap_or(BackgroundExecution::Stop),
         BackgroundCommand::FindEntries {
             job_id,
             query,
@@ -1447,22 +1489,39 @@ fn execute_background_command(
                     cancel_flag.as_ref(),
                     pause_flag.as_ref(),
                 )
+                .then_some(BackgroundExecution::Continue)
+                .unwrap_or(BackgroundExecution::Stop)
             }
             #[cfg(not(test))]
             {
-                let event_tx = event_tx.clone();
-                thread::spawn(move || {
-                    let _ = run_find_search(
-                        &event_tx,
-                        job_id,
-                        query,
-                        base_dir,
-                        max_results,
-                        cancel_flag.as_ref(),
-                        pause_flag.as_ref(),
-                    );
-                });
-                true
+                let worker_event_tx = event_tx.clone();
+                let worker_cancel_flag = cancel_flag.clone();
+                let worker_pause_flag = pause_flag.clone();
+                match thread::Builder::new()
+                    .name(format!("rc-find-{job_id}"))
+                    .spawn(move || {
+                        let _ = run_find_search(
+                            &worker_event_tx,
+                            job_id,
+                            query,
+                            base_dir,
+                            max_results,
+                            worker_cancel_flag.as_ref(),
+                            worker_pause_flag.as_ref(),
+                        );
+                    }) {
+                    Ok(handle) => BackgroundExecution::SpawnFind(RunningFindTask {
+                        handle,
+                        cancel_flag,
+                    }),
+                    Err(error) => {
+                        let _ = event_tx.send(BackgroundEvent::FindEntriesFinished {
+                            job_id,
+                            result: Err(format!("failed to spawn find worker: {error}")),
+                        });
+                        BackgroundExecution::Continue
+                    }
+                }
             }
         }
         BackgroundCommand::BuildTree {
@@ -1474,8 +1533,10 @@ fn execute_background_command(
             event_tx
                 .send(BackgroundEvent::TreeReady { root, entries })
                 .is_ok()
+                .then_some(BackgroundExecution::Continue)
+                .unwrap_or(BackgroundExecution::Stop)
         }
-        BackgroundCommand::Shutdown => false,
+        BackgroundCommand::Shutdown => BackgroundExecution::Stop,
     }
 }
 
@@ -3935,8 +3996,13 @@ mod tests {
             }
             for command in commands {
                 let (event_tx, event_rx) = std::sync::mpsc::channel();
-                if !execute_background_command(command, &event_tx) {
-                    return;
+                match execute_background_command(command, &event_tx) {
+                    BackgroundExecution::Continue => {}
+                    #[cfg(not(test))]
+                    BackgroundExecution::SpawnFind(task) => {
+                        let _ = task.handle.join();
+                    }
+                    BackgroundExecution::Stop => return,
                 }
                 for event in event_rx.try_iter() {
                     app.handle_background_event(event);
