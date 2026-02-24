@@ -578,6 +578,7 @@ pub struct ViewerState {
 impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
         let bytes = fs::read(&path)?;
+        let hex_mode = should_default_to_hex_mode(&bytes);
         let content = String::from_utf8_lossy(&bytes).into_owned();
         let line_offsets = compute_line_offsets(&content);
 
@@ -587,7 +588,7 @@ impl ViewerState {
             content,
             scroll: 0,
             wrap: false,
-            hex_mode: false,
+            hex_mode,
             line_offsets,
             last_search_query: None,
             last_search_match_offset: None,
@@ -2417,6 +2418,26 @@ fn compute_line_offsets(content: &str) -> Vec<usize> {
     offsets
 }
 
+fn should_default_to_hex_mode(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+
+    let sample = &bytes[..bytes.len().min(4096)];
+    if sample.contains(&0) {
+        return true;
+    }
+
+    let suspicious = sample
+        .iter()
+        .filter(|byte| {
+            let byte = **byte;
+            !(byte.is_ascii_graphic() || matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        })
+        .count();
+    suspicious.saturating_mul(100) / sample.len() > 30
+}
+
 fn find_forward_wrap(content: &str, query: &str, start: usize) -> Option<usize> {
     let start = start.min(content.len());
     if let Some(relative) = content[start..].find(query) {
@@ -3334,6 +3355,38 @@ mod tests {
         app.apply(AppCommand::ViewerToggleHex)
             .expect("viewer should toggle back to text mode");
         assert_eq!(app.key_context(), KeyContext::Viewer);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn viewer_opens_binary_content_in_hex_mode_by_default() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-binary-default-hex-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("payload.bin");
+        fs::write(&file_path, b"\x00\x1b\x7fBIN\x01\x02").expect("must create binary file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("binary file should be visible");
+        app.active_panel_mut().cursor = file_index;
+        app.apply(AppCommand::OpenEntry)
+            .expect("open entry should queue viewer");
+        drain_background(&mut app);
+
+        assert_eq!(
+            app.key_context(),
+            KeyContext::ViewerHex,
+            "binary files should open in hex mode"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

@@ -161,7 +161,9 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
 }
 
 fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
+    frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
+    let content_width = area.width.saturating_sub(2) as usize;
     let title = format!(
         "{} | {} {}/{} | wrap:{}",
         viewer.path.to_string_lossy(),
@@ -171,10 +173,10 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
         if viewer.wrap { "on" } else { "off" }
     );
     let content = if viewer.hex_mode {
-        hex_viewer_window(viewer, visible_lines)
+        hex_viewer_window(viewer, visible_lines, content_width)
     } else {
         highlighted_viewer_window(viewer, visible_lines)
-            .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines))
+            .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines, content_width))
     };
     let surface_style = viewer_theme_surface_style().unwrap_or_default();
     let mut paragraph = Paragraph::new(content)
@@ -266,7 +268,7 @@ fn viewer_highlight_cache() -> &'static Mutex<Option<CachedViewerHighlight>> {
 impl CachedViewerHighlight {
     fn new(viewer: &ViewerState, resources: &'static HighlightResources) -> Self {
         let syntax = viewer_syntax(&resources.syntax_set, viewer);
-        let mut raw_lines: Vec<String> = viewer.content.lines().map(ToOwned::to_owned).collect();
+        let mut raw_lines: Vec<String> = viewer.content.lines().map(sanitize_text_line).collect();
         if raw_lines.is_empty() {
             raw_lines.push(String::new());
         }
@@ -297,7 +299,7 @@ impl CachedViewerHighlight {
     }
 }
 
-fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'static> {
+fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize) -> Text<'static> {
     let mut raw_lines: Vec<&str> = viewer.content.lines().collect();
     if raw_lines.is_empty() {
         raw_lines.push("");
@@ -309,12 +311,12 @@ fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'stat
 
     let lines: Vec<Line<'static>> = raw_lines[start..end]
         .iter()
-        .map(|line| Line::from((*line).to_string()))
+        .map(|line| pad_line_to_width(sanitize_text_line(line), width))
         .collect();
     Text::from(lines)
 }
 
-fn hex_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'static> {
+fn hex_viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize) -> Text<'static> {
     let total_rows = ((viewer.bytes.len().saturating_add(15)).saturating_div(16)).max(1);
     let start = viewer.scroll.min(total_rows.saturating_sub(1));
     let end = start.saturating_add(visible_lines.max(1)).min(total_rows);
@@ -349,10 +351,35 @@ fn hex_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Text<'static
             }
         }
 
-        lines.push(Line::from(format!("{offset:08x}  {hex}  |{ascii}|")));
+        lines.push(pad_line_to_width(
+            format!("{offset:08x}  {hex}  |{ascii}|"),
+            width,
+        ));
     }
 
     Text::from(lines)
+}
+
+fn sanitize_text_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for ch in line.chars() {
+        if ch == '\t' {
+            out.push_str("    ");
+        } else if ch.is_control() {
+            out.push('.');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn pad_line_to_width(mut line: String, width: usize) -> Line<'static> {
+    let len = line.chars().count();
+    if len < width {
+        line.push_str(&" ".repeat(width - len));
+    }
+    Line::from(line)
 }
 
 fn syntect_style(style: SyntectStyle) -> Style {
