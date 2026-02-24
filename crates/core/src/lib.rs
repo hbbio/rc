@@ -490,6 +490,7 @@ const MAX_FIND_RESULTS: usize = 2_000;
 const FIND_EVENT_CHUNK_SIZE: usize = 64;
 const TREE_MAX_DEPTH: usize = 6;
 const TREE_MAX_ENTRIES: usize = 2_000;
+const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
@@ -1320,6 +1321,8 @@ pub enum BackgroundCommand {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        request_id: u64,
+        cancel_flag: Arc<AtomicBool>,
     },
     LoadViewer {
         path: PathBuf,
@@ -1347,6 +1350,7 @@ pub enum BackgroundEvent {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        request_id: u64,
         result: Result<Vec<FileEntry>, String>,
     },
     ViewerLoaded {
@@ -1391,15 +1395,21 @@ fn execute_background_command(
             cwd,
             source,
             sort_mode,
+            request_id,
+            cancel_flag,
         } => {
             let result = match &source {
-                PanelListingSource::Directory => {
-                    read_entries(&cwd, sort_mode).map_err(|error| error.to_string())
-                }
-                PanelListingSource::Panelize { command } => {
-                    read_panelized_entries(&cwd, command, sort_mode)
-                        .map_err(|error| error.to_string())
-                }
+                PanelListingSource::Directory =>
+                    read_entries_with_cancel(&cwd, sort_mode, Some(cancel_flag.as_ref()))
+                        .map_err(|error| error.to_string()),
+                PanelListingSource::Panelize { command } =>
+                    read_panelized_entries_with_cancel(
+                        &cwd,
+                        command,
+                        sort_mode,
+                        Some(cancel_flag.as_ref()),
+                    )
+                    .map_err(|error| error.to_string()),
             };
             event_tx
                 .send(BackgroundEvent::PanelRefreshed {
@@ -1407,6 +1417,7 @@ fn execute_background_command(
                     cwd,
                     source,
                     sort_mode,
+                    request_id,
                     result,
                 })
                 .is_ok()
@@ -1662,6 +1673,9 @@ pub struct AppState {
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_background_commands: Vec<BackgroundCommand>,
+    panel_refresh_cancel_flags: [Option<Arc<AtomicBool>>; 2],
+    panel_refresh_request_ids: [u64; 2],
+    next_panel_refresh_request_id: u64,
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
@@ -1693,6 +1707,9 @@ impl AppState {
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
             pending_background_commands: Vec::new(),
+            panel_refresh_cancel_flags: std::array::from_fn(|_| None),
+            panel_refresh_request_ids: [0; 2],
+            next_panel_refresh_request_id: 1,
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
@@ -1861,6 +1878,16 @@ impl AppState {
     }
 
     fn queue_panel_refresh(&mut self, panel: ActivePanel) {
+        let panel_index = panel.index();
+        if let Some(cancel_flag) = self.panel_refresh_cancel_flags[panel_index].as_ref() {
+            cancel_flag.store(true, AtomicOrdering::Relaxed);
+        }
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.panel_refresh_cancel_flags[panel_index] = Some(cancel_flag.clone());
+        let request_id = self.next_panel_refresh_request_id;
+        self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
+        self.panel_refresh_request_ids[panel_index] = request_id;
+
         let panel_state = &mut self.panels[panel.index()];
         panel_state.loading = true;
         self.pending_background_commands
@@ -1869,6 +1896,8 @@ impl AppState {
                 cwd: panel_state.cwd.clone(),
                 source: panel_state.source.clone(),
                 sort_mode: panel_state.sort_mode,
+                request_id,
+                cancel_flag,
             });
     }
 
@@ -1942,8 +1971,12 @@ impl AppState {
                 cwd,
                 source,
                 sort_mode,
+                request_id,
                 result,
             } => {
+                if self.panel_refresh_request_ids[panel.index()] != request_id {
+                    return;
+                }
                 let panel_state = &self.panels[panel.index()];
                 let still_current = panel_state.cwd == cwd
                     && panel_state.source == source
@@ -2003,14 +2036,17 @@ impl AppState {
                                         Some((pending_panel, revert_source));
                                 }
                             }
-                            if is_panelize {
-                                self.set_status(format!("Panelize failed: {error}"));
-                            } else {
-                                self.set_status(format!("Panel refresh failed: {error}"));
+                            if error != PANEL_REFRESH_CANCELED_MESSAGE {
+                                if is_panelize {
+                                    self.set_status(format!("Panelize failed: {error}"));
+                                } else {
+                                    self.set_status(format!("Panel refresh failed: {error}"));
+                                }
                             }
                         }
                     }
                 }
+                self.panel_refresh_cancel_flags[panel.index()] = None;
                 if clear_focus_target {
                     self.pending_panel_focus = None;
                 }
@@ -3702,8 +3738,18 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
 }
 
 fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
+    read_entries_with_cancel(dir, sort_mode, None)
+}
+
+fn read_entries_with_cancel(
+    dir: &Path,
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<Vec<FileEntry>> {
+    ensure_panel_refresh_not_canceled(cancel_flag)?;
     let mut entries = Vec::new();
     for entry_result in fs::read_dir(dir)? {
+        ensure_panel_refresh_not_canceled(cancel_flag)?;
         let entry = entry_result?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -3731,6 +3777,16 @@ fn read_panelized_entries(
     command: &str,
     sort_mode: SortMode,
 ) -> io::Result<Vec<FileEntry>> {
+    read_panelized_entries_with_cancel(base_dir, command, sort_mode, None)
+}
+
+fn read_panelized_entries_with_cancel(
+    base_dir: &Path,
+    command: &str,
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<Vec<FileEntry>> {
+    ensure_panel_refresh_not_canceled(cancel_flag)?;
     let output = run_shell_command(base_dir, command)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3748,6 +3804,7 @@ fn read_panelized_entries(
     let mut entries = Vec::new();
 
     for raw_line in stdout.lines() {
+        ensure_panel_refresh_not_canceled(cancel_flag)?;
         let trimmed = raw_line.trim();
         if trimmed.is_empty() {
             continue;
@@ -3780,6 +3837,16 @@ fn read_panelized_entries(
 
     sort_file_entries(&mut entries, sort_mode);
     Ok(entries)
+}
+
+fn ensure_panel_refresh_not_canceled(cancel_flag: Option<&AtomicBool>) -> io::Result<()> {
+    if cancel_flag.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            PANEL_REFRESH_CANCELED_MESSAGE,
+        ));
+    }
+    Ok(())
 }
 
 fn sort_file_entries(entries: &mut [FileEntry], sort_mode: SortMode) {
@@ -5104,6 +5171,127 @@ mod tests {
             app.active_panel().panelize_command(),
             None,
             "failed panelize should not switch source mode"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn reread_cancels_previous_refresh_for_same_panel() {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-reread-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.txt"), "a").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.refresh_active_panel();
+        assert_eq!(app.pending_background_commands.len(), 1);
+
+        let (first_request_id, first_cancel_flag) = match &app.pending_background_commands[0] {
+            BackgroundCommand::RefreshPanel {
+                request_id,
+                cancel_flag,
+                ..
+            } => (*request_id, Arc::clone(cancel_flag)),
+            _ => panic!("expected panel refresh command"),
+        };
+        assert!(
+            !first_cancel_flag.load(AtomicOrdering::Relaxed),
+            "initial refresh should not be canceled"
+        );
+
+        app.refresh_active_panel();
+        assert!(
+            first_cancel_flag.load(AtomicOrdering::Relaxed),
+            "second refresh should cancel the previous in-flight request"
+        );
+
+        let (second_request_id, second_cancel_flag) = match app
+            .pending_background_commands
+            .last()
+            .expect("second refresh command should be queued")
+        {
+            BackgroundCommand::RefreshPanel {
+                request_id,
+                cancel_flag,
+                ..
+            } => (*request_id, Arc::clone(cancel_flag)),
+            _ => panic!("expected panel refresh command"),
+        };
+        assert!(
+            second_request_id > first_request_id,
+            "request ids should advance for newer refresh commands"
+        );
+        assert!(
+            !second_cancel_flag.load(AtomicOrdering::Relaxed),
+            "newest refresh should remain active"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn stale_panel_refresh_event_is_ignored() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-refresh-stale-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.refresh_active_panel();
+        app.refresh_active_panel();
+        let commands = app.take_pending_background_commands();
+        assert_eq!(commands.len(), 2);
+
+        let first = commands[0].clone();
+        let second = commands[1].clone();
+        let (panel, cwd, source, sort_mode, first_request_id) = match first {
+            BackgroundCommand::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } => (panel, cwd, source, sort_mode, request_id),
+            _ => panic!("expected panel refresh command"),
+        };
+        let second_request_id = match second {
+            BackgroundCommand::RefreshPanel { request_id, .. } => request_id,
+            _ => panic!("expected panel refresh command"),
+        };
+
+        app.handle_background_event(BackgroundEvent::PanelRefreshed {
+            panel,
+            cwd: cwd.clone(),
+            source: source.clone(),
+            sort_mode,
+            request_id: first_request_id,
+            result: Ok(Vec::new()),
+        });
+        assert!(
+            app.panels[panel.index()].loading,
+            "stale refresh result should not clear loading state"
+        );
+
+        app.handle_background_event(BackgroundEvent::PanelRefreshed {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            request_id: second_request_id,
+            result: Ok(Vec::new()),
+        });
+        assert!(
+            !app.panels[panel.index()].loading,
+            "latest refresh result should clear loading state"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
