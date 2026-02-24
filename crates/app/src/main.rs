@@ -105,6 +105,11 @@ fn run_event_loop(
 
 fn handle_key(state: &mut AppState, keymap: &Keymap, key_event: KeyEvent) -> Result<bool> {
     let context = state.key_context();
+
+    if context == KeyContext::Input && try_insert_input_char(state, key_event) {
+        return Ok(false);
+    }
+
     let Some(chord) = map_key_event_to_chord(key_event) else {
         return Ok(false);
     };
@@ -123,16 +128,20 @@ fn handle_key(state: &mut AppState, keymap: &Keymap, key_event: KeyEvent) -> Res
                 ));
             }
         }
-        KeyCommand::CursorUp => {
-            if context == KeyContext::FileManager {
-                state.move_cursor(-1);
+        KeyCommand::CursorUp => match context {
+            KeyContext::FileManager => state.move_cursor(-1),
+            KeyContext::Listbox => {
+                state.dialog_listbox_move(-1);
             }
-        }
-        KeyCommand::CursorDown => {
-            if context == KeyContext::FileManager {
-                state.move_cursor(1);
+            _ => {}
+        },
+        KeyCommand::CursorDown => match context {
+            KeyContext::FileManager => state.move_cursor(1),
+            KeyContext::Listbox => {
+                state.dialog_listbox_move(1);
             }
-        }
+            _ => {}
+        },
         KeyCommand::OpenEntry => {
             if context == KeyContext::FileManager {
                 if state.open_selected_directory()? {
@@ -157,10 +166,64 @@ fn handle_key(state: &mut AppState, keymap: &Keymap, key_event: KeyEvent) -> Res
                 state.set_status("Refreshed active panel");
             }
         }
+        KeyCommand::OpenConfirmDialog => {
+            if context == KeyContext::FileManager {
+                state.open_confirm_dialog();
+                state.set_status("Opened confirm dialog");
+            }
+        }
+        KeyCommand::OpenInputDialog => {
+            if context == KeyContext::FileManager {
+                state.open_input_dialog();
+                state.set_status("Opened input dialog");
+            }
+        }
+        KeyCommand::OpenListboxDialog => {
+            if context == KeyContext::FileManager {
+                state.open_listbox_dialog();
+                state.set_status("Opened listbox dialog");
+            }
+        }
+        KeyCommand::DialogAccept => {
+            if let Some(status) = state.accept_dialog() {
+                state.set_status(status);
+            }
+        }
+        KeyCommand::DialogCancel => {
+            if let Some(status) = state.cancel_dialog() {
+                state.set_status(status);
+            }
+        }
+        KeyCommand::DialogFocusNext => {
+            state.dialog_focus_next();
+        }
+        KeyCommand::DialogBackspace => {
+            state.dialog_input_backspace();
+        }
         KeyCommand::Unknown(_) => {}
     }
 
     Ok(false)
+}
+
+fn try_insert_input_char(state: &mut AppState, key_event: KeyEvent) -> bool {
+    let no_shortcut_modifiers = !key_event
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+        && !key_event
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::ALT)
+        && !key_event
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SUPER);
+
+    if no_shortcut_modifiers {
+        if let CrosstermKeyCode::Char(ch) = key_event.code {
+            return state.dialog_input_insert(ch);
+        }
+    }
+
+    false
 }
 
 fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {

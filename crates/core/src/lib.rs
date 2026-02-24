@@ -7,6 +7,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::keymap::KeyContext;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActivePanel {
     Left,
@@ -35,6 +37,35 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub is_parent: bool,
+}
+
+impl FileEntry {
+    fn directory(name: String, path: PathBuf) -> Self {
+        Self {
+            name,
+            path,
+            is_dir: true,
+            is_parent: false,
+        }
+    }
+
+    fn file(name: String, path: PathBuf) -> Self {
+        Self {
+            name,
+            path,
+            is_dir: false,
+            is_parent: false,
+        }
+    }
+
+    fn parent(path: PathBuf) -> Self {
+        Self {
+            name: String::from(".."),
+            path,
+            is_dir: true,
+            is_parent: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -110,11 +141,100 @@ impl PanelState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DialogButtonFocus {
+    Ok,
+    Cancel,
+}
+
+impl DialogButtonFocus {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            Self::Ok => Self::Cancel,
+            Self::Cancel => Self::Ok,
+        };
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfirmDialogState {
+    pub message: String,
+    pub focus: DialogButtonFocus,
+}
+
+#[derive(Clone, Debug)]
+pub struct InputDialogState {
+    pub prompt: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ListboxDialogState {
+    pub items: Vec<String>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum DialogKind {
+    Confirm(ConfirmDialogState),
+    Input(InputDialogState),
+    Listbox(ListboxDialogState),
+}
+
+#[derive(Clone, Debug)]
+pub struct DialogState {
+    pub title: String,
+    pub kind: DialogKind,
+}
+
+impl DialogState {
+    fn demo_confirm() -> Self {
+        Self {
+            title: String::from("Confirm"),
+            kind: DialogKind::Confirm(ConfirmDialogState {
+                message: String::from("Proceed with this action?"),
+                focus: DialogButtonFocus::Ok,
+            }),
+        }
+    }
+
+    fn demo_input() -> Self {
+        Self {
+            title: String::from("Input"),
+            kind: DialogKind::Input(InputDialogState {
+                prompt: String::from("New name:"),
+                value: String::new(),
+            }),
+        }
+    }
+
+    fn demo_listbox() -> Self {
+        Self {
+            title: String::from("Listbox"),
+            kind: DialogKind::Listbox(ListboxDialogState {
+                items: vec![
+                    String::from("Sort by name"),
+                    String::from("Sort by size"),
+                    String::from("Sort by mtime"),
+                ],
+                selected: 0,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Route {
+    FileManager,
+    Dialog(DialogState),
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     pub status_line: String,
+    routes: Vec<Route>,
 }
 
 impl AppState {
@@ -126,8 +246,9 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "Tab switch panel | Enter open dir | Backspace up | r refresh | q quit",
+                "Tab switch panel | Enter open dir | Backspace up | F2/F7/F9 dialogs | q quit",
             ),
+            routes: vec![Route::FileManager],
         })
     }
 
@@ -164,8 +285,131 @@ impl AppState {
         self.status_line = message.into();
     }
 
-    pub fn key_context(&self) -> keymap::KeyContext {
-        keymap::KeyContext::FileManager
+    pub fn top_route(&self) -> &Route {
+        self.routes
+            .last()
+            .expect("route stack must always contain file manager route")
+    }
+
+    pub fn route_depth(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn key_context(&self) -> KeyContext {
+        match self.top_route() {
+            Route::FileManager => KeyContext::FileManager,
+            Route::Dialog(dialog) => match dialog.kind {
+                DialogKind::Confirm(_) => KeyContext::Dialog,
+                DialogKind::Input(_) => KeyContext::Input,
+                DialogKind::Listbox(_) => KeyContext::Listbox,
+            },
+        }
+    }
+
+    pub fn open_confirm_dialog(&mut self) {
+        self.routes.push(Route::Dialog(DialogState::demo_confirm()));
+    }
+
+    pub fn open_input_dialog(&mut self) {
+        self.routes.push(Route::Dialog(DialogState::demo_input()));
+    }
+
+    pub fn open_listbox_dialog(&mut self) {
+        self.routes.push(Route::Dialog(DialogState::demo_listbox()));
+    }
+
+    pub fn dialog_focus_next(&mut self) -> bool {
+        let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
+            return false;
+        };
+
+        match &mut dialog.kind {
+            DialogKind::Confirm(confirm) => {
+                confirm.focus.toggle();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn dialog_listbox_move(&mut self, delta: isize) -> bool {
+        let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
+            return false;
+        };
+        let DialogKind::Listbox(listbox) = &mut dialog.kind else {
+            return false;
+        };
+        if listbox.items.is_empty() {
+            listbox.selected = 0;
+            return true;
+        }
+
+        let last = listbox.items.len() - 1;
+        let next = if delta.is_negative() {
+            listbox.selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            listbox.selected.saturating_add(delta as usize).min(last)
+        };
+        listbox.selected = next;
+        true
+    }
+
+    pub fn dialog_input_insert(&mut self, ch: char) -> bool {
+        let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
+            return false;
+        };
+        let DialogKind::Input(input) = &mut dialog.kind else {
+            return false;
+        };
+
+        input.value.push(ch);
+        true
+    }
+
+    pub fn dialog_input_backspace(&mut self) -> bool {
+        let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
+            return false;
+        };
+        let DialogKind::Input(input) = &mut dialog.kind else {
+            return false;
+        };
+
+        input.value.pop();
+        true
+    }
+
+    pub fn accept_dialog(&mut self) -> Option<String> {
+        let dialog = self.pop_dialog()?;
+        let status = match dialog.kind {
+            DialogKind::Confirm(confirm) => match confirm.focus {
+                DialogButtonFocus::Ok => String::from("Dialog accepted"),
+                DialogButtonFocus::Cancel => String::from("Dialog canceled"),
+            },
+            DialogKind::Input(input) => format!("Input accepted: {}", input.value),
+            DialogKind::Listbox(listbox) => {
+                if listbox.items.is_empty() {
+                    String::from("Listbox accepted: <empty>")
+                } else {
+                    format!("Listbox accepted: {}", listbox.items[listbox.selected])
+                }
+            }
+        };
+        Some(status)
+    }
+
+    pub fn cancel_dialog(&mut self) -> Option<String> {
+        self.pop_dialog()?;
+        Some(String::from("Dialog canceled"))
+    }
+
+    fn pop_dialog(&mut self) -> Option<DialogState> {
+        let Some(Route::Dialog(_)) = self.routes.last() else {
+            return None;
+        };
+        match self.routes.pop() {
+            Some(Route::Dialog(dialog)) => Some(dialog),
+            _ => None,
+        }
     }
 }
 
@@ -174,14 +418,13 @@ fn read_entries(dir: &Path) -> io::Result<Vec<FileEntry>> {
     for entry_result in fs::read_dir(dir)? {
         let entry = entry_result?;
         let path = entry.path();
-        let is_dir = entry.file_type()?.is_dir();
         let name = entry.file_name().to_string_lossy().into_owned();
-        entries.push(FileEntry {
-            name,
-            path,
-            is_dir,
-            is_parent: false,
-        });
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            entries.push(FileEntry::directory(name, path));
+        } else {
+            entries.push(FileEntry::file(name, path));
+        }
     }
 
     entries.sort_by(|left, right| match (left.is_dir, right.is_dir) {
@@ -191,17 +434,8 @@ fn read_entries(dir: &Path) -> io::Result<Vec<FileEntry>> {
     });
 
     if let Some(parent) = dir.parent() {
-        entries.insert(
-            0,
-            FileEntry {
-                name: String::from(".."),
-                path: parent.to_path_buf(),
-                is_dir: true,
-                is_parent: true,
-            },
-        );
+        entries.insert(0, FileEntry::parent(parent.to_path_buf()));
     }
-
     Ok(entries)
 }
 

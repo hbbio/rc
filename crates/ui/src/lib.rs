@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use rc_core::{ActivePanel, AppState, PanelState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use rc_core::{
+    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, PanelState, Route,
+};
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let root = Layout::default()
@@ -18,7 +20,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         .split(frame.area());
 
     frame.render_widget(
-        Paragraph::new(Line::from("rc | milestone 0/1 bootstrap")),
+        Paragraph::new(Line::from(format!(
+            "rc | context: {:?} | routes: {}",
+            state.key_context(),
+            state.route_depth()
+        ))),
         root[0],
     );
 
@@ -44,6 +50,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Paragraph::new(state.status_line.as_str()).style(Style::default().fg(Color::DarkGray)),
         root[2],
     );
+
+    if let Route::Dialog(dialog) = state.top_route() {
+        render_dialog(frame, dialog);
+    }
 }
 
 fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool) {
@@ -61,12 +71,14 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
             .entries
             .iter()
             .map(|entry| {
-                if entry.is_parent {
-                    ListItem::new("..")
+                let label = if entry.is_parent {
+                    String::from("..")
+                } else if entry.is_dir {
+                    format!("{}/", entry.name)
                 } else {
-                    let suffix = if entry.is_dir { "/" } else { "" };
-                    ListItem::new(format!("{}{}", entry.name, suffix))
-                }
+                    entry.name.clone()
+                };
+                ListItem::new(label)
             })
             .collect()
     };
@@ -86,4 +98,168 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
         list_state.select(Some(panel.cursor));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
+    let area = centered_rect(frame.area(), 56, 14);
+    frame.render_widget(Clear, area);
+
+    match &dialog.kind {
+        DialogKind::Confirm(confirm) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(2),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(confirm.message.as_str()).alignment(Alignment::Center),
+                layout[0],
+            );
+
+            let ok_style = if confirm.focus == DialogButtonFocus::Ok {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let cancel_style = if confirm.focus == DialogButtonFocus::Cancel {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            let buttons = Line::from(vec![
+                Span::styled(" [ OK ] ", ok_style),
+                Span::raw("  "),
+                Span::styled(" [ Cancel ] ", cancel_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(buttons).alignment(Alignment::Center),
+                layout[1],
+            );
+
+            frame.render_widget(
+                Paragraph::new("Enter accept | Tab switch | Esc cancel")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .alignment(Alignment::Center),
+                layout[2],
+            );
+        }
+        DialogKind::Input(input) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(input.prompt.as_str()).style(Style::default().fg(Color::Gray)),
+                layout[0],
+            );
+
+            frame.render_widget(
+                Paragraph::new(input.value.as_str()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Blue)),
+                ),
+                layout[1],
+            );
+
+            frame.render_widget(
+                Paragraph::new("Type text | Enter accept | Backspace delete | Esc cancel")
+                    .style(Style::default().fg(Color::DarkGray)),
+                layout[2],
+            );
+        }
+        DialogKind::Listbox(listbox) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(inner);
+
+            let items: Vec<ListItem<'_>> = if listbox.items.is_empty() {
+                vec![ListItem::new("<empty>")]
+            } else {
+                listbox
+                    .items
+                    .iter()
+                    .map(|item| ListItem::new(item.as_str()))
+                    .collect()
+            };
+            let list = List::new(items)
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+                .highlight_symbol(">> ");
+
+            let mut state = ListState::default();
+            if !listbox.items.is_empty() {
+                state.select(Some(listbox.selected));
+            }
+            frame.render_stateful_widget(list, layout[0], &mut state);
+
+            frame.render_widget(
+                Paragraph::new("Up/Down move | Enter accept | Esc cancel")
+                    .style(Style::default().fg(Color::DarkGray)),
+                layout[1],
+            );
+        }
+    }
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(2));
+    let height = height.min(area.height.saturating_sub(2));
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(width),
+            Constraint::Fill(1),
+        ])
+        .split(area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(height),
+            Constraint::Fill(1),
+        ])
+        .split(horizontal[1]);
+
+    vertical[1]
 }

@@ -85,6 +85,13 @@ pub enum KeyCommand {
     OpenEntry,
     CdUp,
     Reread,
+    OpenConfirmDialog,
+    OpenInputDialog,
+    OpenListboxDialog,
+    DialogAccept,
+    DialogCancel,
+    DialogFocusNext,
+    DialogBackspace,
     Unknown(String),
 }
 
@@ -105,6 +112,13 @@ impl KeyCommand {
             "enter" => Self::OpenEntry,
             "cdup" => Self::CdUp,
             "reread" => Self::Reread,
+            "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
+            "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
+            "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
+            "ok" | "dialogaccept" => Self::DialogAccept,
+            "cancel" | "dialogcancel" => Self::DialogCancel,
+            "focusnext" | "dialogfocusnext" => Self::DialogFocusNext,
+            "backspace" | "dialogbackspace" => Self::DialogBackspace,
             _ => Self::Unknown(name.trim().to_string()),
         }
     }
@@ -262,7 +276,7 @@ mod tests {
 PanelOther = tab
 
 [dialog]
-PanelOther = f1
+FocusNext = tab
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -274,8 +288,7 @@ PanelOther = f1
         );
         assert_eq!(
             keymap.resolve(KeyContext::Dialog, tab),
-            None,
-            "same key should resolve differently by context",
+            Some(&KeyCommand::DialogFocusNext),
         );
     }
 
