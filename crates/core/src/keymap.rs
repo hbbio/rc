@@ -777,6 +777,41 @@ OpenFindDialog = ctrl-slash
     }
 
     #[test]
+    fn parser_maps_panelize_action_names() {
+        let source = r#"
+[filemanager]
+OpenPanelizeDialog = alt-p
+Panelize = ctrl-p
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        let alt_p = KeyChord {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+        let ctrl_p = KeyChord {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        };
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt_p),
+            Some(&KeyCommand::OpenPanelizeDialog)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, ctrl_p),
+            Some(&KeyCommand::OpenPanelizeDialog)
+        );
+    }
+
+    #[test]
     fn parser_reports_unknown_actions_instead_of_failing() {
         let source = r#"
 [filemanager]

@@ -3030,6 +3030,114 @@ mod tests {
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn panelize_command_populates_active_panel_from_stdout_paths() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-populate-{stamp}"));
+        fs::create_dir_all(root.join("sub")).expect("must create subdirectory");
+        fs::write(root.join("a.txt"), "a").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::InputSubmitted(String::from(
+            "printf 'a.txt\\nsub\\nmissing\\n'",
+        )));
+
+        let panel = app.active_panel();
+        assert_eq!(
+            panel.panelize_command(),
+            Some("printf 'a.txt\\nsub\\nmissing\\n'"),
+            "panelize mode should retain command for reread"
+        );
+        assert!(
+            panel
+                .entries
+                .iter()
+                .any(|entry| entry.path == root.join("a.txt")),
+            "panelized entries should include file output path"
+        );
+        assert!(
+            panel
+                .entries
+                .iter()
+                .any(|entry| entry.path == root.join("sub")),
+            "panelized entries should include directory output path"
+        );
+        assert!(
+            panel
+                .entries
+                .iter()
+                .all(|entry| entry.path != root.join("missing")),
+            "missing output paths should be ignored"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panelize_empty_output_keeps_empty_panel_entries() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-empty-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.txt"), "a").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::InputSubmitted(String::from("printf ''")));
+
+        assert_eq!(
+            app.active_panel().entries.len(),
+            0,
+            "empty panelize output should produce empty panel entries"
+        );
+        assert_eq!(app.active_panel().panelize_command(), Some("printf ''"));
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panelize_failure_preserves_previous_directory_listing() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-failure-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.txt"), "a").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let before = app.active_panel().entries.clone();
+
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::InputSubmitted(String::from("exit 42")));
+
+        assert!(
+            app.status_line.contains("Panelize failed:"),
+            "status line should indicate panelize failure"
+        );
+        assert_eq!(
+            app.active_panel().entries,
+            before,
+            "failed panelize should keep previous listing"
+        );
+        assert_eq!(
+            app.active_panel().panelize_command(),
+            None,
+            "failed panelize should not switch source mode"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
     #[test]
     fn app_command_mapping_is_context_aware() {
         assert_eq!(
@@ -3107,6 +3215,10 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenHotlist),
             Some(AppCommand::OpenHotlist)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenPanelizeDialog),
+            Some(AppCommand::OpenPanelizeDialog)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::AddHotlist),
