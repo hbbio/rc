@@ -174,6 +174,7 @@ impl KeyCommand {
         match normalized.as_str() {
             "help" => Self::OpenHelp,
             "menu" | "openmenu" | "pulldown" => Self::OpenMenu,
+            "usermenu" => Self::OpenMenu,
             "quit" => Self::Quit,
             "panelother" => Self::PanelOther,
             "extendedkeymap" => Self::EnterXMap,
@@ -187,7 +188,8 @@ impl KeyCommand {
             "halfpageup" => Self::HelpHalfPageUp,
             "home" | "top" => Self::Home,
             "end" | "bottom" => Self::End,
-            "enter" => Self::OpenEntry,
+            "enter" | "view" | "viewfile" => Self::OpenEntry,
+            "edit" => Self::OpenEntry,
             "cdup" => Self::CdUp,
             "reread" => Self::Reread,
             "toggletag" | "mark" => Self::ToggleTag,
@@ -210,7 +212,7 @@ impl KeyCommand {
             "addhotlist" | "hotlistadd" => Self::AddHotlist,
             "removehotlist" | "hotlistremove" | "deletehotlist" => Self::RemoveHotlist,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
-            "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
+            "openinputdialog" | "demoinputdialog" | "makedir" | "mkdir" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
             "openskindialog" | "skin" | "skins" => Self::OpenSkinDialog,
             "index" => Self::HelpIndex,
@@ -266,7 +268,12 @@ pub struct Keymap {
 
 impl Keymap {
     pub fn bundled_mc_default() -> Result<Self, KeymapParseError> {
-        Self::parse(include_str!("../assets/mc.default.keymap"))
+        let (keymap, _) = Self::bundled_mc_default_with_report()?;
+        Ok(keymap)
+    }
+
+    pub fn bundled_mc_default_with_report() -> Result<(Self, KeymapParseReport), KeymapParseError> {
+        Self::parse_with_report(include_str!("../assets/mc.default.keymap"))
     }
 
     pub fn parse(source: &str) -> Result<Self, KeymapParseError> {
@@ -930,6 +937,35 @@ OpenJobs = f3
     }
 
     #[test]
+    fn parser_maps_common_mc_filemanager_action_names() {
+        let source = r#"
+[filemanager]
+UserMenu = f2
+View = f3
+Edit = f4
+MakeDir = f7
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(2))),
+            Some(&KeyCommand::OpenMenu)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(3))),
+            Some(&KeyCommand::OpenEntry)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(4))),
+            Some(&KeyCommand::OpenEntry)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(7))),
+            Some(&KeyCommand::OpenInputDialog)
+        );
+    }
+
+    #[test]
     fn parser_maps_skin_dialog_action() {
         let source = r#"
 [filemanager]
@@ -1141,5 +1177,21 @@ Reread = ctrl-r
             keymap.resolve(KeyContext::FileManager, ctrl_x),
             Some(&KeyCommand::EnterXMap)
         );
+    }
+
+    #[test]
+    fn bundled_keymap_no_longer_reports_common_mc_actions_as_unknown() {
+        let (_, report) =
+            Keymap::bundled_mc_default_with_report().expect("bundled keymap should parse");
+
+        for action in ["UserMenu", "View", "Edit", "MakeDir"] {
+            assert!(
+                !report
+                    .unknown_actions
+                    .iter()
+                    .any(|unknown| unknown.action.eq_ignore_ascii_case(action)),
+                "unexpected unknown action report for {action}",
+            );
+        }
     }
 }

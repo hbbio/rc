@@ -19,7 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap};
+use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use rc_core::{
     AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, JobEvent, WorkerCommand,
     run_background_worker, run_worker,
@@ -73,8 +73,9 @@ fn main() -> Result<()> {
         state.set_status(format!("Skin '{}' unavailable: {error}", initial_skin));
     }
     state.set_active_skin_name(rc_ui::current_skin_name());
-    let keymap =
-        Keymap::bundled_mc_default().context("failed to load bundled mc.default.keymap")?;
+    let (keymap, keymap_report) = Keymap::bundled_mc_default_with_report()
+        .context("failed to load bundled mc.default.keymap")?;
+    report_keymap_parse_report(&mut state, &keymap_report);
     let skin_runtime = SkinRuntimeConfig {
         skin_dir: cli.skin_dir.clone(),
         mc_ini_path,
@@ -96,6 +97,58 @@ fn init_tracing() {
         .with_target(false)
         .without_time()
         .try_init();
+}
+
+fn report_keymap_parse_report(state: &mut AppState, report: &KeymapParseReport) {
+    if report.unknown_actions.is_empty() && report.skipped_bindings.is_empty() {
+        return;
+    }
+
+    if !report.unknown_actions.is_empty() {
+        let unknown_sample = report
+            .unknown_actions
+            .iter()
+            .take(5)
+            .map(|unknown| {
+                format!(
+                    "{}:{} [{:?}]",
+                    unknown.line, unknown.action, unknown.context
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            count = report.unknown_actions.len(),
+            sample = %unknown_sample,
+            "keymap contains unsupported action names",
+        );
+    }
+
+    if !report.skipped_bindings.is_empty() {
+        let skipped_sample = report
+            .skipped_bindings
+            .iter()
+            .take(5)
+            .map(|binding| {
+                format!(
+                    "{}:{}={} ({})",
+                    binding.line, binding.action, binding.key_spec, binding.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            count = report.skipped_bindings.len(),
+            sample = %skipped_sample,
+            "keymap contains invalid key bindings",
+        );
+    }
+
+    state.set_status(format!(
+        "Keymap loaded with {} unsupported actions and {} invalid bindings (see logs)",
+        report.unknown_actions.len(),
+        report.skipped_bindings.len(),
+    ));
 }
 
 struct SkinRuntimeConfig {
