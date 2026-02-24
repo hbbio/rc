@@ -23,6 +23,7 @@ use crate::keymap::{KeyCommand, KeyContext};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     Quit,
+    CloseViewer,
     SwitchPanel,
     MoveUp,
     MoveDown,
@@ -55,12 +56,25 @@ pub enum AppCommand {
     DialogInputChar(char),
     DialogListboxUp,
     DialogListboxDown,
+    ViewerMoveUp,
+    ViewerMoveDown,
+    ViewerPageUp,
+    ViewerPageDown,
+    ViewerHome,
+    ViewerEnd,
+    ViewerSearchForward,
+    ViewerSearchBackward,
+    ViewerSearchContinue,
+    ViewerSearchContinueBackward,
+    ViewerGoto,
+    ViewerToggleWrap,
 }
 
 impl AppCommand {
     pub fn from_key_command(context: KeyContext, key_command: &KeyCommand) -> Option<Self> {
         match (context, key_command) {
-            (_, KeyCommand::Quit) => Some(Self::Quit),
+            (KeyContext::FileManager, KeyCommand::Quit) => Some(Self::Quit),
+            (KeyContext::Viewer, KeyCommand::Quit) => Some(Self::CloseViewer),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::CursorUp) => Some(Self::MoveUp),
             (KeyContext::FileManager, KeyCommand::CursorDown) => Some(Self::MoveDown),
@@ -86,6 +100,20 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::Reread) => Some(Self::Reread),
+            (KeyContext::Viewer, KeyCommand::CursorUp) => Some(Self::ViewerMoveUp),
+            (KeyContext::Viewer, KeyCommand::CursorDown) => Some(Self::ViewerMoveDown),
+            (KeyContext::Viewer, KeyCommand::PageUp) => Some(Self::ViewerPageUp),
+            (KeyContext::Viewer, KeyCommand::PageDown) => Some(Self::ViewerPageDown),
+            (KeyContext::Viewer, KeyCommand::Home) => Some(Self::ViewerHome),
+            (KeyContext::Viewer, KeyCommand::End) => Some(Self::ViewerEnd),
+            (KeyContext::Viewer, KeyCommand::Search) => Some(Self::ViewerSearchForward),
+            (KeyContext::Viewer, KeyCommand::SearchBackward) => Some(Self::ViewerSearchBackward),
+            (KeyContext::Viewer, KeyCommand::SearchContinue) => Some(Self::ViewerSearchContinue),
+            (KeyContext::Viewer, KeyCommand::SearchContinueBackward) => {
+                Some(Self::ViewerSearchContinueBackward)
+            }
+            (KeyContext::Viewer, KeyCommand::Goto) => Some(Self::ViewerGoto),
+            (KeyContext::Viewer, KeyCommand::ToggleWrap) => Some(Self::ViewerToggleWrap),
             (KeyContext::FileManager, KeyCommand::OpenConfirmDialog) => {
                 Some(Self::OpenConfirmDialog)
             }
@@ -110,6 +138,7 @@ pub enum ApplyResult {
 }
 
 const DEFAULT_PAGE_STEP: usize = 10;
+const DEFAULT_VIEWER_PAGE_STEP: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
@@ -388,10 +417,160 @@ impl PanelState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewerSearchDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewerGotoTarget {
+    Line(usize),
+    Offset(usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct ViewerState {
+    pub path: PathBuf,
+    pub content: String,
+    pub scroll: usize,
+    pub wrap: bool,
+    line_offsets: Vec<usize>,
+    last_search_query: Option<String>,
+    last_search_match_offset: Option<usize>,
+    last_search_direction: ViewerSearchDirection,
+}
+
+impl ViewerState {
+    pub fn open(path: PathBuf) -> io::Result<Self> {
+        let bytes = fs::read(&path)?;
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        let line_offsets = compute_line_offsets(&content);
+
+        Ok(Self {
+            path,
+            content,
+            scroll: 0,
+            wrap: false,
+            line_offsets,
+            last_search_query: None,
+            last_search_match_offset: None,
+            last_search_direction: ViewerSearchDirection::Forward,
+        })
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.line_offsets.len()
+    }
+
+    pub fn current_line_number(&self) -> usize {
+        self.scroll.saturating_add(1)
+    }
+
+    pub fn last_search_query(&self) -> Option<&str> {
+        self.last_search_query.as_deref()
+    }
+
+    pub fn move_lines(&mut self, delta: isize) {
+        let max = self.line_count().saturating_sub(1);
+        if delta.is_negative() {
+            self.scroll = self.scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.scroll = self.scroll.saturating_add(delta as usize).min(max);
+        }
+    }
+
+    pub fn move_pages(&mut self, pages: isize) {
+        self.move_lines(pages.saturating_mul(DEFAULT_VIEWER_PAGE_STEP as isize));
+    }
+
+    pub fn move_home(&mut self) {
+        self.scroll = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.scroll = self.line_count().saturating_sub(1);
+    }
+
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+    }
+
+    fn start_search(&mut self, query: String, direction: ViewerSearchDirection) -> Option<usize> {
+        self.last_search_query = Some(query);
+        self.last_search_direction = direction;
+        self.last_search_match_offset = None;
+        self.continue_search(Some(direction))
+    }
+
+    fn continue_search(&mut self, direction: Option<ViewerSearchDirection>) -> Option<usize> {
+        let query = self.last_search_query.as_deref()?;
+        if query.is_empty() {
+            return None;
+        }
+        let direction = direction.unwrap_or(self.last_search_direction);
+        let start = match direction {
+            ViewerSearchDirection::Forward => self
+                .last_search_match_offset
+                .map(|offset| offset.saturating_add(query.len()))
+                .unwrap_or_else(|| self.current_line_offset()),
+            ViewerSearchDirection::Backward => self
+                .last_search_match_offset
+                .unwrap_or_else(|| self.current_line_offset()),
+        };
+        let found = match direction {
+            ViewerSearchDirection::Forward => find_forward_wrap(&self.content, query, start),
+            ViewerSearchDirection::Backward => find_backward_wrap(&self.content, query, start),
+        }?;
+
+        self.last_search_match_offset = Some(found);
+        self.last_search_direction = direction;
+        self.scroll = self.line_index_for_offset(found);
+        Some(self.scroll)
+    }
+
+    fn goto_input(&mut self, input: &str) -> Result<usize, String> {
+        let target = parse_viewer_goto_target(input)?;
+        match target {
+            ViewerGotoTarget::Line(line) => {
+                if line == 0 {
+                    return Err(String::from("line numbers start at 1"));
+                }
+                self.scroll = line
+                    .saturating_sub(1)
+                    .min(self.line_count().saturating_sub(1));
+            }
+            ViewerGotoTarget::Offset(offset) => {
+                let bounded = offset.min(self.content.len());
+                self.scroll = self.line_index_for_offset(bounded);
+            }
+        }
+        Ok(self.current_line_number())
+    }
+
+    fn current_line_offset(&self) -> usize {
+        let index = self.scroll.min(self.line_count().saturating_sub(1));
+        self.line_offsets[index]
+    }
+
+    fn line_index_for_offset(&self, offset: usize) -> usize {
+        if self.line_offsets.is_empty() {
+            return 0;
+        }
+        let bounded = offset.min(self.content.len());
+        match self.line_offsets.binary_search(&bounded) {
+            Ok(index) => index,
+            Err(0) => 0,
+            Err(index) => index.saturating_sub(1),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
     Jobs,
+    Viewer(ViewerState),
     Dialog(DialogState),
 }
 
@@ -423,6 +602,10 @@ enum PendingDialogAction {
         destination_dir: PathBuf,
     },
     SetDefaultOverwritePolicy,
+    ViewerSearch {
+        direction: ViewerSearchDirection,
+    },
+    ViewerGoto,
 }
 
 #[derive(Debug)]
@@ -448,7 +631,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "F2 rename | F3 jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
+                "F2 rename | Ctrl-J jobs | F3/Enter view | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
@@ -506,6 +689,33 @@ impl AppState {
 
     pub fn go_parent_directory(&mut self) -> io::Result<bool> {
         self.active_panel_mut().go_parent()
+    }
+
+    fn open_selected_file_in_viewer(&mut self) -> io::Result<bool> {
+        let Some(entry) = self.selected_non_parent_entry() else {
+            return Ok(false);
+        };
+        if entry.is_dir {
+            return Ok(false);
+        }
+
+        let viewer = ViewerState::open(entry.path.clone())?;
+        self.routes.push(Route::Viewer(viewer));
+        Ok(true)
+    }
+
+    pub fn active_viewer(&self) -> Option<&ViewerState> {
+        self.routes.iter().rev().find_map(|route| match route {
+            Route::Viewer(viewer) => Some(viewer),
+            _ => None,
+        })
+    }
+
+    fn active_viewer_mut(&mut self) -> Option<&mut ViewerState> {
+        self.routes.iter_mut().rev().find_map(|route| match route {
+            Route::Viewer(viewer) => Some(viewer),
+            _ => None,
+        })
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
@@ -592,6 +802,13 @@ impl AppState {
         }
     }
 
+    fn close_viewer(&mut self) {
+        if matches!(self.top_route(), Route::Viewer(_)) {
+            self.routes.pop();
+            self.set_status("Closed viewer");
+        }
+    }
+
     fn clamp_jobs_cursor(&mut self) {
         let len = self.jobs.jobs().len();
         if len == 0 {
@@ -616,6 +833,64 @@ impl AppState {
         self.jobs_cursor = next;
     }
 
+    fn open_viewer_search_dialog(&mut self, direction: ViewerSearchDirection) {
+        let Some(viewer) = self.active_viewer() else {
+            self.set_status("Viewer is not active");
+            return;
+        };
+        let initial_query = viewer.last_search_query().unwrap_or("").to_string();
+
+        let title = match direction {
+            ViewerSearchDirection::Forward => "Search",
+            ViewerSearchDirection::Backward => "Search Backward",
+        };
+        let prompt = match direction {
+            ViewerSearchDirection::Forward => "Search text:",
+            ViewerSearchDirection::Backward => "Search text (backward):",
+        };
+
+        self.pending_dialog_action = Some(PendingDialogAction::ViewerSearch { direction });
+        self.routes.push(Route::Dialog(DialogState::input(
+            title,
+            prompt,
+            initial_query,
+        )));
+        self.set_status(title);
+    }
+
+    fn open_viewer_goto_dialog(&mut self) {
+        let Some(viewer) = self.active_viewer() else {
+            self.set_status("Viewer is not active");
+            return;
+        };
+        let current_line = viewer.current_line_number().to_string();
+
+        self.pending_dialog_action = Some(PendingDialogAction::ViewerGoto);
+        self.routes.push(Route::Dialog(DialogState::input(
+            "Goto",
+            "Line number, @offset, or 0xHEX offset:",
+            current_line,
+        )));
+        self.set_status("Goto");
+    }
+
+    fn continue_viewer_search(&mut self, direction: Option<ViewerSearchDirection>) {
+        let Some(viewer) = self.active_viewer_mut() else {
+            self.set_status("Viewer is not active");
+            return;
+        };
+        let Some(_) = viewer.last_search_query() else {
+            self.set_status("No previous search query");
+            return;
+        };
+
+        if let Some(line) = viewer.continue_search(direction) {
+            self.set_status(format!("Search hit at line {}", line.saturating_add(1)));
+        } else {
+            self.set_status("Search text not found");
+        }
+    }
+
     pub fn selected_job_record(&self) -> Option<&JobRecord> {
         self.jobs.jobs().get(self.jobs_cursor)
     }
@@ -623,6 +898,7 @@ impl AppState {
     pub fn apply(&mut self, command: AppCommand) -> io::Result<ApplyResult> {
         match command {
             AppCommand::Quit => return Ok(ApplyResult::Quit),
+            AppCommand::CloseViewer => self.close_viewer(),
             AppCommand::SwitchPanel => {
                 self.toggle_active_panel();
                 self.set_status(format!(
@@ -681,8 +957,10 @@ impl AppState {
             AppCommand::OpenEntry => {
                 if self.open_selected_directory()? {
                     self.set_status("Opened selected directory");
+                } else if self.open_selected_file_in_viewer()? {
+                    self.set_status("Opened viewer");
                 } else {
-                    self.set_status("Selected entry is not a directory");
+                    self.set_status("No entry selected");
                 }
             }
             AppCommand::CdUp => {
@@ -708,6 +986,64 @@ impl AppState {
             }
             AppCommand::DialogListboxUp => self.handle_dialog_event(DialogEvent::MoveUp),
             AppCommand::DialogListboxDown => self.handle_dialog_event(DialogEvent::MoveDown),
+            AppCommand::ViewerMoveUp => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_lines(-1);
+                }
+            }
+            AppCommand::ViewerMoveDown => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_lines(1);
+                }
+            }
+            AppCommand::ViewerPageUp => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_pages(-1);
+                }
+            }
+            AppCommand::ViewerPageDown => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_pages(1);
+                }
+            }
+            AppCommand::ViewerHome => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_home();
+                }
+            }
+            AppCommand::ViewerEnd => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_end();
+                }
+            }
+            AppCommand::ViewerSearchForward => {
+                self.open_viewer_search_dialog(ViewerSearchDirection::Forward);
+            }
+            AppCommand::ViewerSearchBackward => {
+                self.open_viewer_search_dialog(ViewerSearchDirection::Backward);
+            }
+            AppCommand::ViewerSearchContinue => {
+                self.continue_viewer_search(None);
+            }
+            AppCommand::ViewerSearchContinueBackward => {
+                self.continue_viewer_search(Some(ViewerSearchDirection::Backward));
+            }
+            AppCommand::ViewerGoto => {
+                self.open_viewer_goto_dialog();
+            }
+            AppCommand::ViewerToggleWrap => {
+                let mut next = None;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.toggle_wrap();
+                    next = Some(viewer.wrap);
+                }
+                if let Some(wrap) = next {
+                    self.set_status(format!(
+                        "Viewer wrap {}",
+                        if wrap { "enabled" } else { "disabled" }
+                    ));
+                }
+            }
         }
 
         Ok(ApplyResult::Continue)
@@ -727,6 +1063,7 @@ impl AppState {
         match self.top_route() {
             Route::FileManager => KeyContext::FileManager,
             Route::Jobs => KeyContext::Jobs,
+            Route::Viewer(_) => KeyContext::Viewer,
             Route::Dialog(dialog) => dialog.key_context(),
         }
     }
@@ -1058,6 +1395,50 @@ impl AppState {
             (Some(PendingDialogAction::SetDefaultOverwritePolicy), DialogResult::Canceled) => {
                 self.set_status("Overwrite policy unchanged");
             }
+            (
+                Some(PendingDialogAction::ViewerSearch { direction }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let query = value.trim();
+                if query.is_empty() {
+                    self.set_status("Search canceled: empty query");
+                    return;
+                }
+
+                let Some(viewer) = self.active_viewer_mut() else {
+                    self.set_status("Viewer is not active");
+                    return;
+                };
+
+                if let Some(line) = viewer.start_search(query.to_string(), direction) {
+                    self.set_status(format!("Search hit at line {}", line.saturating_add(1)));
+                } else {
+                    self.set_status("Search text not found");
+                }
+            }
+            (Some(PendingDialogAction::ViewerSearch { .. }), DialogResult::Canceled) => {
+                self.set_status("Search canceled");
+            }
+            (Some(PendingDialogAction::ViewerGoto), DialogResult::InputSubmitted(value)) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    self.set_status("Goto canceled: empty target");
+                    return;
+                }
+
+                let Some(viewer) = self.active_viewer_mut() else {
+                    self.set_status("Viewer is not active");
+                    return;
+                };
+
+                match viewer.goto_input(value) {
+                    Ok(line) => self.set_status(format!("Moved to line {line}")),
+                    Err(error) => self.set_status(format!("Goto failed: {error}")),
+                }
+            }
+            (Some(PendingDialogAction::ViewerGoto), DialogResult::Canceled) => {
+                self.set_status("Goto canceled");
+            }
             (_, result) => self.set_status(result.status_line()),
         }
     }
@@ -1073,6 +1454,85 @@ impl AppState {
             self.finish_dialog(result);
         }
     }
+}
+
+fn compute_line_offsets(content: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for (index, byte) in content.bytes().enumerate() {
+        if byte == b'\n' && index.saturating_add(1) < content.len() {
+            offsets.push(index + 1);
+        }
+    }
+    offsets
+}
+
+fn find_forward_wrap(content: &str, query: &str, start: usize) -> Option<usize> {
+    let start = start.min(content.len());
+    if let Some(relative) = content[start..].find(query) {
+        return Some(start + relative);
+    }
+    if start == 0 {
+        return None;
+    }
+    content[..start].find(query)
+}
+
+fn find_backward_wrap(content: &str, query: &str, start: usize) -> Option<usize> {
+    let start = start.min(content.len());
+    if let Some(index) = content[..start].rfind(query) {
+        return Some(index);
+    }
+    if start >= content.len() {
+        return None;
+    }
+    content[start..]
+        .rfind(query)
+        .map(|relative| start + relative)
+}
+
+fn parse_viewer_goto_target(input: &str) -> Result<ViewerGotoTarget, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("target is empty"));
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('@') {
+        let value = rest
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| String::from("invalid decimal offset"))?;
+        return Ok(ViewerGotoTarget::Offset(value));
+    }
+
+    if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        let value = usize::from_str_radix(rest.trim(), 16)
+            .map_err(|_| String::from("invalid hex offset"))?;
+        return Ok(ViewerGotoTarget::Offset(value));
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    if let Some(rest) = lowered.strip_prefix("line:") {
+        let value = rest
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| String::from("invalid line number"))?;
+        return Ok(ViewerGotoTarget::Line(value));
+    }
+    if let Some(rest) = lowered.strip_prefix("offset:") {
+        let value = rest
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| String::from("invalid decimal offset"))?;
+        return Ok(ViewerGotoTarget::Offset(value));
+    }
+
+    let value = trimmed
+        .parse::<usize>()
+        .map_err(|_| String::from("invalid line number"))?;
+    Ok(ViewerGotoTarget::Line(value))
 }
 
 fn overwrite_policy_items() -> Vec<String> {
@@ -1533,6 +1993,118 @@ mod tests {
     }
 
     #[test]
+    fn open_entry_on_file_opens_viewer_route() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-open-file-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("notes.txt");
+        fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("must create viewer file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("viewer file should be visible");
+        app.active_panel_mut().cursor = file_index;
+
+        app.apply(AppCommand::OpenEntry)
+            .expect("open entry should open viewer");
+        assert_eq!(app.key_context(), KeyContext::Viewer);
+
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.path, file_path);
+        assert_eq!(viewer.line_count(), 3);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn viewer_supports_scroll_search_goto_and_wrap() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-actions-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("viewer.txt");
+        fs::write(&file_path, "first\nsecond target\nthird\nfourth target\n")
+            .expect("must create viewer content");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("viewer file should be visible");
+        app.active_panel_mut().cursor = file_index;
+        app.apply(AppCommand::OpenEntry)
+            .expect("open entry should open viewer");
+
+        app.apply(AppCommand::ViewerMoveDown)
+            .expect("viewer should move down");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.current_line_number(), 2);
+
+        app.apply(AppCommand::ViewerToggleWrap)
+            .expect("viewer should toggle wrap");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert!(viewer.wrap, "wrap should be enabled");
+
+        app.apply(AppCommand::ViewerGoto)
+            .expect("viewer goto should open dialog");
+        app.apply(AppCommand::DialogBackspace)
+            .expect("should edit goto target");
+        for ch in "3".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing goto target should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("goto dialog should submit");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.current_line_number(), 3);
+
+        app.apply(AppCommand::ViewerSearchForward)
+            .expect("search should open dialog");
+        for ch in "target".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing search query should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("search dialog should submit");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.current_line_number(), 4);
+
+        app.apply(AppCommand::ViewerSearchContinueBackward)
+            .expect("reverse continue search should run");
+        let Route::Viewer(viewer) = app.top_route() else {
+            panic!("top route should be viewer");
+        };
+        assert_eq!(viewer.current_line_number(), 2);
+
+        app.apply(AppCommand::CloseViewer)
+            .expect("viewer should close");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn app_command_mapping_is_context_aware() {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
@@ -1585,6 +2157,34 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CloseJobs),
             Some(AppCommand::CloseJobsScreen)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::Quit),
+            Some(AppCommand::CloseViewer)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::Search),
+            Some(AppCommand::ViewerSearchForward)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::SearchBackward),
+            Some(AppCommand::ViewerSearchBackward)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::SearchContinue),
+            Some(AppCommand::ViewerSearchContinue)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::SearchContinueBackward),
+            Some(AppCommand::ViewerSearchContinueBackward)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::Goto),
+            Some(AppCommand::ViewerGoto)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Viewer, &KeyCommand::ToggleWrap),
+            Some(AppCommand::ViewerToggleWrap)
         );
     }
 }

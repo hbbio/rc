@@ -5,11 +5,11 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
 use rc_core::{
     ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, JobRecord, JobStatus,
-    PanelState, Route,
+    PanelState, Route, ViewerState,
 };
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -37,23 +37,27 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         root[0],
     );
 
-    let panel_areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(root[1]);
+    if let Some(viewer) = state.active_viewer() {
+        render_viewer(frame, root[1], viewer);
+    } else {
+        let panel_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(root[1]);
 
-    render_panel(
-        frame,
-        panel_areas[0],
-        &state.panels[0],
-        state.active_panel == ActivePanel::Left,
-    );
-    render_panel(
-        frame,
-        panel_areas[1],
-        &state.panels[1],
-        state.active_panel == ActivePanel::Right,
-    );
+        render_panel(
+            frame,
+            panel_areas[0],
+            &state.panels[0],
+            state.active_panel == ActivePanel::Left,
+        );
+        render_panel(
+            frame,
+            panel_areas[1],
+            &state.panels[1],
+            state.active_panel == ActivePanel::Right,
+        );
+    }
 
     frame.render_widget(
         Paragraph::new(state.status_line.as_str()).style(Style::default().fg(Color::DarkGray)),
@@ -63,6 +67,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog),
         Route::Jobs => render_jobs_screen(frame, state),
+        Route::Viewer(_) => {}
         Route::FileManager => {}
     }
 }
@@ -119,6 +124,28 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
         list_state.select(Some(panel.cursor));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState) {
+    let title = format!(
+        "{} | line {}/{} | wrap:{}",
+        viewer.path.to_string_lossy(),
+        viewer.current_line_number(),
+        viewer.line_count(),
+        if viewer.wrap { "on" } else { "off" }
+    );
+    let mut paragraph = Paragraph::new(viewer.content.as_str())
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .scroll((viewer.scroll.min(u16::MAX as usize) as u16, 0));
+    if viewer.wrap {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+    }
+    frame.render_widget(paragraph, area);
 }
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState) {

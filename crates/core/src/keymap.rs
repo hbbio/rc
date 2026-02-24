@@ -116,6 +116,12 @@ pub enum KeyCommand {
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
+    Search,
+    SearchBackward,
+    SearchContinue,
+    SearchContinueBackward,
+    Goto,
+    ToggleWrap,
     DialogAccept,
     DialogCancel,
     DialogFocusNext,
@@ -157,6 +163,14 @@ impl KeyCommand {
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
+            "search" => Self::Search,
+            "searchback" | "searchbackward" | "searchreverse" => Self::SearchBackward,
+            "searchcontinue" | "searchnext" => Self::SearchContinue,
+            "searchcontinueback" | "searchcontinuebackward" | "searchprev" => {
+                Self::SearchContinueBackward
+            }
+            "goto" => Self::Goto,
+            "togglewrap" | "togglewrapmode" | "wrapmode" => Self::ToggleWrap,
             "ok" | "dialogaccept" => Self::DialogAccept,
             "cancel" | "dialogcancel" => Self::DialogCancel,
             "focusnext" | "dialogfocusnext" => Self::DialogFocusNext,
@@ -490,6 +504,65 @@ End = end
         assert_eq!(
             keymap.resolve(KeyContext::DiffViewer, KeyChord::new(KeyCode::End)),
             Some(&KeyCommand::End)
+        );
+    }
+
+    #[test]
+    fn parser_maps_viewer_specific_actions() {
+        let source = r#"
+[viewer]
+Search = f7
+SearchBackward = s-f7
+SearchContinue = n
+SearchContinueBackward = s-n
+Goto = g
+ToggleWrap = w
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::F(7))),
+            Some(&KeyCommand::Search)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::Viewer,
+                KeyChord {
+                    code: KeyCode::F(7),
+                    modifiers: KeyModifiers {
+                        ctrl: false,
+                        alt: false,
+                        shift: true,
+                    },
+                },
+            ),
+            Some(&KeyCommand::SearchBackward)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::Char('n'))),
+            Some(&KeyCommand::SearchContinue)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::Viewer,
+                KeyChord {
+                    code: KeyCode::Char('n'),
+                    modifiers: KeyModifiers {
+                        ctrl: false,
+                        alt: false,
+                        shift: true,
+                    },
+                },
+            ),
+            Some(&KeyCommand::SearchContinueBackward)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::Char('g'))),
+            Some(&KeyCommand::Goto)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Viewer, KeyChord::new(KeyCode::Char('w'))),
+            Some(&KeyCommand::ToggleWrap)
         );
     }
 

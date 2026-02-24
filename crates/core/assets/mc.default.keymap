@@ -7,12 +7,12 @@ PageUp = pgup
 PageDown = pgdn
 Home = home
 End = end
-Enter = enter
+Enter = enter; f3
 CdUp = backspace
 Reread = r; ctrl-r
 ToggleTag = insert; ctrl-t
 InvertTags = alt-asterisk
-OpenJobs = f3
+OpenJobs = ctrl-j
 Copy = f5
 Move = f6
 Delete = f8
@@ -61,13 +61,19 @@ Home = home
 End = end
 
 [viewer]
-Quit = f10
+Quit = f10; esc; q
 Up = up
 Down = down
 PageUp = pgup
 PageDown = pgdn
 Home = home
 End = end
+Search = f7; ctrl-s
+SearchBackward = shift-f7
+SearchContinue = n
+SearchContinueBackward = shift-n
+Goto = g; alt-l
+ToggleWrap = w
 
 [viewer:hex]
 Up = up
