@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct JobId(pub u64);
@@ -86,6 +88,36 @@ impl JobRequest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobProgress {
+    pub current_path: Option<PathBuf>,
+    pub items_total: u64,
+    pub items_done: u64,
+    pub bytes_total: u64,
+    pub bytes_done: u64,
+}
+
+impl JobProgress {
+    pub fn percent(&self) -> u8 {
+        let bytes_pct = if self.bytes_total > 0 {
+            self.bytes_done
+                .saturating_mul(100)
+                .saturating_div(self.bytes_total)
+        } else {
+            0
+        };
+        let items_pct = if self.items_total > 0 {
+            self.items_done
+                .saturating_mul(100)
+                .saturating_div(self.items_total)
+        } else {
+            0
+        };
+        let overall = bytes_pct.max(items_pct).min(100);
+        overall as u8
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobStatus {
     Queued,
@@ -100,6 +132,7 @@ pub struct JobRecord {
     pub kind: JobKind,
     pub summary: String,
     pub status: JobStatus,
+    pub progress: Option<JobProgress>,
     pub last_error: Option<String>,
 }
 
@@ -119,6 +152,10 @@ pub enum WorkerCommand {
 pub enum JobEvent {
     Started {
         id: JobId,
+    },
+    Progress {
+        id: JobId,
+        progress: JobProgress,
     },
     Finished {
         id: JobId,
@@ -157,6 +194,7 @@ impl JobManager {
             kind: request.kind(),
             summary: request.summary(),
             status: JobStatus::Queued,
+            progress: None,
             last_error: None,
         };
         self.index_by_id.insert(id, self.jobs.len());
@@ -170,7 +208,13 @@ impl JobManager {
             JobEvent::Started { id } => {
                 if let Some(job) = self.job_mut(*id) {
                     job.status = JobStatus::Running;
+                    job.progress = None;
                     job.last_error = None;
+                }
+            }
+            JobEvent::Progress { id, progress } => {
+                if let Some(job) = self.job_mut(*id) {
+                    job.progress = Some(progress.clone());
                 }
             }
             JobEvent::Finished { id, result } => {
@@ -178,6 +222,11 @@ impl JobManager {
                     match result {
                         Ok(()) => {
                             job.status = JobStatus::Succeeded;
+                            if let Some(progress) = &mut job.progress {
+                                progress.current_path = None;
+                                progress.items_done = progress.items_total;
+                                progress.bytes_done = progress.bytes_total;
+                            }
                             job.last_error = None;
                         }
                         Err(message) => {
@@ -228,39 +277,66 @@ pub struct JobStatusCounts {
 pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent>) {
     while let Ok(command) = command_rx.recv() {
         match command {
-            WorkerCommand::Run(job) => {
-                let _ = event_tx.send(JobEvent::Started { id: job.id });
-                let result = execute_job(job.request).map_err(|error| error.to_string());
-                let _ = event_tx.send(JobEvent::Finished { id: job.id, result });
-            }
+            WorkerCommand::Run(job) => run_single_job(job, &event_tx),
             WorkerCommand::Shutdown => break,
         }
     }
 }
 
-fn execute_job(request: JobRequest) -> io::Result<()> {
+fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
+    let _ = event_tx.send(JobEvent::Started { id: job.id });
+
+    let totals = match measure_request_totals(&job.request) {
+        Ok(totals) => totals,
+        Err(error) => {
+            let _ = event_tx.send(JobEvent::Finished {
+                id: job.id,
+                result: Err(error.to_string()),
+            });
+            return;
+        }
+    };
+
+    let mut progress = ProgressTracker::new(job.id, totals, event_tx);
+    progress.emit();
+    let result = execute_job(job.request, &mut progress).map_err(|error| error.to_string());
+    if result.is_ok() {
+        progress.mark_done();
+    }
+    let _ = event_tx.send(JobEvent::Finished { id: job.id, result });
+}
+
+fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
     match request {
         JobRequest::Copy {
             sources,
             destination_dir,
-        } => copy_paths(&sources, &destination_dir),
+        } => copy_paths(&sources, &destination_dir, progress),
         JobRequest::Move {
             sources,
             destination_dir,
-        } => move_paths(&sources, &destination_dir),
-        JobRequest::Delete { targets } => delete_paths(&targets),
+        } => move_paths(&sources, &destination_dir, progress),
+        JobRequest::Delete { targets } => delete_paths(&targets, progress),
     }
 }
 
-fn copy_paths(sources: &[PathBuf], destination_dir: &Path) -> io::Result<()> {
+fn copy_paths(
+    sources: &[PathBuf],
+    destination_dir: &Path,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
     for source in sources {
         let destination = destination_path(source, destination_dir)?;
-        copy_path(source, &destination)?;
+        copy_path(source, &destination, progress)?;
     }
     Ok(())
 }
 
-fn move_paths(sources: &[PathBuf], destination_dir: &Path) -> io::Result<()> {
+fn move_paths(
+    sources: &[PathBuf],
+    destination_dir: &Path,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
     for source in sources {
         let destination = destination_path(source, destination_dir)?;
         if destination.exists() {
@@ -273,10 +349,14 @@ fn move_paths(sources: &[PathBuf], destination_dir: &Path) -> io::Result<()> {
             ));
         }
 
+        let source_totals = measure_path_totals(source)?;
+        progress.set_current_path(source);
         match fs::rename(source, &destination) {
-            Ok(()) => {}
+            Ok(()) => {
+                progress.advance_totals(source, source_totals);
+            }
             Err(error) if is_cross_device_error(&error) => {
-                copy_path(source, &destination)?;
+                copy_path(source, &destination, progress)?;
                 remove_path(source)?;
             }
             Err(error) => return Err(error),
@@ -285,15 +365,20 @@ fn move_paths(sources: &[PathBuf], destination_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn delete_paths(targets: &[PathBuf]) -> io::Result<()> {
+fn delete_paths(targets: &[PathBuf], progress: &mut ProgressTracker<'_>) -> io::Result<()> {
     for target in targets {
-        remove_path(target)?;
+        delete_path(target, progress)?;
     }
     Ok(())
 }
 
-fn copy_path(source: &Path, destination: &Path) -> io::Result<()> {
+fn copy_path(
+    source: &Path,
+    destination: &Path,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
+    progress.set_current_path(source);
     if metadata.file_type().is_symlink() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -331,8 +416,9 @@ fn copy_path(source: &Path, destination: &Path) -> io::Result<()> {
             let entry = entry?;
             let child_source = entry.path();
             let child_destination = destination.join(entry.file_name());
-            copy_path(&child_source, &child_destination)?;
+            copy_path(&child_source, &child_destination, progress)?;
         }
+        progress.complete_item(source);
         return Ok(());
     }
 
@@ -349,7 +435,56 @@ fn copy_path(source: &Path, destination: &Path) -> io::Result<()> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(source, destination)?;
+    copy_file(source, destination, progress)?;
+    progress.complete_item(source);
+    Ok(())
+}
+
+fn copy_file(
+    source: &Path,
+    destination: &Path,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
+    let mut source_file = fs::File::open(source)?;
+    let mut destination_file = fs::File::create(destination)?;
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+
+    loop {
+        let bytes_read = source_file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        destination_file.write_all(&buffer[..bytes_read])?;
+        progress.advance_bytes(bytes_read as u64);
+    }
+    destination_file.flush()?;
+    Ok(())
+}
+
+fn delete_path(path: &Path, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    progress.set_current_path(path);
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            delete_path(&entry.path(), progress)?;
+        }
+        fs::remove_dir(path)?;
+        progress.complete_item(path);
+        return Ok(());
+    }
+
+    let bytes = if metadata.is_file() {
+        metadata.len()
+    } else {
+        0
+    };
+    fs::remove_file(path)?;
+    if bytes > 0 {
+        progress.advance_bytes(bytes);
+    }
+    progress.complete_item(path);
     Ok(())
 }
 
@@ -376,12 +511,136 @@ fn is_cross_device_error(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::CrossesDevices || error.raw_os_error() == Some(18)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct JobTotals {
+    items: u64,
+    bytes: u64,
+}
+
+fn measure_request_totals(request: &JobRequest) -> io::Result<JobTotals> {
+    match request {
+        JobRequest::Copy { sources, .. } => measure_paths_totals(sources),
+        JobRequest::Move { sources, .. } => measure_paths_totals(sources),
+        JobRequest::Delete { targets } => measure_paths_totals(targets),
+    }
+}
+
+fn measure_paths_totals(paths: &[PathBuf]) -> io::Result<JobTotals> {
+    let mut totals = JobTotals::default();
+    for path in paths {
+        let path_totals = measure_path_totals(path)?;
+        totals.items = totals.items.saturating_add(path_totals.items);
+        totals.bytes = totals.bytes.saturating_add(path_totals.bytes);
+    }
+    Ok(totals)
+}
+
+fn measure_path_totals(path: &Path) -> io::Result<JobTotals> {
+    let mut totals = JobTotals::default();
+    measure_path(path, &mut totals)?;
+    Ok(totals)
+}
+
+fn measure_path(path: &Path, totals: &mut JobTotals) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    totals.items = totals.items.saturating_add(1);
+
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            measure_path(&entry.path(), totals)?;
+        }
+        return Ok(());
+    }
+
+    totals.bytes = totals.bytes.saturating_add(metadata.len());
+    Ok(())
+}
+
+struct ProgressTracker<'a> {
+    job_id: JobId,
+    progress: JobProgress,
+    event_tx: &'a Sender<JobEvent>,
+}
+
+impl<'a> ProgressTracker<'a> {
+    fn new(job_id: JobId, totals: JobTotals, event_tx: &'a Sender<JobEvent>) -> Self {
+        Self {
+            job_id,
+            progress: JobProgress {
+                current_path: None,
+                items_total: totals.items,
+                items_done: 0,
+                bytes_total: totals.bytes,
+                bytes_done: 0,
+            },
+            event_tx,
+        }
+    }
+
+    fn emit(&self) {
+        let _ = self.event_tx.send(JobEvent::Progress {
+            id: self.job_id,
+            progress: self.progress.clone(),
+        });
+    }
+
+    fn set_current_path(&mut self, path: &Path) {
+        self.progress.current_path = Some(path.to_path_buf());
+        self.emit();
+    }
+
+    fn advance_bytes(&mut self, bytes: u64) {
+        self.progress.bytes_done = self
+            .progress
+            .bytes_done
+            .saturating_add(bytes)
+            .min(self.progress.bytes_total);
+        self.emit();
+    }
+
+    fn complete_item(&mut self, path: &Path) {
+        self.progress.current_path = Some(path.to_path_buf());
+        self.progress.items_done = self
+            .progress
+            .items_done
+            .saturating_add(1)
+            .min(self.progress.items_total);
+        self.emit();
+    }
+
+    fn advance_totals(&mut self, path: &Path, totals: JobTotals) {
+        self.progress.current_path = Some(path.to_path_buf());
+        self.progress.items_done = self
+            .progress
+            .items_done
+            .saturating_add(totals.items)
+            .min(self.progress.items_total);
+        self.progress.bytes_done = self
+            .progress
+            .bytes_done
+            .saturating_add(totals.bytes)
+            .min(self.progress.bytes_total);
+        self.emit();
+    }
+
+    fn mark_done(&mut self) {
+        self.progress.current_path = None;
+        self.progress.items_done = self.progress.items_total;
+        self.progress.bytes_done = self.progress.bytes_total;
+        self.emit();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
     use std::fs;
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, Receiver};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -395,8 +654,20 @@ mod tests {
         root
     }
 
+    fn recv_until_finished(event_rx: &Receiver<JobEvent>, manager: &mut JobManager) -> JobEvent {
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("worker should emit job events");
+            manager.handle_event(&event);
+            if matches!(event, JobEvent::Finished { .. }) {
+                return event;
+            }
+        }
+    }
+
     #[test]
-    fn job_manager_tracks_status_transitions() {
+    fn job_manager_tracks_status_and_progress() {
         let mut manager = JobManager::new();
         let job = manager.enqueue(JobRequest::Delete {
             targets: vec![PathBuf::from("/tmp/demo")],
@@ -406,7 +677,23 @@ mod tests {
         assert_eq!(manager.status_counts().queued, 1);
 
         manager.handle_event(&JobEvent::Started { id: job.id });
-        assert_eq!(manager.status_counts().running, 1);
+        manager.handle_event(&JobEvent::Progress {
+            id: job.id,
+            progress: JobProgress {
+                current_path: Some(PathBuf::from("/tmp/demo")),
+                items_total: 2,
+                items_done: 1,
+                bytes_total: 128,
+                bytes_done: 64,
+            },
+        });
+
+        let progress = manager
+            .jobs()
+            .first()
+            .and_then(|record| record.progress.as_ref())
+            .expect("progress should be tracked");
+        assert_eq!(progress.percent(), 50);
 
         manager.handle_event(&JobEvent::Finished {
             id: job.id,
@@ -440,13 +727,11 @@ mod tests {
         command_tx
             .send(WorkerCommand::Run(copy_job))
             .expect("copy command should send");
-        event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("copy should emit started event");
-        let copy_done = event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("copy should emit finished event");
-        manager.handle_event(&copy_done);
+        let copy_done = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(copy_done, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should finish successfully"
+        );
         assert!(
             copy_dest.join("demo.txt").exists(),
             "copy should create file"
@@ -459,13 +744,11 @@ mod tests {
         command_tx
             .send(WorkerCommand::Run(move_job))
             .expect("move command should send");
-        event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("move should emit started event");
-        let move_done = event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("move should emit finished event");
-        manager.handle_event(&move_done);
+        let move_done = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(move_done, JobEvent::Finished { result: Ok(()), .. }),
+            "move should finish successfully"
+        );
         assert!(
             !source_file.exists(),
             "move should remove source file after success"
@@ -482,14 +765,73 @@ mod tests {
         command_tx
             .send(WorkerCommand::Run(delete_job))
             .expect("delete command should send");
-        event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("delete should emit started event");
-        let delete_done = event_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("delete should emit finished event");
-        manager.handle_event(&delete_done);
+        let delete_done = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(delete_done, JobEvent::Finished { result: Ok(()), .. }),
+            "delete should finish successfully"
+        );
         assert!(!moved_file.exists(), "delete should remove target file");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn worker_emits_progress_updates_for_copy() {
+        let root = make_temp_dir("progress");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let payload = vec![42_u8; 256 * 1024];
+        let source_file = source_dir.join("blob.bin");
+        fs::write(&source_file, payload).expect("source payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+
+        let mut saw_progress = false;
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("copy should emit events");
+            if matches!(event, JobEvent::Progress { .. }) {
+                saw_progress = true;
+            }
+            let finished = matches!(event, JobEvent::Finished { .. });
+            manager.handle_event(&event);
+            if finished {
+                break;
+            }
+        }
+
+        assert!(
+            saw_progress,
+            "copy should emit at least one progress update"
+        );
+        let progress = manager
+            .last_job()
+            .and_then(|job| job.progress.as_ref())
+            .expect("job progress should be retained after completion");
+        assert_eq!(progress.percent(), 100, "completed job should be at 100%");
+        assert_eq!(progress.items_done, progress.items_total);
+        assert_eq!(progress.bytes_done, progress.bytes_total);
 
         command_tx
             .send(WorkerCommand::Shutdown)

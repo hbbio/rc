@@ -13,8 +13,8 @@ use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use jobs::{
-    JobEvent, JobId, JobKind, JobManager, JobRecord, JobRequest, JobStatus, JobStatusCounts,
-    WorkerCommand, WorkerJob, run_worker,
+    JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest, JobStatus,
+    JobStatusCounts, WorkerCommand, WorkerJob, run_worker,
 };
 
 use crate::dialog::DialogEvent;
@@ -477,6 +477,22 @@ impl AppState {
                 } else {
                     self.set_status(format!("Job #{id} started"));
                 }
+            }
+            JobEvent::Progress { id, progress } => {
+                let percent = progress.percent();
+                let path_label = progress
+                    .current_path
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| String::from("-"));
+                self.set_status(format!(
+                    "Job #{id} {percent}% | items {}/{} | bytes {}/{} | {path_label}",
+                    progress.items_done,
+                    progress.items_total,
+                    progress.bytes_done,
+                    progress.bytes_total
+                ));
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
