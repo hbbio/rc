@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme};
+use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 #[cfg(unix)]
@@ -363,11 +363,24 @@ fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Opti
 fn build_highlight_resources() -> Option<HighlightResources> {
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let themes = syntect::highlighting::ThemeSet::load_defaults();
-    let theme = themes
+    let mut theme = themes
         .themes
         .get("base16-ocean.dark")
         .cloned()
         .or_else(|| themes.themes.values().next().cloned())?;
+
+    let skin = current_skin();
+    let viewer_style = skin.style("viewer", "_default_");
+    if let Some(foreground) = viewer_style.fg.and_then(syntect_color_from_ratatui) {
+        theme.settings.foreground = Some(foreground);
+    }
+    if let Some(background) = viewer_style.bg.and_then(syntect_color_from_ratatui) {
+        theme.settings.background = Some(background);
+    }
+    for scope in &mut theme.scopes {
+        // Keep syntax foreground accents, but let the viewer surface own the background.
+        scope.style.background = None;
+    }
 
     Some(HighlightResources { syntax_set, theme })
 }
@@ -524,17 +537,11 @@ fn pad_line_to_width(mut line: String, width: usize) -> Line<'static> {
 }
 
 fn syntect_style(style: SyntectStyle) -> Style {
-    let mut ratatui_style = Style::default()
-        .fg(Color::Rgb(
-            style.foreground.r,
-            style.foreground.g,
-            style.foreground.b,
-        ))
-        .bg(Color::Rgb(
-            style.background.r,
-            style.background.g,
-            style.background.b,
-        ));
+    let mut ratatui_style = Style::default().fg(Color::Rgb(
+        style.foreground.r,
+        style.foreground.g,
+        style.foreground.b,
+    ));
 
     if style.font_style.contains(FontStyle::BOLD) {
         ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
@@ -547,6 +554,69 @@ fn syntect_style(style: SyntectStyle) -> Style {
     }
 
     ratatui_style
+}
+
+fn syntect_color_from_ratatui(color: Color) -> Option<SyntectColor> {
+    let (r, g, b) = match color {
+        Color::Reset => return None,
+        Color::Black => (0, 0, 0),
+        Color::Red => (128, 0, 0),
+        Color::Green => (0, 128, 0),
+        Color::Yellow => (128, 128, 0),
+        Color::Blue => (0, 0, 128),
+        Color::Magenta => (128, 0, 128),
+        Color::Cyan => (0, 128, 128),
+        Color::Gray => (192, 192, 192),
+        Color::DarkGray => (128, 128, 128),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (0, 0, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::White => (255, 255, 255),
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => indexed_color_rgb(index),
+    };
+
+    Some(SyntectColor { r, g, b, a: 0xFF })
+}
+
+fn indexed_color_rgb(index: u8) -> (u8, u8, u8) {
+    const ANSI_16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+
+    match index {
+        0..=15 => ANSI_16[index as usize],
+        16..=231 => {
+            let level = [0, 95, 135, 175, 215, 255];
+            let offset = index - 16;
+            let red = level[(offset / 36) as usize];
+            let green = level[((offset % 36) / 6) as usize];
+            let blue = level[(offset % 6) as usize];
+            (red, green, blue)
+        }
+        232..=255 => {
+            let gray = 8u8.saturating_add((index - 232).saturating_mul(10));
+            (gray, gray, gray)
+        }
+    }
 }
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
