@@ -12,7 +12,7 @@ use ratatui::widgets::{
 };
 use rc_core::{
     ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry, FindResultsState,
-    JobRecord, JobStatus, PanelState, Route, TreeState, ViewerState,
+    HelpSpan, HelpState, JobRecord, JobStatus, PanelState, Route, TreeState, ViewerState,
 };
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -102,7 +102,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         state.status_line
     );
     frame.render_widget(Paragraph::new(status), root[2]);
-    render_button_bar(frame, root[3], skin.as_ref());
+    render_button_bar(frame, root[3], skin.as_ref(), state.top_route());
 
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
@@ -111,6 +111,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::FindResults(results) => render_find_results_screen(frame, results, skin.as_ref()),
         Route::Tree(tree) => render_tree_screen(frame, tree, skin.as_ref()),
         Route::Hotlist => render_hotlist_screen(frame, state, skin.as_ref()),
+        Route::Help(help) => render_help_screen(frame, help, skin.as_ref()),
         Route::FileManager => {}
     }
 }
@@ -131,21 +132,35 @@ fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin) {
     frame.render_widget(Paragraph::new(Line::from(spans)).style(menu_style), area);
 }
 
-fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin) {
+fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, route: &Route) {
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
-    let labels = [
-        ("1", "Help"),
-        ("2", "Menu"),
-        ("3", "View"),
-        ("4", "Edit"),
-        ("5", "Copy"),
-        ("6", "RenMov"),
-        ("7", "Mkdir"),
-        ("8", "Delete"),
-        ("9", "PullDn"),
-        ("10", "Quit"),
-    ];
+    let labels: [(&str, &str); 10] = match route {
+        Route::Help(_) => [
+            ("1", "Help"),
+            ("2", "Index"),
+            ("3", "Prev"),
+            ("4", ""),
+            ("5", ""),
+            ("6", ""),
+            ("7", ""),
+            ("8", ""),
+            ("9", ""),
+            ("10", "Quit"),
+        ],
+        _ => [
+            ("1", "Help"),
+            ("2", "Menu"),
+            ("3", "View"),
+            ("4", "Edit"),
+            ("5", "Copy"),
+            ("6", "RenMov"),
+            ("7", "Mkdir"),
+            ("8", "Delete"),
+            ("9", "PullDn"),
+            ("10", "Quit"),
+        ],
+    };
 
     let mut spans: Vec<Span<'_>> = Vec::new();
     for (index, (number, label)) in labels.into_iter().enumerate() {
@@ -1010,6 +1025,66 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     );
 }
 
+fn render_help_screen(frame: &mut Frame, help: &HelpState, skin: &UiSkin) {
+    let area = centered_rect(frame.area(), 116, 36);
+    frame.render_widget(Clear, area);
+
+    let title = format!("Help - {}", help.current_title());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let base_style = skin.style("dialog", "_default_");
+    let link_style = skin.style("menu", "menuhot");
+    let selected_link_style = skin.style("dialog", "dfocus");
+    let selected_link = help.selected_link();
+    let lines: Vec<Line<'_>> = help
+        .lines()
+        .iter()
+        .map(|line| {
+            let spans = line
+                .spans
+                .iter()
+                .map(|span| match span {
+                    HelpSpan::Text(text) => Span::styled(text.as_str(), base_style),
+                    HelpSpan::Link { label, link_index } => {
+                        let style = if selected_link == Some(*link_index) {
+                            selected_link_style
+                        } else {
+                            link_style
+                        };
+                        Span::styled(label.as_str(), style)
+                    }
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(base_style)
+            .scroll((help.scroll() as u16, 0))
+            .wrap(Wrap { trim: false }),
+        layout[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new("Tab/Shift-Tab link | Enter follow | F2/c index | F3/Left back | n/p node | Esc/F10 close")
+            .style(skin.style("core", "disabled")),
+        layout[1],
+    );
+}
+
 fn panel_entry_size_label(entry: &FileEntry) -> String {
     if entry.is_parent {
         return String::from("UP--DIR");
@@ -1357,6 +1432,26 @@ mod tests {
         assert!(
             frame.contains("00000000"),
             "frame should render hex offsets"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_draws_help_overlay() {
+        let root = temp_root("help");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenHelp)
+            .expect("help route should open");
+
+        let frame = render_to_text(&app, 120, 40);
+        assert!(
+            frame.contains("Help - File Manager"),
+            "frame should include help title"
+        );
+        assert!(
+            frame.contains("Tab/Shift-Tab"),
+            "frame should include help viewer hint line"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

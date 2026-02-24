@@ -240,7 +240,7 @@ Top = home; ctrl-home; ctrl-pgup; a1; alt-lt; g
 Bottom = end; ctrl-end; ctrl-pgdn; c1; alt-gt; shift-g
 Enter = right; enter
 LinkNext = tab
-LinkPrev = alt-tab
+LinkPrev = alt-tab; shift-tab
 NodeNext = n
 NodePrev = p
 

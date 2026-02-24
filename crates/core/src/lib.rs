@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod dialog;
+pub mod help;
 pub mod jobs;
 pub mod keymap;
 
@@ -20,6 +21,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
+pub use help::{HelpLine, HelpSpan, HelpState};
 pub use jobs::{
     JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
     JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, run_worker,
@@ -30,6 +32,8 @@ use crate::keymap::{KeyCommand, KeyContext};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppCommand {
+    OpenHelp,
+    CloseHelp,
     Quit,
     CloseViewer,
     OpenFindDialog,
@@ -89,6 +93,21 @@ pub enum AppCommand {
     OpenInputDialog,
     OpenListboxDialog,
     OpenSkinDialog,
+    HelpMoveUp,
+    HelpMoveDown,
+    HelpPageUp,
+    HelpPageDown,
+    HelpHalfPageUp,
+    HelpHalfPageDown,
+    HelpHome,
+    HelpEnd,
+    HelpFollowLink,
+    HelpBack,
+    HelpIndex,
+    HelpLinkNext,
+    HelpLinkPrev,
+    HelpNodeNext,
+    HelpNodePrev,
     DialogAccept,
     DialogCancel,
     DialogFocusNext,
@@ -114,7 +133,9 @@ pub enum AppCommand {
 impl AppCommand {
     pub fn from_key_command(context: KeyContext, key_command: &KeyCommand) -> Option<Self> {
         match (context, key_command) {
+            (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
             (KeyContext::FileManager, KeyCommand::Quit) => Some(Self::Quit),
+            (KeyContext::Help, KeyCommand::Quit) => Some(Self::CloseHelp),
             (KeyContext::Viewer, KeyCommand::Quit) => Some(Self::CloseViewer),
             (KeyContext::FindResults, KeyCommand::Quit) => Some(Self::CloseFindResults),
             (KeyContext::Tree, KeyCommand::Quit) => Some(Self::CloseTree),
@@ -141,6 +162,21 @@ impl AppCommand {
             (KeyContext::Jobs, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
+            (KeyContext::Help, KeyCommand::CursorUp) => Some(Self::HelpMoveUp),
+            (KeyContext::Help, KeyCommand::CursorDown) => Some(Self::HelpMoveDown),
+            (KeyContext::Help, KeyCommand::PageUp) => Some(Self::HelpPageUp),
+            (KeyContext::Help, KeyCommand::PageDown) => Some(Self::HelpPageDown),
+            (KeyContext::Help, KeyCommand::HelpHalfPageUp) => Some(Self::HelpHalfPageUp),
+            (KeyContext::Help, KeyCommand::HelpHalfPageDown) => Some(Self::HelpHalfPageDown),
+            (KeyContext::Help, KeyCommand::Home) => Some(Self::HelpHome),
+            (KeyContext::Help, KeyCommand::End) => Some(Self::HelpEnd),
+            (KeyContext::Help, KeyCommand::OpenEntry) => Some(Self::HelpFollowLink),
+            (KeyContext::Help, KeyCommand::HelpBack) => Some(Self::HelpBack),
+            (KeyContext::Help, KeyCommand::HelpIndex) => Some(Self::HelpIndex),
+            (KeyContext::Help, KeyCommand::HelpLinkNext) => Some(Self::HelpLinkNext),
+            (KeyContext::Help, KeyCommand::HelpLinkPrev) => Some(Self::HelpLinkPrev),
+            (KeyContext::Help, KeyCommand::HelpNodeNext) => Some(Self::HelpNodeNext),
+            (KeyContext::Help, KeyCommand::HelpNodePrev) => Some(Self::HelpNodePrev),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::Reread) => Some(Self::Reread),
@@ -874,6 +910,7 @@ impl TreeState {
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
+    Help(HelpState),
     Jobs,
     Viewer(ViewerState),
     FindResults(FindResultsState),
@@ -1286,9 +1323,7 @@ impl AppState {
         Ok(Self {
             panels: [left, right],
             active_panel: ActivePanel::Left,
-            status_line: String::from(
-                "Tab switch panel | Enter open/view | Backspace parent | Alt-F find/back | Alt-T tree | Alt-H hotlist | Alt/Ctrl-P panelize | Ctrl-J jobs | Alt-J cancel job | q/F10 quit",
-            ),
+            status_line: String::from("Press F1 for help"),
             last_dialog_result: None,
             jobs: JobManager::new(),
             overwrite_policy: OverwritePolicy::Skip,
@@ -1717,6 +1752,33 @@ impl AppState {
         self.jobs.status_counts()
     }
 
+    fn open_help_screen(&mut self) {
+        let context = self.key_context();
+        if let Some(Route::Help(help)) = self.routes.last_mut() {
+            help.open_for_context(KeyContext::Help);
+            self.set_status("Help: help viewer");
+            return;
+        }
+
+        self.routes
+            .push(Route::Help(HelpState::for_context(context)));
+        self.set_status("Opened help");
+    }
+
+    fn close_help_screen(&mut self) {
+        if matches!(self.top_route(), Route::Help(_)) {
+            self.routes.pop();
+            self.set_status("Closed help");
+        }
+    }
+
+    fn help_state_mut(&mut self) -> Option<&mut HelpState> {
+        let Some(Route::Help(help)) = self.routes.last_mut() else {
+            return None;
+        };
+        Some(help)
+    }
+
     fn open_jobs_screen(&mut self) {
         if !matches!(self.top_route(), Route::Jobs) {
             self.routes.push(Route::Jobs);
@@ -2136,6 +2198,8 @@ impl AppState {
             && !matches!(command, AppCommand::EnterXMap);
 
         match command {
+            AppCommand::OpenHelp => self.open_help_screen(),
+            AppCommand::CloseHelp => self.close_help_screen(),
             AppCommand::Quit => {
                 self.request_cancel_for_all_jobs();
                 return Ok(ApplyResult::Quit);
@@ -2265,6 +2329,85 @@ impl AppState {
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::HelpMoveUp => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_lines(-1);
+                }
+            }
+            AppCommand::HelpMoveDown => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_lines(1);
+                }
+            }
+            AppCommand::HelpPageUp => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_pages(-1);
+                }
+            }
+            AppCommand::HelpPageDown => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_pages(1);
+                }
+            }
+            AppCommand::HelpHalfPageUp => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_half_pages(-1);
+                }
+            }
+            AppCommand::HelpHalfPageDown => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_half_pages(1);
+                }
+            }
+            AppCommand::HelpHome => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_home();
+                }
+            }
+            AppCommand::HelpEnd => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_end();
+                }
+            }
+            AppCommand::HelpFollowLink => {
+                if let Some(help) = self.help_state_mut()
+                    && !help.follow_selected_link()
+                {
+                    self.set_status("No help link selected");
+                }
+            }
+            AppCommand::HelpBack => {
+                if let Some(help) = self.help_state_mut()
+                    && !help.back()
+                {
+                    self.set_status("Help history is empty");
+                }
+            }
+            AppCommand::HelpIndex => {
+                if let Some(help) = self.help_state_mut() {
+                    help.open_index();
+                }
+            }
+            AppCommand::HelpLinkNext => {
+                if let Some(help) = self.help_state_mut() {
+                    help.select_next_link();
+                }
+            }
+            AppCommand::HelpLinkPrev => {
+                if let Some(help) = self.help_state_mut() {
+                    help.select_prev_link();
+                }
+            }
+            AppCommand::HelpNodeNext => {
+                if let Some(help) = self.help_state_mut() {
+                    help.open_next_node();
+                }
+            }
+            AppCommand::HelpNodePrev => {
+                if let Some(help) = self.help_state_mut() {
+                    help.open_prev_node();
+                }
+            }
             AppCommand::DialogAccept => self.handle_dialog_event(DialogEvent::Accept),
             AppCommand::DialogCancel => self.handle_dialog_event(DialogEvent::Cancel),
             AppCommand::DialogFocusNext => self.handle_dialog_event(DialogEvent::FocusNext),
@@ -2384,6 +2527,7 @@ impl AppState {
             Route::FindResults(_) => KeyContext::FindResults,
             Route::Tree(_) => KeyContext::Tree,
             Route::Hotlist => KeyContext::Hotlist,
+            Route::Help(_) => KeyContext::Help,
             Route::Dialog(dialog) => dialog.key_context(),
         }
     }
@@ -3614,6 +3758,54 @@ mod tests {
     }
 
     #[test]
+    fn help_route_supports_topic_links_and_back_navigation() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-help-route-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenHelp)
+            .expect("help route should open");
+        assert_eq!(app.key_context(), KeyContext::Help);
+        let Route::Help(help) = app.top_route() else {
+            panic!("top route should be help");
+        };
+        assert_eq!(help.current_id(), "file-manager");
+
+        app.apply(AppCommand::HelpIndex)
+            .expect("help index should open");
+        let Route::Help(help) = app.top_route() else {
+            panic!("top route should remain help");
+        };
+        assert_eq!(help.current_id(), "index");
+
+        app.apply(AppCommand::HelpLinkNext)
+            .expect("next help link should select");
+        app.apply(AppCommand::HelpFollowLink)
+            .expect("following selected link should succeed");
+        let Route::Help(help) = app.top_route() else {
+            panic!("top route should remain help");
+        };
+        assert_ne!(help.current_id(), "index");
+
+        app.apply(AppCommand::HelpBack)
+            .expect("help back should return to previous node");
+        let Route::Help(help) = app.top_route() else {
+            panic!("top route should remain help");
+        };
+        assert_eq!(help.current_id(), "index");
+
+        app.apply(AppCommand::CloseHelp)
+            .expect("help route should close");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn delete_command_queues_job_only_after_confirmation() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4430,6 +4622,18 @@ mod tests {
 
     #[test]
     fn app_command_mapping_is_context_aware() {
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenHelp),
+            Some(AppCommand::OpenHelp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Help, &KeyCommand::Quit),
+            Some(AppCommand::CloseHelp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Help, &KeyCommand::HelpBack),
+            Some(AppCommand::HelpBack)
+        );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
             Some(AppCommand::MoveUp)

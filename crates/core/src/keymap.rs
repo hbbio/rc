@@ -5,6 +5,7 @@ use std::fmt;
 pub enum KeyContext {
     FileManager,
     FileManagerXMap,
+    Help,
     Jobs,
     FindResults,
     Tree,
@@ -38,6 +39,7 @@ impl KeyContext {
 
         match base.as_str() {
             "filemanager" | "panel" => Some(Self::FileManager),
+            "help" => Some(Self::Help),
             "jobs" => Some(Self::Jobs),
             "find" | "findresults" => Some(Self::FindResults),
             "tree" => Some(Self::Tree),
@@ -102,6 +104,7 @@ impl KeyChord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyCommand {
+    OpenHelp,
     Quit,
     PanelOther,
     EnterXMap,
@@ -134,6 +137,14 @@ pub enum KeyCommand {
     OpenInputDialog,
     OpenListboxDialog,
     OpenSkinDialog,
+    HelpIndex,
+    HelpBack,
+    HelpLinkNext,
+    HelpLinkPrev,
+    HelpNodeNext,
+    HelpNodePrev,
+    HelpHalfPageDown,
+    HelpHalfPageUp,
     Search,
     SearchBackward,
     SearchContinue,
@@ -158,6 +169,7 @@ impl KeyCommand {
             .collect();
 
         match normalized.as_str() {
+            "help" => Self::OpenHelp,
             "quit" => Self::Quit,
             "panelother" => Self::PanelOther,
             "extendedkeymap" => Self::EnterXMap,
@@ -165,8 +177,10 @@ impl KeyCommand {
             "down" => Self::CursorDown,
             "pageup" | "pgup" => Self::PageUp,
             "pagedown" | "pgdn" => Self::PageDown,
-            "home" => Self::Home,
-            "end" => Self::End,
+            "halfpagedown" => Self::HelpHalfPageDown,
+            "halfpageup" => Self::HelpHalfPageUp,
+            "home" | "top" => Self::Home,
+            "end" | "bottom" => Self::End,
             "enter" => Self::OpenEntry,
             "cdup" => Self::CdUp,
             "reread" => Self::Reread,
@@ -193,6 +207,12 @@ impl KeyCommand {
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
             "openskindialog" | "skin" | "skins" => Self::OpenSkinDialog,
+            "index" => Self::HelpIndex,
+            "back" => Self::HelpBack,
+            "linknext" => Self::HelpLinkNext,
+            "linkprev" => Self::HelpLinkPrev,
+            "nodenext" => Self::HelpNodeNext,
+            "nodeprev" => Self::HelpNodePrev,
             "search" => Self::Search,
             "searchback" | "searchbackward" | "searchreverse" => Self::SearchBackward,
             "searchcontinue" | "searchnext" => Self::SearchContinue,
@@ -552,6 +572,90 @@ RemoveHotlist = d
         assert_eq!(
             keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('d'))),
             Some(&KeyCommand::RemoveHotlist)
+        );
+    }
+
+    #[test]
+    fn parser_supports_help_context_bindings() {
+        let source = r#"
+[help]
+Help = f1
+Index = f2
+Back = f3
+LinkNext = tab
+LinkPrev = s-tab
+NodeNext = n
+NodePrev = p
+HalfPageDown = d
+HalfPageUp = u
+Top = g
+Bottom = s-g
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::F(1))),
+            Some(&KeyCommand::OpenHelp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::F(2))),
+            Some(&KeyCommand::HelpIndex)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::F(3))),
+            Some(&KeyCommand::HelpBack)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::Tab)),
+            Some(&KeyCommand::HelpLinkNext)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::Help,
+                KeyChord {
+                    code: KeyCode::Tab,
+                    modifiers: KeyModifiers {
+                        ctrl: false,
+                        alt: false,
+                        shift: true,
+                    },
+                },
+            ),
+            Some(&KeyCommand::HelpLinkPrev)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::Char('n'))),
+            Some(&KeyCommand::HelpNodeNext)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::Char('p'))),
+            Some(&KeyCommand::HelpNodePrev)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::Char('d'))),
+            Some(&KeyCommand::HelpHalfPageDown)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::Char('u'))),
+            Some(&KeyCommand::HelpHalfPageUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Help, KeyChord::new(KeyCode::Char('g'))),
+            Some(&KeyCommand::Home)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::Help,
+                KeyChord {
+                    code: KeyCode::Char('g'),
+                    modifiers: KeyModifiers {
+                        ctrl: false,
+                        alt: false,
+                        shift: true,
+                    },
+                },
+            ),
+            Some(&KeyCommand::End)
         );
     }
 
