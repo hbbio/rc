@@ -38,6 +38,10 @@ pub enum AppCommand {
     Move,
     Delete,
     CancelJob,
+    OpenJobsScreen,
+    CloseJobsScreen,
+    JobsMoveUp,
+    JobsMoveDown,
     OpenEntry,
     CdUp,
     Reread,
@@ -72,6 +76,11 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::Move) => Some(Self::Move),
             (KeyContext::FileManager, KeyCommand::Delete) => Some(Self::Delete),
             (KeyContext::FileManager, KeyCommand::CancelJob) => Some(Self::CancelJob),
+            (KeyContext::FileManager, KeyCommand::OpenJobs) => Some(Self::OpenJobsScreen),
+            (KeyContext::Jobs, KeyCommand::CloseJobs) => Some(Self::CloseJobsScreen),
+            (KeyContext::Jobs, KeyCommand::CursorUp) => Some(Self::JobsMoveUp),
+            (KeyContext::Jobs, KeyCommand::CursorDown) => Some(Self::JobsMoveDown),
+            (KeyContext::Jobs, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
@@ -382,6 +391,7 @@ impl PanelState {
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
+    Jobs,
     Dialog(DialogState),
 }
 
@@ -392,6 +402,7 @@ pub struct AppState {
     pub status_line: String,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
+    pub jobs_cursor: usize,
     routes: Vec<Route>,
     pending_worker_commands: Vec<WorkerCommand>,
 }
@@ -405,10 +416,11 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "Ins tag | F5 copy | F6 move | F8 delete | Alt-J cancel job | Shift-F6/F8 sort | q quit",
+                "Ins tag | F3 jobs | F5 copy | F6 move | F8 delete | Alt-J cancel job | Shift-F6/F8 sort | q quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
+            jobs_cursor: 0,
             routes: vec![Route::FileManager],
             pending_worker_commands: Vec::new(),
         })
@@ -472,6 +484,7 @@ impl AppState {
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
         self.jobs.handle_event(&event);
+        self.clamp_jobs_cursor();
         match event {
             JobEvent::Started { id } => {
                 if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
@@ -530,6 +543,49 @@ impl AppState {
         self.jobs.status_counts()
     }
 
+    fn open_jobs_screen(&mut self) {
+        if !matches!(self.top_route(), Route::Jobs) {
+            self.routes.push(Route::Jobs);
+        }
+        self.clamp_jobs_cursor();
+        self.set_status("Opened jobs screen");
+    }
+
+    fn close_jobs_screen(&mut self) {
+        if matches!(self.top_route(), Route::Jobs) {
+            self.routes.pop();
+            self.set_status("Closed jobs screen");
+        }
+    }
+
+    fn clamp_jobs_cursor(&mut self) {
+        let len = self.jobs.jobs().len();
+        if len == 0 {
+            self.jobs_cursor = 0;
+        } else if self.jobs_cursor >= len {
+            self.jobs_cursor = len - 1;
+        }
+    }
+
+    fn move_jobs_cursor(&mut self, delta: isize) {
+        let len = self.jobs.jobs().len();
+        if len == 0 {
+            self.jobs_cursor = 0;
+            return;
+        }
+        let last = len - 1;
+        let next = if delta.is_negative() {
+            self.jobs_cursor.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.jobs_cursor.saturating_add(delta as usize).min(last)
+        };
+        self.jobs_cursor = next;
+    }
+
+    pub fn selected_job_record(&self) -> Option<&JobRecord> {
+        self.jobs.jobs().get(self.jobs_cursor)
+    }
+
     pub fn apply(&mut self, command: AppCommand) -> io::Result<ApplyResult> {
         match command {
             AppCommand::Quit => return Ok(ApplyResult::Quit),
@@ -584,6 +640,10 @@ impl AppState {
             AppCommand::Move => self.queue_move_job(),
             AppCommand::Delete => self.queue_delete_job(),
             AppCommand::CancelJob => self.cancel_latest_job(),
+            AppCommand::OpenJobsScreen => self.open_jobs_screen(),
+            AppCommand::CloseJobsScreen => self.close_jobs_screen(),
+            AppCommand::JobsMoveUp => self.move_jobs_cursor(-1),
+            AppCommand::JobsMoveDown => self.move_jobs_cursor(1),
             AppCommand::OpenEntry => {
                 if self.open_selected_directory()? {
                     self.set_status("Opened selected directory");
@@ -641,6 +701,7 @@ impl AppState {
     pub fn key_context(&self) -> KeyContext {
         match self.top_route() {
             Route::FileManager => KeyContext::FileManager,
+            Route::Jobs => KeyContext::Jobs,
             Route::Dialog(dialog) => dialog.key_context(),
         }
     }
@@ -715,7 +776,12 @@ impl AppState {
     }
 
     fn cancel_latest_job(&mut self) {
-        let Some(job_id) = self.jobs.newest_cancelable_job_id() else {
+        let selected_id = if matches!(self.top_route(), Route::Jobs) {
+            self.selected_job_record().map(|job| job.id)
+        } else {
+            None
+        };
+        let Some(job_id) = selected_id.or_else(|| self.jobs.newest_cancelable_job_id()) else {
             self.set_status("No active job to cancel");
             return;
         };
@@ -976,6 +1042,22 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CancelJob),
             Some(AppCommand::CancelJob)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenJobs),
+            Some(AppCommand::OpenJobsScreen)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CursorUp),
+            Some(AppCommand::JobsMoveUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CursorDown),
+            Some(AppCommand::JobsMoveDown)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CloseJobs),
+            Some(AppCommand::CloseJobsScreen)
         );
     }
 }

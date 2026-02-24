@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum KeyContext {
     FileManager,
+    Jobs,
     Dialog,
     Input,
     Listbox,
@@ -21,6 +22,7 @@ impl KeyContext {
 
         match base.as_str() {
             "filemanager" | "panel" => Some(Self::FileManager),
+            "jobs" => Some(Self::Jobs),
             "dialog" => Some(Self::Dialog),
             "input" => Some(Self::Input),
             "listbox" => Some(Self::Listbox),
@@ -97,6 +99,8 @@ pub enum KeyCommand {
     Move,
     Delete,
     CancelJob,
+    OpenJobs,
+    CloseJobs,
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -136,6 +140,8 @@ impl KeyCommand {
             "move" | "renmov" | "rename" => Self::Move,
             "delete" | "filedelete" | "remove" => Self::Delete,
             "canceljob" | "jobcancel" => Self::CancelJob,
+            "openjobs" | "jobsopen" => Self::OpenJobs,
+            "closejobs" | "jobsclose" => Self::CloseJobs,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
@@ -402,6 +408,25 @@ FocusNext = tab
     }
 
     #[test]
+    fn parser_supports_jobs_context_bindings() {
+        let source = r#"
+[jobs]
+Up = up
+CloseJobs = esc
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::Jobs, KeyChord::new(KeyCode::Up)),
+            Some(&KeyCommand::CursorUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Jobs, KeyChord::new(KeyCode::Esc)),
+            Some(&KeyCommand::CloseJobs)
+        );
+    }
+
+    #[test]
     fn parser_reads_modifiers_and_multiple_bindings() {
         let source = r#"
 [filemanager]
@@ -437,6 +462,7 @@ Copy = f5
 RenMov = f6
 Delete = f8
 CancelJob = alt-j
+OpenJobs = f3
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -451,6 +477,10 @@ CancelJob = alt-j
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(8))),
             Some(&KeyCommand::Delete)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(3))),
+            Some(&KeyCommand::OpenJobs)
         );
         let cancel_job = KeyChord {
             code: KeyCode::Char('j'),

@@ -12,6 +12,7 @@ CdUp = backspace
 Reread = r; ctrl-r
 ToggleTag = insert; ctrl-t
 InvertTags = alt-asterisk
+OpenJobs = f3
 Copy = f5
 Move = f6
 Delete = f8
@@ -37,3 +38,9 @@ Up = up
 Down = down
 Ok = enter
 Cancel = esc
+
+[jobs]
+Up = up
+Down = down
+CancelJob = alt-j
+CloseJobs = esc; q

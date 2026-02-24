@@ -4,9 +4,12 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+};
 use rc_core::{
-    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, PanelState, Route,
+    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, JobRecord, JobStatus,
+    PanelState, Route,
 };
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -57,8 +60,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         root[2],
     );
 
-    if let Route::Dialog(dialog) = state.top_route() {
-        render_dialog(frame, dialog);
+    match state.top_route() {
+        Route::Dialog(dialog) => render_dialog(frame, dialog),
+        Route::Jobs => render_jobs_screen(frame, state),
+        Route::FileManager => {}
     }
 }
 
@@ -253,6 +258,109 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
             );
         }
     }
+}
+
+fn render_jobs_screen(frame: &mut Frame, state: &AppState) {
+    let area = centered_rect(frame.area(), 92, 24);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("Jobs")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let header = Row::new(vec![
+        Cell::from("id"),
+        Cell::from("kind"),
+        Cell::from("status"),
+        Cell::from("progress"),
+        Cell::from("current"),
+        Cell::from("error"),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+
+    let rows: Vec<Row<'_>> = if state.jobs.jobs().is_empty() {
+        vec![Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("empty"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+        ])]
+    } else {
+        state.jobs.jobs().iter().map(job_row).collect()
+    };
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(5),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(20),
+            Constraint::Length(20),
+            Constraint::Min(10),
+        ],
+    )
+    .header(header)
+    .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+    .highlight_symbol(">> ")
+    .block(
+        Block::default()
+            .borders(Borders::NONE)
+            .title("Up/Down select | Alt-J cancel | Esc/q close"),
+    );
+
+    let mut table_state = TableState::default();
+    if !state.jobs.jobs().is_empty() {
+        table_state.select(Some(state.jobs_cursor));
+    }
+    frame.render_stateful_widget(table, inner, &mut table_state);
+}
+
+fn job_row(job: &JobRecord) -> Row<'_> {
+    let status = match job.status {
+        JobStatus::Queued => "queued",
+        JobStatus::Running => "running",
+        JobStatus::Succeeded => "ok",
+        JobStatus::Canceled => "canceled",
+        JobStatus::Failed => "failed",
+    };
+    let progress = job
+        .progress
+        .as_ref()
+        .map(|progress| {
+            format!(
+                "{}% {}/{}",
+                progress.percent(),
+                progress.items_done,
+                progress.items_total
+            )
+        })
+        .unwrap_or_else(|| String::from("-"));
+    let current = job
+        .progress
+        .as_ref()
+        .and_then(|progress| progress.current_path.as_deref())
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("-"));
+    let error = job
+        .last_error
+        .as_ref()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| String::from("-"));
+
+    Row::new(vec![
+        Cell::from(job.id.to_string()),
+        Cell::from(job.kind.label()),
+        Cell::from(status),
+        Cell::from(progress),
+        Cell::from(current),
+        Cell::from(error),
+    ])
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
