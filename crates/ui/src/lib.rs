@@ -34,6 +34,8 @@ struct HighlightResources {
 
 static HIGHLIGHT_RESOURCES: OnceLock<Option<HighlightResources>> = OnceLock::new();
 static VIEWER_HIGHLIGHT_CACHE: OnceLock<Mutex<Option<CachedViewerHighlight>>> = OnceLock::new();
+const PANEL_SIZE_COL_WIDTH: usize = 12;
+const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ViewerHighlightKey {
@@ -99,10 +101,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         job_counts.failed,
         state.status_line
     );
-    frame.render_widget(
-        Paragraph::new(status).style(skin.style("statusbar", "_default_")),
-        root[2],
-    );
+    frame.render_widget(Paragraph::new(status), root[2]);
     render_button_bar(frame, root[3], skin.as_ref());
 
     match state.top_route() {
@@ -230,7 +229,11 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
                 };
                 Row::new(vec![
                     Cell::from(format!("{marker}{label}")),
-                    Cell::from(panel_entry_size_label(entry)),
+                    Cell::from(format!(
+                        "{:>width$} ",
+                        panel_entry_size_label(entry),
+                        width = PANEL_SIZE_VALUE_WIDTH
+                    )),
                     Cell::from(format_modified(entry.modified)),
                 ])
                 .style(entry_style)
@@ -239,7 +242,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
         let header = Row::new(vec![
             Cell::from("Name"),
             Cell::from("Size"),
-            Cell::from("Modify"),
+            Cell::from("Modify time"),
         ])
         .style(skin.style("core", "header"));
 
@@ -247,7 +250,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
             rows,
             [
                 Constraint::Fill(1),
-                Constraint::Length(11),
+                Constraint::Length(PANEL_SIZE_COL_WIDTH as u16),
                 Constraint::Length(12),
             ],
         )
@@ -262,24 +265,33 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
     }
 
     let (selected_count, selected_size) = panel_selected_totals(panel);
-    let selected_summary = format!(
-        "{} in {} {}",
-        format_human_size(selected_size),
-        selected_count,
-        if selected_count == 1 { "file" } else { "files" }
-    );
+    let selected_summary = if selected_count == 0 {
+        String::new()
+    } else {
+        format!(
+            "{} in {} {}",
+            format_human_size(selected_size),
+            selected_count,
+            if selected_count == 1 { "file" } else { "files" }
+        )
+    };
     let disk_summary = panel_disk_summary(panel);
+    let footer_style = if active {
+        skin.style("core", "selected")
+    } else {
+        skin.style("core", "_default_")
+    };
     let footer_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(22)])
         .split(panel_layout[1]);
     frame.render_widget(
-        Paragraph::new(selected_summary).style(skin.style("statusbar", "_default_")),
+        Paragraph::new(selected_summary).style(footer_style),
         footer_layout[0],
     );
     frame.render_widget(
         Paragraph::new(disk_summary)
-            .style(skin.style("statusbar", "_default_"))
+            .style(footer_style)
             .alignment(Alignment::Right),
         footer_layout[1],
     );
@@ -992,7 +1004,12 @@ fn format_modified(modified: Option<SystemTime>) -> String {
     modified
         .map(|time| {
             let local: DateTime<Local> = DateTime::from(time);
-            local.format("%b %e %H:%M").to_string()
+            let now = Local::now();
+            if local < now - chrono::Duration::days(365) {
+                local.format("%b %Y").to_string()
+            } else {
+                local.format("%b %e %H:%M").to_string()
+            }
         })
         .unwrap_or_default()
 }
@@ -1198,6 +1215,27 @@ mod tests {
             "5.11M"
         );
         assert_eq!(format_human_size_compact(1_342_177_280), "1.25G");
+    }
+
+    #[test]
+    fn format_modified_uses_year_for_entries_older_than_one_year() {
+        let old = SystemTime::now()
+            .checked_sub(Duration::from_secs(366 * 24 * 60 * 60))
+            .expect("old timestamp should be representable");
+        let old_local: DateTime<Local> = DateTime::from(old);
+        assert_eq!(
+            format_modified(Some(old)),
+            old_local.format("%b %Y").to_string()
+        );
+
+        let recent = SystemTime::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("recent timestamp should be representable");
+        let recent_local: DateTime<Local> = DateTime::from(recent);
+        assert_eq!(
+            format_modified(Some(recent)),
+            recent_local.format("%b %e %H:%M").to_string()
+        );
     }
 
     #[test]

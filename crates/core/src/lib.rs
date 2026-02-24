@@ -1277,7 +1277,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "F2 rename | F3/Enter view | Alt-F find/back | Alt-T tree | Alt-H hotlist | Alt/ Ctrl-P panelize | Ctrl-J jobs | F5 copy | F6 move | F7 mkdir | F8 delete | F9 policy | Alt-J cancel job | q quit",
+                "Tab switch panel | Enter open/view | Backspace parent | Alt-F find/back | Alt-T tree | Alt-H hotlist | Alt/Ctrl-P panelize | Ctrl-J jobs | Alt-J cancel job | q/F10 quit",
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
