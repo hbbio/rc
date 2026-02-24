@@ -36,15 +36,35 @@ impl JobKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OverwritePolicy {
+    Overwrite,
+    #[default]
+    Skip,
+    Rename,
+}
+
+impl OverwritePolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overwrite => "overwrite",
+            Self::Skip => "skip",
+            Self::Rename => "rename",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
     Copy {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
+        overwrite: OverwritePolicy,
     },
     Move {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
+        overwrite: OverwritePolicy,
     },
     Delete {
         targets: Vec<PathBuf>,
@@ -73,18 +93,22 @@ impl JobRequest {
             Self::Copy {
                 sources,
                 destination_dir,
+                overwrite,
             } => format!(
-                "copy {} item(s) -> {}",
+                "copy {} item(s) -> {} [{}]",
                 sources.len(),
-                destination_dir.to_string_lossy()
+                destination_dir.to_string_lossy(),
+                overwrite.label(),
             ),
             Self::Move {
                 sources,
                 destination_dir,
+                overwrite,
             } => format!(
-                "move {} item(s) -> {}",
+                "move {} item(s) -> {} [{}]",
                 sources.len(),
-                destination_dir.to_string_lossy()
+                destination_dir.to_string_lossy(),
+                overwrite.label(),
             ),
             Self::Delete { targets } => format!("delete {} item(s)", targets.len()),
         }
@@ -385,11 +409,13 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
         JobRequest::Copy {
             sources,
             destination_dir,
-        } => copy_paths(&sources, &destination_dir, progress),
+            overwrite,
+        } => copy_paths(&sources, &destination_dir, overwrite, progress),
         JobRequest::Move {
             sources,
             destination_dir,
-        } => move_paths(&sources, &destination_dir, progress),
+            overwrite,
+        } => move_paths(&sources, &destination_dir, overwrite, progress),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
     }
 }
@@ -397,11 +423,18 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
 fn copy_paths(
     sources: &[PathBuf],
     destination_dir: &Path,
+    overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
     for source in sources {
         progress.ensure_not_canceled()?;
         let destination = destination_path(source, destination_dir)?;
+        let source_totals = measure_path_totals(source)?;
+        let Some(destination) =
+            resolve_destination(source, destination, overwrite, source_totals, progress)?
+        else {
+            continue;
+        };
         copy_path(source, &destination, progress)?;
     }
     Ok(())
@@ -410,22 +443,18 @@ fn copy_paths(
 fn move_paths(
     sources: &[PathBuf],
     destination_dir: &Path,
+    overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
     for source in sources {
         progress.ensure_not_canceled()?;
-        let destination = destination_path(source, destination_dir)?;
-        if destination.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "destination already exists: {}",
-                    destination.to_string_lossy()
-                ),
-            ));
-        }
-
         let source_totals = measure_path_totals(source)?;
+        let destination = destination_path(source, destination_dir)?;
+        let Some(destination) =
+            resolve_destination(source, destination, overwrite, source_totals, progress)?
+        else {
+            continue;
+        };
         progress.set_current_path(source);
         match fs::rename(source, &destination) {
             Ok(()) => {
@@ -576,6 +605,65 @@ fn destination_path(source: &Path, destination_dir: &Path) -> io::Result<PathBuf
         ));
     };
     Ok(destination_dir.join(name))
+}
+
+fn resolve_destination(
+    source: &Path,
+    mut destination: PathBuf,
+    overwrite: OverwritePolicy,
+    source_totals: JobTotals,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<Option<PathBuf>> {
+    if source == destination {
+        match overwrite {
+            OverwritePolicy::Rename => {
+                destination = renamed_destination(&destination);
+            }
+            OverwritePolicy::Overwrite | OverwritePolicy::Skip => {
+                progress.advance_totals(source, source_totals);
+                return Ok(None);
+            }
+        }
+    }
+
+    if destination.exists() {
+        match overwrite {
+            OverwritePolicy::Overwrite => {
+                remove_path(&destination)?;
+            }
+            OverwritePolicy::Skip => {
+                progress.advance_totals(source, source_totals);
+                return Ok(None);
+            }
+            OverwritePolicy::Rename => {
+                destination = renamed_destination(&destination);
+            }
+        }
+    }
+
+    Ok(Some(destination))
+}
+
+fn renamed_destination(destination: &Path) -> PathBuf {
+    let parent = destination.parent().unwrap_or(Path::new("."));
+    let file_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("item"));
+
+    for index in 1_usize.. {
+        let suffix = if index == 1 {
+            String::from("copy")
+        } else {
+            format!("copy{index}")
+        };
+        let candidate = parent.join(format!("{file_name}.{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("rename candidate generator should always return");
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
@@ -824,6 +912,7 @@ mod tests {
         let copy_job = manager.enqueue(JobRequest::Copy {
             sources: vec![source_file],
             destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
         });
         let copy_id = copy_job.id;
         assert!(
@@ -859,6 +948,152 @@ mod tests {
     }
 
     #[test]
+    fn copy_skip_policy_preserves_existing_destination() {
+        let root = make_temp_dir("skip-policy");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let source_file = source_dir.join("demo.txt");
+        let destination_file = destination.join("demo.txt");
+        fs::write(&source_file, "source").expect("source payload should be writable");
+        fs::write(&destination_file, "destination")
+            .expect("destination payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should succeed with skip policy"
+        );
+
+        let content =
+            fs::read_to_string(&destination_file).expect("destination should be readable");
+        assert_eq!(
+            content, "destination",
+            "existing destination should be preserved"
+        );
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_overwrite_policy_replaces_existing_destination() {
+        let root = make_temp_dir("overwrite-policy");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let source_file = source_dir.join("demo.txt");
+        let destination_file = destination.join("demo.txt");
+        fs::write(&source_file, "source").expect("source payload should be writable");
+        fs::write(&destination_file, "destination")
+            .expect("destination payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination.clone(),
+            overwrite: OverwritePolicy::Overwrite,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should succeed with overwrite policy"
+        );
+
+        let content =
+            fs::read_to_string(&destination_file).expect("destination should be readable");
+        assert_eq!(content, "source", "existing destination should be replaced");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_rename_policy_creates_alternate_destination() {
+        let root = make_temp_dir("rename-policy");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let source_file = source_dir.join("demo.txt");
+        let destination_file = destination.join("demo.txt");
+        fs::write(&source_file, "source").expect("source payload should be writable");
+        fs::write(&destination_file, "destination")
+            .expect("destination payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination.clone(),
+            overwrite: OverwritePolicy::Rename,
+        });
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "copy should succeed with rename policy"
+        );
+
+        let content_original =
+            fs::read_to_string(&destination_file).expect("original destination should be readable");
+        assert_eq!(content_original, "destination");
+
+        let renamed_file = destination.join("demo.txt.copy");
+        let content_renamed =
+            fs::read_to_string(&renamed_file).expect("renamed destination should be readable");
+        assert_eq!(content_renamed, "source");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
     fn worker_executes_copy_move_and_delete() {
         let root = make_temp_dir("ops");
         let source_dir = root.join("source");
@@ -879,6 +1114,7 @@ mod tests {
         let copy_job = manager.enqueue(JobRequest::Copy {
             sources: vec![source_file.clone()],
             destination_dir: copy_dest.clone(),
+            overwrite: OverwritePolicy::Skip,
         });
         command_tx
             .send(WorkerCommand::Run(copy_job))
@@ -896,6 +1132,7 @@ mod tests {
         let move_job = manager.enqueue(JobRequest::Move {
             sources: vec![source_file.clone()],
             destination_dir: move_dest.clone(),
+            overwrite: OverwritePolicy::Skip,
         });
         command_tx
             .send(WorkerCommand::Run(move_job))
@@ -957,6 +1194,7 @@ mod tests {
         let copy_job = manager.enqueue(JobRequest::Copy {
             sources: vec![source_file],
             destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
         });
         command_tx
             .send(WorkerCommand::Run(copy_job))

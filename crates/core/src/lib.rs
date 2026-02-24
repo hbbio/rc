@@ -14,7 +14,7 @@ use std::time::SystemTime;
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use jobs::{
     JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
-    JobStatus, JobStatusCounts, WorkerCommand, WorkerJob, run_worker,
+    JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, run_worker,
 };
 
 use crate::dialog::DialogEvent;
@@ -402,6 +402,7 @@ pub struct AppState {
     pub status_line: String,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
+    pub overwrite_policy: OverwritePolicy,
     pub jobs_cursor: usize,
     routes: Vec<Route>,
     pending_worker_commands: Vec<WorkerCommand>,
@@ -420,6 +421,7 @@ impl AppState {
             ),
             last_dialog_result: None,
             jobs: JobManager::new(),
+            overwrite_policy: OverwritePolicy::Skip,
             jobs_cursor: 0,
             routes: vec![Route::FileManager],
             pending_worker_commands: Vec::new(),
@@ -730,6 +732,7 @@ impl AppState {
         let request = JobRequest::Copy {
             sources,
             destination_dir,
+            overwrite: self.overwrite_policy,
         };
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
@@ -750,6 +753,7 @@ impl AppState {
         let request = JobRequest::Move {
             sources,
             destination_dir,
+            overwrite: self.overwrite_policy,
         };
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
