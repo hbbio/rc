@@ -82,9 +82,17 @@ pub enum KeyCommand {
     PanelOther,
     CursorUp,
     CursorDown,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     OpenEntry,
     CdUp,
     Reread,
+    ToggleTag,
+    InvertTags,
+    SortNext,
+    SortReverse,
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -109,9 +117,17 @@ impl KeyCommand {
             "panelother" => Self::PanelOther,
             "up" => Self::CursorUp,
             "down" => Self::CursorDown,
+            "pageup" | "pgup" => Self::PageUp,
+            "pagedown" | "pgdn" => Self::PageDown,
+            "home" => Self::Home,
+            "end" => Self::End,
             "enter" => Self::OpenEntry,
             "cdup" => Self::CdUp,
             "reread" => Self::Reread,
+            "toggletag" | "mark" => Self::ToggleTag,
+            "inverttags" | "markinverse" => Self::InvertTags,
+            "sortnext" => Self::SortNext,
+            "sortreverse" => Self::SortReverse,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
@@ -453,6 +469,14 @@ Reread = ctrl-r
                 shift: false,
             },
         };
+        let ctrl_t = KeyChord {
+            code: KeyCode::Char('t'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        };
 
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, alt_question),
@@ -461,6 +485,10 @@ Reread = ctrl-r
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, ctrl_backslash),
             Some(&KeyCommand::Reread)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, ctrl_t),
+            Some(&KeyCommand::ToggleTag)
         );
         assert!(
             report

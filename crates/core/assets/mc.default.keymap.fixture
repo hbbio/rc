@@ -3,9 +3,17 @@ Quit = f10; q; esc
 PanelOther = tab
 Up = up
 Down = down
+PageUp = pgup
+PageDown = pgdn
+Home = home
+End = end
 Enter = enter
 CdUp = backspace
 Reread = ctrl-r
+ToggleTag = insert; ctrl-t
+InvertTags = alt-asterisk
+SortNext = f6
+SortReverse = f8
 OpenConfirmDialog = f2
 OpenInputDialog = f7
 OpenListboxDialog = f9
@@ -30,4 +38,3 @@ Cancel = esc
 [filemanager:xmap]
 PanelOther = alt-question
 Reread = ctrl-backslash
-

@@ -4,9 +4,11 @@ pub mod dialog;
 pub mod keymap;
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 
@@ -19,6 +21,14 @@ pub enum AppCommand {
     SwitchPanel,
     MoveUp,
     MoveDown,
+    PageUp,
+    PageDown,
+    MoveHome,
+    MoveEnd,
+    ToggleTag,
+    InvertTags,
+    SortNext,
+    SortReverse,
     OpenEntry,
     CdUp,
     Reread,
@@ -41,6 +51,14 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::CursorUp) => Some(Self::MoveUp),
             (KeyContext::FileManager, KeyCommand::CursorDown) => Some(Self::MoveDown),
+            (KeyContext::FileManager, KeyCommand::PageUp) => Some(Self::PageUp),
+            (KeyContext::FileManager, KeyCommand::PageDown) => Some(Self::PageDown),
+            (KeyContext::FileManager, KeyCommand::Home) => Some(Self::MoveHome),
+            (KeyContext::FileManager, KeyCommand::End) => Some(Self::MoveEnd),
+            (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
+            (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
+            (KeyContext::FileManager, KeyCommand::SortNext) => Some(Self::SortNext),
+            (KeyContext::FileManager, KeyCommand::SortReverse) => Some(Self::SortReverse),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
@@ -67,6 +85,48 @@ impl AppCommand {
 pub enum ApplyResult {
     Continue,
     Quit,
+}
+
+const DEFAULT_PAGE_STEP: usize = 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortField {
+    Name,
+    Size,
+    Modified,
+}
+
+impl SortField {
+    fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Size,
+            Self::Size => Self::Modified,
+            Self::Modified => Self::Name,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Size => "size",
+            Self::Modified => "mtime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SortMode {
+    pub field: SortField,
+    pub reverse: bool,
+}
+
+impl Default for SortMode {
+    fn default() -> Self {
+        Self {
+            field: SortField::Name,
+            reverse: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,24 +157,30 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub is_parent: bool,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
 }
 
 impl FileEntry {
-    fn directory(name: String, path: PathBuf) -> Self {
+    fn directory(name: String, path: PathBuf, size: u64, modified: Option<SystemTime>) -> Self {
         Self {
             name,
             path,
             is_dir: true,
             is_parent: false,
+            size,
+            modified,
         }
     }
 
-    fn file(name: String, path: PathBuf) -> Self {
+    fn file(name: String, path: PathBuf, size: u64, modified: Option<SystemTime>) -> Self {
         Self {
             name,
             path,
             is_dir: false,
             is_parent: false,
+            size,
+            modified,
         }
     }
 
@@ -124,6 +190,8 @@ impl FileEntry {
             path,
             is_dir: true,
             is_parent: true,
+            size: 0,
+            modified: None,
         }
     }
 }
@@ -133,6 +201,8 @@ pub struct PanelState {
     pub cwd: PathBuf,
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
+    pub sort_mode: SortMode,
+    tagged: HashSet<PathBuf>,
 }
 
 impl PanelState {
@@ -141,13 +211,20 @@ impl PanelState {
             cwd,
             entries: Vec::new(),
             cursor: 0,
+            sort_mode: SortMode::default(),
+            tagged: HashSet::new(),
         };
         panel.refresh()?;
         Ok(panel)
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
-        self.entries = read_entries(&self.cwd)?;
+        self.entries = read_entries(&self.cwd, self.sort_mode)?;
+        self.tagged.retain(|tag| {
+            self.entries
+                .iter()
+                .any(|entry| !entry.is_parent && entry.path == *tag)
+        });
         if self.entries.is_empty() {
             self.cursor = 0;
         } else if self.cursor >= self.entries.len() {
@@ -171,8 +248,86 @@ impl PanelState {
         self.cursor = next;
     }
 
+    pub fn move_cursor_page(&mut self, pages: isize) {
+        let delta = pages.saturating_mul(DEFAULT_PAGE_STEP as isize);
+        self.move_cursor(delta);
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        if self.entries.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor = self.entries.len() - 1;
+        }
+    }
+
     pub fn selected_entry(&self) -> Option<&FileEntry> {
         self.entries.get(self.cursor)
+    }
+
+    pub fn tagged_count(&self) -> usize {
+        self.tagged.len()
+    }
+
+    pub fn is_tagged(&self, path: &Path) -> bool {
+        self.tagged.contains(path)
+    }
+
+    pub fn toggle_tag_on_cursor(&mut self) -> bool {
+        let Some(entry) = self.selected_entry() else {
+            return false;
+        };
+        if entry.is_parent {
+            return false;
+        }
+        let path = entry.path.clone();
+
+        if self.tagged.contains(&path) {
+            self.tagged.remove(&path);
+            false
+        } else {
+            self.tagged.insert(path);
+            true
+        }
+    }
+
+    pub fn invert_tags(&mut self) {
+        let mut next_tags = HashSet::new();
+        for entry in &self.entries {
+            if entry.is_parent {
+                continue;
+            }
+            if !self.tagged.contains(&entry.path) {
+                next_tags.insert(entry.path.clone());
+            }
+        }
+        self.tagged = next_tags;
+    }
+
+    pub fn sort_label(&self) -> String {
+        format!(
+            "{} {}",
+            self.sort_mode.field.label(),
+            if self.sort_mode.reverse {
+                "desc"
+            } else {
+                "asc"
+            }
+        )
+    }
+
+    pub fn cycle_sort_field(&mut self) -> io::Result<()> {
+        self.sort_mode.field = self.sort_mode.field.next();
+        self.refresh()
+    }
+
+    pub fn toggle_sort_direction(&mut self) -> io::Result<()> {
+        self.sort_mode.reverse = !self.sort_mode.reverse;
+        self.refresh()
     }
 
     pub fn open_selected_directory(&mut self) -> io::Result<bool> {
@@ -185,6 +340,7 @@ impl PanelState {
 
         self.cwd = entry.path.clone();
         self.cursor = 0;
+        self.tagged.clear();
         self.refresh()?;
         Ok(true)
     }
@@ -196,6 +352,7 @@ impl PanelState {
 
         self.cwd = parent.to_path_buf();
         self.cursor = 0;
+        self.tagged.clear();
         self.refresh()?;
         Ok(true)
     }
@@ -225,7 +382,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "Tab switch panel | Enter open dir | Backspace up | F2/F7/F9 dialogs | q quit",
+                "Ins tag | Alt-* invert | PgUp/PgDn/Home/End nav | F6/F8 sort | F2/F7/F9 dialogs | q quit",
             ),
             last_dialog_result: None,
             routes: vec![Route::FileManager],
@@ -280,6 +437,41 @@ impl AppState {
             }
             AppCommand::MoveUp => self.move_cursor(-1),
             AppCommand::MoveDown => self.move_cursor(1),
+            AppCommand::PageUp => self.active_panel_mut().move_cursor_page(-1),
+            AppCommand::PageDown => self.active_panel_mut().move_cursor_page(1),
+            AppCommand::MoveHome => self.active_panel_mut().move_cursor_home(),
+            AppCommand::MoveEnd => self.active_panel_mut().move_cursor_end(),
+            AppCommand::ToggleTag => {
+                let selected = self.active_panel().selected_entry();
+                if selected.is_none() {
+                    self.set_status("No entry selected");
+                } else if selected.is_some_and(|entry| entry.is_parent) {
+                    self.set_status("Parent entry cannot be tagged");
+                } else {
+                    let added = self.active_panel_mut().toggle_tag_on_cursor();
+                    let count = self.active_panel().tagged_count();
+                    self.set_status(if added {
+                        format!("Tagged entry ({count} total)")
+                    } else {
+                        format!("Untagged entry ({count} total)")
+                    });
+                }
+            }
+            AppCommand::InvertTags => {
+                self.active_panel_mut().invert_tags();
+                let count = self.active_panel().tagged_count();
+                self.set_status(format!("Inverted tags ({count} selected)"));
+            }
+            AppCommand::SortNext => {
+                self.active_panel_mut().cycle_sort_field()?;
+                let label = self.active_panel().sort_label();
+                self.set_status(format!("Sort: {label}"));
+            }
+            AppCommand::SortReverse => {
+                self.active_panel_mut().toggle_sort_direction()?;
+                let label = self.active_panel().sort_label();
+                self.set_status(format!("Sort: {label}"));
+            }
             AppCommand::OpenEntry => {
                 if self.open_selected_directory()? {
                     self.set_status("Opened selected directory");
@@ -354,24 +546,48 @@ impl AppState {
     }
 }
 
-fn read_entries(dir: &Path) -> io::Result<Vec<FileEntry>> {
+fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     for entry_result in fs::read_dir(dir)? {
         let entry = entry_result?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let file_type = entry.file_type()?;
+        let metadata = entry.metadata().ok();
+        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
         if file_type.is_dir() {
-            entries.push(FileEntry::directory(name, path));
+            entries.push(FileEntry::directory(name, path, size, modified));
         } else {
-            entries.push(FileEntry::file(name, path));
+            entries.push(FileEntry::file(name, path, size, modified));
         }
     }
 
-    entries.sort_by(|left, right| match (left.is_dir, right.is_dir) {
-        (true, false) => Ordering::Less,
-        (false, true) => Ordering::Greater,
-        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+    entries.sort_by(|left, right| {
+        let dir_order = match (left.is_dir, right.is_dir) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => Ordering::Equal,
+        };
+        if dir_order != Ordering::Equal {
+            return dir_order;
+        }
+
+        let mut order = match sort_mode.field {
+            SortField::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+            SortField::Size => left
+                .size
+                .cmp(&right.size)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase())),
+            SortField::Modified => left
+                .modified
+                .cmp(&right.modified)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase())),
+        };
+        if sort_mode.reverse {
+            order = order.reverse();
+        }
+        order
     });
 
     if let Some(parent) = dir.parent() {
@@ -383,6 +599,7 @@ fn read_entries(dir: &Path) -> io::Result<Vec<FileEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
@@ -392,6 +609,8 @@ mod tests {
             path: PathBuf::from(name),
             is_dir: false,
             is_parent: false,
+            size: 0,
+            modified: None,
         }
     }
 
@@ -410,6 +629,8 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             entries: vec![file_entry("a"), file_entry("b")],
             cursor: 0,
+            sort_mode: SortMode::default(),
+            tagged: HashSet::new(),
         };
 
         panel.move_cursor(-1);
@@ -442,6 +663,87 @@ mod tests {
     }
 
     #[test]
+    fn toggle_and_invert_tags_work_for_non_parent_entries() {
+        let mut panel = PanelState {
+            cwd: PathBuf::from("/tmp"),
+            entries: vec![
+                FileEntry::parent(PathBuf::from("/")),
+                file_entry("a"),
+                file_entry("b"),
+            ],
+            cursor: 0,
+            sort_mode: SortMode::default(),
+            tagged: HashSet::new(),
+        };
+
+        assert!(
+            !panel.toggle_tag_on_cursor(),
+            "parent entry should not be taggable"
+        );
+        assert_eq!(panel.tagged_count(), 0);
+
+        panel.cursor = 1;
+        assert!(panel.toggle_tag_on_cursor());
+        assert_eq!(panel.tagged_count(), 1);
+        assert!(panel.is_tagged(Path::new("a")));
+
+        panel.invert_tags();
+        assert_eq!(panel.tagged_count(), 1);
+        assert!(panel.is_tagged(Path::new("b")));
+        assert!(!panel.is_tagged(Path::new("a")));
+    }
+
+    #[test]
+    fn page_home_end_navigation_stays_bounded() {
+        let entries = vec![
+            FileEntry::parent(PathBuf::from("/tmp")),
+            file_entry("a"),
+            file_entry("b"),
+            file_entry("c"),
+        ];
+        let mut panel = PanelState {
+            cwd: PathBuf::from("/tmp"),
+            entries,
+            cursor: 1,
+            sort_mode: SortMode::default(),
+            tagged: HashSet::new(),
+        };
+
+        panel.move_cursor_home();
+        assert_eq!(panel.cursor, 0);
+
+        panel.move_cursor_end();
+        assert_eq!(panel.cursor, 3);
+
+        panel.move_cursor_page(1);
+        assert_eq!(panel.cursor, 3);
+
+        panel.move_cursor_page(-1);
+        assert_eq!(panel.cursor, 0);
+    }
+
+    #[test]
+    fn sort_mode_cycles_and_toggles_direction() {
+        let mut panel = PanelState {
+            cwd: PathBuf::from("/tmp"),
+            entries: Vec::new(),
+            cursor: 0,
+            sort_mode: SortMode::default(),
+            tagged: HashSet::new(),
+        };
+
+        panel.sort_mode.field = SortField::Name;
+        panel.sort_mode.reverse = false;
+        assert_eq!(panel.sort_label(), "name asc");
+
+        panel.sort_mode.field = panel.sort_mode.field.next();
+        assert_eq!(panel.sort_mode.field, SortField::Size);
+
+        panel.sort_mode.reverse = true;
+        assert_eq!(panel.sort_label(), "size desc");
+    }
+
+    #[test]
     fn app_command_mapping_is_context_aware() {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
@@ -454,6 +756,14 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::DialogAccept),
             Some(AppCommand::DialogAccept)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::ToggleTag),
+            Some(AppCommand::ToggleTag)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::SortNext),
+            Some(AppCommand::SortNext)
         );
     }
 }

@@ -63,7 +63,12 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
         Style::default().fg(Color::Gray)
     };
 
-    let title = panel.cwd.to_string_lossy().into_owned();
+    let title = format!(
+        "{} | sort:{} | tagged:{}",
+        panel.cwd.to_string_lossy(),
+        panel.sort_label(),
+        panel.tagged_count()
+    );
     let items = if panel.entries.is_empty() {
         vec![ListItem::new("<empty>")]
     } else {
@@ -71,6 +76,11 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
             .entries
             .iter()
             .map(|entry| {
+                let tag_marker = if !entry.is_parent && panel.is_tagged(&entry.path) {
+                    '*'
+                } else {
+                    ' '
+                };
                 let label = if entry.is_parent {
                     String::from("..")
                 } else if entry.is_dir {
@@ -78,7 +88,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
                 } else {
                     entry.name.clone()
                 };
-                ListItem::new(label)
+                ListItem::new(format!("[{tag_marker}] {label}"))
             })
             .collect()
     };
