@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -148,6 +148,35 @@ pub fn current_skin() -> Arc<UiSkin> {
         .read()
         .map(|guard| Arc::clone(&guard))
         .unwrap_or_else(|_| Arc::new(UiSkin::fallback()))
+}
+
+pub fn current_skin_name() -> String {
+    current_skin().name().to_string()
+}
+
+pub fn list_available_skins(skin_dir: Option<&Path>) -> Vec<String> {
+    let mut names = BTreeSet::new();
+
+    for directory in search_dirs(skin_dir) {
+        let path = PathBuf::from(directory);
+        let Ok(entries) = fs::read_dir(path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !extension.eq_ignore_ascii_case("ini") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+                names.insert(stem.to_string());
+            }
+        }
+    }
+
+    names.into_iter().collect()
 }
 
 fn resolve_skin_path(name: &str, skin_dir: Option<&Path>) -> Option<PathBuf> {

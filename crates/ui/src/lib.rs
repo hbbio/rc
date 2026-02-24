@@ -24,8 +24,8 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 #[cfg(unix)]
 use nix::sys::statvfs::statvfs;
 
-pub use skin::configure_skin;
 use skin::{UiSkin, current_skin};
+pub use skin::{configure_skin, current_skin_name, list_available_skins};
 
 struct HighlightResources {
     syntax_set: SyntaxSet,

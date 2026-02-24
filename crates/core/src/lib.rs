@@ -88,6 +88,7 @@ pub enum AppCommand {
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
+    OpenSkinDialog,
     DialogAccept,
     DialogCancel,
     DialogFocusNext,
@@ -213,6 +214,7 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenListboxDialog) => {
                 Some(Self::OpenListboxDialog)
             }
+            (KeyContext::FileManager, KeyCommand::OpenSkinDialog) => Some(Self::OpenSkinDialog),
             (_, KeyCommand::DialogAccept) => Some(Self::DialogAccept),
             (_, KeyCommand::DialogCancel) => Some(Self::DialogCancel),
             (_, KeyCommand::DialogFocusNext) => Some(Self::DialogFocusNext),
@@ -908,6 +910,9 @@ enum PendingDialogAction {
         destination_dir: PathBuf,
     },
     SetDefaultOverwritePolicy,
+    SetSkin {
+        original_skin: String,
+    },
     ViewerSearch {
         direction: ViewerSearchDirection,
     },
@@ -1257,6 +1262,11 @@ pub struct AppState {
     pub jobs_cursor: usize,
     pub hotlist: Vec<PathBuf>,
     pub hotlist_cursor: usize,
+    available_skins: Vec<String>,
+    active_skin_name: String,
+    pending_skin_change: Option<String>,
+    pending_skin_preview: Option<String>,
+    pending_skin_revert: Option<String>,
     routes: Vec<Route>,
     paused_find_results: Option<FindResultsState>,
     pending_dialog_action: Option<PendingDialogAction>,
@@ -1285,6 +1295,11 @@ impl AppState {
             jobs_cursor: 0,
             hotlist: Vec::new(),
             hotlist_cursor: 0,
+            available_skins: Vec::new(),
+            active_skin_name: String::from("default"),
+            pending_skin_change: None,
+            pending_skin_preview: None,
+            pending_skin_revert: None,
             routes: vec![Route::FileManager],
             paused_find_results: None,
             pending_dialog_action: None,
@@ -1429,6 +1444,28 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
+    }
+
+    pub fn set_available_skins(&mut self, mut skins: Vec<String>) {
+        skins.sort();
+        skins.dedup();
+        self.available_skins = skins;
+    }
+
+    pub fn set_active_skin_name(&mut self, skin_name: impl Into<String>) {
+        self.active_skin_name = skin_name.into();
+    }
+
+    pub fn take_pending_skin_change(&mut self) -> Option<String> {
+        self.pending_skin_change.take()
+    }
+
+    pub fn take_pending_skin_preview(&mut self) -> Option<String> {
+        self.pending_skin_preview.take()
+    }
+
+    pub fn take_pending_skin_revert(&mut self) -> Option<String> {
+        self.pending_skin_revert.take()
     }
 
     pub fn clear_xmap(&mut self) {
@@ -2227,6 +2264,7 @@ impl AppState {
             AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
+            AppCommand::OpenSkinDialog => self.start_skin_dialog(),
             AppCommand::DialogAccept => self.handle_dialog_event(DialogEvent::Accept),
             AppCommand::DialogCancel => self.handle_dialog_event(DialogEvent::Cancel),
             AppCommand::DialogFocusNext => self.handle_dialog_event(DialogEvent::FocusNext),
@@ -2469,6 +2507,28 @@ impl AppState {
         self.set_status("Choose default overwrite policy");
     }
 
+    fn start_skin_dialog(&mut self) {
+        if self.available_skins.is_empty() {
+            self.set_status("No skins available");
+            return;
+        }
+
+        let selected = self
+            .available_skins
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&self.active_skin_name))
+            .unwrap_or(0);
+        self.pending_dialog_action = Some(PendingDialogAction::SetSkin {
+            original_skin: self.active_skin_name.clone(),
+        });
+        self.routes.push(Route::Dialog(DialogState::listbox(
+            "Skin",
+            self.available_skins.clone(),
+            selected,
+        )));
+        self.set_status("Choose skin");
+    }
+
     fn queue_copy_or_move_job(
         &mut self,
         kind: TransferKind,
@@ -2693,6 +2753,28 @@ impl AppState {
                 self.set_status("Overwrite policy unchanged");
             }
             (
+                Some(PendingDialogAction::SetSkin { .. }),
+                DialogResult::ListboxSubmitted {
+                    value: Some(value), ..
+                },
+            ) => {
+                self.pending_skin_preview = None;
+                self.pending_skin_change = Some(value.clone());
+                self.set_status(format!("Skin selected: {value}"));
+            }
+            (
+                Some(PendingDialogAction::SetSkin { .. }),
+                DialogResult::ListboxSubmitted { value: None, .. },
+            ) => {
+                self.pending_skin_preview = None;
+                self.set_status("Skin unchanged");
+            }
+            (Some(PendingDialogAction::SetSkin { original_skin }), DialogResult::Canceled) => {
+                self.pending_skin_preview = None;
+                self.pending_skin_revert = Some(original_skin);
+                self.set_status("Skin unchanged");
+            }
+            (
                 Some(PendingDialogAction::FindQuery { base_dir }),
                 DialogResult::InputSubmitted(value),
             ) => {
@@ -2806,14 +2888,28 @@ impl AppState {
     }
 
     fn handle_dialog_event(&mut self, event: DialogEvent) {
+        let preview_skin = matches!(
+            self.pending_dialog_action,
+            Some(PendingDialogAction::SetSkin { .. })
+        ) && matches!(event, DialogEvent::MoveUp | DialogEvent::MoveDown);
         let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
             return;
         };
         let transition = dialog.handle_event(event);
-        if let dialog::DialogTransition::Close(result) = transition {
-            self.routes.pop();
-            self.last_dialog_result = Some(result.clone());
-            self.finish_dialog(result);
+        match transition {
+            dialog::DialogTransition::Stay => {
+                if preview_skin
+                    && let DialogKind::Listbox(listbox) = &dialog.kind
+                    && let Some(value) = listbox.items.get(listbox.selected)
+                {
+                    self.pending_skin_preview = Some(value.clone());
+                }
+            }
+            dialog::DialogTransition::Close(result) => {
+                self.routes.pop();
+                self.last_dialog_result = Some(result.clone());
+                self.finish_dialog(result);
+            }
         }
     }
 }
@@ -3452,6 +3548,68 @@ mod tests {
             root.join("newdir").exists(),
             "mkdir should create directory"
         );
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn skin_dialog_emits_selected_skin() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-skin-dialog-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.set_available_skins(vec![String::from("default"), String::from("dark")]);
+        app.set_active_skin_name("default");
+
+        app.apply(AppCommand::OpenSkinDialog)
+            .expect("skin dialog should open");
+        assert_eq!(app.key_context(), KeyContext::Listbox);
+
+        app.apply(AppCommand::DialogListboxUp)
+            .expect("listbox up should move selection");
+        app.apply(AppCommand::DialogAccept)
+            .expect("skin dialog should submit");
+
+        assert_eq!(app.take_pending_skin_change(), Some(String::from("dark")));
+        assert_eq!(app.status_line, "Skin selected: dark");
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn skin_dialog_emits_preview_and_revert_on_cancel() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-skin-preview-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.set_available_skins(vec![String::from("default"), String::from("dark")]);
+        app.set_active_skin_name("default");
+
+        app.apply(AppCommand::OpenSkinDialog)
+            .expect("skin dialog should open");
+        app.apply(AppCommand::DialogListboxUp)
+            .expect("listbox up should move selection");
+        assert_eq!(app.take_pending_skin_preview(), Some(String::from("dark")));
+        assert_eq!(app.take_pending_skin_change(), None);
+        assert_eq!(app.take_pending_skin_revert(), None);
+
+        app.apply(AppCommand::DialogCancel)
+            .expect("skin dialog cancel should close");
+        assert_eq!(app.take_pending_skin_preview(), None);
+        assert_eq!(app.take_pending_skin_change(), None);
+        assert_eq!(
+            app.take_pending_skin_revert(),
+            Some(String::from("default"))
+        );
+        assert_eq!(app.status_line, "Skin unchanged");
+
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
@@ -4355,6 +4513,10 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenPanelizeDialog),
             Some(AppCommand::OpenPanelizeDialog)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenSkinDialog),
+            Some(AppCommand::OpenSkinDialog)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::EnterXMap),

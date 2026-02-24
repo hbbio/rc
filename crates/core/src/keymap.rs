@@ -133,6 +133,7 @@ pub enum KeyCommand {
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
+    OpenSkinDialog,
     Search,
     SearchBackward,
     SearchContinue,
@@ -191,6 +192,7 @@ impl KeyCommand {
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
+            "openskindialog" | "skin" | "skins" => Self::OpenSkinDialog,
             "search" => Self::Search,
             "searchback" | "searchbackward" | "searchreverse" => Self::SearchBackward,
             "searchcontinue" | "searchnext" => Self::SearchContinue,
@@ -763,6 +765,28 @@ OpenJobs = f3
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, cancel_job),
             Some(&KeyCommand::CancelJob)
+        );
+    }
+
+    #[test]
+    fn parser_maps_skin_dialog_action() {
+        let source = r#"
+[filemanager]
+Skin = alt-s
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        let skin = KeyChord {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, skin),
+            Some(&KeyCommand::OpenSkinDialog)
         );
     }
 

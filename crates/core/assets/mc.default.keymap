@@ -522,6 +522,7 @@ SortReverse = shift-f8
 OpenConfirmDialog = f2
 OpenInputDialog = f7
 OpenListboxDialog = f9
+OpenSkinDialog = alt-s; ctrl-k
 OpenFindDialog = alt-f; alt-question; ctrl-slash
 OpenTree = alt-t
 OpenHotlist = alt-h
