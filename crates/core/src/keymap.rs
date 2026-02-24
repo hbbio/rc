@@ -940,4 +940,21 @@ Reread = ctrl-r
             "fixture should exercise unknown action reporting",
         );
     }
+
+    #[test]
+    fn bundled_keymap_includes_upstream_extended_map_binding() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let ctrl_x = KeyChord {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        };
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, ctrl_x),
+            Some(&KeyCommand::EnterXMap)
+        );
+    }
 }
