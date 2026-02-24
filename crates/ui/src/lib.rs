@@ -12,7 +12,8 @@ use ratatui::widgets::{
 };
 use rc_core::{
     ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry, FindResultsState,
-    HelpSpan, HelpState, JobRecord, JobStatus, PanelState, Route, TreeState, ViewerState,
+    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route, TreeState,
+    ViewerState, top_menu_bar_items, top_menus,
 };
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -63,7 +64,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         ])
         .split(frame.area());
 
-    render_menu_bar(frame, root[0], skin.as_ref());
+    let active_menu = match state.top_route() {
+        Route::Menu(menu) => Some(menu.active_menu),
+        _ => None,
+    };
+    render_menu_bar(frame, root[0], skin.as_ref(), active_menu);
 
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
@@ -112,16 +117,21 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Tree(tree) => render_tree_screen(frame, tree, skin.as_ref()),
         Route::Hotlist => render_hotlist_screen(frame, state, skin.as_ref()),
         Route::Help(help) => render_help_screen(frame, help, skin.as_ref()),
+        Route::Menu(menu) => render_menu_overlay(frame, menu, skin.as_ref()),
         Route::FileManager => {}
     }
 }
 
-fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin) {
+fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, active_menu: Option<usize>) {
     let menu_style = skin.style("menu", "_default_");
     let hot_style = skin.style("menu", "menuhot");
-    let items = ["Left", "File", "Command", "Options", "Right"];
     let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
-    for item in items {
+    for (index, item) in top_menus().iter().map(|menu| menu.title).enumerate() {
+        if active_menu == Some(index) {
+            spans.push(Span::styled(item, hot_style));
+            spans.push(Span::raw("  "));
+            continue;
+        }
         let mut chars = item.chars();
         let first = chars.next().unwrap_or_default().to_string();
         let rest: String = chars.collect();
@@ -1025,6 +1035,55 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     );
 }
 
+fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
+    let Some(menu_item) = top_menu_bar_items()
+        .into_iter()
+        .find(|item| item.index == menu.active_menu)
+    else {
+        return;
+    };
+
+    let area = frame.area();
+    if area.height <= 2 {
+        return;
+    }
+
+    let popup_x = menu.popup_origin_x().min(area.width.saturating_sub(1));
+    let popup_y = 1u16;
+    let popup_width = menu.popup_width().min(area.width.saturating_sub(popup_x));
+    let popup_height = menu.popup_height().min(area.height.saturating_sub(popup_y));
+    if popup_width == 0 || popup_height == 0 {
+        return;
+    }
+
+    let popup = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(menu_item.title)
+        .borders(Borders::ALL)
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("menu", "_default_"))
+        .style(skin.style("menu", "_default_"));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let items: Vec<ListItem<'_>> = menu
+        .active_entries()
+        .iter()
+        .map(|entry| ListItem::new(format!(" {}", entry.label)))
+        .collect();
+    let list = List::new(items)
+        .style(skin.style("menu", "_default_"))
+        .highlight_style(skin.style("dialog", "dfocus"))
+        .highlight_symbol(" ");
+    let mut state = ListState::default();
+    if !menu.active_entries().is_empty() {
+        state.select(Some(menu.selected_entry));
+    }
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
 fn render_help_screen(frame: &mut Frame, help: &HelpState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 116, 36);
     frame.render_widget(Clear, area);
@@ -1452,6 +1511,26 @@ mod tests {
         assert!(
             frame.contains("Tab/Shift-Tab"),
             "frame should include help viewer hint line"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_draws_menu_overlay() {
+        let root = temp_root("menu");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenMenuAt(1))
+            .expect("menu route should open");
+
+        let frame = render_to_text(&app, 120, 40);
+        assert!(
+            frame.contains("File"),
+            "frame should include active menu title"
+        );
+        assert!(
+            frame.contains("Copy"),
+            "frame should include menu entry labels"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

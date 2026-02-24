@@ -521,7 +521,7 @@ SortNext = shift-f6
 SortReverse = shift-f8
 OpenConfirmDialog = f2
 OpenInputDialog = f7
-OpenListboxDialog = f9
+OpenMenu = f9
 OpenSkinDialog = alt-s; ctrl-k
 OpenFindDialog = alt-f; alt-question; ctrl-slash
 OpenTree = alt-t
@@ -547,8 +547,13 @@ Cancel = esc
 [menu]
 Up = up
 Down = down
+Left = left
+Right = right
+Home = home
+End = end
 Ok = enter
 Cancel = esc
+Quit = f10
 
 [jobs]
 Up = up

@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode as CrosstermKeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode as CrosstermKeyCode, KeyEvent,
+    KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -121,7 +124,8 @@ fn run_app(
 
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to enter alternate screen")?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("failed to create terminal backend")?;
@@ -175,8 +179,12 @@ fn shutdown_background_worker(
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("failed to leave alternate screen")?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .context("failed to leave alternate screen")?;
     terminal.show_cursor().context("failed to restore cursor")?;
     Ok(())
 }
@@ -213,19 +221,34 @@ fn run_event_loop(
             .context("failed to draw frame")?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout).context("failed to poll input")?
-            && let Event::Key(key_event) = event::read().context("failed to read input event")?
-            && key_event.kind == KeyEventKind::Press
-            && handle_key(
-                state,
-                keymap,
-                key_event,
-                channels.worker_tx,
-                channels.background_tx,
-                skin_runtime,
-            )?
-        {
-            return Ok(());
+        if event::poll(timeout).context("failed to poll input")? {
+            match event::read().context("failed to read input event")? {
+                Event::Key(key_event)
+                    if key_event.kind == KeyEventKind::Press
+                        && handle_key(
+                            state,
+                            keymap,
+                            key_event,
+                            channels.worker_tx,
+                            channels.background_tx,
+                            skin_runtime,
+                        )? =>
+                {
+                    return Ok(());
+                }
+                Event::Mouse(mouse_event)
+                    if handle_mouse(
+                        state,
+                        mouse_event,
+                        channels.worker_tx,
+                        channels.background_tx,
+                        skin_runtime,
+                    )? =>
+                {
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
 
         if last_tick.elapsed() >= tick_rate {
@@ -274,6 +297,26 @@ fn handle_key(
         return Ok(false);
     };
 
+    Ok(
+        apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
+            == ApplyResult::Quit,
+    )
+}
+
+fn handle_mouse(
+    state: &mut AppState,
+    mouse_event: MouseEvent,
+    worker_tx: &Sender<WorkerCommand>,
+    background_tx: &Sender<BackgroundCommand>,
+    skin_runtime: &SkinRuntimeConfig,
+) -> Result<bool> {
+    if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return Ok(false);
+    }
+
+    let Some(command) = state.command_for_left_click(mouse_event.column, mouse_event.row) else {
+        return Ok(false);
+    };
     Ok(
         apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
             == ApplyResult::Quit,

@@ -105,9 +105,12 @@ impl KeyChord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyCommand {
     OpenHelp,
+    OpenMenu,
     Quit,
     PanelOther,
     EnterXMap,
+    CursorLeft,
+    CursorRight,
     CursorUp,
     CursorDown,
     PageUp,
@@ -170,9 +173,12 @@ impl KeyCommand {
 
         match normalized.as_str() {
             "help" => Self::OpenHelp,
+            "menu" | "openmenu" | "pulldown" => Self::OpenMenu,
             "quit" => Self::Quit,
             "panelother" => Self::PanelOther,
             "extendedkeymap" => Self::EnterXMap,
+            "left" => Self::CursorLeft,
+            "right" => Self::CursorRight,
             "up" => Self::CursorUp,
             "down" => Self::CursorDown,
             "pageup" | "pgup" => Self::PageUp,
@@ -656,6 +662,57 @@ Bottom = s-g
                 },
             ),
             Some(&KeyCommand::End)
+        );
+    }
+
+    #[test]
+    fn parser_supports_menu_context_bindings() {
+        let source = r#"
+[filemanager]
+Menu = f9
+
+[menu]
+Up = up
+Down = down
+Left = left
+Right = right
+Ok = enter
+Cancel = esc
+Quit = f10
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(9))),
+            Some(&KeyCommand::OpenMenu)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Up)),
+            Some(&KeyCommand::CursorUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Down)),
+            Some(&KeyCommand::CursorDown)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Left)),
+            Some(&KeyCommand::CursorLeft)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Right)),
+            Some(&KeyCommand::CursorRight)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Enter)),
+            Some(&KeyCommand::DialogAccept)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Esc)),
+            Some(&KeyCommand::DialogCancel)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::F(10))),
+            Some(&KeyCommand::Quit)
         );
     }
 

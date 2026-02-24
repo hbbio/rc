@@ -34,6 +34,9 @@ use crate::keymap::{KeyCommand, KeyContext};
 pub enum AppCommand {
     OpenHelp,
     CloseHelp,
+    OpenMenu,
+    OpenMenuAt(usize),
+    CloseMenu,
     Quit,
     CloseViewer,
     OpenFindDialog,
@@ -93,6 +96,14 @@ pub enum AppCommand {
     OpenInputDialog,
     OpenListboxDialog,
     OpenSkinDialog,
+    MenuMoveUp,
+    MenuMoveDown,
+    MenuMoveLeft,
+    MenuMoveRight,
+    MenuHome,
+    MenuEnd,
+    MenuAccept,
+    MenuSelectAt(usize),
     HelpMoveUp,
     HelpMoveDown,
     HelpPageUp,
@@ -134,6 +145,17 @@ impl AppCommand {
     pub fn from_key_command(context: KeyContext, key_command: &KeyCommand) -> Option<Self> {
         match (context, key_command) {
             (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
+            (KeyContext::FileManager, KeyCommand::OpenMenu) => Some(Self::OpenMenu),
+            (KeyContext::Menu, KeyCommand::Quit) => Some(Self::CloseMenu),
+            (KeyContext::Menu, KeyCommand::DialogCancel) => Some(Self::CloseMenu),
+            (KeyContext::Menu, KeyCommand::DialogAccept)
+            | (KeyContext::Menu, KeyCommand::OpenEntry) => Some(Self::MenuAccept),
+            (KeyContext::Menu, KeyCommand::CursorUp) => Some(Self::MenuMoveUp),
+            (KeyContext::Menu, KeyCommand::CursorDown) => Some(Self::MenuMoveDown),
+            (KeyContext::Menu, KeyCommand::CursorLeft) => Some(Self::MenuMoveLeft),
+            (KeyContext::Menu, KeyCommand::CursorRight) => Some(Self::MenuMoveRight),
+            (KeyContext::Menu, KeyCommand::Home) => Some(Self::MenuHome),
+            (KeyContext::Menu, KeyCommand::End) => Some(Self::MenuEnd),
             (KeyContext::FileManager, KeyCommand::Quit) => Some(Self::Quit),
             (KeyContext::Help, KeyCommand::Quit) => Some(Self::CloseHelp),
             (KeyContext::Viewer, KeyCommand::Quit) => Some(Self::CloseViewer),
@@ -259,6 +281,201 @@ impl AppCommand {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MenuEntry {
+    pub label: &'static str,
+    pub command: AppCommand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TopMenu {
+    pub title: &'static str,
+    pub entries: &'static [MenuEntry],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MenuBarItem {
+    pub index: usize,
+    pub title: &'static str,
+    pub start_x: u16,
+    pub end_x: u16,
+}
+
+const LEFT_MENU_ENTRIES: [MenuEntry; 6] = [
+    MenuEntry {
+        label: "Find file",
+        command: AppCommand::OpenFindDialog,
+    },
+    MenuEntry {
+        label: "Directory tree",
+        command: AppCommand::OpenTree,
+    },
+    MenuEntry {
+        label: "Directory hotlist",
+        command: AppCommand::OpenHotlist,
+    },
+    MenuEntry {
+        label: "External panelize",
+        command: AppCommand::OpenPanelizeDialog,
+    },
+    MenuEntry {
+        label: "Skin",
+        command: AppCommand::OpenSkinDialog,
+    },
+    MenuEntry {
+        label: "Help",
+        command: AppCommand::OpenHelp,
+    },
+];
+
+const FILE_MENU_ENTRIES: [MenuEntry; 7] = [
+    MenuEntry {
+        label: "View",
+        command: AppCommand::OpenEntry,
+    },
+    MenuEntry {
+        label: "Copy",
+        command: AppCommand::Copy,
+    },
+    MenuEntry {
+        label: "Move",
+        command: AppCommand::Move,
+    },
+    MenuEntry {
+        label: "Mkdir",
+        command: AppCommand::OpenInputDialog,
+    },
+    MenuEntry {
+        label: "Delete",
+        command: AppCommand::Delete,
+    },
+    MenuEntry {
+        label: "Rename",
+        command: AppCommand::OpenConfirmDialog,
+    },
+    MenuEntry {
+        label: "Quit",
+        command: AppCommand::Quit,
+    },
+];
+
+const COMMAND_MENU_ENTRIES: [MenuEntry; 6] = [
+    MenuEntry {
+        label: "Jobs",
+        command: AppCommand::OpenJobsScreen,
+    },
+    MenuEntry {
+        label: "Cancel job",
+        command: AppCommand::CancelJob,
+    },
+    MenuEntry {
+        label: "Find file",
+        command: AppCommand::OpenFindDialog,
+    },
+    MenuEntry {
+        label: "Directory tree",
+        command: AppCommand::OpenTree,
+    },
+    MenuEntry {
+        label: "Directory hotlist",
+        command: AppCommand::OpenHotlist,
+    },
+    MenuEntry {
+        label: "Help",
+        command: AppCommand::OpenHelp,
+    },
+];
+
+const OPTIONS_MENU_ENTRIES: [MenuEntry; 5] = [
+    MenuEntry {
+        label: "Sort next",
+        command: AppCommand::SortNext,
+    },
+    MenuEntry {
+        label: "Sort reverse",
+        command: AppCommand::SortReverse,
+    },
+    MenuEntry {
+        label: "Reread",
+        command: AppCommand::Reread,
+    },
+    MenuEntry {
+        label: "Skin",
+        command: AppCommand::OpenSkinDialog,
+    },
+    MenuEntry {
+        label: "Panelize",
+        command: AppCommand::OpenPanelizeDialog,
+    },
+];
+
+const RIGHT_MENU_ENTRIES: [MenuEntry; 3] = [
+    MenuEntry {
+        label: "Swap panels",
+        command: AppCommand::SwitchPanel,
+    },
+    MenuEntry {
+        label: "Directory tree",
+        command: AppCommand::OpenTree,
+    },
+    MenuEntry {
+        label: "Directory hotlist",
+        command: AppCommand::OpenHotlist,
+    },
+];
+
+const TOP_MENUS: [TopMenu; 5] = [
+    TopMenu {
+        title: "Left",
+        entries: &LEFT_MENU_ENTRIES,
+    },
+    TopMenu {
+        title: "File",
+        entries: &FILE_MENU_ENTRIES,
+    },
+    TopMenu {
+        title: "Command",
+        entries: &COMMAND_MENU_ENTRIES,
+    },
+    TopMenu {
+        title: "Options",
+        entries: &OPTIONS_MENU_ENTRIES,
+    },
+    TopMenu {
+        title: "Right",
+        entries: &RIGHT_MENU_ENTRIES,
+    },
+];
+
+pub fn top_menus() -> &'static [TopMenu] {
+    &TOP_MENUS
+}
+
+pub fn top_menu_bar_items() -> Vec<MenuBarItem> {
+    let mut items = Vec::with_capacity(TOP_MENUS.len());
+    let mut cursor_x = 1u16;
+    for (index, menu) in TOP_MENUS.iter().enumerate() {
+        let title_width = menu.title.chars().count() as u16;
+        let start_x = cursor_x;
+        let end_x = start_x.saturating_add(title_width.saturating_sub(1));
+        items.push(MenuBarItem {
+            index,
+            title: menu.title,
+            start_x,
+            end_x,
+        });
+        cursor_x = end_x.saturating_add(3);
+    }
+    items
+}
+
+pub fn top_menu_hit_test(column: u16) -> Option<usize> {
+    top_menu_bar_items()
+        .into_iter()
+        .find(|item| column >= item.start_x && column <= item.end_x)
+        .map(|item| item.index)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -907,10 +1124,146 @@ impl TreeState {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MenuState {
+    pub active_menu: usize,
+    pub selected_entry: usize,
+}
+
+impl MenuState {
+    fn new(active_menu: usize) -> Self {
+        let mut state = Self {
+            active_menu: 0,
+            selected_entry: 0,
+        };
+        state.set_active_menu(active_menu);
+        state
+    }
+
+    pub fn active_menu_title(&self) -> &'static str {
+        self.active_menu().title
+    }
+
+    pub fn active_entries(&self) -> &'static [MenuEntry] {
+        self.active_menu().entries
+    }
+
+    pub fn popup_origin_x(&self) -> u16 {
+        top_menu_bar_items()
+            .into_iter()
+            .find(|item| item.index == self.active_menu)
+            .map(|item| item.start_x.saturating_sub(1))
+            .unwrap_or(0)
+    }
+
+    pub fn popup_width(&self) -> u16 {
+        let inner = self
+            .active_entries()
+            .iter()
+            .map(|entry| entry.label.chars().count() as u16)
+            .max()
+            .unwrap_or(1)
+            .saturating_add(2);
+        inner.saturating_add(2)
+    }
+
+    pub fn popup_height(&self) -> u16 {
+        self.active_entries().len() as u16 + 2
+    }
+
+    fn set_active_menu(&mut self, active_menu: usize) {
+        self.active_menu = active_menu.min(TOP_MENUS.len().saturating_sub(1));
+        self.selected_entry = 0;
+        self.clamp_selected_entry();
+    }
+
+    fn move_up(&mut self) {
+        if self.active_entries().is_empty() {
+            self.selected_entry = 0;
+            return;
+        }
+        self.selected_entry = self.selected_entry.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if self.active_entries().is_empty() {
+            self.selected_entry = 0;
+            return;
+        }
+        let last = self.active_entries().len() - 1;
+        self.selected_entry = self.selected_entry.saturating_add(1).min(last);
+    }
+
+    fn move_left(&mut self) {
+        if self.active_menu == 0 {
+            self.active_menu = TOP_MENUS.len() - 1;
+        } else {
+            self.active_menu -= 1;
+        }
+        self.selected_entry = 0;
+    }
+
+    fn move_right(&mut self) {
+        self.active_menu = (self.active_menu + 1) % TOP_MENUS.len();
+        self.selected_entry = 0;
+    }
+
+    fn move_home(&mut self) {
+        self.selected_entry = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.selected_entry = self.active_entries().len().saturating_sub(1);
+    }
+
+    fn select_entry(&mut self, index: usize) {
+        self.selected_entry = index;
+        self.clamp_selected_entry();
+    }
+
+    fn selected_command(&self) -> Option<AppCommand> {
+        self.active_entries()
+            .get(self.selected_entry)
+            .map(|entry| entry.command)
+    }
+
+    fn hit_test_entry(&self, column: u16, row: u16) -> Option<usize> {
+        let x = self.popup_origin_x();
+        let y = 1u16;
+        let width = self.popup_width();
+        let items = self.active_entries().len() as u16;
+        if items == 0 {
+            return None;
+        }
+
+        if row < y + 1 || row >= y + 1 + items {
+            return None;
+        }
+        if column < x + 1 || column >= x + width.saturating_sub(1) {
+            return None;
+        }
+
+        Some((row - (y + 1)) as usize)
+    }
+
+    fn active_menu(&self) -> &'static TopMenu {
+        TOP_MENUS.get(self.active_menu).unwrap_or(&TOP_MENUS[0])
+    }
+
+    fn clamp_selected_entry(&mut self) {
+        if self.active_entries().is_empty() {
+            self.selected_entry = 0;
+        } else if self.selected_entry >= self.active_entries().len() {
+            self.selected_entry = self.active_entries().len() - 1;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
     Help(HelpState),
+    Menu(MenuState),
     Jobs,
     Viewer(ViewerState),
     FindResults(FindResultsState),
@@ -1779,6 +2132,70 @@ impl AppState {
         Some(help)
     }
 
+    fn open_menu(&mut self, menu_index: usize) {
+        if let Some(Route::Menu(menu)) = self.routes.last_mut() {
+            menu.set_active_menu(menu_index);
+            let title = menu.active_menu_title();
+            self.set_status(format!("Menu: {title}"));
+            return;
+        }
+
+        let menu = MenuState::new(menu_index);
+        self.set_status(format!("Menu: {}", menu.active_menu_title()));
+        self.routes.push(Route::Menu(menu));
+    }
+
+    fn close_menu(&mut self) {
+        if matches!(self.top_route(), Route::Menu(_)) {
+            self.routes.pop();
+            self.set_status("Closed menu");
+        }
+    }
+
+    fn menu_state_mut(&mut self) -> Option<&mut MenuState> {
+        let Some(Route::Menu(menu)) = self.routes.last_mut() else {
+            return None;
+        };
+        Some(menu)
+    }
+
+    fn accept_menu_selection(&mut self) -> Option<AppCommand> {
+        let selected = self
+            .menu_state_mut()
+            .and_then(|menu| menu.selected_command());
+        self.close_menu();
+        selected
+    }
+
+    fn accept_menu_selection_at(&mut self, index: usize) -> Option<AppCommand> {
+        if let Some(menu) = self.menu_state_mut() {
+            menu.select_entry(index);
+        }
+        self.accept_menu_selection()
+    }
+
+    pub fn command_for_left_click(&self, column: u16, row: u16) -> Option<AppCommand> {
+        if !matches!(self.top_route(), Route::FileManager | Route::Menu(_)) {
+            return None;
+        }
+
+        if row == 0
+            && let Some(menu_index) = top_menu_hit_test(column)
+        {
+            return Some(AppCommand::OpenMenuAt(menu_index));
+        }
+
+        let Route::Menu(menu) = self.top_route() else {
+            return None;
+        };
+
+        if let Some(entry_index) = menu.hit_test_entry(column, row) {
+            return Some(AppCommand::MenuSelectAt(entry_index));
+        }
+
+        Some(AppCommand::CloseMenu)
+    }
+
     fn open_jobs_screen(&mut self) {
         if !matches!(self.top_route(), Route::Jobs) {
             self.routes.push(Route::Jobs);
@@ -2196,8 +2613,12 @@ impl AppState {
         let clear_xmap_after_command = self.xmap_pending
             && matches!(self.top_route(), Route::FileManager)
             && !matches!(command, AppCommand::EnterXMap);
+        let mut follow_up_command = None;
 
         match command {
+            AppCommand::OpenMenu => self.open_menu(0),
+            AppCommand::OpenMenuAt(index) => self.open_menu(index),
+            AppCommand::CloseMenu => self.close_menu(),
             AppCommand::OpenHelp => self.open_help_screen(),
             AppCommand::CloseHelp => self.close_help_screen(),
             AppCommand::Quit => {
@@ -2329,6 +2750,42 @@ impl AppState {
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::MenuMoveUp => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_up();
+                }
+            }
+            AppCommand::MenuMoveDown => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_down();
+                }
+            }
+            AppCommand::MenuMoveLeft => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_left();
+                }
+            }
+            AppCommand::MenuMoveRight => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_right();
+                }
+            }
+            AppCommand::MenuHome => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_home();
+                }
+            }
+            AppCommand::MenuEnd => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_end();
+                }
+            }
+            AppCommand::MenuAccept => {
+                follow_up_command = self.accept_menu_selection();
+            }
+            AppCommand::MenuSelectAt(index) => {
+                follow_up_command = self.accept_menu_selection_at(index);
+            }
             AppCommand::HelpMoveUp => {
                 if let Some(help) = self.help_state_mut() {
                     help.move_lines(-1);
@@ -2494,6 +2951,10 @@ impl AppState {
             self.xmap_pending = false;
         }
 
+        if let Some(next_command) = follow_up_command {
+            return self.apply(next_command);
+        }
+
         Ok(ApplyResult::Continue)
     }
 
@@ -2524,6 +2985,7 @@ impl AppState {
                     KeyContext::Viewer
                 }
             }
+            Route::Menu(_) => KeyContext::Menu,
             Route::FindResults(_) => KeyContext::FindResults,
             Route::Tree(_) => KeyContext::Tree,
             Route::Hotlist => KeyContext::Hotlist,
@@ -3806,6 +4268,54 @@ mod tests {
     }
 
     #[test]
+    fn menu_route_supports_keyboard_navigation_and_selection() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-route-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenMenuAt(2))
+            .expect("menu route should open");
+        assert_eq!(app.key_context(), KeyContext::Menu);
+
+        app.apply(AppCommand::MenuAccept)
+            .expect("menu accept should execute selected action");
+        assert_eq!(app.key_context(), KeyContext::Jobs);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn menu_mouse_clicks_map_to_commands() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-mouse-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let command = app.command_for_left_click(8, 0);
+        assert_eq!(command, Some(AppCommand::OpenMenuAt(1)));
+
+        app.apply(AppCommand::OpenMenuAt(1))
+            .expect("menu route should open");
+        assert_eq!(
+            app.command_for_left_click(8, 3),
+            Some(AppCommand::MenuSelectAt(1))
+        );
+        assert_eq!(
+            app.command_for_left_click(100, 20),
+            Some(AppCommand::CloseMenu)
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn delete_command_queues_job_only_after_confirmation() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4633,6 +5143,34 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Help, &KeyCommand::HelpBack),
             Some(AppCommand::HelpBack)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenMenu),
+            Some(AppCommand::OpenMenu)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorUp),
+            Some(AppCommand::MenuMoveUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorDown),
+            Some(AppCommand::MenuMoveDown)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorLeft),
+            Some(AppCommand::MenuMoveLeft)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorRight),
+            Some(AppCommand::MenuMoveRight)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::DialogAccept),
+            Some(AppCommand::MenuAccept)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::DialogCancel),
+            Some(AppCommand::CloseMenu)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
