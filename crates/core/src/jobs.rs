@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -360,10 +360,18 @@ pub struct JobStatusCounts {
 }
 
 pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent>) {
+    let mut queued_cancellations = HashSet::new();
     while let Ok(command) = command_rx.recv() {
         match command {
-            WorkerCommand::Run(job) => run_single_job(job, &event_tx),
-            WorkerCommand::Cancel(_) => {}
+            WorkerCommand::Run(job) => {
+                if queued_cancellations.remove(&job.id) {
+                    job.cancel_flag.store(true, Ordering::Relaxed);
+                }
+                run_single_job(job, &event_tx);
+            }
+            WorkerCommand::Cancel(id) => {
+                queued_cancellations.insert(id);
+            }
             WorkerCommand::Shutdown => break,
         }
     }
@@ -377,7 +385,15 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     } = job;
     let _ = event_tx.send(JobEvent::Started { id });
 
-    let totals = match measure_request_totals(&request) {
+    if let Err(error) = ensure_not_canceled(cancel_flag.as_ref()) {
+        let _ = event_tx.send(JobEvent::Finished {
+            id,
+            result: Err(error.to_string()),
+        });
+        return;
+    }
+
+    let totals = match measure_request_totals(&request, cancel_flag.as_ref()) {
         Ok(totals) => totals,
         Err(error) => {
             let _ = event_tx.send(JobEvent::Finished {
@@ -429,7 +445,7 @@ fn copy_paths(
     for source in sources {
         progress.ensure_not_canceled()?;
         let destination = destination_path(source, destination_dir)?;
-        let source_totals = measure_path_totals(source)?;
+        let source_totals = measure_path_totals(source, progress.cancel_flag.as_ref())?;
         let Some(destination) =
             resolve_destination(source, destination, overwrite, source_totals, progress)?
         else {
@@ -448,7 +464,7 @@ fn move_paths(
 ) -> io::Result<()> {
     for source in sources {
         progress.ensure_not_canceled()?;
-        let source_totals = measure_path_totals(source)?;
+        let source_totals = measure_path_totals(source, progress.cancel_flag.as_ref())?;
         let destination = destination_path(source, destination_dir)?;
         let Some(destination) =
             resolve_destination(source, destination, overwrite, source_totals, progress)?
@@ -738,37 +754,46 @@ fn is_canceled_message(message: &str) -> bool {
     message == JOB_CANCELED_MESSAGE
 }
 
+fn ensure_not_canceled(cancel_flag: &AtomicBool) -> io::Result<()> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(canceled_error());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct JobTotals {
     items: u64,
     bytes: u64,
 }
 
-fn measure_request_totals(request: &JobRequest) -> io::Result<JobTotals> {
+fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
-        JobRequest::Copy { sources, .. } => measure_paths_totals(sources),
-        JobRequest::Move { sources, .. } => measure_paths_totals(sources),
-        JobRequest::Delete { targets } => measure_paths_totals(targets),
+        JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
+        JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
+        JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
     }
 }
 
-fn measure_paths_totals(paths: &[PathBuf]) -> io::Result<JobTotals> {
+fn measure_paths_totals(paths: &[PathBuf], cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     let mut totals = JobTotals::default();
     for path in paths {
-        let path_totals = measure_path_totals(path)?;
+        ensure_not_canceled(cancel_flag)?;
+        let path_totals = measure_path_totals(path, cancel_flag)?;
         totals.items = totals.items.saturating_add(path_totals.items);
         totals.bytes = totals.bytes.saturating_add(path_totals.bytes);
     }
     Ok(totals)
 }
 
-fn measure_path_totals(path: &Path) -> io::Result<JobTotals> {
+fn measure_path_totals(path: &Path, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     let mut totals = JobTotals::default();
-    measure_path(path, &mut totals)?;
+    measure_path(path, &mut totals, cancel_flag)?;
     Ok(totals)
 }
 
-fn measure_path(path: &Path, totals: &mut JobTotals) -> io::Result<()> {
+fn measure_path(path: &Path, totals: &mut JobTotals, cancel_flag: &AtomicBool) -> io::Result<()> {
+    ensure_not_canceled(cancel_flag)?;
     let metadata = fs::symlink_metadata(path)?;
     totals.items = totals.items.saturating_add(1);
 
@@ -777,8 +802,9 @@ fn measure_path(path: &Path, totals: &mut JobTotals) -> io::Result<()> {
     }
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
+            ensure_not_canceled(cancel_flag)?;
             let entry = entry?;
-            measure_path(&entry.path(), totals)?;
+            measure_path(&entry.path(), totals, cancel_flag)?;
         }
         return Ok(());
     }
@@ -869,10 +895,7 @@ impl<'a> ProgressTracker<'a> {
     }
 
     fn ensure_not_canceled(&self) -> io::Result<()> {
-        if self.cancel_flag.load(Ordering::Relaxed) {
-            return Err(canceled_error());
-        }
-        Ok(())
+        ensure_not_canceled(self.cancel_flag.as_ref())
     }
 }
 
@@ -881,6 +904,8 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{self, Receiver};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -995,6 +1020,75 @@ mod tests {
         worker
             .join()
             .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn worker_cancel_command_marks_queued_job_as_canceled() {
+        let root = make_temp_dir("queued-cancel-command");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let payload = vec![8_u8; 512 * 1024];
+        let source_file = source_dir.join("blob.bin");
+        fs::write(&source_file, payload).expect("source payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
+        });
+        let copy_id = copy_job.id;
+        command_tx
+            .send(WorkerCommand::Cancel(copy_id))
+            .expect("cancel command should send");
+        command_tx
+            .send(WorkerCommand::Run(copy_job))
+            .expect("copy command should send");
+
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => assert!(
+                is_canceled_message(&error),
+                "finished error should be a cancellation marker"
+            ),
+            _ => panic!("job should finish with a cancellation error"),
+        }
+        assert_eq!(manager.status_counts().canceled, 1);
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn measure_request_totals_stops_when_cancel_is_requested() {
+        let root = make_temp_dir("measure-cancel");
+        let source_file = root.join("source.bin");
+        fs::write(&source_file, vec![1_u8; 16 * 1024]).expect("source payload should be writable");
+
+        let request = JobRequest::Delete {
+            targets: vec![source_file],
+        };
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let error = measure_request_totals(&request, cancel_flag.as_ref())
+            .expect_err("canceled preflight should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
+
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
