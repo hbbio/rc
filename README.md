@@ -27,6 +27,14 @@ Requirements:
 - Rust stable toolchain
 - A terminal with ANSI support
 
+Install from a local checkout:
+
+```bash
+cargo install --path crates/app --locked
+```
+
+Note: recent Cargo versions require `--path` for local installs.
+
 Run:
 
 ```bash
