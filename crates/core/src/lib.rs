@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod keymap;
+
 use std::cmp::Ordering;
 use std::fs;
 use std::io;
@@ -160,6 +162,10 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
+    }
+
+    pub fn key_context(&self) -> keymap::KeyContext {
+        keymap::KeyContext::FileManager
     }
 }
 

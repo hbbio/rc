@@ -1,0 +1,18 @@
+[filemanager]
+Quit = q; esc; f10
+PanelOther = tab
+Up = up
+Down = down
+Enter = enter
+CdUp = backspace
+Reread = r; ctrl-r
+
+[dialog]
+Quit = esc
+
+[input]
+Quit = esc
+
+[listbox]
+Quit = esc
+
