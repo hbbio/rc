@@ -1437,19 +1437,19 @@ fn execute_background_command(
             cancel_flag,
         } => {
             let result = match &source {
-                PanelListingSource::Directory =>
+                PanelListingSource::Directory => {
                     read_entries_with_cancel(&cwd, sort_mode, Some(cancel_flag.as_ref()))
-                        .map_err(|error| error.to_string()),
-                PanelListingSource::Panelize { command } =>
-                    read_panelized_entries_with_cancel(
-                        &cwd,
-                        command,
-                        sort_mode,
-                        Some(cancel_flag.as_ref()),
-                    )
-                    .map_err(|error| error.to_string()),
+                        .map_err(|error| error.to_string())
+                }
+                PanelListingSource::Panelize { command } => read_panelized_entries_with_cancel(
+                    &cwd,
+                    command,
+                    sort_mode,
+                    Some(cancel_flag.as_ref()),
+                )
+                .map_err(|error| error.to_string()),
             };
-            event_tx
+            if event_tx
                 .send(BackgroundEvent::PanelRefreshed {
                     panel,
                     cwd,
@@ -1459,17 +1459,25 @@ fn execute_background_command(
                     result,
                 })
                 .is_ok()
-                .then_some(BackgroundExecution::Continue)
-                .unwrap_or(BackgroundExecution::Stop)
+            {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
         }
-        BackgroundCommand::LoadViewer { path } => event_tx
-            .send(BackgroundEvent::ViewerLoaded {
-                path: path.clone(),
-                result: ViewerState::open(path).map_err(|error| error.to_string()),
-            })
-            .is_ok()
-            .then_some(BackgroundExecution::Continue)
-            .unwrap_or(BackgroundExecution::Stop),
+        BackgroundCommand::LoadViewer { path } => {
+            if event_tx
+                .send(BackgroundEvent::ViewerLoaded {
+                    path: path.clone(),
+                    result: ViewerState::open(path).map_err(|error| error.to_string()),
+                })
+                .is_ok()
+            {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
+        }
         BackgroundCommand::FindEntries {
             job_id,
             query,
@@ -1480,7 +1488,7 @@ fn execute_background_command(
         } => {
             #[cfg(test)]
             {
-                run_find_search(
+                if run_find_search(
                     event_tx,
                     job_id,
                     query,
@@ -1488,9 +1496,11 @@ fn execute_background_command(
                     max_results,
                     cancel_flag.as_ref(),
                     pause_flag.as_ref(),
-                )
-                .then_some(BackgroundExecution::Continue)
-                .unwrap_or(BackgroundExecution::Stop)
+                ) {
+                    BackgroundExecution::Continue
+                } else {
+                    BackgroundExecution::Stop
+                }
             }
             #[cfg(not(test))]
             {
@@ -1530,11 +1540,14 @@ fn execute_background_command(
             max_entries,
         } => {
             let entries = build_tree_entries(&root, max_depth, max_entries);
-            event_tx
+            if event_tx
                 .send(BackgroundEvent::TreeReady { root, entries })
                 .is_ok()
-                .then_some(BackgroundExecution::Continue)
-                .unwrap_or(BackgroundExecution::Stop)
+            {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
         }
         BackgroundCommand::Shutdown => BackgroundExecution::Stop,
     }

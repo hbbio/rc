@@ -54,7 +54,9 @@ fn shutdown_cancels_and_joins_spawned_find_tasks() {
     command_tx
         .send(BackgroundCommand::Shutdown)
         .expect("shutdown command should send");
-    worker.join().expect("background worker should join cleanly");
+    worker
+        .join()
+        .expect("background worker should join cleanly");
 
     assert!(
         cancel_flag.load(Ordering::Relaxed),
