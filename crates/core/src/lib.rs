@@ -32,6 +32,7 @@ pub struct FileEntry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
+    pub is_parent: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -169,7 +170,12 @@ fn read_entries(dir: &Path) -> io::Result<Vec<FileEntry>> {
         let path = entry.path();
         let is_dir = entry.file_type()?.is_dir();
         let name = entry.file_name().to_string_lossy().into_owned();
-        entries.push(FileEntry { name, path, is_dir });
+        entries.push(FileEntry {
+            name,
+            path,
+            is_dir,
+            is_parent: false,
+        });
     }
 
     entries.sort_by(|left, right| match (left.is_dir, right.is_dir) {
@@ -177,18 +183,34 @@ fn read_entries(dir: &Path) -> io::Result<Vec<FileEntry>> {
         (false, true) => Ordering::Greater,
         _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
     });
+
+    if let Some(parent) = dir.parent() {
+        entries.insert(
+            0,
+            FileEntry {
+                name: String::from(".."),
+                path: parent.to_path_buf(),
+                is_dir: true,
+                is_parent: true,
+            },
+        );
+    }
+
     Ok(entries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{env, fs};
 
     fn file_entry(name: &str) -> FileEntry {
         FileEntry {
             name: name.to_string(),
             path: PathBuf::from(name),
             is_dir: false,
+            is_parent: false,
         }
     }
 
@@ -214,5 +236,27 @@ mod tests {
 
         panel.move_cursor(99);
         assert_eq!(panel.cursor, 1);
+    }
+
+    #[test]
+    fn panel_listing_prepends_parent_entry() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-parent-entry-{stamp}"));
+        let child = root.join("child");
+
+        fs::create_dir_all(&child).expect("must create child directory");
+        fs::write(child.join("a.txt"), "x").expect("must create child file");
+
+        let panel = PanelState::new(child.clone()).expect("panel should initialize");
+        let first = panel.entries.first().expect("entries should not be empty");
+        assert_eq!(first.name, "..");
+        assert!(first.is_parent);
+        assert!(first.is_dir);
+        assert_eq!(first.path, root);
+
+        fs::remove_dir_all(&root).expect("must remove temp tree");
     }
 }

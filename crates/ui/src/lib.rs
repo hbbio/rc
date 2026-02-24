@@ -61,8 +61,12 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool)
             .entries
             .iter()
             .map(|entry| {
-                let suffix = if entry.is_dir { "/" } else { "" };
-                ListItem::new(format!("{}{}", entry.name, suffix))
+                if entry.is_parent {
+                    ListItem::new("..")
+                } else {
+                    let suffix = if entry.is_dir { "/" } else { "" };
+                    ListItem::new(format!("{}{}", entry.name, suffix))
+                }
             })
             .collect()
     };
