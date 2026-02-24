@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod dialog;
+pub mod jobs;
 pub mod keymap;
 
 use std::cmp::Ordering;
@@ -11,6 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
+pub use jobs::{
+    JobEvent, JobId, JobKind, JobManager, JobRecord, JobRequest, JobStatus, JobStatusCounts,
+    WorkerCommand, WorkerJob, run_worker,
+};
 
 use crate::dialog::DialogEvent;
 use crate::keymap::{KeyCommand, KeyContext};
@@ -29,6 +34,9 @@ pub enum AppCommand {
     InvertTags,
     SortNext,
     SortReverse,
+    Copy,
+    Move,
+    Delete,
     OpenEntry,
     CdUp,
     Reread,
@@ -59,6 +67,9 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
             (KeyContext::FileManager, KeyCommand::SortNext) => Some(Self::SortNext),
             (KeyContext::FileManager, KeyCommand::SortReverse) => Some(Self::SortReverse),
+            (KeyContext::FileManager, KeyCommand::Copy) => Some(Self::Copy),
+            (KeyContext::FileManager, KeyCommand::Move) => Some(Self::Move),
+            (KeyContext::FileManager, KeyCommand::Delete) => Some(Self::Delete),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
@@ -308,6 +319,14 @@ impl PanelState {
         self.tagged = next_tags;
     }
 
+    pub fn tagged_paths_in_display_order(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.is_parent && self.tagged.contains(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
     pub fn sort_label(&self) -> String {
         format!(
             "{} {}",
@@ -370,7 +389,9 @@ pub struct AppState {
     pub active_panel: ActivePanel,
     pub status_line: String,
     pub last_dialog_result: Option<DialogResult>,
+    pub jobs: JobManager,
     routes: Vec<Route>,
+    pending_worker_jobs: Vec<WorkerJob>,
 }
 
 impl AppState {
@@ -382,10 +403,12 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from(
-                "Ins tag | Alt-* invert | PgUp/PgDn/Home/End nav | F6/F8 sort | F2/F7/F9 dialogs | q quit",
+                "Ins tag | F5 copy | F6 move | F8 delete | Shift-F6/F8 sort | q quit",
             ),
             last_dialog_result: None,
+            jobs: JobManager::new(),
             routes: vec![Route::FileManager],
+            pending_worker_jobs: Vec::new(),
         })
     }
 
@@ -398,12 +421,31 @@ impl AppState {
         &mut self.panels[index]
     }
 
+    pub fn passive_panel(&self) -> &PanelState {
+        let index = self.passive_panel_index();
+        &self.panels[index]
+    }
+
+    fn passive_panel_index(&self) -> usize {
+        match self.active_panel {
+            ActivePanel::Left => ActivePanel::Right.index(),
+            ActivePanel::Right => ActivePanel::Left.index(),
+        }
+    }
+
     pub fn toggle_active_panel(&mut self) {
         self.active_panel.toggle();
     }
 
     pub fn refresh_active_panel(&mut self) -> io::Result<()> {
         self.active_panel_mut().refresh()
+    }
+
+    pub fn refresh_panels(&mut self) -> io::Result<()> {
+        for panel in &mut self.panels {
+            panel.refresh()?;
+        }
+        Ok(())
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -420,6 +462,50 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
+    }
+
+    pub fn take_pending_worker_jobs(&mut self) -> Vec<WorkerJob> {
+        std::mem::take(&mut self.pending_worker_jobs)
+    }
+
+    pub fn handle_job_event(&mut self, event: JobEvent) {
+        self.jobs.handle_event(&event);
+        match event {
+            JobEvent::Started { id } => {
+                if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
+                    self.set_status(format!("Job #{id} started: {}", job.summary));
+                } else {
+                    self.set_status(format!("Job #{id} started"));
+                }
+            }
+            JobEvent::Finished { id, result } => match result {
+                Ok(()) => {
+                    if let Err(error) = self.refresh_panels() {
+                        self.set_status(format!("Job #{id} finished, refresh failed: {error}"));
+                        return;
+                    }
+                    if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
+                        self.set_status(format!("Job #{id} finished: {}", job.summary));
+                    } else {
+                        self.set_status(format!("Job #{id} finished"));
+                    }
+                }
+                Err(error) => {
+                    self.set_status(format!("Job #{id} failed: {error}"));
+                }
+            },
+        }
+    }
+
+    pub fn handle_job_dispatch_failure(&mut self, id: JobId, error: String) {
+        self.handle_job_event(JobEvent::Finished {
+            id,
+            result: Err(error),
+        });
+    }
+
+    pub fn jobs_status_counts(&self) -> JobStatusCounts {
+        self.jobs.status_counts()
     }
 
     pub fn apply(&mut self, command: AppCommand) -> io::Result<ApplyResult> {
@@ -472,6 +558,9 @@ impl AppState {
                 let label = self.active_panel().sort_label();
                 self.set_status(format!("Sort: {label}"));
             }
+            AppCommand::Copy => self.queue_copy_job(),
+            AppCommand::Move => self.queue_move_job(),
+            AppCommand::Delete => self.queue_delete_job(),
             AppCommand::OpenEntry => {
                 if self.open_selected_directory()? {
                     self.set_status("Opened selected directory");
@@ -531,6 +620,72 @@ impl AppState {
             Route::FileManager => KeyContext::FileManager,
             Route::Dialog(dialog) => dialog.key_context(),
         }
+    }
+
+    fn selected_operation_paths(&self) -> Vec<PathBuf> {
+        let tagged = self.active_panel().tagged_paths_in_display_order();
+        if !tagged.is_empty() {
+            return tagged;
+        }
+
+        self.active_panel()
+            .selected_entry()
+            .filter(|entry| !entry.is_parent)
+            .map(|entry| vec![entry.path.clone()])
+            .unwrap_or_default()
+    }
+
+    fn queue_copy_job(&mut self) {
+        let sources = self.selected_operation_paths();
+        if sources.is_empty() {
+            self.set_status("Copy requires a selected or tagged entry");
+            return;
+        }
+
+        let destination_dir = self.passive_panel().cwd.clone();
+        let request = JobRequest::Copy {
+            sources,
+            destination_dir,
+        };
+        let summary = request.summary();
+        let worker_job = self.jobs.enqueue(request);
+        let job_id = worker_job.id;
+        self.pending_worker_jobs.push(worker_job);
+        self.set_status(format!("Queued job #{job_id}: {summary}"));
+    }
+
+    fn queue_move_job(&mut self) {
+        let sources = self.selected_operation_paths();
+        if sources.is_empty() {
+            self.set_status("Move requires a selected or tagged entry");
+            return;
+        }
+
+        let destination_dir = self.passive_panel().cwd.clone();
+        let request = JobRequest::Move {
+            sources,
+            destination_dir,
+        };
+        let summary = request.summary();
+        let worker_job = self.jobs.enqueue(request);
+        let job_id = worker_job.id;
+        self.pending_worker_jobs.push(worker_job);
+        self.set_status(format!("Queued job #{job_id}: {summary}"));
+    }
+
+    fn queue_delete_job(&mut self) {
+        let targets = self.selected_operation_paths();
+        if targets.is_empty() {
+            self.set_status("Delete requires a selected or tagged entry");
+            return;
+        }
+
+        let request = JobRequest::Delete { targets };
+        let summary = request.summary();
+        let worker_job = self.jobs.enqueue(request);
+        let job_id = worker_job.id;
+        self.pending_worker_jobs.push(worker_job);
+        self.set_status(format!("Queued job #{job_id}: {summary}"));
     }
 
     fn handle_dialog_event(&mut self, event: DialogEvent) {
@@ -764,6 +919,18 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::SortNext),
             Some(AppCommand::SortNext)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::Copy),
+            Some(AppCommand::Copy)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::Move),
+            Some(AppCommand::Move)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::Delete),
+            Some(AppCommand::Delete)
         );
     }
 }

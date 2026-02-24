@@ -93,6 +93,9 @@ pub enum KeyCommand {
     InvertTags,
     SortNext,
     SortReverse,
+    Copy,
+    Move,
+    Delete,
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -128,6 +131,9 @@ impl KeyCommand {
             "inverttags" | "markinverse" => Self::InvertTags,
             "sortnext" => Self::SortNext,
             "sortreverse" => Self::SortReverse,
+            "copy" | "filecopy" => Self::Copy,
+            "move" | "renmov" | "rename" => Self::Move,
+            "delete" | "filedelete" | "remove" => Self::Delete,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
@@ -418,6 +424,30 @@ Reread = ctrl-r; r
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, reread_plain),
             Some(&KeyCommand::Reread)
+        );
+    }
+
+    #[test]
+    fn parser_maps_copy_move_delete_actions() {
+        let source = r#"
+[filemanager]
+Copy = f5
+RenMov = f6
+Delete = f8
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(5))),
+            Some(&KeyCommand::Copy)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(6))),
+            Some(&KeyCommand::Move)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(8))),
+            Some(&KeyCommand::Delete)
         );
     }
 

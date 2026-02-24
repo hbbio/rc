@@ -10,6 +10,7 @@ use rc_core::{
 };
 
 pub fn render(frame: &mut Frame, state: &AppState) {
+    let job_counts = state.jobs_status_counts();
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -21,9 +22,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     frame.render_widget(
         Paragraph::new(Line::from(format!(
-            "rc | context: {:?} | routes: {}",
+            "rc | context: {:?} | routes: {} | jobs q:{} r:{} ok:{} err:{}",
             state.key_context(),
-            state.route_depth()
+            state.route_depth(),
+            job_counts.queued,
+            job_counts.running,
+            job_counts.succeeded,
+            job_counts.failed
         ))),
         root[0],
     );
