@@ -48,7 +48,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   Alt-F open find/back to find results\n\
   Alt-T open directory tree\n\
   Alt-H open directory hotlist\n\
-  Alt/Ctrl-P open external panelize\n\
+  Ctrl-X ! (or Alt/Ctrl-P) open external panelize\n\
   Ctrl-J open jobs screen\n\
   Alt-J cancel latest job\n\
   Alt-S/Ctrl-K open skin picker\n\
@@ -515,7 +515,7 @@ mod tests {
 
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Tab switch panel"));
-        assert!(content.contains("Alt/Ctrl-P open external panelize"));
+        assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("q/F10 quit"));
     }
 }

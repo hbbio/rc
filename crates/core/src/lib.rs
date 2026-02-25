@@ -361,7 +361,7 @@ const FILE_MENU_ENTRIES: [MenuEntry; 7] = [
     },
 ];
 
-const COMMAND_MENU_ENTRIES: [MenuEntry; 6] = [
+const COMMAND_MENU_ENTRIES: [MenuEntry; 7] = [
     MenuEntry {
         label: "Jobs",
         command: AppCommand::OpenJobsScreen,
@@ -383,12 +383,16 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 6] = [
         command: AppCommand::OpenHotlist,
     },
     MenuEntry {
+        label: "External panelize",
+        command: AppCommand::OpenPanelizeDialog,
+    },
+    MenuEntry {
         label: "Help",
         command: AppCommand::OpenHelp,
     },
 ];
 
-const OPTIONS_MENU_ENTRIES: [MenuEntry; 5] = [
+const OPTIONS_MENU_ENTRIES: [MenuEntry; 4] = [
     MenuEntry {
         label: "Sort next",
         command: AppCommand::SortNext,
@@ -404,10 +408,6 @@ const OPTIONS_MENU_ENTRIES: [MenuEntry; 5] = [
     MenuEntry {
         label: "Skin",
         command: AppCommand::OpenSkinDialog,
-    },
-    MenuEntry {
-        label: "Panelize",
-        command: AppCommand::OpenPanelizeDialog,
     },
 ];
 
@@ -4727,6 +4727,30 @@ mod tests {
         app.apply(AppCommand::MenuAccept)
             .expect("menu accept should execute selected action");
         assert_eq!(app.key_context(), KeyContext::Jobs);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn command_menu_external_panelize_opens_dialog() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-command-panelize-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenMenuAt(2))
+            .expect("command menu should open");
+        for _ in 0..5 {
+            app.apply(AppCommand::MenuMoveDown)
+                .expect("menu movement should succeed");
+        }
+        app.apply(AppCommand::MenuAccept)
+            .expect("external panelize menu entry should open dialog");
+        assert_eq!(app.key_context(), KeyContext::Listbox);
+        assert!(app.status_line.contains("External panelize"));
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
