@@ -46,6 +46,9 @@ pub enum AppCommand {
     OpenHotlist,
     CloseHotlist,
     OpenPanelizeDialog,
+    PanelizePresetAdd,
+    PanelizePresetEdit,
+    PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
     MoveUp,
@@ -185,6 +188,9 @@ impl AppCommand {
             (KeyContext::Jobs, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
+            (KeyContext::Listbox, KeyCommand::OpenInputDialog) => Some(Self::PanelizePresetAdd),
+            (KeyContext::Listbox, KeyCommand::OpenConfirmDialog) => Some(Self::PanelizePresetEdit),
+            (KeyContext::Listbox, KeyCommand::Delete) => Some(Self::PanelizePresetRemove),
             (KeyContext::Help, KeyCommand::CursorUp) => Some(Self::HelpMoveUp),
             (KeyContext::Help, KeyCommand::CursorDown) => Some(Self::HelpMoveDown),
             (KeyContext::Help, KeyCommand::PageUp) => Some(Self::HelpPageUp),
@@ -1363,6 +1369,15 @@ enum PendingDialogAction {
     PanelizeCommand {
         preset_commands: Vec<String>,
     },
+    PanelizePresetAdd {
+        initial_command: String,
+        preset_commands: Vec<String>,
+    },
+    PanelizePresetEdit {
+        initial_command: String,
+        preset_commands: Vec<String>,
+        preset_index: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1894,6 +1909,7 @@ pub struct AppState {
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
+    panelize_presets: Vec<String>,
     xmap_pending: bool,
 }
 
@@ -1928,6 +1944,7 @@ impl AppState {
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
+            panelize_presets: panelize_preset_commands(),
             xmap_pending: false,
         })
     }
@@ -2495,7 +2512,7 @@ impl AppState {
             .panelize_command()
             .unwrap_or("find . -type f")
             .to_string();
-        let preset_commands = panelize_preset_commands();
+        let preset_commands = self.panelize_presets.clone();
         self.open_panelize_preset_selection_dialog(initial_command, preset_commands);
         self.set_status("External panelize");
     }
@@ -2568,6 +2585,100 @@ impl AppState {
             }
             _ => false,
         }
+    }
+
+    fn active_panelize_preset_selection(&self) -> Option<(String, Vec<String>, usize)> {
+        let PendingDialogAction::PanelizePresetSelection {
+            initial_command,
+            preset_commands,
+        } = self.pending_dialog_action.clone()?
+        else {
+            return None;
+        };
+        let Route::Dialog(dialog) = self.top_route() else {
+            return None;
+        };
+        let DialogKind::Listbox(listbox) = &dialog.kind else {
+            return None;
+        };
+        Some((initial_command, preset_commands, listbox.selected))
+    }
+
+    fn start_panelize_preset_add(&mut self) {
+        let Some((initial_command, preset_commands, _)) = self.active_panelize_preset_selection()
+        else {
+            return;
+        };
+        self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetAdd {
+            initial_command,
+            preset_commands,
+        });
+        self.routes.push(Route::Dialog(DialogState::input(
+            "Add panelize command",
+            "Command:",
+            "",
+        )));
+        self.set_status("Panelize preset: add command");
+    }
+
+    fn start_panelize_preset_edit(&mut self) {
+        let Some((initial_command, preset_commands, selected_index)) =
+            self.active_panelize_preset_selection()
+        else {
+            return;
+        };
+        if selected_index == 0 {
+            self.set_status("Select a preset command to edit");
+            return;
+        }
+        let preset_index = selected_index - 1;
+        let Some(existing_command) = preset_commands.get(preset_index).cloned() else {
+            self.set_status("Panelize preset selection is invalid");
+            return;
+        };
+        self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetEdit {
+            initial_command,
+            preset_commands,
+            preset_index,
+        });
+        self.routes.push(Route::Dialog(DialogState::input(
+            "Edit panelize command",
+            "Command:",
+            existing_command,
+        )));
+        self.set_status("Panelize preset: edit command");
+    }
+
+    fn remove_panelize_preset(&mut self) {
+        let Some((initial_command, mut preset_commands, selected_index)) =
+            self.active_panelize_preset_selection()
+        else {
+            return;
+        };
+        if selected_index == 0 {
+            self.set_status("Select a preset command to remove");
+            return;
+        }
+        let preset_index = selected_index - 1;
+        let Some(removed_command) =
+            (preset_index < preset_commands.len()).then(|| preset_commands.remove(preset_index))
+        else {
+            self.set_status("Panelize preset selection is invalid");
+            return;
+        };
+
+        self.panelize_presets = preset_commands.clone();
+        self.routes.pop();
+        let next_initial = if initial_command == removed_command {
+            preset_commands
+                .first()
+                .cloned()
+                .unwrap_or_else(|| String::from("find . -type f"))
+        } else {
+            initial_command
+        };
+        self.open_panelize_preset_selection_dialog(next_initial, preset_commands);
+        self.set_status(format!("Removed panelize preset: {removed_command}"));
     }
 
     fn start_panelize_command(&mut self, command: String) {
@@ -3011,6 +3122,9 @@ impl AppState {
             AppCommand::OpenHotlist => self.open_hotlist_screen(),
             AppCommand::CloseHotlist => self.close_hotlist_screen(),
             AppCommand::OpenPanelizeDialog => self.open_panelize_dialog(),
+            AppCommand::PanelizePresetAdd => self.start_panelize_preset_add(),
+            AppCommand::PanelizePresetEdit => self.start_panelize_preset_edit(),
+            AppCommand::PanelizePresetRemove => self.remove_panelize_preset(),
             AppCommand::EnterXMap => {
                 self.xmap_pending = true;
                 self.set_status("Extended keymap mode");
@@ -3848,6 +3962,102 @@ impl AppState {
             }
             (Some(PendingDialogAction::PanelizeCommand { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize canceled");
+            }
+            (
+                Some(PendingDialogAction::PanelizePresetAdd {
+                    initial_command,
+                    mut preset_commands,
+                }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let command = value.trim();
+                if command.is_empty() {
+                    self.pending_dialog_action =
+                        Some(PendingDialogAction::PanelizePresetSelection {
+                            initial_command,
+                            preset_commands,
+                        });
+                    self.set_status("Panelize preset add canceled: empty command");
+                    return;
+                }
+                let command = command.to_string();
+                if preset_commands.iter().any(|preset| preset == &command) {
+                    self.pending_dialog_action =
+                        Some(PendingDialogAction::PanelizePresetSelection {
+                            initial_command,
+                            preset_commands,
+                        });
+                    self.set_status("Panelize preset already exists");
+                    return;
+                }
+
+                preset_commands.push(command.clone());
+                self.panelize_presets = preset_commands.clone();
+                self.routes.pop();
+                self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
+                self.set_status(format!("Added panelize preset: {command}"));
+            }
+            (
+                Some(PendingDialogAction::PanelizePresetAdd {
+                    initial_command,
+                    preset_commands,
+                }),
+                DialogResult::Canceled,
+            ) => {
+                self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetSelection {
+                    initial_command,
+                    preset_commands,
+                });
+                self.set_status("Panelize preset add canceled");
+            }
+            (
+                Some(PendingDialogAction::PanelizePresetEdit {
+                    initial_command,
+                    mut preset_commands,
+                    preset_index,
+                }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                let command = value.trim();
+                if command.is_empty() {
+                    self.pending_dialog_action =
+                        Some(PendingDialogAction::PanelizePresetSelection {
+                            initial_command,
+                            preset_commands,
+                        });
+                    self.set_status("Panelize preset edit canceled: empty command");
+                    return;
+                }
+                let command = command.to_string();
+                let Some(entry) = preset_commands.get_mut(preset_index) else {
+                    self.pending_dialog_action =
+                        Some(PendingDialogAction::PanelizePresetSelection {
+                            initial_command,
+                            preset_commands,
+                        });
+                    self.set_status("Panelize preset edit failed: invalid selection");
+                    return;
+                };
+                *entry = command.clone();
+
+                self.panelize_presets = preset_commands.clone();
+                self.routes.pop();
+                self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
+                self.set_status(format!("Updated panelize preset: {command}"));
+            }
+            (
+                Some(PendingDialogAction::PanelizePresetEdit {
+                    initial_command,
+                    preset_commands,
+                    ..
+                }),
+                DialogResult::Canceled,
+            ) => {
+                self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetSelection {
+                    initial_command,
+                    preset_commands,
+                });
+                self.set_status("Panelize preset edit canceled");
             }
             (
                 Some(PendingDialogAction::ViewerSearch { direction }),
@@ -6003,6 +6213,74 @@ mod tests {
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
+    #[test]
+    fn panelize_preset_management_add_edit_remove_works() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-preset-manage-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.apply(AppCommand::PanelizePresetAdd)
+            .expect("F2 add should open preset input");
+        for ch in "echo added".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing preset command should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("submitting new preset should succeed");
+
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("panelize should remain in preset list dialog");
+        };
+        let DialogKind::Listbox(listbox) = &dialog.kind else {
+            panic!("panelize should return to preset list dialog");
+        };
+        assert!(
+            listbox.items.iter().any(|item| item == "echo added"),
+            "added preset should appear in list"
+        );
+
+        app.apply(AppCommand::PanelizePresetEdit)
+            .expect("F4 edit should open preset input");
+        for ch in " updated".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing edit suffix should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("submitting edited preset should succeed");
+
+        let edited = String::from("echo added updated");
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("panelize should remain in preset list dialog");
+        };
+        let DialogKind::Listbox(listbox) = &dialog.kind else {
+            panic!("panelize should return to preset list dialog");
+        };
+        assert!(
+            listbox.items.iter().any(|item| item == &edited),
+            "edited preset should replace previous value"
+        );
+
+        app.apply(AppCommand::PanelizePresetRemove)
+            .expect("F8 remove should delete selected preset");
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("panelize should remain in preset list dialog");
+        };
+        let DialogKind::Listbox(listbox) = &dialog.kind else {
+            panic!("panelize should return to preset list dialog");
+        };
+        assert!(
+            !listbox.items.iter().any(|item| item == &edited),
+            "removed preset should no longer be listed"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
     #[cfg(unix)]
     #[test]
     fn panelize_preset_selection_runs_without_custom_input() {
@@ -6268,6 +6546,18 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::CursorUp),
             Some(AppCommand::DialogListboxUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::OpenInputDialog),
+            Some(AppCommand::PanelizePresetAdd)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::OpenConfirmDialog),
+            Some(AppCommand::PanelizePresetEdit)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::Delete),
+            Some(AppCommand::PanelizePresetRemove)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::DialogAccept),

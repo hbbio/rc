@@ -116,6 +116,7 @@ See also [File manager](file-manager) and [Panelize and VFS](panelize).",
   External panelize (Ctrl-X !)\n\
     Source: shell command stdout, one path per line\n\
     Entry point: Ctrl-X ! or F9 -> Command -> External panelize\n\
+    Dialog keys: Up/Down, Tab, Enter, Esc, F2/F4/F8\n\
 \n\
 Both allow normal file operations (F3/F4/F5/F6/F8),\n\
 Ctrl-R refresh, and exit by changing to a real directory.\n\

@@ -1212,6 +1212,24 @@ Reread = ctrl-r
     }
 
     #[test]
+    fn bundled_keymap_supports_panelize_preset_management_keys() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+
+        assert_eq!(
+            keymap.resolve(KeyContext::Listbox, KeyChord::new(KeyCode::F(2))),
+            Some(&KeyCommand::OpenInputDialog)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Listbox, KeyChord::new(KeyCode::F(4))),
+            Some(&KeyCommand::OpenConfirmDialog)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Listbox, KeyChord::new(KeyCode::F(8))),
+            Some(&KeyCommand::Delete)
+        );
+    }
+
+    #[test]
     fn bundled_keymap_no_longer_reports_common_mc_actions_as_unknown() {
         let (_, report) =
             Keymap::bundled_mc_default_with_report().expect("bundled keymap should parse");

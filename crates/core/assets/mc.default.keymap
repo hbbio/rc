@@ -545,6 +545,9 @@ Down = down
 Ok = enter
 Cancel = esc
 FocusNext = tab
+OpenInputDialog = f2
+OpenConfirmDialog = f4
+Delete = f8
 
 [menu]
 Up = up
