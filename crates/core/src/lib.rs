@@ -5,12 +5,12 @@ pub mod help;
 pub mod jobs;
 pub mod keymap;
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{
     Arc,
@@ -1379,12 +1379,18 @@ pub fn run_background_worker(
     event_tx: Sender<BackgroundEvent>,
 ) {
     let mut running_find_tasks = Vec::new();
+    #[cfg(not(test))]
+    let mut running_panel_refresh_tasks = Vec::new();
     while let Ok(command) = command_rx.recv() {
         reap_finished_find_tasks(&mut running_find_tasks);
+        #[cfg(not(test))]
+        reap_finished_panel_refresh_tasks(&mut running_panel_refresh_tasks);
         match execute_background_command(command, &event_tx) {
             BackgroundExecution::Continue => {}
             #[cfg(not(test))]
             BackgroundExecution::SpawnFind(task) => running_find_tasks.push(task),
+            #[cfg(not(test))]
+            BackgroundExecution::SpawnPanelRefresh(task) => running_panel_refresh_tasks.push(task),
             BackgroundExecution::Stop => break,
         }
     }
@@ -1392,7 +1398,15 @@ pub fn run_background_worker(
     for task in &running_find_tasks {
         task.cancel_flag.store(true, AtomicOrdering::Relaxed);
     }
+    #[cfg(not(test))]
+    for task in &running_panel_refresh_tasks {
+        task.cancel_flag.store(true, AtomicOrdering::Relaxed);
+    }
     for task in running_find_tasks {
+        let _ = task.handle.join();
+    }
+    #[cfg(not(test))]
+    for task in running_panel_refresh_tasks {
         let _ = task.handle.join();
     }
 }
@@ -1403,11 +1417,20 @@ struct RunningFindTask {
     cancel_flag: Arc<AtomicBool>,
 }
 
+#[cfg(not(test))]
+#[derive(Debug)]
+struct RunningPanelRefreshTask {
+    handle: thread::JoinHandle<()>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 enum BackgroundExecution {
     Continue,
     #[cfg(not(test))]
     SpawnFind(RunningFindTask),
+    #[cfg(not(test))]
+    SpawnPanelRefresh(RunningPanelRefreshTask),
     Stop,
 }
 
@@ -1419,6 +1442,37 @@ fn reap_finished_find_tasks(tasks: &mut Vec<RunningFindTask>) {
             let _ = task.handle.join();
         } else {
             index += 1;
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn reap_finished_panel_refresh_tasks(tasks: &mut Vec<RunningPanelRefreshTask>) {
+    let mut index = 0usize;
+    while index < tasks.len() {
+        if tasks[index].handle.is_finished() {
+            let task = tasks.swap_remove(index);
+            let _ = task.handle.join();
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn refresh_panel_entries(
+    cwd: &Path,
+    source: &PanelListingSource,
+    sort_mode: SortMode,
+    cancel_flag: &AtomicBool,
+) -> Result<Vec<FileEntry>, String> {
+    match source {
+        PanelListingSource::Directory => {
+            read_entries_with_cancel(cwd, sort_mode, Some(cancel_flag))
+                .map_err(|error| error.to_string())
+        }
+        PanelListingSource::Panelize { command } => {
+            read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
+                .map_err(|error| error.to_string())
         }
     }
 }
@@ -1436,33 +1490,65 @@ fn execute_background_command(
             request_id,
             cancel_flag,
         } => {
-            let result = match &source {
-                PanelListingSource::Directory => {
-                    read_entries_with_cancel(&cwd, sort_mode, Some(cancel_flag.as_ref()))
-                        .map_err(|error| error.to_string())
-                }
-                PanelListingSource::Panelize { command } => read_panelized_entries_with_cancel(
-                    &cwd,
-                    command,
-                    sort_mode,
-                    Some(cancel_flag.as_ref()),
-                )
-                .map_err(|error| error.to_string()),
-            };
-            if event_tx
-                .send(BackgroundEvent::PanelRefreshed {
-                    panel,
-                    cwd,
-                    source,
-                    sort_mode,
-                    request_id,
-                    result,
-                })
-                .is_ok()
+            #[cfg(test)]
             {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
+                let result = refresh_panel_entries(&cwd, &source, sort_mode, cancel_flag.as_ref());
+                if event_tx
+                    .send(BackgroundEvent::PanelRefreshed {
+                        panel,
+                        cwd,
+                        source,
+                        sort_mode,
+                        request_id,
+                        result,
+                    })
+                    .is_ok()
+                {
+                    BackgroundExecution::Continue
+                } else {
+                    BackgroundExecution::Stop
+                }
+            }
+            #[cfg(not(test))]
+            {
+                let worker_event_tx = event_tx.clone();
+                let worker_cancel_flag = cancel_flag.clone();
+                let worker_cwd = cwd.clone();
+                let worker_source = source.clone();
+                match thread::Builder::new()
+                    .name(format!("rc-refresh-{}-{request_id}", panel.index()))
+                    .spawn(move || {
+                        let result = refresh_panel_entries(
+                            &worker_cwd,
+                            &worker_source,
+                            sort_mode,
+                            worker_cancel_flag.as_ref(),
+                        );
+                        let _ = worker_event_tx.send(BackgroundEvent::PanelRefreshed {
+                            panel,
+                            cwd: worker_cwd,
+                            source: worker_source,
+                            sort_mode,
+                            request_id,
+                            result,
+                        });
+                    }) {
+                    Ok(handle) => BackgroundExecution::SpawnPanelRefresh(RunningPanelRefreshTask {
+                        handle,
+                        cancel_flag,
+                    }),
+                    Err(error) => {
+                        let _ = event_tx.send(BackgroundEvent::PanelRefreshed {
+                            panel,
+                            cwd,
+                            source,
+                            sort_mode,
+                            request_id,
+                            result: Err(format!("failed to spawn panel refresh worker: {error}")),
+                        });
+                        BackgroundExecution::Continue
+                    }
+                }
             }
         }
         BackgroundCommand::LoadViewer { path } => {
@@ -1659,7 +1745,7 @@ where
             }
         }
 
-        child_dirs.sort_by_key(|left| path_sort_key(left));
+        child_dirs.sort_by_cached_key(|left| path_sort_key(left));
         for child_dir in child_dirs.into_iter().rev() {
             stack.push(child_dir);
         }
@@ -3861,7 +3947,7 @@ fn read_panelized_entries_with_cancel(
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
-    let output = run_shell_command(base_dir, command)?;
+    let output = run_shell_command(base_dir, command, cancel_flag)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
@@ -3924,32 +4010,46 @@ fn ensure_panel_refresh_not_canceled(cancel_flag: Option<&AtomicBool>) -> io::Re
 }
 
 fn sort_file_entries(entries: &mut [FileEntry], sort_mode: SortMode) {
-    entries.sort_by(|left, right| {
-        let dir_order = match (left.is_dir, right.is_dir) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => Ordering::Equal,
-        };
-        if dir_order != Ordering::Equal {
-            return dir_order;
-        }
+    let type_rank = |entry: &FileEntry| if entry.is_dir { 0_u8 } else { 1_u8 };
 
-        let mut order = match sort_mode.field {
-            SortField::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-            SortField::Size => left
-                .size
-                .cmp(&right.size)
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase())),
-            SortField::Modified => left
-                .modified
-                .cmp(&right.modified)
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase())),
-        };
-        if sort_mode.reverse {
-            order = order.reverse();
+    match (sort_mode.field, sort_mode.reverse) {
+        (SortField::Name, false) => {
+            entries.sort_by_cached_key(|entry| (type_rank(entry), entry.name.to_lowercase()));
         }
-        order
-    });
+        (SortField::Name, true) => {
+            entries
+                .sort_by_cached_key(|entry| (type_rank(entry), Reverse(entry.name.to_lowercase())));
+        }
+        (SortField::Size, false) => {
+            entries.sort_by_cached_key(|entry| {
+                (type_rank(entry), (entry.size, entry.name.to_lowercase()))
+            });
+        }
+        (SortField::Size, true) => {
+            entries.sort_by_cached_key(|entry| {
+                (
+                    type_rank(entry),
+                    Reverse((entry.size, entry.name.to_lowercase())),
+                )
+            });
+        }
+        (SortField::Modified, false) => {
+            entries.sort_by_cached_key(|entry| {
+                (
+                    type_rank(entry),
+                    (entry.modified, entry.name.to_lowercase()),
+                )
+            });
+        }
+        (SortField::Modified, true) => {
+            entries.sort_by_cached_key(|entry| {
+                (
+                    type_rank(entry),
+                    Reverse((entry.modified, entry.name.to_lowercase())),
+                )
+            });
+        }
+    }
 }
 
 fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
@@ -3966,21 +4066,88 @@ fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn run_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Output> {
+fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Child> {
     Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 #[cfg(windows)]
-fn run_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Output> {
+fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Child> {
     Command::new("cmd")
         .arg("/C")
         .arg(command)
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+fn run_shell_command(
+    cwd: &Path,
+    command: &str,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<std::process::Output> {
+    let mut child = spawn_shell_command(cwd, command)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture command stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture command stderr"))?;
+
+    let stdout_handle = thread::spawn(move || {
+        let mut reader = stdout;
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
+        Ok(buffer)
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buffer = Vec::new();
+        reader.read_to_end(&mut buffer)?;
+        Ok(buffer)
+    });
+
+    loop {
+        if cancel_flag.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                PANEL_REFRESH_CANCELED_MESSAGE,
+            ));
+        }
+
+        if let Some(status) = child.try_wait()? {
+            let stdout = join_command_output_reader(stdout_handle, "stdout")?;
+            let stderr = join_command_output_reader(stderr_handle, "stderr")?;
+            return Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn join_command_output_reader(
+    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stream: &str,
+) -> io::Result<Vec<u8>> {
+    handle
+        .join()
+        .map_err(|_| io::Error::other(format!("command {stream} reader thread panicked")))?
 }
 
 #[cfg(test)]
@@ -5251,6 +5418,40 @@ mod tests {
             None,
             "failed panelize should not switch source mode"
         );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panelize_command_can_be_canceled_while_shell_process_runs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-cancel-running-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_clone = Arc::clone(&cancel_flag);
+        let cancel_task = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            cancel_clone.store(true, AtomicOrdering::Relaxed);
+        });
+
+        let result = read_panelized_entries_with_cancel(
+            &root,
+            "sleep 1; printf 'a.txt\\n'",
+            SortMode::default(),
+            Some(cancel_flag.as_ref()),
+        );
+
+        cancel_task
+            .join()
+            .expect("cancel request thread should finish");
+        let error = result.expect_err("panelize command should be canceled");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), PANEL_REFRESH_CANCELED_MESSAGE);
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

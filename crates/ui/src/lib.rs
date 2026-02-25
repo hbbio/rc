@@ -15,9 +15,10 @@ use rc_core::{
     HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route, TreeState,
     ViewerState, top_menu_bar_items, top_menus,
 };
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -35,8 +36,12 @@ struct HighlightResources {
 
 static HIGHLIGHT_RESOURCES: OnceLock<Option<HighlightResources>> = OnceLock::new();
 static VIEWER_HIGHLIGHT_CACHE: OnceLock<Mutex<Option<CachedViewerHighlight>>> = OnceLock::new();
+static DISK_USAGE_SUMMARY_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, String)>>> =
+    OnceLock::new();
 const PANEL_SIZE_COL_WIDTH: usize = 12;
 const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
+const DISK_USAGE_CACHE_TTL: Duration = Duration::from_millis(750);
+const DISK_USAGE_CACHE_MAX_ENTRIES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ViewerHighlightKey {
@@ -230,9 +235,18 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
             panel_layout[0],
         );
     } else {
+        let viewport_rows = panel_layout[0].height.saturating_sub(1).max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(panel.entries.len(), panel.cursor, viewport_rows);
+        let selected_row = panel
+            .cursor
+            .saturating_sub(window_start)
+            .min(window_end.saturating_sub(window_start).saturating_sub(1));
         let rows: Vec<Row<'_>> = panel
             .entries
             .iter()
+            .skip(window_start)
+            .take(window_end.saturating_sub(window_start))
             .map(|entry| {
                 let tagged = !entry.is_parent && panel.is_tagged(&entry.path);
                 let mut entry_style = if tagged {
@@ -285,7 +299,7 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
         .column_spacing(1);
 
         let mut table_state = TableState::default();
-        table_state.select(Some(panel.cursor));
+        table_state.select(Some(selected_row));
         frame.render_stateful_widget(table, panel_layout[0], &mut table_state);
     }
 
@@ -893,9 +907,14 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState, ski
             vec![ListItem::new("<no matches>")]
         }
     } else {
+        let viewport_rows = layout[1].height.max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(results.entries.len(), results.cursor, viewport_rows);
         results
             .entries
             .iter()
+            .skip(window_start)
+            .take(window_end.saturating_sub(window_start))
             .map(|entry| {
                 let mut label = entry.path.to_string_lossy().into_owned();
                 if entry.is_dir && !label.ends_with('/') {
@@ -911,7 +930,14 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState, ski
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     if !results.entries.is_empty() {
-        state.select(Some(results.cursor));
+        let viewport_rows = layout[1].height.max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(results.entries.len(), results.cursor, viewport_rows);
+        let selected_row = results
+            .cursor
+            .saturating_sub(window_start)
+            .min(window_end.saturating_sub(window_start).saturating_sub(1));
+        state.select(Some(selected_row));
     }
     frame.render_stateful_widget(list, layout[1], &mut state);
 
@@ -960,8 +986,13 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState, skin: &UiSkin) {
     let items: Vec<ListItem<'_>> = if tree.entries.is_empty() {
         vec![ListItem::new("<empty tree>")]
     } else {
+        let viewport_rows = layout[1].height.max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(tree.entries.len(), tree.cursor, viewport_rows);
         tree.entries
             .iter()
+            .skip(window_start)
+            .take(window_end.saturating_sub(window_start))
             .map(|entry| {
                 let name = if entry.depth == 0 {
                     entry.path.to_string_lossy().into_owned()
@@ -979,7 +1010,14 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState, skin: &UiSkin) {
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     if !tree.entries.is_empty() {
-        state.select(Some(tree.cursor));
+        let viewport_rows = layout[1].height.max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(tree.entries.len(), tree.cursor, viewport_rows);
+        let selected_row = tree
+            .cursor
+            .saturating_sub(window_start)
+            .min(window_end.saturating_sub(window_start).saturating_sub(1));
+        state.select(Some(selected_row));
     }
     frame.render_stateful_widget(list, layout[1], &mut state);
 
@@ -1012,8 +1050,13 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     let items: Vec<ListItem<'_>> = if app.hotlist.is_empty() {
         vec![ListItem::new("<empty hotlist>")]
     } else {
+        let viewport_rows = layout[0].height.max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(app.hotlist.len(), app.hotlist_cursor, viewport_rows);
         app.hotlist
             .iter()
+            .skip(window_start)
+            .take(window_end.saturating_sub(window_start))
             .map(|path| ListItem::new(path.to_string_lossy().into_owned()))
             .collect()
     };
@@ -1024,7 +1067,14 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
 
     let mut state = ListState::default();
     if !app.hotlist.is_empty() {
-        state.select(Some(app.hotlist_cursor));
+        let viewport_rows = layout[0].height.max(1) as usize;
+        let (window_start, window_end) =
+            visible_window(app.hotlist.len(), app.hotlist_cursor, viewport_rows);
+        let selected_row = app
+            .hotlist_cursor
+            .saturating_sub(window_start)
+            .min(window_end.saturating_sub(window_start).saturating_sub(1));
+        state.select(Some(selected_row));
     }
     frame.render_stateful_widget(list, layout[0], &mut state);
 
@@ -1152,6 +1202,10 @@ fn panel_entry_size_label(entry: &FileEntry) -> String {
 }
 
 fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
+    if panel.tagged_count() == 0 {
+        return (0, 0);
+    }
+
     let mut count = 0usize;
     let mut size = 0u64;
 
@@ -1167,7 +1221,35 @@ fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
 }
 
 fn panel_disk_summary(panel: &PanelState) -> String {
-    let Some((free, total)) = disk_usage(panel.cwd.as_path()) else {
+    let now = Instant::now();
+    let cache = DISK_USAGE_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        if let Some((captured_at, cached)) = cache.get(panel.cwd.as_path())
+            && now.saturating_duration_since(*captured_at) <= DISK_USAGE_CACHE_TTL
+        {
+            return cached.clone();
+        }
+
+        let summary = compute_disk_summary(panel.cwd.as_path());
+        if cache.len() >= DISK_USAGE_CACHE_MAX_ENTRIES {
+            cache.retain(|_, (captured_at, _)| {
+                now.saturating_duration_since(*captured_at) <= DISK_USAGE_CACHE_TTL
+            });
+            if cache.len() >= DISK_USAGE_CACHE_MAX_ENTRIES
+                && let Some(path) = cache.keys().next().cloned()
+            {
+                cache.remove(path.as_path());
+            }
+        }
+        cache.insert(panel.cwd.clone(), (now, summary.clone()));
+        return summary;
+    }
+
+    compute_disk_summary(panel.cwd.as_path())
+}
+
+fn compute_disk_summary(path: &Path) -> String {
+    let Some((free, total)) = disk_usage(path) else {
         return String::from("- / - (-%)");
     };
     if total == 0 {
@@ -1180,6 +1262,20 @@ fn panel_disk_summary(panel: &PanelState) -> String {
         format_human_size(total),
         percent
     )
+}
+
+fn visible_window(total: usize, cursor: usize, viewport_rows: usize) -> (usize, usize) {
+    if total == 0 || viewport_rows == 0 {
+        return (0, 0);
+    }
+
+    let visible = viewport_rows.min(total);
+    let mut start = cursor.saturating_sub(visible / 2);
+    if start + visible > total {
+        start = total.saturating_sub(visible);
+    }
+    let end = start + visible;
+    (start, end)
 }
 
 #[cfg(unix)]
