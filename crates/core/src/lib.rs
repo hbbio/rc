@@ -4068,15 +4068,12 @@ fn read_panelized_entries_with_cancel(
             continue;
         }
 
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        let size = metadata.len();
-        let modified = metadata.modified().ok();
-
+        let metadata = fs::metadata(&path).ok();
+        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
         let name = panelized_entry_label(base_dir, &path);
-        if metadata.is_dir() {
+        let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        if is_dir {
             entries.push(FileEntry::directory(name, path, size, modified));
         } else {
             entries.push(FileEntry::file(name, path, size, modified));
@@ -5483,8 +5480,8 @@ mod tests {
             panel
                 .entries
                 .iter()
-                .all(|entry| entry.path != root.join("missing")),
-            "missing output paths should be ignored"
+                .any(|entry| entry.path == root.join("missing")),
+            "panelized entries should preserve command output even when path metadata is missing"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
