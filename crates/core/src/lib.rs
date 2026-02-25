@@ -4053,12 +4053,12 @@ fn read_panelized_entries_with_cancel(
 
     for raw_line in stdout.lines() {
         ensure_panel_refresh_not_canceled(cancel_flag)?;
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() {
             continue;
         }
 
-        let input_path = PathBuf::from(trimmed);
+        let input_path = PathBuf::from(line);
         let path = if input_path.is_absolute() {
             input_path
         } else {
@@ -5511,6 +5511,34 @@ mod tests {
             "empty panelize output should produce empty panel entries"
         );
         assert_eq!(app.active_panel().panelize_command(), Some("printf ''"));
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panelize_preserves_leading_and_trailing_spaces_in_paths() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-spaces-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let spaced_name = "  spaced file  ";
+        let spaced_file = root.join(spaced_name);
+        fs::write(&spaced_file, "a").expect("must create spaced filename");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        submit_panelize_custom_command(&mut app, "printf '  spaced file  \\n'");
+        drain_background(&mut app);
+
+        assert!(
+            app.active_panel()
+                .entries
+                .iter()
+                .any(|entry| entry.path == spaced_file),
+            "panelize should preserve leading/trailing spaces in path lines"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
