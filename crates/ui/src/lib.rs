@@ -13,7 +13,7 @@ use ratatui::widgets::{
 use rc_core::{
     ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry, FindResultsState,
     HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route, TreeState,
-    ViewerState, top_menu_bar_items, top_menus,
+    ViewerState, top_menus,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -1108,13 +1108,6 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
 }
 
 fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
-    let Some(menu_item) = top_menu_bar_items()
-        .into_iter()
-        .find(|item| item.index == menu.active_menu)
-    else {
-        return;
-    };
-
     let area = frame.area();
     if area.height <= 2 {
         return;
@@ -1132,7 +1125,6 @@ fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(menu_item.title)
         .borders(Borders::ALL)
         .border_set(skin.dialog_border_set())
         .border_style(skin.style("menu", "_default_"))
@@ -1140,10 +1132,33 @@ fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    // Reserve one column for the list highlight symbol.
+    let content_width = inner.width.saturating_sub(1) as usize;
     let items: Vec<ListItem<'_>> = menu
         .active_entries()
         .iter()
-        .map(|entry| ListItem::new(format!(" {}", entry.label)))
+        .map(|entry| {
+            if !entry.selectable && entry.label.is_empty() {
+                let line = "-".repeat(content_width.max(1));
+                return ListItem::new(line);
+            }
+
+            if entry.shortcut.is_empty() {
+                return ListItem::new(entry.label);
+            }
+
+            let label_width = entry.label.chars().count();
+            let shortcut_width = entry.shortcut.chars().count();
+            let spacing = content_width
+                .saturating_sub(label_width.saturating_add(shortcut_width))
+                .max(1);
+            ListItem::new(format!(
+                "{}{}{}",
+                entry.label,
+                " ".repeat(spacing),
+                entry.shortcut
+            ))
+        })
         .collect();
     let list = List::new(items)
         .style(skin.style("menu", "_default_"))
@@ -1667,9 +1682,22 @@ mod tests {
             frame.contains("File"),
             "frame should include active menu title"
         );
+        assert_eq!(
+            frame.matches("File").count(),
+            2,
+            "menu title should appear in top menu and status, not be repeated in popup title"
+        );
         assert!(
             frame.contains("Copy"),
             "frame should include menu entry labels"
+        );
+        assert!(
+            frame.contains("F10"),
+            "function-key shortcuts should keep all digits\n{frame}"
+        );
+        assert!(
+            frame.contains("M-c"),
+            "meta-key shortcuts should keep trailing characters\n{frame}"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

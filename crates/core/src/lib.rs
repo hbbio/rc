@@ -144,6 +144,8 @@ pub enum AppCommand {
     ViewerGoto,
     ViewerToggleWrap,
     ViewerToggleHex,
+    MenuNoop,
+    MenuNotImplemented(&'static str),
 }
 
 impl AppCommand {
@@ -298,7 +300,51 @@ impl AppCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MenuEntry {
     pub label: &'static str,
+    pub shortcut: &'static str,
     pub command: AppCommand,
+    pub selectable: bool,
+}
+
+impl MenuEntry {
+    const fn action(label: &'static str, command: AppCommand) -> Self {
+        Self {
+            label,
+            shortcut: "",
+            command,
+            selectable: true,
+        }
+    }
+
+    const fn action_with_shortcut(
+        label: &'static str,
+        shortcut: &'static str,
+        command: AppCommand,
+    ) -> Self {
+        Self {
+            label,
+            shortcut,
+            command,
+            selectable: true,
+        }
+    }
+
+    const fn stub(label: &'static str, shortcut: &'static str) -> Self {
+        Self {
+            label,
+            shortcut,
+            command: AppCommand::MenuNotImplemented(label),
+            selectable: true,
+        }
+    }
+
+    const fn separator() -> Self {
+        Self {
+            label: "",
+            shortcut: "",
+            command: AppCommand::MenuNoop,
+            selectable: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,137 +361,71 @@ pub struct MenuBarItem {
     pub end_x: u16,
 }
 
-const LEFT_MENU_ENTRIES: [MenuEntry; 6] = [
-    MenuEntry {
-        label: "Find file",
-        command: AppCommand::OpenFindDialog,
-    },
-    MenuEntry {
-        label: "Directory tree",
-        command: AppCommand::OpenTree,
-    },
-    MenuEntry {
-        label: "Directory hotlist",
-        command: AppCommand::OpenHotlist,
-    },
-    MenuEntry {
-        label: "External panelize",
-        command: AppCommand::OpenPanelizeDialog,
-    },
-    MenuEntry {
-        label: "Skin",
-        command: AppCommand::OpenSkinDialog,
-    },
-    MenuEntry {
-        label: "Help",
-        command: AppCommand::OpenHelp,
-    },
+const SIDE_MENU_ENTRIES: [MenuEntry; 16] = [
+    MenuEntry::stub("File listing", ""),
+    MenuEntry::stub("Quick view", "C-x q"),
+    MenuEntry::stub("Info", "C-x i"),
+    MenuEntry::action("Tree", AppCommand::OpenTree),
+    MenuEntry::separator(),
+    MenuEntry::stub("Listing format...", ""),
+    MenuEntry::stub("Sort order...", ""),
+    MenuEntry::stub("Filter...", ""),
+    MenuEntry::stub("Encoding...", "M-e"),
+    MenuEntry::separator(),
+    MenuEntry::stub("FTP link...", ""),
+    MenuEntry::stub("Shell link...", ""),
+    MenuEntry::stub("SFTP link...", ""),
+    MenuEntry::action("Panelize", AppCommand::OpenPanelizeDialog),
+    MenuEntry::separator(),
+    MenuEntry::action_with_shortcut("Rescan", "C-r", AppCommand::Reread),
 ];
 
-const FILE_MENU_ENTRIES: [MenuEntry; 8] = [
-    MenuEntry {
-        label: "View",
-        command: AppCommand::OpenEntry,
-    },
-    MenuEntry {
-        label: "Edit",
-        command: AppCommand::EditEntry,
-    },
-    MenuEntry {
-        label: "Copy",
-        command: AppCommand::Copy,
-    },
-    MenuEntry {
-        label: "Move",
-        command: AppCommand::Move,
-    },
-    MenuEntry {
-        label: "Mkdir",
-        command: AppCommand::OpenInputDialog,
-    },
-    MenuEntry {
-        label: "Delete",
-        command: AppCommand::Delete,
-    },
-    MenuEntry {
-        label: "Rename",
-        command: AppCommand::OpenConfirmDialog,
-    },
-    MenuEntry {
-        label: "Quit",
-        command: AppCommand::Quit,
-    },
+const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
+    MenuEntry::action_with_shortcut("View", "F3", AppCommand::OpenEntry),
+    MenuEntry::stub("View file...", ""),
+    MenuEntry::stub("Filtered view", "M-!"),
+    MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
+    MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
+    MenuEntry::stub("Chmod", "C-x c"),
+    MenuEntry::stub("Link", "C-x l"),
+    MenuEntry::stub("Symlink", "C-x s"),
+    MenuEntry::stub("Relative symlink", "C-x v"),
+    MenuEntry::stub("Edit symlink", "C-x C-s"),
+    MenuEntry::stub("Chown", "C-x o"),
+    MenuEntry::stub("Advanced chown", ""),
+    MenuEntry::action_with_shortcut("Rename/Move", "F6", AppCommand::Move),
+    MenuEntry::action_with_shortcut("Mkdir", "F7", AppCommand::OpenInputDialog),
+    MenuEntry::action_with_shortcut("Delete", "F8", AppCommand::Delete),
+    MenuEntry::stub("Quick cd", "M-c"),
+    MenuEntry::separator(),
+    MenuEntry::stub("Select group", "+"),
+    MenuEntry::stub("Unselect group", "-"),
+    MenuEntry::action_with_shortcut("Invert selection", "*", AppCommand::InvertTags),
+    MenuEntry::separator(),
+    MenuEntry::action_with_shortcut("Exit", "F10", AppCommand::Quit),
 ];
 
 const COMMAND_MENU_ENTRIES: [MenuEntry; 7] = [
-    MenuEntry {
-        label: "Jobs",
-        command: AppCommand::OpenJobsScreen,
-    },
-    MenuEntry {
-        label: "Cancel job",
-        command: AppCommand::CancelJob,
-    },
-    MenuEntry {
-        label: "Find file",
-        command: AppCommand::OpenFindDialog,
-    },
-    MenuEntry {
-        label: "Directory tree",
-        command: AppCommand::OpenTree,
-    },
-    MenuEntry {
-        label: "Directory hotlist",
-        command: AppCommand::OpenHotlist,
-    },
-    MenuEntry {
-        label: "External panelize",
-        command: AppCommand::OpenPanelizeDialog,
-    },
-    MenuEntry {
-        label: "Help",
-        command: AppCommand::OpenHelp,
-    },
+    MenuEntry::action("Jobs", AppCommand::OpenJobsScreen),
+    MenuEntry::action("Cancel job", AppCommand::CancelJob),
+    MenuEntry::action("Find file", AppCommand::OpenFindDialog),
+    MenuEntry::action("Directory tree", AppCommand::OpenTree),
+    MenuEntry::action("Directory hotlist", AppCommand::OpenHotlist),
+    MenuEntry::action("External panelize", AppCommand::OpenPanelizeDialog),
+    MenuEntry::action("Help", AppCommand::OpenHelp),
 ];
 
 const OPTIONS_MENU_ENTRIES: [MenuEntry; 4] = [
-    MenuEntry {
-        label: "Sort next",
-        command: AppCommand::SortNext,
-    },
-    MenuEntry {
-        label: "Sort reverse",
-        command: AppCommand::SortReverse,
-    },
-    MenuEntry {
-        label: "Reread",
-        command: AppCommand::Reread,
-    },
-    MenuEntry {
-        label: "Skin",
-        command: AppCommand::OpenSkinDialog,
-    },
-];
-
-const RIGHT_MENU_ENTRIES: [MenuEntry; 3] = [
-    MenuEntry {
-        label: "Swap panels",
-        command: AppCommand::SwitchPanel,
-    },
-    MenuEntry {
-        label: "Directory tree",
-        command: AppCommand::OpenTree,
-    },
-    MenuEntry {
-        label: "Directory hotlist",
-        command: AppCommand::OpenHotlist,
-    },
+    MenuEntry::action("Sort next", AppCommand::SortNext),
+    MenuEntry::action("Sort reverse", AppCommand::SortReverse),
+    MenuEntry::action("Reread", AppCommand::Reread),
+    MenuEntry::action("Skin", AppCommand::OpenSkinDialog),
 ];
 
 const TOP_MENUS: [TopMenu; 5] = [
     TopMenu {
         title: "Left",
-        entries: &LEFT_MENU_ENTRIES,
+        entries: &SIDE_MENU_ENTRIES,
     },
     TopMenu {
         title: "File",
@@ -461,7 +441,7 @@ const TOP_MENUS: [TopMenu; 5] = [
     },
     TopMenu {
         title: "Right",
-        entries: &RIGHT_MENU_ENTRIES,
+        entries: &SIDE_MENU_ENTRIES,
     },
 ];
 
@@ -1218,7 +1198,15 @@ impl MenuState {
         let inner = self
             .active_entries()
             .iter()
-            .map(|entry| entry.label.chars().count() as u16)
+            .map(|entry| {
+                let label_width = entry.label.chars().count() as u16;
+                let shortcut_width = entry.shortcut.chars().count() as u16;
+                if shortcut_width == 0 {
+                    label_width
+                } else {
+                    label_width.saturating_add(1).saturating_add(shortcut_width)
+                }
+            })
             .max()
             .unwrap_or(1)
             .saturating_add(2);
@@ -1231,47 +1219,37 @@ impl MenuState {
 
     fn set_active_menu(&mut self, active_menu: usize) {
         self.active_menu = active_menu.min(TOP_MENUS.len().saturating_sub(1));
-        self.selected_entry = 0;
+        self.selected_entry = self.first_selectable_entry().unwrap_or(0);
         self.clamp_selected_entry();
     }
 
     fn move_up(&mut self) {
-        if self.active_entries().is_empty() {
-            self.selected_entry = 0;
-            return;
-        }
-        self.selected_entry = self.selected_entry.saturating_sub(1);
+        self.move_to_adjacent_selectable(-1);
     }
 
     fn move_down(&mut self) {
-        if self.active_entries().is_empty() {
-            self.selected_entry = 0;
-            return;
-        }
-        let last = self.active_entries().len() - 1;
-        self.selected_entry = self.selected_entry.saturating_add(1).min(last);
+        self.move_to_adjacent_selectable(1);
     }
 
     fn move_left(&mut self) {
-        if self.active_menu == 0 {
-            self.active_menu = TOP_MENUS.len() - 1;
+        let next = if self.active_menu == 0 {
+            TOP_MENUS.len() - 1
         } else {
-            self.active_menu -= 1;
-        }
-        self.selected_entry = 0;
+            self.active_menu - 1
+        };
+        self.set_active_menu(next);
     }
 
     fn move_right(&mut self) {
-        self.active_menu = (self.active_menu + 1) % TOP_MENUS.len();
-        self.selected_entry = 0;
+        self.set_active_menu((self.active_menu + 1) % TOP_MENUS.len());
     }
 
     fn move_home(&mut self) {
-        self.selected_entry = 0;
+        self.selected_entry = self.first_selectable_entry().unwrap_or(0);
     }
 
     fn move_end(&mut self) {
-        self.selected_entry = self.active_entries().len().saturating_sub(1);
+        self.selected_entry = self.last_selectable_entry().unwrap_or(0);
     }
 
     fn select_entry(&mut self, index: usize) {
@@ -1282,6 +1260,7 @@ impl MenuState {
     fn selected_command(&self) -> Option<AppCommand> {
         self.active_entries()
             .get(self.selected_entry)
+            .filter(|entry| entry.selectable)
             .map(|entry| entry.command)
     }
 
@@ -1301,7 +1280,11 @@ impl MenuState {
             return None;
         }
 
-        Some((row - (y + 1)) as usize)
+        let index = (row - (y + 1)) as usize;
+        self.active_entries()
+            .get(index)
+            .filter(|entry| entry.selectable)
+            .map(|_| index)
     }
 
     fn active_menu(&self) -> &'static TopMenu {
@@ -1313,6 +1296,47 @@ impl MenuState {
             self.selected_entry = 0;
         } else if self.selected_entry >= self.active_entries().len() {
             self.selected_entry = self.active_entries().len() - 1;
+        }
+
+        if self
+            .active_entries()
+            .get(self.selected_entry)
+            .is_none_or(|entry| !entry.selectable)
+        {
+            self.selected_entry = self.first_selectable_entry().unwrap_or(0);
+        }
+    }
+
+    fn first_selectable_entry(&self) -> Option<usize> {
+        self.active_entries()
+            .iter()
+            .position(|entry| entry.selectable)
+    }
+
+    fn last_selectable_entry(&self) -> Option<usize> {
+        self.active_entries()
+            .iter()
+            .rposition(|entry| entry.selectable)
+    }
+
+    fn move_to_adjacent_selectable(&mut self, direction: isize) {
+        let entries = self.active_entries();
+        if entries.is_empty() || direction == 0 {
+            self.selected_entry = 0;
+            return;
+        }
+
+        let mut index = self.selected_entry as isize;
+        loop {
+            let next = index + direction;
+            if next < 0 || next >= entries.len() as isize {
+                break;
+            }
+            index = next;
+            if entries[index as usize].selectable {
+                self.selected_entry = index as usize;
+                return;
+            }
         }
     }
 }
@@ -3166,6 +3190,10 @@ impl AppState {
         let mut follow_up_command = None;
 
         match command {
+            AppCommand::MenuNoop => {}
+            AppCommand::MenuNotImplemented(label) => {
+                self.set_status(format!("{label} is not implemented yet"));
+            }
             AppCommand::OpenMenu => self.open_menu(0),
             AppCommand::OpenMenuAt(index) => self.open_menu(index),
             AppCommand::CloseMenu => self.close_menu(),
@@ -5200,6 +5228,83 @@ mod tests {
         assert_eq!(app.key_context(), KeyContext::Jobs);
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn menu_stub_action_reports_not_implemented_status() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-stub-action-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenMenuAt(0))
+            .expect("left menu should open");
+        app.apply(AppCommand::MenuAccept)
+            .expect("accepting stub menu action should succeed");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        assert!(
+            app.status_line.contains("not implemented"),
+            "stub actions should report a not-implemented status"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn side_menus_match_and_skin_is_only_in_options() {
+        let menus = top_menus();
+        let left = menus
+            .iter()
+            .find(|menu| menu.title == "Left")
+            .expect("left menu should exist");
+        let right = menus
+            .iter()
+            .find(|menu| menu.title == "Right")
+            .expect("right menu should exist");
+        let file = menus
+            .iter()
+            .find(|menu| menu.title == "File")
+            .expect("file menu should exist");
+        let options = menus
+            .iter()
+            .find(|menu| menu.title == "Options")
+            .expect("options menu should exist");
+
+        let left_labels: Vec<&str> = left.entries.iter().map(|entry| entry.label).collect();
+        let right_labels: Vec<&str> = right.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            left_labels, right_labels,
+            "left and right menu entries should remain identical"
+        );
+        assert!(
+            left_labels.contains(&"File listing")
+                && left_labels.contains(&"Panelize")
+                && left_labels.contains(&"Rescan"),
+            "side menus should include MC-style panel controls"
+        );
+
+        let file_labels: Vec<&str> = file.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(file_labels.first(), Some(&"View"));
+        assert!(file_labels.contains(&"Rename/Move"));
+        assert!(file_labels.contains(&"Select group"));
+        assert_eq!(file_labels.last(), Some(&"Exit"));
+
+        let skin_count = menus
+            .iter()
+            .flat_map(|menu| menu.entries.iter())
+            .filter(|entry| entry.command == AppCommand::OpenSkinDialog)
+            .count();
+        assert_eq!(skin_count, 1, "skin should appear in options only");
+        assert!(
+            options
+                .entries
+                .iter()
+                .any(|entry| entry.command == AppCommand::OpenSkinDialog),
+            "options menu should include skin"
+        );
     }
 
     #[test]
