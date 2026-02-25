@@ -570,6 +570,8 @@ PageDown = pgdn
 Home = home
 End = end
 Enter = enter
+Panelize = f5
+CancelJob = alt-j
 
 [tree]
 Quit = esc; q
@@ -640,3 +642,4 @@ End = end
 [filemanager:xmap]
 PanelOther = alt-question
 Reread = ctrl-backslash
+ExternalPanelize = exclamation

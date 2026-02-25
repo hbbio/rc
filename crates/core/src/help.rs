@@ -95,6 +95,7 @@ Keys:\n\
   Up/Down move\n\
   PgUp/PgDn/Home/End navigate\n\
   Enter locate the result in panel\n\
+  F5 panelize current results\n\
   Alt-J cancel active find job\n\
   Esc/q close\n\
 \n\

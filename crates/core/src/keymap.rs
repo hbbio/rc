@@ -546,6 +546,7 @@ CloseJobs = esc
 [findresults]
 Up = up
 Quit = esc
+Panelize = f5
 
 [tree]
 Down = down
@@ -565,6 +566,10 @@ RemoveHotlist = d
         assert_eq!(
             keymap.resolve(KeyContext::FindResults, KeyChord::new(KeyCode::Esc)),
             Some(&KeyCommand::Quit)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FindResults, KeyChord::new(KeyCode::F(5))),
+            Some(&KeyCommand::OpenPanelizeDialog)
         );
         assert_eq!(
             keymap.resolve(KeyContext::Tree, KeyChord::new(KeyCode::Down)),
@@ -1176,6 +1181,18 @@ Reread = ctrl-r
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, ctrl_x),
             Some(&KeyCommand::EnterXMap)
+        );
+    }
+
+    #[test]
+    fn bundled_keymap_includes_external_panelize_xmap_binding() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('!'))
+            ),
+            Some(&KeyCommand::OpenPanelizeDialog)
         );
     }
 

@@ -151,6 +151,18 @@ fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, route: &Route
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
     let labels: [(&str, &str); 10] = match route {
+        Route::FindResults(_) => [
+            ("1", "Help"),
+            ("2", ""),
+            ("3", ""),
+            ("4", ""),
+            ("5", "Panelize"),
+            ("6", ""),
+            ("7", ""),
+            ("8", ""),
+            ("9", ""),
+            ("10", "Close"),
+        ],
         Route::Help(_) => [
             ("1", "Help"),
             ("2", "Index"),
@@ -190,7 +202,7 @@ fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, route: &Route
 }
 
 fn panel_title(panel: &PanelState) -> String {
-    let panelize_suffix = if panel.panelize_command().is_some() {
+    let panelize_suffix = if panel.is_panelized() {
         " | panelize"
     } else {
         ""
@@ -953,7 +965,7 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState, ski
 
     frame.render_widget(
         Paragraph::new(
-            "Enter locate | Up/Down move | PgUp/PgDn | Home/End | Alt-J cancel | Esc/q close",
+            "Enter locate | F5 panelize | Up/Down move | PgUp/PgDn | Home/End | Alt-J cancel | Esc/q close",
         )
         .style(skin.style("core", "disabled")),
         layout[2],

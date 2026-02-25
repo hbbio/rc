@@ -76,6 +76,7 @@ pub enum AppCommand {
     FindResultsHome,
     FindResultsEnd,
     FindResultsOpenEntry,
+    FindResultsPanelize,
     TreeMoveUp,
     TreeMoveDown,
     TreePageUp,
@@ -210,6 +211,9 @@ impl AppCommand {
             (KeyContext::FindResults, KeyCommand::Home) => Some(Self::FindResultsHome),
             (KeyContext::FindResults, KeyCommand::End) => Some(Self::FindResultsEnd),
             (KeyContext::FindResults, KeyCommand::OpenEntry) => Some(Self::FindResultsOpenEntry),
+            (KeyContext::FindResults, KeyCommand::OpenPanelizeDialog) => {
+                Some(Self::FindResultsPanelize)
+            }
             (KeyContext::FindResults, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::FileManager, KeyCommand::OpenTree) => Some(Self::OpenTree),
             (KeyContext::Tree, KeyCommand::CursorUp) => Some(Self::TreeMoveUp),
@@ -610,7 +614,20 @@ impl FileEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PanelListingSource {
     Directory,
-    Panelize { command: String },
+    Panelize {
+        command: String,
+    },
+    FindResults {
+        query: String,
+        base_dir: PathBuf,
+        paths: Vec<PathBuf>,
+    },
+}
+
+impl PanelListingSource {
+    fn is_panelized(&self) -> bool {
+        !matches!(self, Self::Directory)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -645,6 +662,9 @@ impl PanelState {
             PanelListingSource::Panelize { command } => {
                 read_panelized_entries(&self.cwd, command, self.sort_mode)?
             }
+            PanelListingSource::FindResults {
+                base_dir, paths, ..
+            } => read_panelized_paths(base_dir, paths, self.sort_mode, None)?,
         };
         self.apply_entries(entries);
         self.loading = false;
@@ -800,7 +820,7 @@ impl PanelState {
     }
 
     pub fn exit_panelize(&mut self) -> bool {
-        if !matches!(self.source, PanelListingSource::Panelize { .. }) {
+        if !self.source.is_panelized() {
             return false;
         }
 
@@ -829,8 +849,12 @@ impl PanelState {
     pub fn panelize_command(&self) -> Option<&str> {
         match &self.source {
             PanelListingSource::Panelize { command } => Some(command.as_str()),
-            PanelListingSource::Directory => None,
+            _ => None,
         }
+    }
+
+    pub fn is_panelized(&self) -> bool {
+        self.source.is_panelized()
     }
 }
 
@@ -1499,6 +1523,10 @@ fn refresh_panel_entries(
             read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
                 .map_err(|error| error.to_string())
         }
+        PanelListingSource::FindResults {
+            base_dir, paths, ..
+        } => read_panelized_paths(base_dir, paths, sort_mode, Some(cancel_flag))
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -2214,7 +2242,7 @@ impl AppState {
                             }
                         }
                         Err(error) => {
-                            let is_panelize = matches!(source, PanelListingSource::Panelize { .. });
+                            let is_panelize = source.is_panelized();
                             if let Some((pending_panel, revert_source)) =
                                 self.pending_panelize_revert.take()
                             {
@@ -2575,6 +2603,48 @@ impl AppState {
             self.set_status("Selected result parent directory is not accessible");
         }
         Ok(())
+    }
+
+    fn panelize_find_results(&mut self) {
+        let Some((query, base_dir, paths)) = (match self.top_route() {
+            Route::FindResults(results) => Some((
+                results.query.clone(),
+                results.base_dir.clone(),
+                results
+                    .entries
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            _ => None,
+        }) else {
+            self.set_status("Find results are not active");
+            return;
+        };
+
+        if paths.is_empty() {
+            self.set_status("No find results to panelize");
+            return;
+        }
+
+        let result_count = paths.len();
+        let active_panel = self.active_panel;
+        let previous_source = self.active_panel().source.clone();
+        {
+            let panel = self.active_panel_mut();
+            panel.source = PanelListingSource::FindResults {
+                query,
+                base_dir,
+                paths,
+            };
+            panel.cursor = 0;
+            panel.tagged.clear();
+            panel.loading = true;
+        }
+        self.pending_panelize_revert = Some((active_panel, previous_source));
+        self.pause_active_find_results();
+        self.queue_panel_refresh(active_panel);
+        self.set_status(format!("Panelizing {result_count} find result(s)..."));
     }
 
     fn open_tree_screen(&mut self) {
@@ -2976,6 +3046,7 @@ impl AppState {
             AppCommand::FindResultsOpenEntry => {
                 self.open_selected_find_result()?;
             }
+            AppCommand::FindResultsPanelize => self.panelize_find_results(),
             AppCommand::TreeMoveUp => self.move_tree_cursor(-1),
             AppCommand::TreeMoveDown => self.move_tree_cursor(1),
             AppCommand::TreePageUp => self.move_tree_page(-1),
@@ -4058,30 +4129,62 @@ fn read_panelized_entries_with_cancel(
             continue;
         }
 
-        let input_path = PathBuf::from(line);
-        let path = if input_path.is_absolute() {
-            input_path
-        } else {
-            base_dir.join(input_path)
-        };
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-
-        let metadata = fs::metadata(&path).ok();
-        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
-        let name = panelized_entry_label(base_dir, &path);
-        let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
-        if is_dir {
-            entries.push(FileEntry::directory(name, path, size, modified));
-        } else {
-            entries.push(FileEntry::file(name, path, size, modified));
-        }
+        append_panelized_path_entry(
+            base_dir,
+            PathBuf::from(line),
+            &mut seen,
+            &mut entries,
+            cancel_flag,
+        )?;
     }
 
     sort_file_entries(&mut entries, sort_mode);
     Ok(entries)
+}
+
+fn read_panelized_paths(
+    base_dir: &Path,
+    paths: &[PathBuf],
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<Vec<FileEntry>> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for path in paths {
+        append_panelized_path_entry(base_dir, path.clone(), &mut seen, &mut entries, cancel_flag)?;
+    }
+    sort_file_entries(&mut entries, sort_mode);
+    Ok(entries)
+}
+
+fn append_panelized_path_entry(
+    base_dir: &Path,
+    input_path: PathBuf,
+    seen: &mut HashSet<PathBuf>,
+    entries: &mut Vec<FileEntry>,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<()> {
+    ensure_panel_refresh_not_canceled(cancel_flag)?;
+    let path = if input_path.is_absolute() {
+        input_path
+    } else {
+        base_dir.join(input_path)
+    };
+    if !seen.insert(path.clone()) {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(&path).ok();
+    let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+    let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+    let name = panelized_entry_label(base_dir, &path);
+    let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
+    if is_dir {
+        entries.push(FileEntry::directory(name, path, size, modified));
+    } else {
+        entries.push(FileEntry::file(name, path, size, modified));
+    }
+    Ok(())
 }
 
 fn ensure_panel_refresh_not_canceled(cancel_flag: Option<&AtomicBool>) -> io::Result<()> {
@@ -5184,6 +5287,75 @@ mod tests {
     }
 
     #[test]
+    fn find_results_panelize_creates_virtual_panel_and_preserves_resume() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-find-panelize-{stamp}"));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("must create temp tree");
+        let target = nested.join("needle.txt");
+        fs::write(&target, "needle").expect("must create target file");
+        fs::write(root.join("other.log"), "other").expect("must create non-matching file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should open");
+        for ch in "needle".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("typing find query should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("find dialog should submit");
+        drain_background(&mut app);
+        assert_eq!(app.key_context(), KeyContext::FindResults);
+
+        app.apply(AppCommand::FindResultsPanelize)
+            .expect("panelizing find results should succeed");
+        drain_background(&mut app);
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        assert!(matches!(
+            app.active_panel().source,
+            PanelListingSource::FindResults { .. }
+        ));
+        assert!(
+            app.active_panel()
+                .entries
+                .iter()
+                .any(|entry| entry.path == target),
+            "panelized find results should include matching files"
+        );
+        assert_eq!(app.active_panel().cwd, root);
+
+        app.apply(AppCommand::CdUp)
+            .expect("CdUp should leave panelize mode");
+        drain_background(&mut app);
+        assert!(matches!(
+            app.active_panel().source,
+            PanelListingSource::Directory
+        ));
+        assert_eq!(
+            app.active_panel().cwd,
+            root,
+            "leaving panelize mode should keep current directory unchanged"
+        );
+
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should resume previous results");
+        assert_eq!(app.key_context(), KeyContext::FindResults);
+        let Route::FindResults(results) = app.top_route() else {
+            panic!("top route should be find results");
+        };
+        assert!(
+            results.entries.iter().any(|entry| entry.path == target),
+            "resumed find results should still include prior matches"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn find_cancel_uses_job_flag_without_worker_cancel_command() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6019,6 +6191,10 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::OpenEntry),
             Some(AppCommand::FindResultsOpenEntry)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::OpenPanelizeDialog),
+            Some(AppCommand::FindResultsPanelize)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::CancelJob),
