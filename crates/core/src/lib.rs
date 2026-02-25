@@ -4067,12 +4067,16 @@ fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
 
 #[cfg(unix)]
 fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+
     Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
 }
 
@@ -4082,9 +4086,41 @@ fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Ch
         .arg("/C")
         .arg(command)
         .current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+}
+
+#[cfg(unix)]
+fn terminate_shell_command(child: &mut std::process::Child) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    let Ok(pid) = i32::try_from(child.id()) else {
+        let _ = child.kill();
+        return;
+    };
+
+    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+}
+
+#[cfg(windows)]
+fn terminate_shell_command(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(&pid)
+        .arg("/T")
+        .arg("/F")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if !matches!(status, Ok(exit_status) if exit_status.success()) {
+        let _ = child.kill();
+    }
 }
 
 fn run_shell_command(
@@ -4117,7 +4153,7 @@ fn run_shell_command(
 
     loop {
         if cancel_flag.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed)) {
-            let _ = child.kill();
+            terminate_shell_command(&mut child);
             let _ = child.wait();
             let _ = stdout_handle.join();
             let _ = stderr_handle.join();
@@ -4154,7 +4190,7 @@ fn join_command_output_reader(
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
     fn file_entry(name: &str) -> FileEntry {
@@ -5439,9 +5475,10 @@ mod tests {
             cancel_clone.store(true, AtomicOrdering::Relaxed);
         });
 
+        let started_at = Instant::now();
         let result = read_panelized_entries_with_cancel(
             &root,
-            "sleep 1; printf 'a.txt\\n'",
+            "sleep 3; printf 'a.txt\\n'",
             SortMode::default(),
             Some(cancel_flag.as_ref()),
         );
@@ -5452,6 +5489,11 @@ mod tests {
         let error = result.expect_err("panelize command should be canceled");
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(error.to_string(), PANEL_REFRESH_CANCELED_MESSAGE);
+        let elapsed = started_at.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "canceled panelize command should stop quickly, took {elapsed:?}"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

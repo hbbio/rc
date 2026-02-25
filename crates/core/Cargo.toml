@@ -8,4 +8,4 @@ license.workspace = true
 filetime = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["fs", "user"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }
