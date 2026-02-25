@@ -677,6 +677,9 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
                 modifiers.shift = true;
                 KeyCode::Char(ch.to_ascii_lowercase())
             } else {
+                if !ch.is_ascii_alphabetic() {
+                    modifiers.shift = false;
+                }
                 KeyCode::Char(ch)
             }
         }
@@ -767,6 +770,17 @@ mod tests {
         .expect("option-f with ALT modifier should map to a chord");
         assert_eq!(chord.code, KeyCode::Char('f'));
         assert!(chord.modifiers.alt);
+    }
+
+    #[test]
+    fn shifted_symbol_char_drops_shift_modifier_for_lookup() {
+        let chord = map_key_event_to_chord(KeyEvent::new(
+            CrosstermKeyCode::Char('!'),
+            KeyModifiers::SHIFT,
+        ))
+        .expect("shift+1 should map to exclamation");
+        assert_eq!(chord.code, KeyCode::Char('!'));
+        assert!(!chord.modifiers.shift);
     }
 
     #[test]
