@@ -118,6 +118,7 @@ pub enum KeyCommand {
     Home,
     End,
     OpenEntry,
+    EditEntry,
     CdUp,
     Reread,
     ToggleTag,
@@ -189,7 +190,7 @@ impl KeyCommand {
             "home" | "top" => Self::Home,
             "end" | "bottom" => Self::End,
             "enter" | "view" | "viewfile" => Self::OpenEntry,
-            "edit" => Self::OpenEntry,
+            "edit" => Self::EditEntry,
             "cdup" => Self::CdUp,
             "reread" => Self::Reread,
             "toggletag" | "mark" => Self::ToggleTag,
@@ -962,7 +963,7 @@ MakeDir = f7
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(4))),
-            Some(&KeyCommand::OpenEntry)
+            Some(&KeyCommand::EditEntry)
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(7))),

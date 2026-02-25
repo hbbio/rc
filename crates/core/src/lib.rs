@@ -70,6 +70,7 @@ pub enum AppCommand {
     JobsMoveUp,
     JobsMoveDown,
     OpenEntry,
+    EditEntry,
     CdUp,
     Reread,
     FindResultsMoveUp,
@@ -207,6 +208,7 @@ impl AppCommand {
             (KeyContext::Help, KeyCommand::HelpNodeNext) => Some(Self::HelpNodeNext),
             (KeyContext::Help, KeyCommand::HelpNodePrev) => Some(Self::HelpNodePrev),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
+            (KeyContext::FileManager, KeyCommand::EditEntry) => Some(Self::EditEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::Reread) => Some(Self::Reread),
             (KeyContext::FileManager, KeyCommand::OpenFindDialog) => Some(Self::OpenFindDialog),
@@ -340,10 +342,14 @@ const LEFT_MENU_ENTRIES: [MenuEntry; 6] = [
     },
 ];
 
-const FILE_MENU_ENTRIES: [MenuEntry; 7] = [
+const FILE_MENU_ENTRIES: [MenuEntry; 8] = [
     MenuEntry {
         label: "View",
         command: AppCommand::OpenEntry,
+    },
+    MenuEntry {
+        label: "Edit",
+        command: AppCommand::EditEntry,
     },
     MenuEntry {
         label: "Copy",
@@ -1440,6 +1446,21 @@ pub enum BackgroundEvent {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalEditRequest {
+    pub editor_command: String,
+    pub path: PathBuf,
+    pub cwd: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditSelectionResult {
+    OpenedExternal,
+    OpenedInternal,
+    NoEntrySelected,
+    SelectedEntryIsDirectory,
+}
+
 pub fn run_background_worker(
     command_rx: Receiver<BackgroundCommand>,
     event_tx: Sender<BackgroundEvent>,
@@ -1903,6 +1924,7 @@ pub struct AppState {
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_background_commands: Vec<BackgroundCommand>,
+    pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh_cancel_flags: [Option<Arc<AtomicBool>>; 2],
     panel_refresh_request_ids: [u64; 2],
     next_panel_refresh_request_id: u64,
@@ -1938,6 +1960,7 @@ impl AppState {
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
             pending_background_commands: Vec::new(),
+            pending_external_edit_requests: Vec::new(),
             panel_refresh_cancel_flags: std::array::from_fn(|_| None),
             panel_refresh_request_ids: [0; 2],
             next_panel_refresh_request_id: 1,
@@ -1997,6 +2020,40 @@ impl AppState {
 
     pub fn exit_panelize_mode(&mut self) -> bool {
         self.active_panel_mut().exit_panelize()
+    }
+
+    fn open_selected_file_in_editor(&mut self) -> EditSelectionResult {
+        self.open_selected_file_in_editor_with_resolver(resolve_external_editor_command)
+    }
+
+    fn open_selected_file_in_editor_with_resolver(
+        &mut self,
+        mut resolve_external_editor: impl FnMut() -> Option<String>,
+    ) -> EditSelectionResult {
+        let Some((path, is_dir)) = self
+            .selected_non_parent_entry()
+            .map(|entry| (entry.path.clone(), entry.is_dir))
+        else {
+            return EditSelectionResult::NoEntrySelected;
+        };
+
+        if is_dir {
+            return EditSelectionResult::SelectedEntryIsDirectory;
+        }
+
+        if let Some(editor_command) = resolve_external_editor() {
+            self.pending_external_edit_requests
+                .push(ExternalEditRequest {
+                    editor_command,
+                    path,
+                    cwd: self.active_panel().cwd.clone(),
+                });
+            return EditSelectionResult::OpenedExternal;
+        }
+
+        self.pending_background_commands
+            .push(BackgroundCommand::LoadViewer { path });
+        EditSelectionResult::OpenedInternal
     }
 
     fn open_selected_file_in_viewer(&mut self) -> bool {
@@ -2143,6 +2200,10 @@ impl AppState {
 
     pub fn take_pending_background_commands(&mut self) -> Vec<BackgroundCommand> {
         std::mem::take(&mut self.pending_background_commands)
+    }
+
+    pub fn take_pending_external_edit_requests(&mut self) -> Vec<ExternalEditRequest> {
+        std::mem::take(&mut self.pending_external_edit_requests)
     }
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
@@ -3197,6 +3258,18 @@ impl AppState {
                     self.set_status("No entry selected");
                 }
             }
+            AppCommand::EditEntry => match self.open_selected_file_in_editor() {
+                EditSelectionResult::OpenedExternal => {
+                    self.set_status("Opening external editor...")
+                }
+                EditSelectionResult::OpenedInternal => {
+                    self.set_status("Opening internal editor...")
+                }
+                EditSelectionResult::NoEntrySelected => self.set_status("No entry selected"),
+                EditSelectionResult::SelectedEntryIsDirectory => {
+                    self.set_status("Directory cannot be edited");
+                }
+            },
             AppCommand::CdUp => {
                 if self.exit_panelize_mode() {
                     self.queue_panel_refresh(self.active_panel);
@@ -4526,6 +4599,28 @@ fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
     }
 }
 
+fn resolve_external_editor_command() -> Option<String> {
+    resolve_external_editor_command_with_lookup(|name| std::env::var(name).ok())
+}
+
+fn resolve_external_editor_command_with_lookup(
+    mut lookup_env: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    for variable in ["EDITOR", "VISUAL"] {
+        if let Some(value) = lookup_env(variable)
+            && let Some(trimmed) = non_empty_env_value(&value)
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn non_empty_env_value(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 #[cfg(unix)]
 fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
@@ -5323,6 +5418,86 @@ mod tests {
         };
         assert_eq!(viewer.path, file_path);
         assert_eq!(viewer.line_count(), 3);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn edit_entry_on_file_queues_external_editor_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-edit-open-file-external-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("notes.txt");
+        fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("must create edit target");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("edit target should be visible");
+        app.active_panel_mut().cursor = file_index;
+
+        assert_eq!(
+            app.open_selected_file_in_editor_with_resolver(|| Some(String::from("nvim"))),
+            EditSelectionResult::OpenedExternal
+        );
+
+        let requests = app.take_pending_external_edit_requests();
+        assert_eq!(requests.len(), 1, "one editor request should be queued");
+        let request = &requests[0];
+        assert_eq!(request.editor_command, "nvim");
+        assert_eq!(request.path, file_path);
+        assert_eq!(request.cwd, root);
+        assert!(
+            app.take_pending_background_commands().is_empty(),
+            "external edit should not queue viewer load"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn edit_entry_falls_back_to_internal_when_no_external_editor_is_set() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-edit-open-file-internal-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("notes.txt");
+        fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("must create edit target");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("edit target should be visible");
+        app.active_panel_mut().cursor = file_index;
+
+        assert_eq!(
+            app.open_selected_file_in_editor_with_resolver(|| None),
+            EditSelectionResult::OpenedInternal
+        );
+        assert!(
+            app.take_pending_external_edit_requests().is_empty(),
+            "no external editor request should be queued"
+        );
+
+        let pending_background = app.take_pending_background_commands();
+        assert_eq!(pending_background.len(), 1, "viewer load should be queued");
+        match &pending_background[0] {
+            BackgroundCommand::LoadViewer { path } => {
+                assert_eq!(path, &file_path);
+            }
+            other => panic!("expected viewer load command, got {other:?}"),
+        }
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -6498,6 +6673,29 @@ mod tests {
     }
 
     #[test]
+    fn resolve_external_editor_command_prefers_editor_over_visual() {
+        let editor = resolve_external_editor_command_with_lookup(|name| match name {
+            "EDITOR" => Some(String::from("  nvim  ")),
+            "VISUAL" => Some(String::from("vim")),
+            _ => None,
+        });
+        assert_eq!(editor, Some(String::from("nvim")));
+    }
+
+    #[test]
+    fn resolve_external_editor_command_uses_visual_then_none() {
+        let editor = resolve_external_editor_command_with_lookup(|name| match name {
+            "EDITOR" => Some(String::from("  ")),
+            "VISUAL" => Some(String::from(" code --wait ")),
+            _ => None,
+        });
+        assert_eq!(editor, Some(String::from("code --wait")));
+
+        let missing = resolve_external_editor_command_with_lookup(|_| None);
+        assert_eq!(missing, None);
+    }
+
+    #[test]
     fn app_command_mapping_is_context_aware() {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenHelp),
@@ -6542,6 +6740,14 @@ mod tests {
         assert_eq!(
             AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
             Some(AppCommand::MoveUp)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenEntry),
+            Some(AppCommand::OpenEntry)
+        );
+        assert_eq!(
+            AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::EditEntry),
+            Some(AppCommand::EditEntry)
         );
         assert_eq!(
             AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::CursorUp),

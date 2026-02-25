@@ -3,6 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,8 +22,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use rc_core::{
-    AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, JobEvent, WorkerCommand,
-    run_background_worker, run_worker,
+    AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, ExternalEditRequest,
+    JobEvent, WorkerCommand, run_background_worker, run_worker,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -268,6 +269,7 @@ fn run_event_loop(
             channels.background_event_rx,
             &mut background_disconnected,
         );
+        dispatch_pending_external_edit_requests(terminal, state);
 
         terminal
             .draw(|frame| rc_ui::render(frame, state))
@@ -427,6 +429,116 @@ fn dispatch_pending_background_commands(
             break;
         }
     }
+}
+
+fn dispatch_pending_external_edit_requests(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) {
+    for request in state.take_pending_external_edit_requests() {
+        if let Err(error) = run_external_editor_request(terminal, &request) {
+            state.set_status(format!("Editor launch failed: {error}"));
+        }
+    }
+}
+
+fn run_external_editor_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    request: &ExternalEditRequest,
+) -> Result<()> {
+    suspend_terminal_for_external_command(terminal)?;
+    let run_result = run_external_editor_process(request);
+    let resume_result = resume_terminal_after_external_command(terminal);
+
+    match (run_result, resume_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(run_error), Ok(())) => Err(run_error),
+        (Ok(()), Err(resume_error)) => Err(resume_error),
+        (Err(run_error), Err(resume_error)) => Err(anyhow!(
+            "editor command failed: {run_error}; terminal restore failed: {resume_error}"
+        )),
+    }
+}
+
+fn suspend_terminal_for_external_command(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    disable_raw_mode().context("failed to disable raw mode for external editor")?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .context("failed to leave alternate screen for external editor")?;
+    terminal
+        .show_cursor()
+        .context("failed to show cursor for external editor")?;
+    Ok(())
+}
+
+fn resume_terminal_after_external_command(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    enable_raw_mode().context("failed to re-enable raw mode after external editor")?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )
+    .context("failed to re-enter alternate screen after external editor")?;
+    terminal
+        .clear()
+        .context("failed to clear terminal after external editor")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
+    let command = format!("{} \"$1\"", request.editor_command);
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .arg("rc-editor")
+        .arg(&request.path)
+        .current_dir(&request.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to launch external editor command '{}'",
+                request.editor_command
+            )
+        })?;
+    if !status.success() {
+        return Err(anyhow!("external editor exited with {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
+    let escaped_path = request.path.to_string_lossy().replace('"', "\"\"");
+    let command = format!("{} \"{}\"", request.editor_command, escaped_path);
+    let status = Command::new("cmd")
+        .arg("/C")
+        .arg(command)
+        .current_dir(&request.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to launch external editor command '{}'",
+                request.editor_command
+            )
+        })?;
+    if !status.success() {
+        return Err(anyhow!("external editor exited with {status}"));
+    }
+    Ok(())
 }
 
 fn apply_pending_skin_change(state: &mut AppState, skin_runtime: &SkinRuntimeConfig) {

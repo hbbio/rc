@@ -63,6 +63,7 @@ Main file manager:
 
 - `Tab`: switch active panel
 - `Enter` / `F3`: open directory or open file in viewer
+- `F4`: edit file using `$EDITOR`, then `$VISUAL`, with internal fallback
 - `Backspace`: go to parent directory
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
 - `Ctrl-J`: open jobs screen
