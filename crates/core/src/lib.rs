@@ -1360,7 +1360,9 @@ enum PendingDialogAction {
         initial_command: String,
         preset_commands: Vec<String>,
     },
-    PanelizeCommand,
+    PanelizeCommand {
+        preset_commands: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -2494,6 +2496,15 @@ impl AppState {
             .unwrap_or("find . -type f")
             .to_string();
         let preset_commands = panelize_preset_commands();
+        self.open_panelize_preset_selection_dialog(initial_command, preset_commands);
+        self.set_status("External panelize");
+    }
+
+    fn open_panelize_preset_selection_dialog(
+        &mut self,
+        initial_command: String,
+        preset_commands: Vec<String>,
+    ) {
         let mut items = vec![String::from(PANELIZE_CUSTOM_COMMAND_LABEL)];
         items.extend(preset_commands.iter().cloned());
         let selected = panelize_preset_selected_index(&initial_command, &preset_commands);
@@ -2506,7 +2517,57 @@ impl AppState {
             items,
             selected,
         )));
-        self.set_status("External panelize");
+    }
+
+    fn open_panelize_command_input_dialog(
+        &mut self,
+        initial_command: String,
+        preset_commands: Vec<String>,
+    ) {
+        self.pending_dialog_action = Some(PendingDialogAction::PanelizeCommand { preset_commands });
+        self.routes.push(Route::Dialog(DialogState::input(
+            "External panelize",
+            "Command (stdout paths):",
+            initial_command,
+        )));
+    }
+
+    fn toggle_panelize_dialog_focus(&mut self) -> bool {
+        match self.pending_dialog_action.clone() {
+            Some(PendingDialogAction::PanelizePresetSelection {
+                initial_command,
+                preset_commands,
+            }) => {
+                let is_listbox = matches!(
+                    self.top_route(),
+                    Route::Dialog(DialogState {
+                        kind: DialogKind::Listbox(_),
+                        ..
+                    })
+                );
+                if !is_listbox {
+                    return false;
+                }
+                self.routes.pop();
+                self.open_panelize_command_input_dialog(initial_command, preset_commands);
+                self.set_status("External panelize: enter command");
+                true
+            }
+            Some(PendingDialogAction::PanelizeCommand { preset_commands }) => {
+                let initial_command = match self.top_route() {
+                    Route::Dialog(dialog) => match &dialog.kind {
+                        DialogKind::Input(input) => input.value.clone(),
+                        _ => return false,
+                    },
+                    _ => return false,
+                };
+                self.routes.pop();
+                self.open_panelize_preset_selection_dialog(initial_command, preset_commands);
+                self.set_status("External panelize");
+                true
+            }
+            _ => false,
+        }
     }
 
     fn start_panelize_command(&mut self, command: String) {
@@ -3188,7 +3249,11 @@ impl AppState {
             }
             AppCommand::DialogAccept => self.handle_dialog_event(DialogEvent::Accept),
             AppCommand::DialogCancel => self.handle_dialog_event(DialogEvent::Cancel),
-            AppCommand::DialogFocusNext => self.handle_dialog_event(DialogEvent::FocusNext),
+            AppCommand::DialogFocusNext => {
+                if !self.toggle_panelize_dialog_focus() {
+                    self.handle_dialog_event(DialogEvent::FocusNext);
+                }
+            }
             AppCommand::DialogBackspace => self.handle_dialog_event(DialogEvent::Backspace),
             AppCommand::DialogInputChar(ch) => {
                 self.handle_dialog_event(DialogEvent::InsertChar(ch))
@@ -3756,12 +3821,7 @@ impl AppState {
                     return;
                 };
                 if index == 0 {
-                    self.pending_dialog_action = Some(PendingDialogAction::PanelizeCommand);
-                    self.routes.push(Route::Dialog(DialogState::input(
-                        "External panelize",
-                        "Command (stdout paths):",
-                        initial_command,
-                    )));
+                    self.open_panelize_command_input_dialog(initial_command, preset_commands);
                     self.set_status("External panelize: enter command");
                     return;
                 }
@@ -3774,7 +3834,10 @@ impl AppState {
             (Some(PendingDialogAction::PanelizePresetSelection { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize canceled");
             }
-            (Some(PendingDialogAction::PanelizeCommand), DialogResult::InputSubmitted(value)) => {
+            (
+                Some(PendingDialogAction::PanelizeCommand { .. }),
+                DialogResult::InputSubmitted(value),
+            ) => {
                 let command = value.trim();
                 if command.is_empty() {
                     self.set_status("Panelize canceled: empty command");
@@ -3783,7 +3846,7 @@ impl AppState {
 
                 self.start_panelize_command(command.to_string());
             }
-            (Some(PendingDialogAction::PanelizeCommand), DialogResult::Canceled) => {
+            (Some(PendingDialogAction::PanelizeCommand { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize canceled");
             }
             (
@@ -5877,6 +5940,64 @@ mod tests {
                 .iter()
                 .any(|item| item == "find . -name '*.orig'"),
             "panelize list should include predefined commands"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn panelize_dialog_tab_switches_from_presets_to_input() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-tab-to-input-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.apply(AppCommand::DialogFocusNext)
+            .expect("tab should switch to command input");
+
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("panelize should remain in dialog route");
+        };
+        let DialogKind::Input(input) = &dialog.kind else {
+            panic!("tab should open panelize input dialog");
+        };
+        assert_eq!(input.value, "find . -type f");
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn panelize_dialog_tab_switches_from_input_back_to_presets() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-tab-to-presets-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.apply(AppCommand::DialogFocusNext)
+            .expect("tab should switch to command input");
+        app.apply(AppCommand::DialogInputChar('x'))
+            .expect("typing command suffix should succeed");
+        app.apply(AppCommand::DialogFocusNext)
+            .expect("tab should switch back to preset list");
+
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("panelize should remain in dialog route");
+        };
+        let DialogKind::Listbox(listbox) = &dialog.kind else {
+            panic!("tab should return to preset list");
+        };
+        assert_eq!(listbox.selected, 0);
+        assert_eq!(
+            listbox.items.first(),
+            Some(&String::from(PANELIZE_CUSTOM_COMMAND_LABEL))
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

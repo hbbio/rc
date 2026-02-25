@@ -1197,6 +1197,21 @@ Reread = ctrl-r
     }
 
     #[test]
+    fn bundled_keymap_supports_tab_focus_switch_for_panelize_dialogs() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let tab = KeyChord::new(KeyCode::Tab);
+
+        assert_eq!(
+            keymap.resolve(KeyContext::Input, tab),
+            Some(&KeyCommand::DialogFocusNext)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Listbox, tab),
+            Some(&KeyCommand::DialogFocusNext)
+        );
+    }
+
+    #[test]
     fn bundled_keymap_no_longer_reports_common_mc_actions_as_unknown() {
         let (_, report) =
             Keymap::bundled_mc_default_with_report().expect("bundled keymap should parse");

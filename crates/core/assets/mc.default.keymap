@@ -537,12 +537,14 @@ FocusNext = tab
 Ok = enter
 Cancel = esc
 Backspace = backspace
+FocusNext = tab
 
 [listbox]
 Up = up
 Down = down
 Ok = enter
 Cancel = esc
+FocusNext = tab
 
 [menu]
 Up = up
