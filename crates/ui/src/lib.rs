@@ -189,14 +189,24 @@ fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, route: &Route
     frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
-    let title = format!(
-        "{} | sort:{} | tagged:{}{}",
+fn panel_title(panel: &PanelState) -> String {
+    let panelize_suffix = if panel.panelize_command().is_some() {
+        " | panelize"
+    } else {
+        ""
+    };
+    format!(
+        "{}{} | sort:{} | tagged:{}{}",
         panel.cwd.to_string_lossy(),
+        panelize_suffix,
         panel.sort_label(),
         panel.tagged_count(),
         if panel.loading { " | loading..." } else { "" }
-    );
+    )
+}
+
+fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
+    let title = panel_title(panel);
     let selected_tagged = panel
         .selected_entry()
         .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
@@ -1552,6 +1562,27 @@ mod tests {
             frame.contains("entry.txt"),
             "frame should include panel entry names"
         );
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panel_title_marks_panelize_panels() {
+        let root = temp_root("panelize-title");
+        fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenPanelizeDialog)
+            .expect("panelize dialog should open");
+        app.apply(AppCommand::DialogAccept)
+            .expect("default panelize preset should run");
+        drain_background(&mut app);
+
+        let title = panel_title(app.active_panel());
+        assert!(
+            title.contains("panelize"),
+            "panel title should indicate panelize mode"
+        );
+
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
