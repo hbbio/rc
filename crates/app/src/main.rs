@@ -346,7 +346,12 @@ fn handle_key(
         }
         return Ok(false);
     };
-    let Some(command) = AppCommand::from_key_command(context, key_command) else {
+    let command = AppCommand::from_key_command(context, key_command).or_else(|| {
+        (context == KeyContext::FileManagerXMap)
+            .then(|| AppCommand::from_key_command(KeyContext::FileManager, key_command))
+            .flatten()
+    });
+    let Some(command) = command else {
         return Ok(false);
     };
 
@@ -726,6 +731,7 @@ fn map_macos_option_symbol(ch: char) -> Option<char> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode as CrosstermKeyCode, KeyEvent, KeyModifiers};
+    use std::sync::mpsc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
@@ -781,6 +787,51 @@ mod tests {
         .expect("shift+1 should map to exclamation");
         assert_eq!(chord.code, KeyCode::Char('!'));
         assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
+    fn ctrl_x_exclamation_opens_external_panelize_dialog() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-ctrlx-panelize-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let (worker_tx, _worker_rx) = mpsc::channel();
+        let (background_tx, _background_rx) = mpsc::channel();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dir: None,
+            mc_ini_path: None,
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            &worker_tx,
+            &background_tx,
+            &skin_runtime,
+        )
+        .expect("ctrl-x should enter xmap mode");
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('!'), KeyModifiers::SHIFT),
+            &worker_tx,
+            &background_tx,
+            &skin_runtime,
+        )
+        .expect("ctrl-x ! should open external panelize");
+
+        assert_eq!(state.key_context(), KeyContext::Listbox);
+        assert!(
+            state.status_line.contains("External panelize"),
+            "status line should acknowledge external panelize dialog"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]
