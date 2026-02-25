@@ -791,6 +791,19 @@ impl PanelState {
         true
     }
 
+    pub fn exit_panelize(&mut self) -> bool {
+        if !matches!(self.source, PanelListingSource::Panelize { .. }) {
+            return false;
+        }
+
+        self.cursor = 0;
+        self.source = PanelListingSource::Directory;
+        self.tagged.clear();
+        self.entries.clear();
+        self.loading = true;
+        true
+    }
+
     pub fn panelize_with_command(&mut self, command: String) -> io::Result<usize> {
         let previous_source = self.source.clone();
         self.source = PanelListingSource::Panelize { command };
@@ -1923,6 +1936,10 @@ impl AppState {
         self.active_panel_mut().go_parent()
     }
 
+    pub fn exit_panelize_mode(&mut self) -> bool {
+        self.active_panel_mut().exit_panelize()
+    }
+
     fn open_selected_file_in_viewer(&mut self) -> bool {
         let Some(entry) = self.selected_non_parent_entry() else {
             return false;
@@ -2902,7 +2919,10 @@ impl AppState {
                 }
             }
             AppCommand::CdUp => {
-                if self.go_parent_directory() {
+                if self.exit_panelize_mode() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Leaving panelize mode...");
+                } else if self.go_parent_directory() {
                     self.queue_panel_refresh(self.active_panel);
                     self.set_status("Loading parent directory...");
                 } else {
@@ -5418,6 +5438,56 @@ mod tests {
             "empty panelize output should produce empty panel entries"
         );
         assert_eq!(app.active_panel().panelize_command(), Some("printf ''"));
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cdup_leaves_panelize_mode_without_changing_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-cdup-{stamp}"));
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("must create subdirectory");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::InputSubmitted(String::from(
+            "printf 'sub\\n'",
+        )));
+        drain_background(&mut app);
+
+        assert_eq!(
+            app.active_panel().panelize_command(),
+            Some("printf 'sub\\n'"),
+            "precondition: panel should be in panelize mode"
+        );
+        assert_eq!(app.active_panel().cwd, root);
+
+        app.apply(AppCommand::CdUp)
+            .expect("CdUp should leave panelize mode");
+        drain_background(&mut app);
+
+        assert_eq!(
+            app.active_panel().panelize_command(),
+            None,
+            "CdUp should restore normal directory mode from panelize"
+        );
+        assert_eq!(
+            app.active_panel().cwd,
+            root,
+            "CdUp in panelize mode should not change to parent directory"
+        );
+        assert!(
+            app.active_panel()
+                .entries
+                .iter()
+                .any(|entry| entry.path == sub),
+            "restored listing should include entries from the current directory"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
