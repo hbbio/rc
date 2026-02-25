@@ -682,6 +682,11 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
                 modifiers.shift = true;
                 KeyCode::Char(ch.to_ascii_lowercase())
             } else {
+                if modifiers.shift
+                    && let Some(symbol) = map_shifted_ascii_symbol(ch)
+                {
+                    ch = symbol;
+                }
                 if !ch.is_ascii_alphabetic() {
                     modifiers.shift = false;
                 }
@@ -723,6 +728,33 @@ fn map_macos_option_symbol(ch: char) -> Option<char> {
         '¬' => Some('l'),
         '¿' => Some('?'),
         '•' | '°' => Some('*'),
+        _ => None,
+    }
+}
+
+fn map_shifted_ascii_symbol(ch: char) -> Option<char> {
+    match ch {
+        '`' => Some('~'),
+        '1' => Some('!'),
+        '2' => Some('@'),
+        '3' => Some('#'),
+        '4' => Some('$'),
+        '5' => Some('%'),
+        '6' => Some('^'),
+        '7' => Some('&'),
+        '8' => Some('*'),
+        '9' => Some('('),
+        '0' => Some(')'),
+        '-' => Some('_'),
+        '=' => Some('+'),
+        '[' => Some('{'),
+        ']' => Some('}'),
+        '\\' => Some('|'),
+        ';' => Some(':'),
+        '\'' => Some('"'),
+        ',' => Some('<'),
+        '.' => Some('>'),
+        '/' => Some('?'),
         _ => None,
     }
 }
@@ -790,6 +822,17 @@ mod tests {
     }
 
     #[test]
+    fn shifted_digit_char_maps_to_shifted_symbol_for_lookup() {
+        let chord = map_key_event_to_chord(KeyEvent::new(
+            CrosstermKeyCode::Char('1'),
+            KeyModifiers::SHIFT,
+        ))
+        .expect("shift+1 should map to exclamation");
+        assert_eq!(chord.code, KeyCode::Char('!'));
+        assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
     fn ctrl_x_exclamation_opens_external_panelize_dialog() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -824,6 +867,51 @@ mod tests {
             &skin_runtime,
         )
         .expect("ctrl-x ! should open external panelize");
+
+        assert_eq!(state.key_context(), KeyContext::Listbox);
+        assert!(
+            state.status_line.contains("External panelize"),
+            "status line should acknowledge external panelize dialog"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn ctrl_x_shift_digit_opens_external_panelize_dialog() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-ctrlx-panelize-digit-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let (worker_tx, _worker_rx) = mpsc::channel();
+        let (background_tx, _background_rx) = mpsc::channel();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dir: None,
+            mc_ini_path: None,
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            &worker_tx,
+            &background_tx,
+            &skin_runtime,
+        )
+        .expect("ctrl-x should enter xmap mode");
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('1'), KeyModifiers::SHIFT),
+            &worker_tx,
+            &background_tx,
+            &skin_runtime,
+        )
+        .expect("ctrl-x shift+1 should open external panelize");
 
         assert_eq!(state.key_context(), KeyContext::Listbox);
         assert!(
