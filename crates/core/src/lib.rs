@@ -491,6 +491,14 @@ const FIND_EVENT_CHUNK_SIZE: usize = 64;
 const TREE_MAX_DEPTH: usize = 6;
 const TREE_MAX_ENTRIES: usize = 2_000;
 const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
+const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";
+const PANELIZE_PRESET_COMMANDS: &[&str] = &[
+    "find . -type f",
+    "find . -name '*.orig'",
+    "find . -name '*.rej'",
+    "find . -name core",
+    "find . -type f -perm -4000",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
@@ -1323,6 +1331,10 @@ enum PendingDialogAction {
     ViewerGoto,
     FindQuery {
         base_dir: PathBuf,
+    },
+    PanelizePresetSelection {
+        initial_command: String,
+        preset_commands: Vec<String>,
     },
     PanelizeCommand,
 }
@@ -2448,18 +2460,40 @@ impl AppState {
     }
 
     fn open_panelize_dialog(&mut self) {
-        let initial = self
+        let initial_command = self
             .active_panel()
             .panelize_command()
             .unwrap_or("find . -type f")
             .to_string();
-        self.pending_dialog_action = Some(PendingDialogAction::PanelizeCommand);
-        self.routes.push(Route::Dialog(DialogState::input(
+        let preset_commands = panelize_preset_commands();
+        let mut items = vec![String::from(PANELIZE_CUSTOM_COMMAND_LABEL)];
+        items.extend(preset_commands.iter().cloned());
+        let selected = panelize_preset_selected_index(&initial_command, &preset_commands);
+        self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetSelection {
+            initial_command,
+            preset_commands,
+        });
+        self.routes.push(Route::Dialog(DialogState::listbox(
             "External panelize",
-            "Command (stdout paths):",
-            initial,
+            items,
+            selected,
         )));
         self.set_status("External panelize");
+    }
+
+    fn start_panelize_command(&mut self, command: String) {
+        let active_panel = self.active_panel;
+        let previous_source = self.active_panel().source.clone();
+        {
+            let panel = self.active_panel_mut();
+            panel.source = PanelListingSource::Panelize { command };
+            panel.cursor = 0;
+            panel.tagged.clear();
+            panel.loading = true;
+        }
+        self.pending_panelize_revert = Some((active_panel, previous_source));
+        self.queue_panel_refresh(active_panel);
+        self.set_status("Panelize running...");
     }
 
     fn close_find_results(&mut self) {
@@ -3639,6 +3673,36 @@ impl AppState {
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
             }
+            (
+                Some(PendingDialogAction::PanelizePresetSelection {
+                    initial_command,
+                    preset_commands,
+                }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                let Some(index) = index else {
+                    self.set_status("Panelize canceled");
+                    return;
+                };
+                if index == 0 {
+                    self.pending_dialog_action = Some(PendingDialogAction::PanelizeCommand);
+                    self.routes.push(Route::Dialog(DialogState::input(
+                        "External panelize",
+                        "Command (stdout paths):",
+                        initial_command,
+                    )));
+                    self.set_status("External panelize: enter command");
+                    return;
+                }
+                let Some(command) = preset_commands.get(index.saturating_sub(1)).cloned() else {
+                    self.set_status("Panelize canceled");
+                    return;
+                };
+                self.start_panelize_command(command);
+            }
+            (Some(PendingDialogAction::PanelizePresetSelection { .. }), DialogResult::Canceled) => {
+                self.set_status("Panelize canceled");
+            }
             (Some(PendingDialogAction::PanelizeCommand), DialogResult::InputSubmitted(value)) => {
                 let command = value.trim();
                 if command.is_empty() {
@@ -3646,20 +3710,7 @@ impl AppState {
                     return;
                 }
 
-                let active_panel = self.active_panel;
-                let previous_source = self.active_panel().source.clone();
-                {
-                    let panel = self.active_panel_mut();
-                    panel.source = PanelListingSource::Panelize {
-                        command: command.to_string(),
-                    };
-                    panel.cursor = 0;
-                    panel.tagged.clear();
-                    panel.loading = true;
-                }
-                self.pending_panelize_revert = Some((active_panel, previous_source));
-                self.queue_panel_refresh(active_panel);
-                self.set_status("Panelize running...");
+                self.start_panelize_command(command.to_string());
             }
             (Some(PendingDialogAction::PanelizeCommand), DialogResult::Canceled) => {
                 self.set_status("Panelize canceled");
@@ -3918,6 +3969,20 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
         2 => OverwritePolicy::Rename,
         _ => OverwritePolicy::Skip,
     }
+}
+
+fn panelize_preset_commands() -> Vec<String> {
+    PANELIZE_PRESET_COMMANDS
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect()
+}
+
+fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[String]) -> usize {
+    preset_commands
+        .iter()
+        .position(|command| command == initial_command)
+        .map_or(0, |index| index.saturating_add(1))
 }
 
 fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
@@ -4248,6 +4313,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn submit_panelize_custom_command(app: &mut AppState, command: &str) {
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::ListboxSubmitted {
+            index: Some(0),
+            value: Some(String::from(PANELIZE_CUSTOM_COMMAND_LABEL)),
+        });
+        app.finish_dialog(DialogResult::InputSubmitted(command.to_string()));
     }
 
     #[test]
@@ -5382,10 +5456,7 @@ mod tests {
         fs::write(root.join("a.txt"), "a").expect("must create file");
 
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.open_panelize_dialog();
-        app.finish_dialog(DialogResult::InputSubmitted(String::from(
-            "printf 'a.txt\\nsub\\nmissing\\n'",
-        )));
+        submit_panelize_custom_command(&mut app, "printf 'a.txt\\nsub\\nmissing\\n'");
         drain_background(&mut app);
 
         let panel = app.active_panel();
@@ -5431,8 +5502,7 @@ mod tests {
         fs::write(root.join("a.txt"), "a").expect("must create file");
 
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.open_panelize_dialog();
-        app.finish_dialog(DialogResult::InputSubmitted(String::from("printf ''")));
+        submit_panelize_custom_command(&mut app, "printf ''");
         drain_background(&mut app);
 
         assert_eq!(
@@ -5457,10 +5527,7 @@ mod tests {
         fs::create_dir_all(&sub).expect("must create subdirectory");
 
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.open_panelize_dialog();
-        app.finish_dialog(DialogResult::InputSubmitted(String::from(
-            "printf 'sub\\n'",
-        )));
+        submit_panelize_custom_command(&mut app, "printf 'sub\\n'");
         drain_background(&mut app);
 
         assert_eq!(
@@ -5509,8 +5576,7 @@ mod tests {
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         let before = app.active_panel().entries.clone();
 
-        app.open_panelize_dialog();
-        app.finish_dialog(DialogResult::InputSubmitted(String::from("exit 42")));
+        submit_panelize_custom_command(&mut app, "exit 42");
         drain_background(&mut app);
 
         assert!(
@@ -5544,10 +5610,7 @@ mod tests {
         fs::write(sub.join("a.txt"), "a").expect("must create file");
 
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.open_panelize_dialog();
-        app.finish_dialog(DialogResult::InputSubmitted(String::from(
-            "printf 'sub/a.txt\\n'",
-        )));
+        submit_panelize_custom_command(&mut app, "printf 'sub/a.txt\\n'");
         drain_background(&mut app);
 
         app.apply(AppCommand::OpenConfirmDialog)
@@ -5561,6 +5624,72 @@ mod tests {
         assert_eq!(
             input.value, "a.txt",
             "rename input should default to basename, not panelized display label"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn panelize_dialog_lists_predefined_commands() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-presets-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("panelize should open a dialog");
+        };
+        let DialogKind::Listbox(listbox) = &dialog.kind else {
+            panic!("panelize should open a listbox dialog");
+        };
+        assert_eq!(
+            listbox.items.first(),
+            Some(&String::from(PANELIZE_CUSTOM_COMMAND_LABEL))
+        );
+        assert!(
+            listbox
+                .items
+                .iter()
+                .any(|item| item == "find . -name '*.orig'"),
+            "panelize list should include predefined commands"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panelize_preset_selection_runs_without_custom_input() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-preset-select-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        fs::write(root.join("a.txt"), "a").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::ListboxSubmitted {
+            index: Some(1),
+            value: Some(String::from("find . -type f")),
+        });
+        drain_background(&mut app);
+
+        assert_eq!(
+            app.active_panel().panelize_command(),
+            Some("find . -type f")
+        );
+        assert!(
+            app.active_panel()
+                .entries
+                .iter()
+                .any(|entry| entry.path == root.join("a.txt")),
+            "preset command should populate panel entries"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
