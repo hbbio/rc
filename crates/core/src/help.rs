@@ -18,6 +18,7 @@ Choose a topic:\n\
   [Viewer](viewer)\n\
   [Jobs screen](jobs)\n\
   [Find results](find-results)\n\
+  [Panelize and VFS](panelize)\n\
   [Directory tree](tree)\n\
   [Directory hotlist](hotlist)\n\
 \n\
@@ -49,6 +50,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   Alt-T open directory tree\n\
   Alt-H open directory hotlist\n\
   Ctrl-X ! (or Alt/Ctrl-P) open external panelize\n\
+  F9 -> Command -> External panelize\n\
   Ctrl-J open jobs screen\n\
   Alt-J cancel latest job\n\
   Alt-S/Ctrl-K open skin picker\n\
@@ -59,7 +61,7 @@ File operations:\n\
   Insert/Ctrl-T toggle selection\n\
   F5/F6/F8 copy/move/delete\n\
 \n\
-More: [Find results](find-results), [Directory tree](tree), [Directory hotlist](hotlist).",
+More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist).",
     ),
     (
         "viewer",
@@ -99,7 +101,30 @@ Keys:\n\
   Alt-J cancel active find job\n\
   Esc/q close\n\
 \n\
-See also [File manager](file-manager).",
+Panelize here uses the internal Find results list.\n\
+Use external panelize for shell-command output lists.\n\
+\n\
+See also [File manager](file-manager) and [Panelize and VFS](panelize).",
+    ),
+    (
+        "panelize",
+        "Panelize and VFS",
+        "Two panelize flows share the same virtual panel layer:\n\
+  Find results panelize (F5 in Find results)\n\
+    Source: internal search matches\n\
+    Entry point: Alt-? search, then F5 in results\n\
+  External panelize (Ctrl-X !)\n\
+    Source: shell command stdout, one path per line\n\
+    Entry point: Ctrl-X ! or F9 -> Command -> External panelize\n\
+\n\
+Both allow normal file operations (F3/F4/F5/F6/F8),\n\
+Ctrl-R refresh, and exit by changing to a real directory.\n\
+\n\
+How this differs from VFS:\n\
+  VFS mounts archives/remote locations as browsable trees.\n\
+  Panelize does not mount filesystems; it only lists paths.\n\
+\n\
+Back to [File manager](file-manager) or [Find results](find-results).",
     ),
     (
         "tree",
@@ -517,6 +542,18 @@ mod tests {
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Tab switch panel"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
+        assert!(content.contains("F9 -> Command -> External panelize"));
         assert!(content.contains("q/F10 quit"));
+    }
+
+    #[test]
+    fn panelize_topic_mentions_internal_external_and_vfs() {
+        let mut help = HelpState::for_context(KeyContext::FileManager);
+        help.open_topic("panelize", false);
+
+        let content = flatten_help_lines(help.lines());
+        assert!(content.contains("Find results panelize"));
+        assert!(content.contains("External panelize (Ctrl-X !)"));
+        assert!(content.contains("How this differs from VFS"));
     }
 }
