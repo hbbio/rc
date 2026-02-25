@@ -3297,7 +3297,10 @@ impl AppState {
         }
 
         let source = entry.path.clone();
-        let current_name = entry.name.clone();
+        let current_name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| entry.name.clone());
         self.pending_dialog_action = Some(PendingDialogAction::RenameEntry { source });
         self.routes.push(Route::Dialog(DialogState::input(
             "Rename/Move",
@@ -5523,6 +5526,41 @@ mod tests {
             app.active_panel().panelize_command(),
             None,
             "failed panelize should not switch source mode"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_dialog_uses_basename_for_panelized_entry() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-rename-basename-{stamp}"));
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("must create subdirectory");
+        fs::write(sub.join("a.txt"), "a").expect("must create file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.open_panelize_dialog();
+        app.finish_dialog(DialogResult::InputSubmitted(String::from(
+            "printf 'sub/a.txt\\n'",
+        )));
+        drain_background(&mut app);
+
+        app.apply(AppCommand::OpenConfirmDialog)
+            .expect("rename dialog should open");
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("rename action should open a dialog route");
+        };
+        let DialogKind::Input(input) = &dialog.kind else {
+            panic!("rename action should open an input dialog");
+        };
+        assert_eq!(
+            input.value, "a.txt",
+            "rename input should default to basename, not panelized display label"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
