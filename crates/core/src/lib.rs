@@ -35,7 +35,7 @@ pub use settings::{
 };
 
 use crate::dialog::DialogEvent;
-use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap};
+use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap, KeymapParseReport};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
@@ -558,6 +558,14 @@ impl SortField {
             Self::Modified => "mtime",
         }
     }
+
+    fn from_settings(field: SettingsSortField) -> Self {
+        match field {
+            SettingsSortField::Name => Self::Name,
+            SettingsSortField::Size => Self::Size,
+            SettingsSortField::Modified => Self::Modified,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -667,6 +675,7 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    show_hidden_files: bool,
     source: PanelListingSource,
     tagged: HashSet<PathBuf>,
     pub loading: bool,
@@ -679,6 +688,7 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -689,7 +699,9 @@ impl PanelState {
 
     pub fn refresh(&mut self) -> io::Result<()> {
         let entries = match &self.source {
-            PanelListingSource::Directory => read_entries(&self.cwd, self.sort_mode)?,
+            PanelListingSource::Directory => {
+                read_entries_with_visibility(&self.cwd, self.sort_mode, self.show_hidden_files)?
+            }
             PanelListingSource::Panelize { command } => {
                 read_panelized_entries(&self.cwd, command, self.sort_mode)?
             }
@@ -734,6 +746,10 @@ impl PanelState {
     pub fn move_cursor_page(&mut self, pages: isize) {
         let delta = pages.saturating_mul(DEFAULT_PAGE_STEP as isize);
         self.move_cursor(delta);
+    }
+
+    pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) {
+        self.show_hidden_files = show_hidden_files;
     }
 
     pub fn move_cursor_home(&mut self) {
@@ -1342,16 +1358,16 @@ impl MenuState {
 pub struct SettingsScreenState {
     pub category: SettingsCategory,
     pub title: String,
-    pub entries: Vec<String>,
+    pub entries: Vec<SettingsEntry>,
     pub selected_entry: usize,
 }
 
 impl SettingsScreenState {
-    fn new(category: SettingsCategory) -> Self {
+    fn new(category: SettingsCategory, entries: Vec<SettingsEntry>) -> Self {
         Self {
             category,
             title: format!("{} options", category.label()),
-            entries: settings_category_placeholder_entries(category),
+            entries,
             selected_entry: 0,
         }
     }
@@ -1372,13 +1388,58 @@ impl SettingsScreenState {
     }
 }
 
-fn settings_category_placeholder_entries(category: SettingsCategory) -> Vec<String> {
-    vec![
-        format!("{} settings editor", category.label()),
-        String::from("Use Up/Down to navigate entries."),
-        String::from("Press Enter to toggle/apply (implementation in progress)."),
-        String::from("Press Esc to return."),
-    ]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsEntry {
+    pub label: String,
+    pub value: String,
+    action: SettingsEntryAction,
+}
+
+impl SettingsEntry {
+    fn new(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        action: SettingsEntryAction,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            action,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        if self.value.is_empty() {
+            return self.label.clone();
+        }
+        format!("{}: {}", self.label, self.value)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SettingsEntryAction {
+    ToggleUseInternalEditor,
+    CycleDefaultOverwritePolicy,
+    ToggleMacosOptionSymbols,
+    ToggleLayoutShowMenuBar,
+    ToggleLayoutShowButtonBar,
+    ToggleLayoutShowDebugStatus,
+    ToggleLayoutShowPanelTotals,
+    TogglePanelShowHiddenFiles,
+    CyclePanelSortField,
+    TogglePanelSortReverse,
+    ToggleConfirmDelete,
+    ToggleConfirmOverwrite,
+    ToggleConfirmQuit,
+    OpenSkinDialog,
+    ToggleUtf8Output,
+    ToggleEightBitInput,
+    LearnKeysCapture,
+    ToggleVfsEnabled,
+    ToggleVfsFtpEnabled,
+    ToggleVfsShellLinkEnabled,
+    ToggleVfsSftpEnabled,
+    Info,
 }
 
 #[derive(Clone, Debug)]
@@ -1406,6 +1467,7 @@ enum PendingDialogAction {
     ConfirmDelete {
         targets: Vec<PathBuf>,
     },
+    ConfirmQuit,
     Mkdir {
         base_dir: PathBuf,
     },
@@ -1458,6 +1520,7 @@ pub enum BackgroundCommand {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        show_hidden_files: bool,
         request_id: u64,
         cancel_flag: Arc<AtomicBool>,
     },
@@ -1689,13 +1752,17 @@ fn refresh_panel_entries(
     cwd: &Path,
     source: &PanelListingSource,
     sort_mode: SortMode,
+    show_hidden_files: bool,
     cancel_flag: &AtomicBool,
 ) -> Result<Vec<FileEntry>, String> {
     match source {
-        PanelListingSource::Directory => {
-            read_entries_with_cancel(cwd, sort_mode, Some(cancel_flag))
-                .map_err(|error| error.to_string())
-        }
+        PanelListingSource::Directory => read_entries_with_visibility_cancel(
+            cwd,
+            sort_mode,
+            show_hidden_files,
+            Some(cancel_flag),
+        )
+        .map_err(|error| error.to_string()),
         PanelListingSource::Panelize { command } => {
             read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
                 .map_err(|error| error.to_string())
@@ -1717,12 +1784,19 @@ fn execute_background_command(
             cwd,
             source,
             sort_mode,
+            show_hidden_files,
             request_id,
             cancel_flag,
         } => {
             #[cfg(test)]
             {
-                let result = refresh_panel_entries(&cwd, &source, sort_mode, cancel_flag.as_ref());
+                let result = refresh_panel_entries(
+                    &cwd,
+                    &source,
+                    sort_mode,
+                    show_hidden_files,
+                    cancel_flag.as_ref(),
+                );
                 if event_tx
                     .send(BackgroundEvent::PanelRefreshed {
                         panel,
@@ -1752,6 +1826,7 @@ fn execute_background_command(
                             &worker_cwd,
                             &worker_source,
                             sort_mode,
+                            show_hidden_files,
                             worker_cancel_flag.as_ref(),
                         );
                         let _ = worker_event_tx.send(BackgroundEvent::PanelRefreshed {
@@ -2073,8 +2148,11 @@ pub struct AppState {
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
     panelize_presets: Vec<String>,
     keybinding_hints: KeybindingHints,
+    keymap_unknown_actions: usize,
+    keymap_invalid_bindings: usize,
     xmap_pending: bool,
     pending_save_setup: bool,
+    pending_quit: bool,
 }
 
 impl AppState {
@@ -2113,8 +2191,11 @@ impl AppState {
             pending_panelize_revert: None,
             panelize_presets: settings.configuration.panelize_presets.clone(),
             keybinding_hints: KeybindingHints::default(),
+            keymap_unknown_actions: 0,
+            keymap_invalid_bindings: 0,
             xmap_pending: false,
             pending_save_setup: false,
+            pending_quit: false,
         })
     }
 
@@ -2143,15 +2224,68 @@ impl AppState {
         self.settings.mark_dirty();
     }
 
+    pub fn show_menu_bar(&self) -> bool {
+        self.settings.layout.show_menu_bar
+    }
+
+    pub fn show_button_bar(&self) -> bool {
+        self.settings.layout.show_button_bar
+    }
+
+    pub fn show_debug_status(&self) -> bool {
+        self.settings.layout.show_debug_status
+    }
+
+    pub fn show_panel_totals(&self) -> bool {
+        self.settings.layout.show_panel_totals
+    }
+
+    pub fn jobs_dialog_size(&self) -> (u16, u16) {
+        (
+            self.settings.layout.jobs_dialog_width,
+            self.settings.layout.jobs_dialog_height,
+        )
+    }
+
+    pub fn help_dialog_size(&self) -> (u16, u16) {
+        (
+            self.settings.layout.help_dialog_width,
+            self.settings.layout.help_dialog_height,
+        )
+    }
+
+    pub fn disk_usage_cache_ttl(&self) -> Duration {
+        Duration::from_millis(self.settings.advanced.disk_usage_cache_ttl_ms)
+    }
+
+    pub fn disk_usage_cache_max_entries(&self) -> usize {
+        self.settings.advanced.disk_usage_cache_max_entries
+    }
+
     pub fn replace_settings(&mut self, settings: Settings) {
-        self.overwrite_policy = settings.configuration.default_overwrite_policy;
-        self.hotlist = settings.configuration.hotlist.clone();
+        self.settings = settings;
+        self.overwrite_policy = self.settings.configuration.default_overwrite_policy;
+        self.hotlist = self.settings.configuration.hotlist.clone();
         self.hotlist_cursor = self
             .hotlist_cursor
             .min(self.hotlist.len().saturating_sub(1));
-        self.panelize_presets = settings.configuration.panelize_presets.clone();
-        self.active_skin_name = settings.appearance.skin.clone();
-        self.settings = settings;
+        self.panelize_presets = self.settings.configuration.panelize_presets.clone();
+        self.active_skin_name = self.settings.appearance.skin.clone();
+
+        let sort_mode = self.default_panel_sort_mode();
+        let show_hidden_files = self.settings.panel_options.show_hidden_files;
+        for panel in &mut self.panels {
+            panel.sort_mode = sort_mode;
+            panel.set_show_hidden_files(show_hidden_files);
+            let _ = panel.refresh();
+        }
+    }
+
+    fn default_panel_sort_mode(&self) -> SortMode {
+        SortMode {
+            field: SortField::from_settings(self.settings.panel_options.sort_field),
+            reverse: self.settings.panel_options.sort_reverse,
+        }
     }
 
     pub fn active_panel(&self) -> &PanelState {
@@ -2334,6 +2468,7 @@ impl AppState {
 
     pub fn set_active_skin_name(&mut self, skin_name: impl Into<String>) {
         self.active_skin_name = skin_name.into();
+        self.refresh_settings_entries();
     }
 
     pub fn take_pending_skin_change(&mut self) -> Option<String> {
@@ -2358,6 +2493,11 @@ impl AppState {
 
     pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
         self.keybinding_hints = KeybindingHints::from_keymap(keymap);
+    }
+
+    pub fn set_keymap_parse_report(&mut self, report: &KeymapParseReport) {
+        self.keymap_unknown_actions = report.unknown_actions.len();
+        self.keymap_invalid_bindings = report.skipped_bindings.len();
     }
 
     pub fn keybinding_labels(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
@@ -2926,6 +3066,7 @@ impl AppState {
                 cwd: panel_state.cwd.clone(),
                 source: panel_state.source.clone(),
                 sort_mode: panel_state.sort_mode,
+                show_hidden_files: panel_state.show_hidden_files,
                 request_id,
                 cancel_flag,
             });
@@ -3227,7 +3368,7 @@ impl AppState {
     }
 
     fn open_settings_screen(&mut self, category: SettingsCategory) {
-        let next = SettingsScreenState::new(category);
+        let next = SettingsScreenState::new(category, self.settings_entries_for_category(category));
         if let Some(Route::Settings(current)) = self.routes.last_mut() {
             *current = next;
         } else {
@@ -3250,15 +3391,399 @@ impl AppState {
         Some(settings)
     }
 
+    fn settings_entries_for_category(&self, category: SettingsCategory) -> Vec<SettingsEntry> {
+        match category {
+            SettingsCategory::Configuration => vec![
+                SettingsEntry::new(
+                    "Use internal editor",
+                    bool_label(self.settings.configuration.use_internal_editor),
+                    SettingsEntryAction::ToggleUseInternalEditor,
+                ),
+                SettingsEntry::new(
+                    "Default overwrite policy",
+                    self.overwrite_policy.label(),
+                    SettingsEntryAction::CycleDefaultOverwritePolicy,
+                ),
+                SettingsEntry::new(
+                    "macOS Option-symbol compatibility",
+                    bool_label(self.settings.configuration.macos_option_symbols),
+                    SettingsEntryAction::ToggleMacosOptionSymbols,
+                ),
+                SettingsEntry::new(
+                    "Keymap override",
+                    self.settings
+                        .configuration
+                        .keymap_override
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| String::from("<none>")),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Hotlist entries",
+                    self.hotlist.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Panelize presets",
+                    self.panelize_presets.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+            ],
+            SettingsCategory::Layout => vec![
+                SettingsEntry::new(
+                    "Show menu bar",
+                    bool_label(self.settings.layout.show_menu_bar),
+                    SettingsEntryAction::ToggleLayoutShowMenuBar,
+                ),
+                SettingsEntry::new(
+                    "Show button bar",
+                    bool_label(self.settings.layout.show_button_bar),
+                    SettingsEntryAction::ToggleLayoutShowButtonBar,
+                ),
+                SettingsEntry::new(
+                    "Show debug status",
+                    bool_label(self.settings.layout.show_debug_status),
+                    SettingsEntryAction::ToggleLayoutShowDebugStatus,
+                ),
+                SettingsEntry::new(
+                    "Show panel totals",
+                    bool_label(self.settings.layout.show_panel_totals),
+                    SettingsEntryAction::ToggleLayoutShowPanelTotals,
+                ),
+            ],
+            SettingsCategory::PanelOptions => vec![
+                SettingsEntry::new(
+                    "Show hidden files",
+                    bool_label(self.settings.panel_options.show_hidden_files),
+                    SettingsEntryAction::TogglePanelShowHiddenFiles,
+                ),
+                SettingsEntry::new(
+                    "Default sort field",
+                    match self.settings.panel_options.sort_field {
+                        SettingsSortField::Name => "name",
+                        SettingsSortField::Size => "size",
+                        SettingsSortField::Modified => "mtime",
+                    },
+                    SettingsEntryAction::CyclePanelSortField,
+                ),
+                SettingsEntry::new(
+                    "Default sort reverse",
+                    bool_label(self.settings.panel_options.sort_reverse),
+                    SettingsEntryAction::TogglePanelSortReverse,
+                ),
+            ],
+            SettingsCategory::Confirmation => vec![
+                SettingsEntry::new(
+                    "Confirm delete",
+                    bool_label(self.settings.confirmation.confirm_delete),
+                    SettingsEntryAction::ToggleConfirmDelete,
+                ),
+                SettingsEntry::new(
+                    "Confirm overwrite",
+                    bool_label(self.settings.confirmation.confirm_overwrite),
+                    SettingsEntryAction::ToggleConfirmOverwrite,
+                ),
+                SettingsEntry::new(
+                    "Confirm quit",
+                    bool_label(self.settings.confirmation.confirm_quit),
+                    SettingsEntryAction::ToggleConfirmQuit,
+                ),
+            ],
+            SettingsCategory::Appearance => vec![
+                SettingsEntry::new(
+                    "Skin...",
+                    self.active_skin_name.clone(),
+                    SettingsEntryAction::OpenSkinDialog,
+                ),
+                SettingsEntry::new(
+                    "Available skins",
+                    self.available_skins.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Custom skin directories",
+                    self.settings.appearance.skin_dirs.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+            ],
+            SettingsCategory::DisplayBits => vec![
+                SettingsEntry::new(
+                    "UTF-8 output",
+                    bool_label(self.settings.display_bits.utf8_output),
+                    SettingsEntryAction::ToggleUtf8Output,
+                ),
+                SettingsEntry::new(
+                    "8-bit input",
+                    bool_label(self.settings.display_bits.eight_bit_input),
+                    SettingsEntryAction::ToggleEightBitInput,
+                ),
+            ],
+            SettingsCategory::LearnKeys => vec![
+                SettingsEntry::new(
+                    "Last learned binding",
+                    self.settings
+                        .learn_keys
+                        .last_learned_binding
+                        .clone()
+                        .unwrap_or_else(|| String::from("<none>")),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Unknown keymap actions",
+                    self.keymap_unknown_actions.to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Invalid key bindings",
+                    self.keymap_invalid_bindings.to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Capture binding (scaffold)",
+                    "",
+                    SettingsEntryAction::LearnKeysCapture,
+                ),
+            ],
+            SettingsCategory::VirtualFs => vec![
+                SettingsEntry::new(
+                    "Enable virtual FS",
+                    bool_label(self.settings.virtual_fs.vfs_enabled),
+                    SettingsEntryAction::ToggleVfsEnabled,
+                ),
+                SettingsEntry::new(
+                    "Enable FTP links",
+                    bool_label(self.settings.virtual_fs.ftp_enabled),
+                    SettingsEntryAction::ToggleVfsFtpEnabled,
+                ),
+                SettingsEntry::new(
+                    "Enable shell links",
+                    bool_label(self.settings.virtual_fs.shell_link_enabled),
+                    SettingsEntryAction::ToggleVfsShellLinkEnabled,
+                ),
+                SettingsEntry::new(
+                    "Enable SFTP links",
+                    bool_label(self.settings.virtual_fs.sftp_enabled),
+                    SettingsEntryAction::ToggleVfsSftpEnabled,
+                ),
+            ],
+        }
+    }
+
+    fn refresh_settings_entries(&mut self) {
+        let Some((category, selected)) = self.routes.last().and_then(|route| match route {
+            Route::Settings(current) => Some((current.category, current.selected_entry)),
+            _ => None,
+        }) else {
+            return;
+        };
+        let entries = self.settings_entries_for_category(category);
+        if let Some(Route::Settings(current)) = self.routes.last_mut() {
+            current.entries = entries;
+            if current.entries.is_empty() {
+                current.selected_entry = 0;
+            } else {
+                current.selected_entry = selected.min(current.entries.len().saturating_sub(1));
+            }
+        }
+    }
+
     fn apply_settings_entry(&mut self) {
-        let Some(settings) = self.settings_state_mut() else {
+        let Some(route) = self.routes.last() else {
             return;
         };
-        let Some(entry) = settings.entries.get(settings.selected_entry) else {
+        let Route::Settings(settings) = route else {
             return;
         };
-        let message = format!("{}: {entry}", settings.category.label());
-        self.set_status(message);
+        let Some(entry) = settings.entries.get(settings.selected_entry).cloned() else {
+            return;
+        };
+
+        match entry.action {
+            SettingsEntryAction::ToggleUseInternalEditor => {
+                self.settings.configuration.use_internal_editor =
+                    !self.settings.configuration.use_internal_editor;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Use internal editor: {}",
+                    bool_label(self.settings.configuration.use_internal_editor)
+                ));
+            }
+            SettingsEntryAction::CycleDefaultOverwritePolicy => {
+                self.overwrite_policy = next_overwrite_policy(self.overwrite_policy);
+                self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Default overwrite policy: {}",
+                    self.overwrite_policy.label()
+                ));
+            }
+            SettingsEntryAction::ToggleMacosOptionSymbols => {
+                self.settings.configuration.macos_option_symbols =
+                    !self.settings.configuration.macos_option_symbols;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "macOS Option-symbol compatibility: {}",
+                    bool_label(self.settings.configuration.macos_option_symbols)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowMenuBar => {
+                self.settings.layout.show_menu_bar = !self.settings.layout.show_menu_bar;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show menu bar: {}",
+                    bool_label(self.settings.layout.show_menu_bar)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowButtonBar => {
+                self.settings.layout.show_button_bar = !self.settings.layout.show_button_bar;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show button bar: {}",
+                    bool_label(self.settings.layout.show_button_bar)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowDebugStatus => {
+                self.settings.layout.show_debug_status = !self.settings.layout.show_debug_status;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show debug status: {}",
+                    bool_label(self.settings.layout.show_debug_status)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowPanelTotals => {
+                self.settings.layout.show_panel_totals = !self.settings.layout.show_panel_totals;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show panel totals: {}",
+                    bool_label(self.settings.layout.show_panel_totals)
+                ));
+            }
+            SettingsEntryAction::TogglePanelShowHiddenFiles => {
+                self.settings.panel_options.show_hidden_files =
+                    !self.settings.panel_options.show_hidden_files;
+                let show_hidden_files = self.settings.panel_options.show_hidden_files;
+                for panel in &mut self.panels {
+                    panel.set_show_hidden_files(show_hidden_files);
+                }
+                self.settings.mark_dirty();
+                self.refresh_panels();
+                self.set_status(format!(
+                    "Show hidden files: {}",
+                    bool_label(show_hidden_files)
+                ));
+            }
+            SettingsEntryAction::CyclePanelSortField => {
+                self.settings.panel_options.sort_field =
+                    next_settings_sort_field(self.settings.panel_options.sort_field);
+                let sort_mode = self.default_panel_sort_mode();
+                for panel in &mut self.panels {
+                    panel.sort_mode = sort_mode;
+                }
+                self.settings.mark_dirty();
+                self.refresh_panels();
+                self.set_status(format!("Default sort: {}", sort_mode.field.label()));
+            }
+            SettingsEntryAction::TogglePanelSortReverse => {
+                self.settings.panel_options.sort_reverse =
+                    !self.settings.panel_options.sort_reverse;
+                let sort_mode = self.default_panel_sort_mode();
+                for panel in &mut self.panels {
+                    panel.sort_mode = sort_mode;
+                }
+                self.settings.mark_dirty();
+                self.refresh_panels();
+                self.set_status(format!(
+                    "Default sort reverse: {}",
+                    bool_label(self.settings.panel_options.sort_reverse)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmDelete => {
+                self.settings.confirmation.confirm_delete =
+                    !self.settings.confirmation.confirm_delete;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm delete: {}",
+                    bool_label(self.settings.confirmation.confirm_delete)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmOverwrite => {
+                self.settings.confirmation.confirm_overwrite =
+                    !self.settings.confirmation.confirm_overwrite;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm overwrite: {}",
+                    bool_label(self.settings.confirmation.confirm_overwrite)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmQuit => {
+                self.settings.confirmation.confirm_quit = !self.settings.confirmation.confirm_quit;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm quit: {}",
+                    bool_label(self.settings.confirmation.confirm_quit)
+                ));
+            }
+            SettingsEntryAction::OpenSkinDialog => self.start_skin_dialog(),
+            SettingsEntryAction::ToggleUtf8Output => {
+                self.settings.display_bits.utf8_output = !self.settings.display_bits.utf8_output;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "UTF-8 output: {}",
+                    bool_label(self.settings.display_bits.utf8_output)
+                ));
+            }
+            SettingsEntryAction::ToggleEightBitInput => {
+                self.settings.display_bits.eight_bit_input =
+                    !self.settings.display_bits.eight_bit_input;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "8-bit input: {}",
+                    bool_label(self.settings.display_bits.eight_bit_input)
+                ));
+            }
+            SettingsEntryAction::LearnKeysCapture => {
+                self.set_status("Learn keys capture is scaffolded and not implemented yet");
+            }
+            SettingsEntryAction::ToggleVfsEnabled => {
+                self.settings.virtual_fs.vfs_enabled = !self.settings.virtual_fs.vfs_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable virtual FS: {}",
+                    bool_label(self.settings.virtual_fs.vfs_enabled)
+                ));
+            }
+            SettingsEntryAction::ToggleVfsFtpEnabled => {
+                self.settings.virtual_fs.ftp_enabled = !self.settings.virtual_fs.ftp_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable FTP links: {}",
+                    bool_label(self.settings.virtual_fs.ftp_enabled)
+                ));
+            }
+            SettingsEntryAction::ToggleVfsShellLinkEnabled => {
+                self.settings.virtual_fs.shell_link_enabled =
+                    !self.settings.virtual_fs.shell_link_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable shell links: {}",
+                    bool_label(self.settings.virtual_fs.shell_link_enabled)
+                ));
+            }
+            SettingsEntryAction::ToggleVfsSftpEnabled => {
+                self.settings.virtual_fs.sftp_enabled = !self.settings.virtual_fs.sftp_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable SFTP links: {}",
+                    bool_label(self.settings.virtual_fs.sftp_enabled)
+                ));
+            }
+            SettingsEntryAction::Info => {
+                self.set_status(format!("{}: {}", entry.label, entry.value));
+            }
+        }
+
+        self.refresh_settings_entries();
     }
 
     fn menu_state_mut(&mut self) -> Option<&mut MenuState> {
@@ -3981,8 +4506,12 @@ impl AppState {
             AppCommand::OpenHelp => self.open_help_screen(),
             AppCommand::CloseHelp => self.close_help_screen(),
             AppCommand::Quit => {
-                self.request_cancel_for_all_jobs();
-                return Ok(ApplyResult::Quit);
+                if self.settings.confirmation.confirm_quit {
+                    self.start_quit_confirmation();
+                } else {
+                    self.request_cancel_for_all_jobs();
+                    return Ok(ApplyResult::Quit);
+                }
             }
             AppCommand::CloseViewer => self.close_viewer(),
             AppCommand::OpenFindDialog => self.open_find_dialog(),
@@ -4051,7 +4580,18 @@ impl AppState {
             }
             AppCommand::Copy => self.start_copy_dialog(),
             AppCommand::Move => self.start_move_dialog(),
-            AppCommand::Delete => self.start_delete_confirmation(),
+            AppCommand::Delete => {
+                if self.settings.confirmation.confirm_delete {
+                    self.start_delete_confirmation();
+                } else {
+                    let targets = self.selected_operation_paths();
+                    if targets.is_empty() {
+                        self.set_status("Delete requires a selected or tagged entry");
+                    } else {
+                        self.queue_delete_job(targets);
+                    }
+                }
+            }
             AppCommand::CancelJob => self.cancel_latest_job(),
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
@@ -4383,6 +4923,11 @@ impl AppState {
             self.xmap_pending = false;
         }
 
+        if self.pending_quit {
+            self.pending_quit = false;
+            return Ok(ApplyResult::Quit);
+        }
+
         if let Some(next_command) = follow_up_command {
             return self.apply(next_command);
         }
@@ -4500,6 +5045,13 @@ impl AppState {
         self.routes
             .push(Route::Dialog(DialogState::confirm("Delete", message)));
         self.set_status("Confirm delete");
+    }
+
+    fn start_quit_confirmation(&mut self) {
+        self.pending_dialog_action = Some(PendingDialogAction::ConfirmQuit);
+        self.routes
+            .push(Route::Dialog(DialogState::confirm("Quit", "Exit rc?")));
+        self.set_status("Confirm quit");
     }
 
     fn start_rename_dialog(&mut self) {
@@ -4644,6 +5196,16 @@ impl AppState {
         }
     }
 
+    fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
+        let request = JobRequest::Delete { targets };
+        let summary = request.summary();
+        let worker_job = self.jobs.enqueue(request);
+        let job_id = worker_job.id;
+        self.pending_worker_commands
+            .push(WorkerCommand::Run(worker_job));
+        self.set_status(format!("Queued job #{job_id}: {summary}"));
+    }
+
     fn finish_dialog(&mut self, result: DialogResult) {
         let pending = self.pending_dialog_action.take();
         match (pending, result) {
@@ -4652,17 +5214,20 @@ impl AppState {
                 Some(PendingDialogAction::ConfirmDelete { targets }),
                 DialogResult::ConfirmAccepted,
             ) => {
-                let request = JobRequest::Delete { targets };
-                let summary = request.summary();
-                let worker_job = self.jobs.enqueue(request);
-                let job_id = worker_job.id;
-                self.pending_worker_commands
-                    .push(WorkerCommand::Run(worker_job));
-                self.set_status(format!("Queued job #{job_id}: {summary}"));
+                self.queue_delete_job(targets);
             }
             (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::ConfirmDeclined)
             | (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::Canceled) => {
                 self.set_status("Delete canceled");
+            }
+            (Some(PendingDialogAction::ConfirmQuit), DialogResult::ConfirmAccepted) => {
+                self.request_cancel_for_all_jobs();
+                self.pending_quit = true;
+                self.set_status("Quitting...");
+            }
+            (Some(PendingDialogAction::ConfirmQuit), DialogResult::ConfirmDeclined)
+            | (Some(PendingDialogAction::ConfirmQuit), DialogResult::Canceled) => {
+                self.set_status("Quit canceled");
             }
             (
                 Some(PendingDialogAction::Mkdir { base_dir }),
@@ -4745,18 +5310,27 @@ impl AppState {
                 } else {
                     source_base_dir.join(input_path)
                 };
-                let selected = overwrite_policy_index(self.overwrite_policy);
-                self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
-                    kind,
-                    sources,
-                    destination_dir,
-                });
-                self.routes.push(Route::Dialog(DialogState::listbox(
-                    "Overwrite Policy",
-                    overwrite_policy_items(),
-                    selected,
-                )));
-                self.set_status("Choose overwrite policy");
+                if self.settings.confirmation.confirm_overwrite {
+                    let selected = overwrite_policy_index(self.overwrite_policy);
+                    self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
+                        kind,
+                        sources,
+                        destination_dir,
+                    });
+                    self.routes.push(Route::Dialog(DialogState::listbox(
+                        "Overwrite Policy",
+                        overwrite_policy_items(),
+                        selected,
+                    )));
+                    self.set_status("Choose overwrite policy");
+                } else {
+                    self.queue_copy_or_move_job(
+                        kind,
+                        sources,
+                        destination_dir,
+                        self.overwrite_policy,
+                    );
+                }
             }
             (Some(PendingDialogAction::TransferDestination { .. }), DialogResult::Canceled) => {
                 self.set_status("Copy/Move canceled");
@@ -5254,6 +5828,26 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
     }
 }
 
+fn next_overwrite_policy(policy: OverwritePolicy) -> OverwritePolicy {
+    match policy {
+        OverwritePolicy::Overwrite => OverwritePolicy::Skip,
+        OverwritePolicy::Skip => OverwritePolicy::Rename,
+        OverwritePolicy::Rename => OverwritePolicy::Overwrite,
+    }
+}
+
+fn next_settings_sort_field(field: SettingsSortField) -> SettingsSortField {
+    match field {
+        SettingsSortField::Name => SettingsSortField::Size,
+        SettingsSortField::Size => SettingsSortField::Modified,
+        SettingsSortField::Modified => SettingsSortField::Name,
+    }
+}
+
+fn bool_label(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
 fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[String]) -> usize {
     preset_commands
         .iter()
@@ -5261,13 +5855,23 @@ fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[Stri
         .map_or(0, |index| index.saturating_add(1))
 }
 
+#[cfg(test)]
 fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
-    read_entries_with_cancel(dir, sort_mode, None)
+    read_entries_with_visibility_cancel(dir, sort_mode, true, None)
 }
 
-fn read_entries_with_cancel(
+fn read_entries_with_visibility(
     dir: &Path,
     sort_mode: SortMode,
+    show_hidden_files: bool,
+) -> io::Result<Vec<FileEntry>> {
+    read_entries_with_visibility_cancel(dir, sort_mode, show_hidden_files, None)
+}
+
+fn read_entries_with_visibility_cancel(
+    dir: &Path,
+    sort_mode: SortMode,
+    show_hidden_files: bool,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
@@ -5277,6 +5881,9 @@ fn read_entries_with_cancel(
         let entry = entry_result?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
+        if !show_hidden_files && name.starts_with('.') {
+            continue;
+        }
         let file_type = entry.file_type()?;
         let metadata = entry.metadata().ok();
         let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
@@ -5738,6 +6345,7 @@ mod tests {
             entries: vec![file_entry("a"), file_entry("b")],
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -5853,6 +6461,7 @@ mod tests {
             ],
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -5888,6 +6497,7 @@ mod tests {
             entries,
             cursor: 1,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -5913,6 +6523,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -6298,6 +6909,85 @@ OpenJobs = f6
             ],
             "options menu should follow mc ordering and labels"
         );
+    }
+
+    #[test]
+    fn options_commands_open_settings_routes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-options-route-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenOptionsLayout)
+            .expect("layout options should open");
+        let Route::Settings(settings) = app.top_route() else {
+            panic!("settings route should open");
+        };
+        assert_eq!(settings.category, SettingsCategory::Layout);
+        assert!(!settings.entries.is_empty());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn settings_toggle_marks_dirty_and_save_setup_sets_pending_flag() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-options-dirty-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        assert!(!app.settings().save_setup.dirty);
+
+        app.apply(AppCommand::OpenOptionsConfiguration)
+            .expect("configuration options should open");
+        app.apply(AppCommand::DialogAccept)
+            .expect("toggle should apply");
+        assert!(app.settings().save_setup.dirty);
+
+        app.apply(AppCommand::SaveSetup)
+            .expect("save setup command should succeed");
+        assert!(app.take_pending_save_setup());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn confirm_quit_setting_requires_dialog_before_quit() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-confirm-quit-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenOptionsConfirmation)
+            .expect("confirmation options should open");
+        app.apply(AppCommand::DialogListboxDown)
+            .expect("move to confirm overwrite");
+        app.apply(AppCommand::DialogListboxDown)
+            .expect("move to confirm quit");
+        app.apply(AppCommand::DialogAccept)
+            .expect("toggle confirm quit");
+
+        let result = app
+            .apply(AppCommand::Quit)
+            .expect("quit should open confirmation");
+        assert_eq!(result, ApplyResult::Continue);
+        assert!(matches!(app.top_route(), Route::Dialog(_)));
+
+        let quit_result = app
+            .apply(AppCommand::DialogAccept)
+            .expect("confirm quit should return quit result");
+        assert_eq!(quit_result, ApplyResult::Quit);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]

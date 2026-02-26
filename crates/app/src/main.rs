@@ -99,16 +99,11 @@ fn main() -> Result<()> {
         skin_dir,
         settings_paths,
     };
-    let input_compatibility = InputCompatibility {
-        macos_option_symbols: settings.configuration.macos_option_symbols,
-    };
-
     run_app(
         &mut state,
         &keymap,
         Duration::from_millis(cli.tick_rate_ms),
         &skin_runtime,
-        input_compatibility,
     )
 }
 
@@ -123,6 +118,7 @@ fn init_tracing() {
 }
 
 fn report_keymap_parse_report(state: &mut AppState, report: &KeymapParseReport) {
+    state.set_keymap_parse_report(report);
     if report.unknown_actions.is_empty() && report.skipped_bindings.is_empty() {
         return;
     }
@@ -248,7 +244,6 @@ fn run_app(
     keymap: &Keymap,
     tick_rate: Duration,
     skin_runtime: &SkinRuntimeConfig,
-    input_compatibility: InputCompatibility,
 ) -> Result<()> {
     let (worker_tx, worker_rx) = mpsc::channel();
     let (worker_event_tx, worker_event_rx) = mpsc::channel();
@@ -284,7 +279,6 @@ fn run_app(
             background_event_rx: &background_event_rx,
         },
         skin_runtime,
-        input_compatibility,
     );
     let shutdown_result = shutdown_worker(worker_tx, worker_handle);
     let shutdown_background_result = shutdown_background_worker(background_tx, background_handle);
@@ -345,7 +339,6 @@ fn run_event_loop(
     tick_rate: Duration,
     channels: RuntimeChannels<'_>,
     skin_runtime: &SkinRuntimeConfig,
-    input_compatibility: InputCompatibility,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
     let mut worker_disconnected = false;
@@ -376,7 +369,12 @@ fn run_event_loop(
                             channels.worker_tx,
                             channels.background_tx,
                             skin_runtime,
-                            input_compatibility,
+                            InputCompatibility {
+                                macos_option_symbols: state
+                                    .settings()
+                                    .configuration
+                                    .macos_option_symbols,
+                            },
                         )? =>
                 {
                     return Ok(());
@@ -493,7 +491,7 @@ fn apply_and_dispatch(
 
 fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig) {
     let save_requested = state.take_pending_save_setup();
-    if !save_requested && !state.settings().save_setup.dirty {
+    if !save_requested {
         return;
     }
 

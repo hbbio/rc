@@ -19,7 +19,7 @@ use rc_core::{
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -41,8 +41,6 @@ static DISK_USAGE_SUMMARY_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Ins
     OnceLock::new();
 const PANEL_SIZE_COL_WIDTH: usize = 12;
 const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
-const DISK_USAGE_CACHE_TTL: Duration = Duration::from_millis(750);
-const DISK_USAGE_CACHE_MAX_ENTRIES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ViewerHighlightKey {
@@ -60,13 +58,15 @@ struct CachedViewerHighlight {
 pub fn render(frame: &mut Frame, state: &AppState) {
     let skin = current_skin();
     let job_counts = state.jobs_status_counts();
+    let menu_height = if state.show_menu_bar() { 1 } else { 0 };
+    let button_height = if state.show_button_bar() { 1 } else { 0 };
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(menu_height),
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(button_height),
         ])
         .split(frame.area());
 
@@ -74,7 +74,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Menu(menu) => Some(menu.active_menu),
         _ => None,
     };
-    render_menu_bar(frame, root[0], skin.as_ref(), active_menu);
+    if state.show_menu_bar() {
+        render_menu_bar(frame, root[0], skin.as_ref(), active_menu);
+    }
 
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
@@ -90,6 +92,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             &state.panels[0],
             state.active_panel == ActivePanel::Left,
             skin.as_ref(),
+            state,
         );
         render_panel(
             frame,
@@ -97,23 +100,30 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             &state.panels[1],
             state.active_panel == ActivePanel::Right,
             skin.as_ref(),
+            state,
         );
     }
 
-    let status = format!(
-        "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
-        state.key_context(),
-        state.route_depth(),
-        skin.name(),
-        job_counts.queued,
-        job_counts.running,
-        job_counts.succeeded,
-        job_counts.canceled,
-        job_counts.failed,
-        state.status_line
-    );
+    let status = if state.show_debug_status() {
+        format!(
+            "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
+            state.key_context(),
+            state.route_depth(),
+            skin.name(),
+            job_counts.queued,
+            job_counts.running,
+            job_counts.succeeded,
+            job_counts.canceled,
+            job_counts.failed,
+            state.status_line
+        )
+    } else {
+        state.status_line.clone()
+    };
     frame.render_widget(Paragraph::new(status), root[2]);
-    render_button_bar(frame, root[3], skin.as_ref(), state);
+    if state.show_button_bar() {
+        render_button_bar(frame, root[3], skin.as_ref(), state);
+    }
 
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
@@ -348,7 +358,14 @@ fn panel_title(panel: &PanelState) -> String {
     )
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
+fn render_panel(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+    app: &AppState,
+) {
     let title = panel_title(panel);
     let selected_tagged = panel
         .selected_entry()
@@ -457,17 +474,17 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
     }
 
     let (selected_count, selected_size) = panel_selected_totals(panel);
-    let selected_summary = if selected_count == 0 {
-        String::new()
-    } else {
+    let selected_summary = if app.show_panel_totals() && selected_count > 0 {
         format!(
             "{} in {} {}",
             format_human_size(selected_size),
             selected_count,
             if selected_count == 1 { "file" } else { "files" }
         )
+    } else {
+        String::new()
     };
-    let disk_summary = panel_disk_summary(panel);
+    let disk_summary = panel_disk_summary(panel, app);
     let footer_style = if active {
         skin.style("core", "selected")
     } else {
@@ -956,7 +973,8 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
 }
 
 fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 92, 24);
+    let (width, height) = state.jobs_dialog_size();
+    let area = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1389,7 +1407,7 @@ fn render_settings_screen(frame: &mut Frame, settings: &SettingsScreenState, ski
         settings
             .entries
             .iter()
-            .map(|item| ListItem::new(item.as_str()))
+            .map(|item| ListItem::new(item.text()))
             .collect()
     };
     let list = List::new(items)
@@ -1410,7 +1428,8 @@ fn render_settings_screen(frame: &mut Frame, settings: &SettingsScreenState, ski
 }
 
 fn render_help_screen(frame: &mut Frame, app: &AppState, help: &HelpState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 116, 36);
+    let (width, height) = app.help_dialog_size();
+    let area = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, area);
 
     let title = format!("Help - {}", help.current_title());
@@ -1520,22 +1539,24 @@ fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
     (count, size)
 }
 
-fn panel_disk_summary(panel: &PanelState) -> String {
+fn panel_disk_summary(panel: &PanelState, app: &AppState) -> String {
     let now = Instant::now();
+    let cache_ttl = app.disk_usage_cache_ttl();
+    let cache_max_entries = app.disk_usage_cache_max_entries();
     let cache = DISK_USAGE_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache) = cache.lock() {
         if let Some((captured_at, cached)) = cache.get(panel.cwd.as_path())
-            && now.saturating_duration_since(*captured_at) <= DISK_USAGE_CACHE_TTL
+            && now.saturating_duration_since(*captured_at) <= cache_ttl
         {
             return cached.clone();
         }
 
         let summary = compute_disk_summary(panel.cwd.as_path());
-        if cache.len() >= DISK_USAGE_CACHE_MAX_ENTRIES {
+        if cache.len() >= cache_max_entries {
             cache.retain(|_, (captured_at, _)| {
-                now.saturating_duration_since(*captured_at) <= DISK_USAGE_CACHE_TTL
+                now.saturating_duration_since(*captured_at) <= cache_ttl
             });
-            if cache.len() >= DISK_USAGE_CACHE_MAX_ENTRIES
+            if cache.len() >= cache_max_entries
                 && let Some(path) = cache.keys().next().cloned()
             {
                 cache.remove(path.as_path());
