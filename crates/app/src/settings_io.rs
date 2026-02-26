@@ -119,7 +119,21 @@ fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
         .unwrap_or("settings");
     let tmp = path.with_file_name(format!("{stem}.tmp-{}", std::process::id()));
     fs::write(&tmp, content)?;
-    fs::rename(tmp, path)
+    #[cfg(windows)]
+    {
+        match fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(path)?;
+                fs::rename(tmp, path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(tmp, path)
+    }
 }
 
 pub fn upsert_skin_in_mc_ini(source: &str, skin: &str) -> String {
@@ -729,6 +743,39 @@ skin=mc-skin
         assert!(rc_ini.contains("[configuration]"));
         assert!(rc_ini.contains("overwrite_policy=rename"));
         assert!(rc_ini.contains("hotlist=/tmp"));
+
+        fs::remove_dir_all(&root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn save_settings_can_replace_existing_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-save-settings-replace-{stamp}"));
+        fs::create_dir_all(&root).expect("test directory should be created");
+
+        let mc_ini_path = root.join("mc.ini");
+        let rc_ini_path = root.join("settings.ini");
+        let paths = SettingsPaths {
+            mc_ini_path: Some(mc_ini_path.clone()),
+            rc_ini_path: Some(rc_ini_path.clone()),
+        };
+
+        let mut settings = Settings::default();
+        settings.appearance.skin = String::from("first-skin");
+        settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
+        save_settings(&paths, &settings).expect("first save should succeed");
+
+        settings.appearance.skin = String::from("second-skin");
+        settings.configuration.default_overwrite_policy = OverwritePolicy::Skip;
+        save_settings(&paths, &settings).expect("second save should succeed");
+
+        let mc_ini = fs::read_to_string(&mc_ini_path).expect("mc ini should exist");
+        let rc_ini = fs::read_to_string(&rc_ini_path).expect("rc ini should exist");
+        assert!(mc_ini.contains("skin=second-skin"));
+        assert!(rc_ini.contains("overwrite_policy=skip"));
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
     }
