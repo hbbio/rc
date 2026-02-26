@@ -4,6 +4,7 @@ pub mod dialog;
 pub mod help;
 pub mod jobs;
 pub mod keymap;
+pub mod settings;
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,11 @@ pub use help::{HelpLine, HelpSpan, HelpState};
 pub use jobs::{
     JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
     JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, run_worker,
+};
+pub use settings::{
+    AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
+    DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
+    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsSortField, VirtualFsSettings,
 };
 
 use crate::dialog::DialogEvent;
@@ -488,13 +494,6 @@ const TREE_MAX_DEPTH: usize = 6;
 const TREE_MAX_ENTRIES: usize = 2_000;
 const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
 const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";
-const PANELIZE_PRESET_COMMANDS: &[&str] = &[
-    "find . -type f",
-    "find . -name '*.orig'",
-    "find . -name '*.rej'",
-    "find . -name core",
-    "find . -type f -perm -4000",
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
@@ -1961,6 +1960,7 @@ fn wildcard_match(text: &str, pattern: &str) -> bool {
 
 #[derive(Debug)]
 pub struct AppState {
+    settings: Settings,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     pub status_line: String,
@@ -1994,21 +1994,23 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
+        let settings = Settings::default();
         let left = PanelState::new(start_path.clone())?;
         let right = PanelState::new(start_path)?;
 
         Ok(Self {
+            settings: settings.clone(),
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from("Press F1 for help"),
             last_dialog_result: None,
             jobs: JobManager::new(),
-            overwrite_policy: OverwritePolicy::Skip,
+            overwrite_policy: settings.configuration.default_overwrite_policy,
             jobs_cursor: 0,
-            hotlist: Vec::new(),
+            hotlist: settings.configuration.hotlist.clone(),
             hotlist_cursor: 0,
             available_skins: Vec::new(),
-            active_skin_name: String::from("default"),
+            active_skin_name: settings.appearance.skin.clone(),
             pending_skin_change: None,
             pending_skin_preview: None,
             pending_skin_revert: None,
@@ -2024,10 +2026,29 @@ impl AppState {
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
-            panelize_presets: panelize_preset_commands(),
+            panelize_presets: settings.configuration.panelize_presets.clone(),
             keybinding_hints: KeybindingHints::default(),
             xmap_pending: false,
         })
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn settings_mut(&mut self) -> &mut Settings {
+        &mut self.settings
+    }
+
+    pub fn replace_settings(&mut self, settings: Settings) {
+        self.overwrite_policy = settings.configuration.default_overwrite_policy;
+        self.hotlist = settings.configuration.hotlist.clone();
+        self.hotlist_cursor = self
+            .hotlist_cursor
+            .min(self.hotlist.len().saturating_sub(1));
+        self.panelize_presets = settings.configuration.panelize_presets.clone();
+        self.active_skin_name = settings.appearance.skin.clone();
+        self.settings = settings;
     }
 
     pub fn active_panel(&self) -> &PanelState {
@@ -5026,13 +5047,6 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
         2 => OverwritePolicy::Rename,
         _ => OverwritePolicy::Skip,
     }
-}
-
-fn panelize_preset_commands() -> Vec<String> {
-    PANELIZE_PRESET_COMMANDS
-        .iter()
-        .map(|command| (*command).to_string())
-        .collect()
 }
 
 fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[String]) -> usize {
