@@ -425,6 +425,9 @@ fn handle_key(
     let Some(chord) = map_key_event_to_chord(key_event, input_compatibility) else {
         return Ok(false);
     };
+    if state.capture_learn_keys_chord(chord) {
+        return Ok(false);
+    }
     let key_command = keymap.resolve(context, chord).or_else(|| {
         if context == KeyContext::ViewerHex {
             keymap.resolve(KeyContext::Viewer, chord)
@@ -982,6 +985,57 @@ mod tests {
         .expect("shift+1 should map to exclamation");
         assert_eq!(chord.code, KeyCode::Char('!'));
         assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
+    fn learn_keys_capture_consumes_next_key_event() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-keys-handle-key-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let (worker_tx, _worker_rx) = mpsc::channel();
+        let (background_tx, _background_rx) = mpsc::channel();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        state
+            .apply(AppCommand::OpenOptionsLearnKeys)
+            .expect("learn keys options should open");
+        for _ in 0..4 {
+            state
+                .apply(AppCommand::DialogListboxDown)
+                .expect("selection should move down");
+        }
+        state
+            .apply(AppCommand::DialogAccept)
+            .expect("capture should start");
+
+        let quit = handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            &worker_tx,
+            &background_tx,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("capture key should be handled");
+        assert!(!quit);
+        assert_eq!(
+            state.settings().learn_keys.last_learned_binding.as_deref(),
+            Some("Ctrl-x")
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]

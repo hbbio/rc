@@ -2145,6 +2145,7 @@ pub struct AppState {
     keybinding_hints: KeybindingHints,
     keymap_unknown_actions: usize,
     keymap_invalid_bindings: usize,
+    pending_learn_keys_capture: bool,
     xmap_pending: bool,
     pending_save_setup: bool,
     pending_quit: bool,
@@ -2188,6 +2189,7 @@ impl AppState {
             keybinding_hints: KeybindingHints::default(),
             keymap_unknown_actions: 0,
             keymap_invalid_bindings: 0,
+            pending_learn_keys_capture: false,
             xmap_pending: false,
             pending_save_setup: false,
             pending_quit: false,
@@ -2493,6 +2495,38 @@ impl AppState {
     pub fn set_keymap_parse_report(&mut self, report: &KeymapParseReport) {
         self.keymap_unknown_actions = report.unknown_actions.len();
         self.keymap_invalid_bindings = report.skipped_bindings.len();
+    }
+
+    pub fn capture_learn_keys_chord(&mut self, chord: KeyChord) -> bool {
+        if !self.pending_learn_keys_capture {
+            return false;
+        }
+
+        self.pending_learn_keys_capture = false;
+        if chord.code == KeyCode::Esc
+            && !chord.modifiers.ctrl
+            && !chord.modifiers.alt
+            && !chord.modifiers.shift
+        {
+            self.set_status("Learn keys capture canceled");
+            return true;
+        }
+
+        let captured = format_key_chord(chord);
+        self.settings.learn_keys.last_learned_binding = Some(captured.clone());
+        self.settings.mark_dirty();
+        let target = self
+            .settings
+            .configuration
+            .keymap_override
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("<none>"));
+        self.set_status(format!(
+            "Captured key chord: {captured} (override target: {target})"
+        ));
+        self.refresh_settings_entries();
+        true
     }
 
     pub fn keybinding_labels(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
@@ -3363,6 +3397,7 @@ impl AppState {
     }
 
     fn open_settings_screen(&mut self, category: SettingsCategory) {
+        self.pending_learn_keys_capture = false;
         let next = SettingsScreenState::new(category, self.settings_entries_for_category(category));
         if let Some(Route::Settings(current)) = self.routes.last_mut() {
             *current = next;
@@ -3374,6 +3409,7 @@ impl AppState {
 
     fn close_settings_screen(&mut self) {
         if matches!(self.top_route(), Route::Settings(_)) {
+            self.pending_learn_keys_capture = false;
             self.routes.pop();
             self.set_status("Closed options");
         }
@@ -3521,6 +3557,16 @@ impl AppState {
                         .learn_keys
                         .last_learned_binding
                         .clone()
+                        .unwrap_or_else(|| String::from("<none>")),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Override target",
+                    self.settings
+                        .configuration
+                        .keymap_override
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
                         .unwrap_or_else(|| String::from("<none>")),
                     SettingsEntryAction::Info,
                 ),
@@ -3738,7 +3784,8 @@ impl AppState {
                 ));
             }
             SettingsEntryAction::LearnKeysCapture => {
-                self.set_status("Learn keys capture is scaffolded and not implemented yet");
+                self.pending_learn_keys_capture = true;
+                self.set_status("Press a key chord to capture (Esc to cancel)");
             }
             SettingsEntryAction::ToggleVfsEnabled => {
                 self.settings.virtual_fs.vfs_enabled = !self.settings.virtual_fs.vfs_enabled;
@@ -6285,6 +6332,7 @@ fn join_command_output_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::KeyModifiers;
     use std::path::Path;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use std::{env, fs};
@@ -6956,6 +7004,82 @@ OpenJobs = f6
         app.apply(AppCommand::SaveSetup)
             .expect("save setup command should succeed");
         assert!(app.take_pending_save_setup());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn learn_keys_capture_stores_chord_and_marks_settings_dirty() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-keys-capture-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenOptionsLearnKeys)
+            .expect("learn keys options should open");
+        for _ in 0..4 {
+            app.apply(AppCommand::DialogListboxDown)
+                .expect("selection should move down");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("capture entry should activate");
+        assert!(
+            app.status_line.contains("Press a key chord"),
+            "capture mode status should be shown"
+        );
+
+        assert!(app.capture_learn_keys_chord(KeyChord {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        }));
+        assert_eq!(
+            app.settings().learn_keys.last_learned_binding.as_deref(),
+            Some("Ctrl-x")
+        );
+        assert!(app.settings().save_setup.dirty);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn learn_keys_capture_can_be_canceled_with_escape() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-keys-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings_mut().learn_keys.last_learned_binding = Some(String::from("F5"));
+        app.apply(AppCommand::OpenOptionsLearnKeys)
+            .expect("learn keys options should open");
+        for _ in 0..4 {
+            app.apply(AppCommand::DialogListboxDown)
+                .expect("selection should move down");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("capture entry should activate");
+
+        assert!(app.capture_learn_keys_chord(KeyChord {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::default(),
+        }));
+        assert_eq!(
+            app.settings().learn_keys.last_learned_binding.as_deref(),
+            Some("F5")
+        );
+        assert!(
+            app.status_line.contains("canceled"),
+            "cancel status should be shown"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
