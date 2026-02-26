@@ -196,6 +196,7 @@ fn parse_ini_section_name(line: &str) -> Option<&str> {
 
 fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
     let mut section = String::new();
+    let mut saw_configuration_section = false;
     let mut saw_hotlist = false;
     let mut saw_panelize_presets = false;
     let mut saw_skin_dirs = false;
@@ -208,6 +209,9 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
 
         if let Some(section_name) = parse_ini_section_name(line) {
             section = section_name.to_ascii_lowercase();
+            if section == "configuration" {
+                saw_configuration_section = true;
+            }
             continue;
         }
 
@@ -413,6 +417,10 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             }
             _ => {}
         }
+    }
+
+    if saw_configuration_section && !saw_panelize_presets {
+        settings.configuration.panelize_presets.clear();
     }
 }
 
@@ -674,6 +682,21 @@ skin=default
             OverwritePolicy::Rename
         );
         assert_eq!(parsed.panel_options.sort_field, SettingsSortField::Modified);
+    }
+
+    #[test]
+    fn rc_settings_round_trip_preserves_empty_panelize_presets() {
+        let mut settings = Settings::default();
+        settings.configuration.panelize_presets.clear();
+
+        let source = render_rc_settings_ini(&settings);
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &source);
+
+        assert!(
+            parsed.configuration.panelize_presets.is_empty(),
+            "empty panelize presets should remain empty after reload"
+        );
     }
 
     #[test]
