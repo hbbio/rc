@@ -342,6 +342,7 @@ impl AppCommand {
 pub struct MenuEntry {
     pub label: &'static str,
     pub shortcut: &'static str,
+    pub literal_shortcut: bool,
     pub command: AppCommand,
     pub selectable: bool,
 }
@@ -351,6 +352,7 @@ impl MenuEntry {
         Self {
             label,
             shortcut: "",
+            literal_shortcut: false,
             command,
             selectable: true,
         }
@@ -364,6 +366,21 @@ impl MenuEntry {
         Self {
             label,
             shortcut,
+            literal_shortcut: false,
+            command,
+            selectable: true,
+        }
+    }
+
+    const fn action_with_literal_shortcut(
+        label: &'static str,
+        shortcut: &'static str,
+        command: AppCommand,
+    ) -> Self {
+        Self {
+            label,
+            shortcut,
+            literal_shortcut: true,
             command,
             selectable: true,
         }
@@ -373,6 +390,7 @@ impl MenuEntry {
         Self {
             label,
             shortcut,
+            literal_shortcut: true,
             command: AppCommand::MenuNotImplemented(label),
             selectable: true,
         }
@@ -382,6 +400,7 @@ impl MenuEntry {
         Self {
             label: "",
             shortcut: "",
+            literal_shortcut: true,
             command: AppCommand::MenuNoop,
             selectable: false,
         }
@@ -446,14 +465,31 @@ const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("Exit", "F10", AppCommand::Quit),
 ];
 
-const COMMAND_MENU_ENTRIES: [MenuEntry; 7] = [
-    MenuEntry::action("Jobs", AppCommand::OpenJobsScreen),
-    MenuEntry::action("Cancel job", AppCommand::CancelJob),
-    MenuEntry::action("Find file", AppCommand::OpenFindDialog),
+const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
+    MenuEntry::stub("User menu", "F2"),
     MenuEntry::action("Directory tree", AppCommand::OpenTree),
-    MenuEntry::action("Directory hotlist", AppCommand::OpenHotlist),
-    MenuEntry::action("External panelize", AppCommand::OpenPanelizeDialog),
-    MenuEntry::action("Help", AppCommand::OpenHelp),
+    MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
+    MenuEntry::stub("Swap panels", "C-u"),
+    MenuEntry::stub("Switch panels on/off", "C-o"),
+    MenuEntry::stub("Compare directories", "C-x d"),
+    MenuEntry::stub("Compare files", "C-x C-d"),
+    MenuEntry::action_with_literal_shortcut(
+        "External panelize",
+        "C-x !",
+        AppCommand::OpenPanelizeDialog,
+    ),
+    MenuEntry::stub("Show directory sizes", "C-Space"),
+    MenuEntry::separator(),
+    MenuEntry::stub("Command history", "M-h"),
+    MenuEntry::stub("Viewed/edited files history", "M-E"),
+    MenuEntry::action_with_literal_shortcut("Directory hotlist", "C-\\", AppCommand::OpenHotlist),
+    MenuEntry::stub("Active VFS list", "C-x a"),
+    MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
+    MenuEntry::stub("Screen list", "M-`"),
+    MenuEntry::separator(),
+    MenuEntry::stub("Edit extension file", ""),
+    MenuEntry::stub("Edit menu file", ""),
+    MenuEntry::stub("Edit highlighting group file", ""),
 ];
 
 const OPTIONS_MENU_ENTRIES: [MenuEntry; 9] = [
@@ -2559,6 +2595,9 @@ impl AppState {
     }
 
     pub fn menu_entry_shortcut_label(&self, entry: &MenuEntry) -> String {
+        if entry.literal_shortcut && !entry.shortcut.is_empty() {
+            return entry.shortcut.to_string();
+        }
         if let Some(dynamic) = self.keybinding_primary_label(KeyContext::FileManager, entry.command)
         {
             return dynamic.to_string();
@@ -6371,6 +6410,28 @@ mod tests {
         }
     }
 
+    fn move_menu_selection_to_label(app: &mut AppState, label: &str) {
+        let len = match app.top_route() {
+            Route::Menu(menu) => menu.active_entries().len(),
+            _ => panic!("menu route should be active"),
+        };
+        for _ in 0..len {
+            let matches_target = match app.top_route() {
+                Route::Menu(menu) => menu
+                    .active_entries()
+                    .get(menu.selected_entry)
+                    .is_some_and(|entry| entry.label == label),
+                _ => false,
+            };
+            if matches_target {
+                return;
+            }
+            app.apply(AppCommand::MenuMoveDown)
+                .expect("menu movement should succeed");
+        }
+        panic!("menu entry '{label}' should exist");
+    }
+
     fn submit_panelize_custom_command(app: &mut AppState, command: &str) {
         app.open_panelize_dialog();
         app.finish_dialog(DialogResult::ListboxSubmitted {
@@ -6875,6 +6936,7 @@ OpenJobs = f6
             .expect("menu route should open");
         assert_eq!(app.key_context(), KeyContext::Menu);
 
+        move_menu_selection_to_label(&mut app, "Background jobs");
         app.apply(AppCommand::MenuAccept)
             .expect("menu accept should execute selected action");
         assert_eq!(app.key_context(), KeyContext::Jobs);
@@ -6924,6 +6986,10 @@ OpenJobs = f6
             .iter()
             .find(|menu| menu.title == "Options")
             .expect("options menu should exist");
+        let command = menus
+            .iter()
+            .find(|menu| menu.title == "Command")
+            .expect("command menu should exist");
 
         let left_labels: Vec<&str> = left.entries.iter().map(|entry| entry.label).collect();
         let right_labels: Vec<&str> = right.entries.iter().map(|entry| entry.label).collect();
@@ -6943,6 +7009,42 @@ OpenJobs = f6
         assert!(file_labels.contains(&"Rename/Move"));
         assert!(file_labels.contains(&"Select group"));
         assert_eq!(file_labels.last(), Some(&"Exit"));
+
+        let command_labels: Vec<&str> = command.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            command_labels,
+            vec![
+                "User menu",
+                "Directory tree",
+                "Find file",
+                "Swap panels",
+                "Switch panels on/off",
+                "Compare directories",
+                "Compare files",
+                "External panelize",
+                "Show directory sizes",
+                "",
+                "Command history",
+                "Viewed/edited files history",
+                "Directory hotlist",
+                "Active VFS list",
+                "Background jobs",
+                "Screen list",
+                "",
+                "Edit extension file",
+                "Edit menu file",
+                "Edit highlighting group file",
+            ],
+            "command menu should follow MC structure and ordering"
+        );
+
+        let command_shortcuts: Vec<&str> =
+            command.entries.iter().map(|entry| entry.shortcut).collect();
+        assert_eq!(command_shortcuts[0], "F2");
+        assert_eq!(command_shortcuts[2], "M-?");
+        assert_eq!(command_shortcuts[7], "C-x !");
+        assert_eq!(command_shortcuts[12], "C-\\");
+        assert_eq!(command_shortcuts[14], "C-x j");
 
         let option_labels: Vec<&str> = options.entries.iter().map(|entry| entry.label).collect();
         assert_eq!(
@@ -7129,10 +7231,7 @@ OpenJobs = f6
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.apply(AppCommand::OpenMenuAt(2))
             .expect("command menu should open");
-        for _ in 0..5 {
-            app.apply(AppCommand::MenuMoveDown)
-                .expect("menu movement should succeed");
-        }
+        move_menu_selection_to_label(&mut app, "External panelize");
         app.apply(AppCommand::MenuAccept)
             .expect("external panelize menu entry should open dialog");
         assert_eq!(app.key_context(), KeyContext::Listbox);
