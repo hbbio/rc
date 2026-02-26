@@ -76,6 +76,7 @@ fn main() -> Result<()> {
     state.set_active_skin_name(rc_ui::current_skin_name());
     let (keymap, keymap_report) = Keymap::bundled_mc_default_with_report()
         .context("failed to load bundled mc.default.keymap")?;
+    state.set_keybinding_hints_from_keymap(&keymap);
     report_keymap_parse_report(&mut state, &keymap_report);
     let skin_runtime = SkinRuntimeConfig {
         skin_dir: cli.skin_dir.clone(),

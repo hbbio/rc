@@ -22,7 +22,7 @@ Choose a topic:\n\
   [Directory tree](tree)\n\
   [Directory hotlist](hotlist)\n\
 \n\
-Use TAB / Shift-TAB to move across links and ENTER to follow.",
+Use {{help_link_cycle}} to move across links and {{help_follow}} to follow.",
     ),
     (
         "help-viewer",
@@ -30,12 +30,12 @@ Use TAB / Shift-TAB to move across links and ENTER to follow.",
         "The help viewer supports linked nodes and history.\n\
 \n\
 Main keys:\n\
-  TAB / Shift-TAB  select next/previous link\n\
-  ENTER / Right    follow selected link\n\
-  Left / F3 / l    go back in history\n\
-  F2 / c           open index\n\
-  n / p            next / previous node\n\
-  F10 / Esc        close help\n\
+  {{help_link_cycle}}  select next/previous link\n\
+  {{help_follow}}      follow selected link\n\
+  {{help_back}}        go back in history\n\
+  {{help_index}}       open index\n\
+  {{help_node_cycle}}  next / previous node\n\
+  {{help_close}}       close help\n\
 \n\
 Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
     ),
@@ -43,23 +43,23 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
         "file-manager",
         "File Manager",
         "File manager quick keys:\n\
-  Tab switch panel\n\
-  Enter/F3 open directory or view file\n\
-  Backspace go to parent directory\n\
-  Alt-F open find/back to find results\n\
-  Alt-T open directory tree\n\
-  Alt-H open directory hotlist\n\
-  Ctrl-X ! (or Alt/Ctrl-P) open external panelize\n\
-  F9 -> Command -> External panelize\n\
-  Ctrl-J open jobs screen\n\
-  Alt-J cancel latest job\n\
-  Alt-S/Ctrl-K open skin picker\n\
-  q/F10 quit\n\
+  {{fm_switch_panel}} switch panel\n\
+  {{fm_open_entry}} open directory or view file\n\
+  {{fm_parent}} go to parent directory\n\
+  {{fm_find}} open find/back to find results\n\
+  {{fm_tree}} open directory tree\n\
+  {{fm_hotlist}} open directory hotlist\n\
+  {{fm_external_panelize}} open external panelize\n\
+  {{fm_external_panelize_menu}} -> Command -> External panelize\n\
+  {{fm_open_jobs}} open jobs screen\n\
+  {{fm_cancel_job}} cancel latest job\n\
+  {{fm_skin}} open skin picker\n\
+  {{fm_quit}} quit\n\
 \n\
 File operations:\n\
-  Up/Down move cursor\n\
-  Insert/Ctrl-T toggle selection\n\
-  F5/F6/F8 copy/move/delete\n\
+  {{fm_move}} move cursor\n\
+  {{fm_toggle_tag}} toggle selection\n\
+  {{fm_file_ops}} copy/move/delete\n\
 \n\
 More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist).",
     ),
@@ -67,12 +67,12 @@ More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tre
         "viewer",
         "Viewer",
         "Viewer basics:\n\
-  Up/Down and PgUp/PgDn scroll\n\
-  F7 search, Shift-F7 reverse search\n\
-  n / Shift-n continue search\n\
-  g goto line or offset\n\
-  w toggle wrap\n\
-  h toggle hex mode\n\
+  {{viewer_scroll}} scroll\n\
+  {{viewer_search}} search, {{viewer_search_back}} reverse search\n\
+  {{viewer_search_continue}} continue search\n\
+  {{viewer_goto}} goto line or offset\n\
+  {{viewer_wrap}} toggle wrap\n\
+  {{viewer_hex}} toggle hex mode\n\
 \n\
 Return to [File manager](file-manager).",
     ),
@@ -82,9 +82,9 @@ Return to [File manager](file-manager).",
         "Jobs screen shows queued/running/finished jobs.\n\
 \n\
 Keys:\n\
-  Up/Down move across jobs\n\
-  Alt-J cancel selected job\n\
-  Esc/q close jobs screen\n\
+  {{jobs_move}} move across jobs\n\
+  {{jobs_cancel}} cancel selected job\n\
+  {{jobs_close}} close jobs screen\n\
 \n\
 Back to [File manager](file-manager).",
     ),
@@ -94,12 +94,12 @@ Back to [File manager](file-manager).",
         "Find results are streamed while the search runs.\n\
 \n\
 Keys:\n\
-  Up/Down move\n\
-  PgUp/PgDn/Home/End navigate\n\
-  Enter locate the result in panel\n\
-  F5 panelize current results\n\
-  Alt-J cancel active find job\n\
-  Esc/q close\n\
+  {{find_move}} move\n\
+  {{find_nav}} navigate\n\
+  {{find_open}} locate the result in panel\n\
+  {{find_panelize}} panelize current results\n\
+  {{find_cancel}} cancel active find job\n\
+  {{find_close}} close\n\
 \n\
 Panelize here uses the internal Find results list.\n\
 Use external panelize for shell-command output lists.\n\
@@ -110,16 +110,16 @@ See also [File manager](file-manager) and [Panelize and VFS](panelize).",
         "panelize",
         "Panelize and VFS",
         "Two panelize flows share the same virtual panel layer:\n\
-  Find results panelize (F5 in Find results)\n\
+  Find results panelize ({{panelize_find_results}})\n\
     Source: internal search matches\n\
-    Entry point: Alt-? search, then F5 in results\n\
-  External panelize (Ctrl-X !)\n\
+    Entry point: {{panelize_find_entry}}\n\
+  External panelize ({{panelize_external}})\n\
     Source: shell command stdout, one path per line\n\
-    Entry point: Ctrl-X ! or F9 -> Command -> External panelize\n\
-    Dialog keys: Up/Down, Tab, Enter, Esc, F2/F4/F8\n\
+    Entry point: {{panelize_external_entry}}\n\
+    Dialog keys: {{panelize_dialog_keys}}\n\
 \n\
-Both allow normal file operations (F3/F4/F5/F6/F8),\n\
-Ctrl-R refresh, and exit by changing to a real directory.\n\
+Both allow normal file operations ({{panelize_ops}}),\n\
+{{panelize_refresh}} refresh, and exit by changing to a real directory.\n\
 \n\
 How this differs from VFS:\n\
   VFS mounts archives/remote locations as browsable trees.\n\
@@ -133,10 +133,10 @@ Back to [File manager](file-manager) or [Find results](find-results).",
         "Tree screen presents a compact directory tree.\n\
 \n\
 Keys:\n\
-  Up/Down move\n\
-  PgUp/PgDn/Home/End navigate\n\
-  Enter open selected directory in active panel\n\
-  Esc/q close\n\
+  {{tree_move}} move\n\
+  {{tree_nav}} navigate\n\
+  {{tree_open}} open selected directory in active panel\n\
+  {{tree_close}} close\n\
 \n\
 See also [Directory hotlist](hotlist) and [File manager](file-manager).",
     ),
@@ -146,10 +146,10 @@ See also [Directory hotlist](hotlist) and [File manager](file-manager).",
         "Hotlist stores frequently used directories.\n\
 \n\
 Keys:\n\
-  Enter open selected directory\n\
-  a add current directory\n\
-  d/delete remove selected entry\n\
-  Esc/q close\n\
+  {{hotlist_open}} open selected directory\n\
+  {{hotlist_add}} add current directory\n\
+  {{hotlist_remove}} remove selected entry\n\
+  {{hotlist_close}} close\n\
 \n\
 See also [Directory tree](tree) and [File manager](file-manager).",
     ),
@@ -202,7 +202,15 @@ pub struct HelpState {
 
 impl HelpState {
     pub fn for_context(context: KeyContext) -> Self {
-        let (nodes, index_by_id) = build_nodes();
+        let replacements = default_replacements();
+        Self::for_context_with_replacements(context, &replacements)
+    }
+
+    pub fn for_context_with_replacements(
+        context: KeyContext,
+        replacements: &HashMap<&'static str, String>,
+    ) -> Self {
+        let (nodes, index_by_id) = build_nodes(replacements);
         let mut state = Self {
             nodes,
             index_by_id,
@@ -408,7 +416,9 @@ fn topic_for_context(context: KeyContext) -> &'static str {
     }
 }
 
-fn build_nodes() -> (Vec<HelpNode>, HashMap<String, usize>) {
+fn build_nodes(
+    replacements: &HashMap<&'static str, String>,
+) -> (Vec<HelpNode>, HashMap<String, usize>) {
     let index_by_id = HELP_NODE_SPECS
         .iter()
         .enumerate()
@@ -417,14 +427,20 @@ fn build_nodes() -> (Vec<HelpNode>, HashMap<String, usize>) {
 
     let nodes = HELP_NODE_SPECS
         .iter()
-        .map(|(id, title, body)| parse_node(id, title, body))
+        .map(|(id, title, body)| parse_node(id, title, body, replacements))
         .collect::<Vec<_>>();
     (nodes, index_by_id)
 }
 
-fn parse_node(id: &str, title: &str, body: &str) -> HelpNode {
+fn parse_node(
+    id: &str,
+    title: &str,
+    body: &str,
+    replacements: &HashMap<&'static str, String>,
+) -> HelpNode {
     let mut links = Vec::new();
-    let lines = body
+    let rendered_body = apply_replacements(body, replacements);
+    let lines = rendered_body
         .lines()
         .enumerate()
         .map(|(line_number, line)| parse_line(line, line_number, &mut links))
@@ -487,6 +503,84 @@ fn parse_line(line: &str, line_number: usize, links: &mut Vec<HelpLink>) -> Help
     HelpLine { spans }
 }
 
+fn apply_replacements(body: &str, replacements: &HashMap<&'static str, String>) -> String {
+    let mut rendered = body.to_string();
+    for (token, value) in replacements {
+        let needle = format!("{{{{{token}}}}}");
+        rendered = rendered.replace(&needle, value);
+    }
+    rendered
+}
+
+fn default_replacements() -> HashMap<&'static str, String> {
+    HashMap::from([
+        ("help_link_cycle", String::from("TAB / Shift-TAB")),
+        ("help_follow", String::from("ENTER / Right")),
+        ("help_back", String::from("Left / F3 / l")),
+        ("help_index", String::from("F2 / c")),
+        ("help_node_cycle", String::from("n / p")),
+        ("help_close", String::from("F10 / Esc")),
+        ("fm_switch_panel", String::from("Tab")),
+        ("fm_open_entry", String::from("Enter/F3")),
+        ("fm_parent", String::from("Backspace")),
+        ("fm_find", String::from("Alt-F")),
+        ("fm_tree", String::from("Alt-T")),
+        ("fm_hotlist", String::from("Alt-H")),
+        (
+            "fm_external_panelize",
+            String::from("Ctrl-X ! (or Alt/Ctrl-P)"),
+        ),
+        ("fm_external_panelize_menu", String::from("F9")),
+        ("fm_open_jobs", String::from("Ctrl-J")),
+        ("fm_cancel_job", String::from("Alt-J")),
+        ("fm_skin", String::from("Alt-S/Ctrl-K")),
+        ("fm_quit", String::from("q/F10")),
+        ("fm_move", String::from("Up/Down")),
+        ("fm_toggle_tag", String::from("Insert/Ctrl-T")),
+        ("fm_file_ops", String::from("F5/F6/F8")),
+        ("viewer_scroll", String::from("Up/Down and PgUp/PgDn")),
+        ("viewer_search", String::from("F7")),
+        ("viewer_search_back", String::from("Shift-F7")),
+        ("viewer_search_continue", String::from("n / Shift-n")),
+        ("viewer_goto", String::from("g")),
+        ("viewer_wrap", String::from("w")),
+        ("viewer_hex", String::from("h")),
+        ("jobs_move", String::from("Up/Down")),
+        ("jobs_cancel", String::from("Alt-J")),
+        ("jobs_close", String::from("Esc/q")),
+        ("find_move", String::from("Up/Down")),
+        ("find_nav", String::from("PgUp/PgDn/Home/End")),
+        ("find_open", String::from("Enter")),
+        ("find_panelize", String::from("F5")),
+        ("find_cancel", String::from("Alt-J")),
+        ("find_close", String::from("Esc/q")),
+        ("panelize_find_results", String::from("F5 in Find results")),
+        (
+            "panelize_find_entry",
+            String::from("Alt-? search, then F5 in results"),
+        ),
+        ("panelize_external", String::from("Ctrl-X !")),
+        (
+            "panelize_external_entry",
+            String::from("Ctrl-X ! or F9 -> Command -> External panelize"),
+        ),
+        (
+            "panelize_dialog_keys",
+            String::from("Up/Down, Tab, Enter, Esc, F2/F4/F8"),
+        ),
+        ("panelize_ops", String::from("F3/F4/F5/F6/F8")),
+        ("panelize_refresh", String::from("Ctrl-R")),
+        ("tree_move", String::from("Up/Down")),
+        ("tree_nav", String::from("PgUp/PgDn/Home/End")),
+        ("tree_open", String::from("Enter")),
+        ("tree_close", String::from("Esc/q")),
+        ("hotlist_open", String::from("Enter")),
+        ("hotlist_add", String::from("a")),
+        ("hotlist_remove", String::from("d/delete")),
+        ("hotlist_close", String::from("Esc/q")),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,10 +601,12 @@ mod tests {
 
     #[test]
     fn parses_links_and_keeps_order() {
+        let replacements = HashMap::new();
         let node = parse_node(
             "node",
             "Node",
             "See [first](a) and [second](b).\nThen [third](c).",
+            &replacements,
         );
         assert_eq!(node.links.len(), 3);
         assert_eq!(node.links[0].target, "a");

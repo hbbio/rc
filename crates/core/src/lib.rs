@@ -28,9 +28,9 @@ pub use jobs::{
 };
 
 use crate::dialog::DialogEvent;
-use crate::keymap::{KeyCommand, KeyContext};
+use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
     OpenHelp,
     CloseHelp,
@@ -1194,25 +1194,6 @@ impl MenuState {
             .unwrap_or(0)
     }
 
-    pub fn popup_width(&self) -> u16 {
-        let inner = self
-            .active_entries()
-            .iter()
-            .map(|entry| {
-                let label_width = entry.label.chars().count() as u16;
-                let shortcut_width = entry.shortcut.chars().count() as u16;
-                if shortcut_width == 0 {
-                    label_width
-                } else {
-                    label_width.saturating_add(1).saturating_add(shortcut_width)
-                }
-            })
-            .max()
-            .unwrap_or(1)
-            .saturating_add(2);
-        inner.saturating_add(2)
-    }
-
     pub fn popup_height(&self) -> u16 {
         self.active_entries().len() as u16 + 2
     }
@@ -1262,29 +1243,6 @@ impl MenuState {
             .get(self.selected_entry)
             .filter(|entry| entry.selectable)
             .map(|entry| entry.command)
-    }
-
-    fn hit_test_entry(&self, column: u16, row: u16) -> Option<usize> {
-        let x = self.popup_origin_x();
-        let y = 1u16;
-        let width = self.popup_width();
-        let items = self.active_entries().len() as u16;
-        if items == 0 {
-            return None;
-        }
-
-        if row < y + 1 || row >= y + 1 + items {
-            return None;
-        }
-        if column < x + 1 || column >= x + width.saturating_sub(1) {
-            return None;
-        }
-
-        let index = (row - (y + 1)) as usize;
-        self.active_entries()
-            .get(index)
-            .filter(|entry| entry.selectable)
-            .map(|_| index)
     }
 
     fn active_menu(&self) -> &'static TopMenu {
@@ -1483,6 +1441,80 @@ enum EditSelectionResult {
     OpenedInternal,
     NoEntrySelected,
     SelectedEntryIsDirectory,
+}
+
+#[derive(Clone, Debug, Default)]
+struct KeybindingHints {
+    labels_by_context_and_command: HashMap<(KeyContext, AppCommand), Vec<String>>,
+}
+
+impl KeybindingHints {
+    fn from_keymap(keymap: &Keymap) -> Self {
+        let mut chords_by_context_and_command: HashMap<(KeyContext, AppCommand), Vec<KeyChord>> =
+            HashMap::new();
+        let contexts = [
+            KeyContext::FileManager,
+            KeyContext::FileManagerXMap,
+            KeyContext::Help,
+            KeyContext::Jobs,
+            KeyContext::FindResults,
+            KeyContext::Tree,
+            KeyContext::Hotlist,
+            KeyContext::Dialog,
+            KeyContext::Input,
+            KeyContext::Listbox,
+            KeyContext::Menu,
+            KeyContext::Editor,
+            KeyContext::Viewer,
+            KeyContext::ViewerHex,
+            KeyContext::DiffViewer,
+        ];
+
+        for context in contexts {
+            for (chord, key_command) in keymap.bindings_for_context(context) {
+                let app_command =
+                    AppCommand::from_key_command(context, &key_command).or_else(|| {
+                        (context == KeyContext::FileManagerXMap)
+                            .then(|| {
+                                AppCommand::from_key_command(KeyContext::FileManager, &key_command)
+                            })
+                            .flatten()
+                    });
+                let Some(app_command) = app_command else {
+                    continue;
+                };
+                chords_by_context_and_command
+                    .entry((context, app_command))
+                    .or_default()
+                    .push(chord);
+            }
+        }
+
+        let mut labels_by_context_and_command = HashMap::new();
+        for ((context, app_command), mut chords) in chords_by_context_and_command {
+            chords.sort_by_key(key_chord_sort_key);
+            let mut labels = Vec::new();
+            for chord in chords {
+                let label = format_key_chord(chord);
+                if !labels.iter().any(|existing| existing == &label) {
+                    labels.push(label);
+                }
+            }
+            if !labels.is_empty() {
+                labels_by_context_and_command.insert((context, app_command), labels);
+            }
+        }
+
+        Self {
+            labels_by_context_and_command,
+        }
+    }
+
+    fn labels_for(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
+        self.labels_by_context_and_command
+            .get(&(context, command))
+            .map(Vec::as_slice)
+    }
 }
 
 pub fn run_background_worker(
@@ -1956,6 +1988,7 @@ pub struct AppState {
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
     panelize_presets: Vec<String>,
+    keybinding_hints: KeybindingHints,
     xmap_pending: bool,
 }
 
@@ -1992,6 +2025,7 @@ impl AppState {
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
             panelize_presets: panelize_preset_commands(),
+            keybinding_hints: KeybindingHints::default(),
             xmap_pending: false,
         })
     }
@@ -2192,6 +2226,557 @@ impl AppState {
 
     pub fn clear_xmap(&mut self) {
         self.xmap_pending = false;
+    }
+
+    pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
+        self.keybinding_hints = KeybindingHints::from_keymap(keymap);
+    }
+
+    pub fn keybinding_labels(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
+        self.keybinding_hints.labels_for(context, command)
+    }
+
+    pub fn keybinding_primary_label(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+    ) -> Option<&str> {
+        self.keybinding_labels(context, command)
+            .and_then(|labels| labels.first().map(String::as_str))
+    }
+
+    pub fn keybinding_joined_label(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        separator: &str,
+        limit: usize,
+    ) -> Option<String> {
+        let labels = self.keybinding_labels(context, command)?;
+        let clipped = if limit == 0 {
+            labels
+        } else {
+            &labels[..labels.len().min(limit)]
+        };
+        Some(clipped.join(separator))
+    }
+
+    pub fn menu_entry_shortcut_label(&self, entry: &MenuEntry) -> String {
+        if let Some(dynamic) = self.keybinding_primary_label(KeyContext::FileManager, entry.command)
+        {
+            return dynamic.to_string();
+        }
+        entry.shortcut.to_string()
+    }
+
+    pub fn menu_popup_width(&self, menu: &MenuState) -> u16 {
+        let inner = menu
+            .active_entries()
+            .iter()
+            .map(|entry| {
+                let label_width = entry.label.chars().count() as u16;
+                let shortcut = self.menu_entry_shortcut_label(entry);
+                let shortcut_width = shortcut.chars().count() as u16;
+                if shortcut_width == 0 {
+                    label_width
+                } else {
+                    label_width.saturating_add(1).saturating_add(shortcut_width)
+                }
+            })
+            .max()
+            .unwrap_or(1)
+            .saturating_add(2);
+        inner.saturating_add(2)
+    }
+
+    fn keybinding_primary_or_fallback(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        fallback: &str,
+    ) -> String {
+        self.keybinding_primary_label(context, command)
+            .map_or_else(|| fallback.to_string(), ToString::to_string)
+    }
+
+    fn keybinding_joined_or_fallback(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        fallback: &str,
+        limit: usize,
+    ) -> String {
+        self.keybinding_joined_label(context, command, " / ", limit)
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn xmap_sequence_or_fallback(&self, command: AppCommand, fallback: &str) -> String {
+        let prefix = self.keybinding_primary_label(KeyContext::FileManager, AppCommand::EnterXMap);
+        let suffix = self.keybinding_primary_label(KeyContext::FileManagerXMap, command);
+        match (prefix, suffix) {
+            (Some(prefix), Some(suffix)) => format!("{prefix} {suffix}"),
+            _ => fallback.to_string(),
+        }
+    }
+
+    fn help_replacements(&self) -> HashMap<&'static str, String> {
+        let mut replacements = HashMap::new();
+
+        replacements.insert(
+            "help_link_cycle",
+            format!(
+                "{} / {}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpLinkNext,
+                    "Tab"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpLinkPrev,
+                    "Shift-Tab",
+                ),
+            ),
+        );
+        replacements.insert(
+            "help_follow",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::HelpFollowLink,
+                "Enter / Right",
+                2,
+            ),
+        );
+        replacements.insert(
+            "help_back",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::HelpBack,
+                "Left / F3 / l",
+                3,
+            ),
+        );
+        replacements.insert(
+            "help_index",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::HelpIndex,
+                "F2 / c",
+                2,
+            ),
+        );
+        replacements.insert(
+            "help_node_cycle",
+            format!(
+                "{} / {}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpNodeNext,
+                    "n"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpNodePrev,
+                    "p"
+                ),
+            ),
+        );
+        replacements.insert(
+            "help_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::CloseHelp,
+                "F10 / Esc",
+                2,
+            ),
+        );
+
+        replacements.insert(
+            "fm_switch_panel",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::SwitchPanel,
+                "Tab",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_open_entry",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenEntry,
+                "Enter/F3",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_parent",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::CdUp,
+                "Backspace",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_find",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenFindDialog,
+                "Alt-F",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_tree",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenTree,
+                "Alt-T",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_hotlist",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenHotlist,
+                "Alt-H",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_external_panelize",
+            format!(
+                "{} (or {})",
+                self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
+                self.keybinding_joined_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenPanelizeDialog,
+                    "Alt/Ctrl-P",
+                    2,
+                )
+            ),
+        );
+        replacements.insert(
+            "fm_external_panelize_menu",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenMenu,
+                "F9",
+            ),
+        );
+        replacements.insert(
+            "fm_open_jobs",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenJobsScreen,
+                "Ctrl-J",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_cancel_job",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::CancelJob,
+                "Alt-J",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_skin",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenSkinDialog,
+                "Alt-S/Ctrl-K",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_quit",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::Quit,
+                "q/F10",
+                2,
+            ),
+        );
+        replacements.insert("fm_move", "Up/Down".to_string());
+        replacements.insert(
+            "fm_toggle_tag",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::ToggleTag,
+                "Insert/Ctrl-T",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_file_ops",
+            format!(
+                "{}/{}/{}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Copy,
+                    "F5"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Move,
+                    "F6"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Delete,
+                    "F8"
+                ),
+            ),
+        );
+
+        replacements.insert("viewer_scroll", "Up/Down and PgUp/PgDn".to_string());
+        replacements.insert(
+            "viewer_search",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerSearchForward,
+                "F7",
+            ),
+        );
+        replacements.insert(
+            "viewer_search_back",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerSearchBackward,
+                "Shift-F7",
+            ),
+        );
+        replacements.insert(
+            "viewer_search_continue",
+            format!(
+                "{} / {}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Viewer,
+                    AppCommand::ViewerSearchContinue,
+                    "n"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Viewer,
+                    AppCommand::ViewerSearchContinueBackward,
+                    "Shift-n",
+                ),
+            ),
+        );
+        replacements.insert(
+            "viewer_goto",
+            self.keybinding_primary_or_fallback(KeyContext::Viewer, AppCommand::ViewerGoto, "g"),
+        );
+        replacements.insert(
+            "viewer_wrap",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerToggleWrap,
+                "w",
+            ),
+        );
+        replacements.insert(
+            "viewer_hex",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerToggleHex,
+                "h",
+            ),
+        );
+
+        replacements.insert("jobs_move", "Up/Down".to_string());
+        replacements.insert(
+            "jobs_cancel",
+            self.keybinding_joined_or_fallback(KeyContext::Jobs, AppCommand::CancelJob, "Alt-J", 1),
+        );
+        replacements.insert(
+            "jobs_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Jobs,
+                AppCommand::CloseJobsScreen,
+                "Esc/q",
+                2,
+            ),
+        );
+
+        replacements.insert("find_move", "Up/Down".to_string());
+        replacements.insert("find_nav", "PgUp/PgDn/Home/End".to_string());
+        replacements.insert(
+            "find_open",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsOpenEntry,
+                "Enter",
+            ),
+        );
+        replacements.insert(
+            "find_panelize",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsPanelize,
+                "F5",
+            ),
+        );
+        replacements.insert(
+            "find_cancel",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::CancelJob,
+                "Alt-J",
+                1,
+            ),
+        );
+        replacements.insert(
+            "find_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::CloseFindResults,
+                "Esc/q",
+                2,
+            ),
+        );
+
+        replacements.insert(
+            "panelize_find_results",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsPanelize,
+                "F5",
+            ),
+        );
+        replacements.insert(
+            "panelize_find_entry",
+            format!(
+                "{} search, then {} in results",
+                self.keybinding_joined_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenFindDialog,
+                    "Alt-?",
+                    1
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FindResults,
+                    AppCommand::FindResultsPanelize,
+                    "F5",
+                ),
+            ),
+        );
+        replacements.insert(
+            "panelize_external",
+            self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
+        );
+        replacements.insert(
+            "panelize_external_entry",
+            format!(
+                "{} or {} -> Command -> External panelize",
+                self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenMenu,
+                    "F9"
+                ),
+            ),
+        );
+        replacements.insert(
+            "panelize_dialog_keys",
+            "Up/Down, Tab, Enter, Esc, F2/F4/F8".to_string(),
+        );
+        replacements.insert(
+            "panelize_ops",
+            format!(
+                "{}/{}/{}/{}/{}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenEntry,
+                    "F3"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::EditEntry,
+                    "F4"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Copy,
+                    "F5"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Move,
+                    "F6"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Delete,
+                    "F8"
+                ),
+            ),
+        );
+        replacements.insert(
+            "panelize_refresh",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::Reread,
+                "Ctrl-R",
+                1,
+            ),
+        );
+
+        replacements.insert("tree_move", "Up/Down".to_string());
+        replacements.insert("tree_nav", "PgUp/PgDn/Home/End".to_string());
+        replacements.insert(
+            "tree_open",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Tree,
+                AppCommand::TreeOpenEntry,
+                "Enter",
+            ),
+        );
+        replacements.insert(
+            "tree_close",
+            self.keybinding_joined_or_fallback(KeyContext::Tree, AppCommand::CloseTree, "Esc/q", 2),
+        );
+
+        replacements.insert(
+            "hotlist_open",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistOpenEntry,
+                "Enter",
+            ),
+        );
+        replacements.insert(
+            "hotlist_add",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistAddCurrentDirectory,
+                "a",
+            ),
+        );
+        replacements.insert(
+            "hotlist_remove",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistRemoveSelected,
+                "d/delete",
+                2,
+            ),
+        );
+        replacements.insert(
+            "hotlist_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::CloseHotlist,
+                "Esc/q",
+                2,
+            ),
+        );
+
+        replacements
     }
 
     fn queue_panel_refresh(&mut self, panel: ActivePanel) {
@@ -2470,8 +3055,12 @@ impl AppState {
             return;
         }
 
+        let replacements = self.help_replacements();
         self.routes
-            .push(Route::Help(HelpState::for_context(context)));
+            .push(Route::Help(HelpState::for_context_with_replacements(
+                context,
+                &replacements,
+            )));
         self.set_status("Opened help");
     }
 
@@ -2546,11 +3135,34 @@ impl AppState {
             return None;
         };
 
-        if let Some(entry_index) = menu.hit_test_entry(column, row) {
+        if let Some(entry_index) = self.menu_hit_test_entry(menu, column, row) {
             return Some(AppCommand::MenuSelectAt(entry_index));
         }
 
         Some(AppCommand::CloseMenu)
+    }
+
+    fn menu_hit_test_entry(&self, menu: &MenuState, column: u16, row: u16) -> Option<usize> {
+        let x = menu.popup_origin_x();
+        let y = 1u16;
+        let width = self.menu_popup_width(menu);
+        let items = menu.active_entries().len() as u16;
+        if items == 0 {
+            return None;
+        }
+
+        if row < y + 1 || row >= y + 1 + items {
+            return None;
+        }
+        if column < x + 1 || column >= x + width.saturating_sub(1) {
+            return None;
+        }
+
+        let index = (row - (y + 1)) as usize;
+        menu.active_entries()
+            .get(index)
+            .filter(|entry| entry.selectable)
+            .map(|_| index)
     }
 
     fn open_jobs_screen(&mut self) {
@@ -4627,6 +5239,77 @@ fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
     }
 }
 
+fn key_chord_sort_key(chord: &KeyChord) -> (u8, u16, String) {
+    let has_ctrl_or_alt = chord.modifiers.ctrl || chord.modifiers.alt;
+    let has_any_modifiers = chord.modifiers.ctrl || chord.modifiers.alt || chord.modifiers.shift;
+    let rank = match chord.code {
+        KeyCode::F(_) if !has_any_modifiers => 0,
+        KeyCode::F(_) => 1,
+        _ if has_ctrl_or_alt => 2,
+        KeyCode::Enter
+        | KeyCode::Esc
+        | KeyCode::Tab
+        | KeyCode::Backspace
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Insert
+        | KeyCode::Delete => 3,
+        KeyCode::Char(ch) if ch.is_ascii_alphabetic() && !has_any_modifiers => 4,
+        KeyCode::Char(_) if !has_any_modifiers => 5,
+        KeyCode::Char(_) => 6,
+    };
+
+    let number = match chord.code {
+        KeyCode::F(value) => value as u16,
+        _ => 0,
+    };
+    (rank, number, format_key_chord(*chord))
+}
+
+fn format_key_chord(chord: KeyChord) -> String {
+    let key = match chord.code {
+        KeyCode::Char(ch) => ch.to_string(),
+        KeyCode::F(number) => format!("F{number}"),
+        KeyCode::Enter => String::from("Enter"),
+        KeyCode::Esc => String::from("Esc"),
+        KeyCode::Tab => String::from("Tab"),
+        KeyCode::Backspace => String::from("Backspace"),
+        KeyCode::Up => String::from("Up"),
+        KeyCode::Down => String::from("Down"),
+        KeyCode::Left => String::from("Left"),
+        KeyCode::Right => String::from("Right"),
+        KeyCode::Home => String::from("Home"),
+        KeyCode::End => String::from("End"),
+        KeyCode::PageUp => String::from("PgUp"),
+        KeyCode::PageDown => String::from("PgDn"),
+        KeyCode::Insert => String::from("Insert"),
+        KeyCode::Delete => String::from("Delete"),
+    };
+
+    let mut modifiers = Vec::new();
+    if chord.modifiers.ctrl {
+        modifiers.push("Ctrl");
+    }
+    if chord.modifiers.alt {
+        modifiers.push("Alt");
+    }
+    if chord.modifiers.shift {
+        modifiers.push("Shift");
+    }
+
+    if modifiers.is_empty() {
+        key
+    } else {
+        format!("{}-{key}", modifiers.join("-"))
+    }
+}
+
 fn resolve_external_editor_command() -> Option<String> {
     resolve_external_editor_command_with_lookup(|name| std::env::var(name).ok())
 }
@@ -5205,6 +5888,94 @@ mod tests {
         app.apply(AppCommand::CloseHelp)
             .expect("help route should close");
         assert_eq!(app.key_context(), KeyContext::FileManager);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn menu_shortcuts_follow_loaded_keymap_bindings() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-shortcuts-keymap-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::parse(
+            r#"
+[filemanager]
+View = f11
+Edit = f12
+Copy = ctrl-y
+"#,
+        )
+        .expect("keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+
+        let view_entry = FILE_MENU_ENTRIES
+            .iter()
+            .find(|entry| entry.label == "View")
+            .expect("View entry should exist");
+        let edit_entry = FILE_MENU_ENTRIES
+            .iter()
+            .find(|entry| entry.label == "Edit")
+            .expect("Edit entry should exist");
+        let copy_entry = FILE_MENU_ENTRIES
+            .iter()
+            .find(|entry| entry.label == "Copy")
+            .expect("Copy entry should exist");
+
+        assert_eq!(app.menu_entry_shortcut_label(view_entry), "F11");
+        assert_eq!(app.menu_entry_shortcut_label(edit_entry), "F12");
+        assert_eq!(app.menu_entry_shortcut_label(copy_entry), "Ctrl-y");
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn help_content_applies_keybinding_replacements() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-help-keybindings-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::parse(
+            r#"
+[filemanager]
+OpenJobs = f6
+"#,
+        )
+        .expect("keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+        app.apply(AppCommand::OpenHelp)
+            .expect("help route should open");
+
+        let Route::Help(help) = app.top_route() else {
+            panic!("top route should be help");
+        };
+        let mut content = String::new();
+        for line in help.lines() {
+            for span in &line.spans {
+                match span {
+                    HelpSpan::Text(text) => content.push_str(text),
+                    HelpSpan::Link { label, .. } => content.push_str(label),
+                }
+            }
+            content.push('\n');
+        }
+
+        assert!(
+            !content.contains("{{"),
+            "help content should not contain unresolved template tokens"
+        );
+        assert!(
+            content.contains("F6 open jobs screen"),
+            "help should reflect keymap-derived shortcuts"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

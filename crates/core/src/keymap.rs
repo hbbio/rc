@@ -352,6 +352,18 @@ impl Keymap {
             .get(&context)
             .and_then(|keys| keys.get(&chord))
     }
+
+    pub fn bindings_for_context(&self, context: KeyContext) -> Vec<(KeyChord, KeyCommand)> {
+        self.bindings
+            .get(&context)
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .map(|(chord, command)| (*chord, command.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
