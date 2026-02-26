@@ -1,12 +1,12 @@
-You are rebuilding a mature, stateful TUI file manager with its own viewer, editor, diff viewer, VFS layers, and a large surface of “small” behaviors. A workable plan needs (1) a feature inventory grounded in upstream docs/config, (2) a compatibility strategy for keymaps and config files, and (3) an architecture that keeps the UI responsive while long operations run. I’m assuming the target is a daily-driver replacement on Linux first, then other Unix-like systems, and Windows as a follow-on.
+You are rebuilding a mature, stateful TUI file manager with its own viewer, external tool integrations, VFS layers, and a large surface of “small” behaviors. A workable plan needs (1) a feature inventory grounded in upstream docs/config, (2) a compatibility strategy for keymaps and config files, and (3) an architecture that keeps the UI responsive while long operations run. I’m assuming the target is a daily-driver replacement on Linux first, then other Unix-like systems, and Windows as a follow-on.
 
 ## 1. Scope, goals, and hard constraints
 
 ### Primary goals
 
-* **Feature parity with current GNU Midnight Commander** at the user-facing level: two-panel file manager, subshell command line, internal viewer/editor/diff viewer, VFS, search, user menu, extension-based “Open/View/Edit”. ([Midnight Commander][1])
+* **MC-compatible daily-driver behavior**, without requiring a strict 1:1 reimplementation of every legacy subsystem. ([Midnight Commander][1])
 * **Default keybindings match MC**, by shipping and parsing the same keymap format and default mappings. ([GitHub][2])
-* **Modernize** the internals: strong separation of concerns, structured concurrency, testability, crash safety, and better responsiveness during I/O.
+* **World-class modern UX and internals**: strong separation of concerns, structured concurrency, testability, crash safety, better responsiveness during I/O, and room for new capabilities beyond classic MC behavior.
 
 ### Compatibility constraints
 
@@ -15,7 +15,7 @@ You are rebuilding a mature, stateful TUI file manager with its own viewer, edit
   * `mc.default.keymap` format and section model (filemanager/panel/dialog/menu/input/editor/viewer/diffviewer…). ([GitHub][2])
   * `mc.ext.ini` INI format, including command macros and “Include=” composition. ([GitHub][3])
   * `mc.menu` user menu format and macros (`%f`, `%t`, `%view{...}`, `%{prompt}` …). ([GitHub][4])
-  * Syntax mapping for the editor (`Syntax` file locations and matching rules). ([GitHub][5])
+  * Existing key contexts from `mc.default.keymap`, including editor/diff contexts, even when some actions are intentionally implemented through external tools. ([GitHub][2])
 
 ### “Modernize” definition for this project
 
@@ -23,6 +23,16 @@ You are rebuilding a mature, stateful TUI file manager with its own viewer, edit
 * Unicode-first rendering and input; stable behavior on modern terminals; truecolor themes.
 * Safer defaults for destructive actions (trash where supported, clearer previews, better progress and cancelation).
 * Extensibility that does not require patching core: plugin hooks for VFS backends and previewers.
+
+## Deviations
+
+These are explicit product decisions, not temporary gaps:
+
+* **No internal text editor implementation.** Editing is always delegated to an external editor process.
+* **Editor resolution order:** configured editor setting (when present), then environment (`$EDITOR`, then `$VISUAL`), then executable detection on `PATH` in this order: `hx`, `nvim`, `vim`, `vi`, `emacs`.
+* **No full internal diff viewer implementation.** Diff is executed as an external command and rendered in-app as command output, with `difftastic` preferred and `diff` as fallback.
+* **FTP/SFTP are optional, not required for core parity.** They remain possible extensions behind feature gates/plugins and may be omitted in lean distributions.
+* **Roadmap stays directional, not a status log.** Implementation status and milestone completion live in `README.md`.
 
 ## 2. Feature inventory and target screens
 
@@ -72,22 +82,23 @@ Plan for:
 * Goto offset/line.
 * Hex mode and “hex edit mode” behavior mapped to the viewer:hex keymap section. ([GitHub][2])
 
-### 2.4 Internal editor (mcedit-compatible experience)
+### 2.4 External editor integration
 
-From the editor man page and keymap:
+Plan for:
 
-* Multiple files / file switching.
-* Undo/redo, block selection, column selection.
-* Search/replace, goto line, bracket match, paragraph format, bookmarks, syntax highlighting on/off. ([GitHub][2])
-* Editor user menu (F11) driven by `mcedit.menu`. ([GitHub][7])
-* Syntax mapping rules and system/user locations for syntax files. ([GitHub][5])
+* Deterministic editor command resolution and launch flow (settings -> env -> PATH probe fallback list).
+* Safe command invocation from panel cwd, with predictable argument quoting and exit-status handling.
+* Clean terminal suspend/resume behavior around external editor execution.
+* Optional command templates for advanced users while keeping a secure default path.
 
-### 2.5 Diff viewer
+### 2.5 Diff workflow
 
-From the keymap and manuals:
+Plan for:
 
-* Side-by-side diff with split controls (full/equal/more/less).
-* Hunk navigation, search, save, edit/merge actions. ([GitHub][2])
+* Launch diff command for selected inputs and stream/capture output in-app.
+* Prefer `difftastic` when available, fallback to `diff` automatically.
+* Keep MC-style key entry points, but map them to a command runner + output viewer route.
+* Support user-configurable diff command templates later, with secure defaults first.
 
 ### 2.6 VFS and “extension file” behaviors
 
@@ -166,7 +177,9 @@ Plan: a screen that displays what the terminal sent (raw bytes and decoded guess
 
 * **camino** (`Utf8PathBuf`) for UI-facing paths where you need guaranteed UTF-8 display. Keep `std::path::PathBuf` for OS-facing calls where non-UTF-8 paths matter. ([Docs.rs][15])
 
-### 4.6 Remote access libraries (VFS backends)
+### 4.6 Remote access libraries (optional VFS backends)
+
+FTP/SFTP support is explicitly optional for this project. Local filesystem excellence, responsiveness, and extension workflows are higher priority.
 
 You have two viable approaches for SSH-like backends:
 
@@ -193,7 +206,7 @@ FTP/FTPS:
 
 Recommendation:
 
-* Start with `ssh2` for SFTP (fastest path to a usable daily tool), keep an internal trait boundary so a future pure-Rust backend can land without rewriting the UI and file ops layer.
+* Keep remote protocols behind a trait boundary and feature gates; ship only when they meet reliability and maintenance bar.
 
 ### 4.7 Archives
 
@@ -205,12 +218,10 @@ For native archive browsing (treated like a directory):
 MC also relies on many external helpers and schemes defined through `mc.ext.ini` and helper scripts for a broad set of archive/package formats (7z, rar, rpm, deb, iso…). ([GitHub][3])
 Plan: native TAR/ZIP early, then keep “extfs helper” compatibility for the long tail.
 
-### 4.8 Viewer/editor/diff internals
+### 4.8 Viewer and external-tool integration
 
 * **memmap2** for memory-mapped I/O in viewer and large-file operations. ([Crates][22])
-* **ropey** as the editor’s text buffer (rope structure for large files and edits). ([Crates][23])
-* **syntect** for syntax highlighting (TextMate/Sublime style definitions). ([Crates][24])
-* **similar** for diff computation and presentation. ([Docs.rs][25])
+* **syntect** for syntax highlighting in viewer/output surfaces. ([Crates][24])
 
 ### 4.9 Config, CLI, logging
 
@@ -234,7 +245,7 @@ Plan: native TAR/ZIP early, then keep “extfs helper” compatibility for the l
   * `ui` (ratatui widgets and render pipeline)
   * `vfs` (backends and path parsing)
   * `ops` (copy/move/delete engines)
-  * `viewer`, `editor`, `diff`
+  * `viewer`, `external_tools`
   * `config` (mc.keymap, mc.ext.ini, menus, theme formats)
   * `shell` (subshell/pty)
 
@@ -443,7 +454,7 @@ Implement as job pipelines that:
 * Every destructive op records a structured event (path, op, result, timing) through tracing. ([Crates][28])
 * Optional “dry run” mode for copy/move jobs to show what would happen.
 
-## 11. Viewer, editor, diff: detailed build plan
+## 11. Viewer and external tools: detailed build plan
 
 ### 11.1 Viewer
 
@@ -459,34 +470,37 @@ Implement as job pipelines that:
   * Plain and regex search (optional).
   * Continue search and direction controls mapped to viewer keymap. ([GitHub][2])
 
-### 11.2 Editor
+### 11.2 External editor execution
 
-* Text buffer: ropey. ([Crates][23])
-* Syntax highlighting: syntect (load TextMate grammars). ([Crates][24])
-  Also plan a compatibility layer:
+* Resolution strategy:
 
-  * Parse MC’s Syntax mapping file, but translate to syntect grammar selection where possible. ([GitHub][5])
-* Editing features to schedule in order:
+  1. App/editor setting (if defined)
+  2. `$EDITOR`
+  3. `$VISUAL`
+  4. PATH probes in order: `hx`, `nvim`, `vim`, `vi`, `emacs`
+* Launch model:
 
-  1. Basic navigation, insert/overwrite, save, save-as.
-  2. Undo/redo.
-  3. Search/replace.
-  4. Block selection and operations (copy/move/remove), then column selection (MC has dedicated column mark movement keys). ([GitHub][2])
-  5. Bookmarks and bookmark navigation keys.
-  6. External command piping and editor user menu (F11). ([GitHub][7])
+  * Execute editor in panel cwd.
+  * Suspend TUI cleanly and restore on return.
+  * Report exit status and errors in status/output views.
+* Validation:
 
-### 11.3 Diff viewer
+  * Integration tests for resolution precedence and missing-editor behavior.
+  * Platform-specific quoting/launch tests.
 
-* Diff engine: similar crate for text diffs and hunk structure. ([Docs.rs][25])
+### 11.3 Diff command integration
+
+* Command strategy:
+
+  * Prefer `difftastic` (`difft`) output mode when present.
+  * Fallback to POSIX `diff` when `difftastic` is unavailable.
 * UI:
 
-  * Two panes with synchronized scrolling.
-  * Hunk list and navigation.
-  * Split controls and tab width controls per diffviewer keymap. ([GitHub][2])
-* Merge/edit operations:
+  * Reuse output viewer route for diff output with paging/search.
+  * Keep keymap entry points compatible with MC command surfaces.
+* Future extension:
 
-  * Start with “open left/right in editor”.
-  * Later: inline apply hunk to target file.
+  * Allow user-defined diff command templates and arguments.
 
 ## 12. Configuration model and file formats
 
@@ -509,8 +523,7 @@ Adopt XDG on Unix and provide import from MC locations:
 
   * keymap (`*.keymap`) ([GitHub][2])
   * `mc.ext.ini` ([GitHub][3])
-  * `mc.menu` and `mcedit.menu` ([GitHub][4])
-  * Syntax mapping file `Syntax` ([GitHub][5])
+  * `mc.menu` (and optionally `mcedit.menu` as data import only) ([GitHub][4])
 * For new settings, store a Rust-owned config file (TOML is a common choice with serde), while still allowing export to MC-ish formats.
 
 ## 13. Licensing plan
@@ -595,20 +608,21 @@ Pick early; it impacts packaging and contributor expectations.
 * `mc.ext.ini` engine: Open/View/Edit behaviors and scheme dispatch. ([GitHub][3])
 * `mc.menu` parser and user menu screen, macro engine, `%view{...}` piping to internal viewer. ([GitHub][4])
 
-### Milestone 6: Editor
+### Milestone 6: External editor workflow
 
-* Rope-based buffer, syntax highlight via syntect, core edit keys from keymap.
-* Search/replace, undo/redo.
-* Editor user menu (`mcedit.menu`). ([GitHub][7])
+* Deterministic editor resolution (settings/env/PATH fallback chain).
+* Stable TUI suspend/resume around editor execution.
+* Better error reporting and test coverage for external editor launching.
 
-### Milestone 7: Diff viewer
+### Milestone 7: Diff command output
 
-* Similar-based diff model, hunk navigation, split controls, open-in-editor.
+* Integrate `difftastic` with `diff` fallback.
+* Render diff output in-app via output viewer route with search and paging.
 
-### Milestone 8: Remote VFS
+### Milestone 8: Optional remote VFS
 
-* FTP (suppaftp) and SFTP (ssh2 or russh) directory listing and file transfer. ([Crates][18])
-* Credential handling, host key checks, bookmarks.
+* Optional FTP/SFTP integration behind feature flags or plugin boundary.
+* Credential handling and host verification only if remote support is enabled.
 
 ### Milestone 9: Subshell
 
@@ -635,13 +649,13 @@ High risk areas:
 
 * Subshell + Ctrl-O + terminal mode transitions across terminals.
 * Full MC VFS compatibility, especially nested VFS and extfs scheme semantics.
-* Editor parity (MC’s editor has years of accumulated behaviors).
+* Cross-platform robustness for external tool invocation, terminal handoff, and output rendering.
 
 Risk controls:
 
 * Reach a usable file manager early (Milestone 2) and then add tools.
 * Keep strict boundaries: UI never blocks on I/O; everything expensive is a job.
-* Preserve compatibility by reading the same keymap/menu/ext formats first, then add new formats later.
+* Preserve compatibility where it matters most (keymaps/workflows), while explicitly favoring modern external-tool integration over strict 1:1 subsystem reimplementation.
 
 If you want, I can turn this plan into a repository-level blueprint: workspace crate graph, public trait surfaces, and a per-milestone backlog broken into tickets with acceptance criteria keyed to MC behaviors and the exact keymap contexts.
 
@@ -678,4 +692,3 @@ If you want, I can turn this plan into a repository-level blueprint: workspace c
 [31]: https://rust-lang.github.io/rustfmt/ "https://rust-lang.github.io/rustfmt/"
 [32]: https://docs.rs/memmap2 "https://docs.rs/memmap2"
 [33]: https://docs.rs/git2 "https://docs.rs/git2"
-
