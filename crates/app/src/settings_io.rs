@@ -661,4 +661,75 @@ skin=default
         );
         assert_eq!(parsed.panel_options.sort_field, SettingsSortField::Modified);
     }
+
+    #[test]
+    fn load_settings_prefers_mc_skin_over_rc_skin() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-load-settings-precedence-{stamp}"));
+        fs::create_dir_all(&root).expect("test directory should be created");
+
+        let mc_ini_path = root.join("mc.ini");
+        let rc_ini_path = root.join("settings.ini");
+        fs::write(
+            &mc_ini_path,
+            "\
+[Midnight-Commander]
+skin=mc-skin
+",
+        )
+        .expect("mc ini should be written");
+
+        let mut settings = Settings::default();
+        settings.appearance.skin = String::from("rc-skin");
+        fs::write(&rc_ini_path, render_rc_settings_ini(&settings))
+            .expect("rc ini should be written");
+
+        let loaded = load_settings(&SettingsPaths {
+            mc_ini_path: Some(mc_ini_path.clone()),
+            rc_ini_path: Some(rc_ini_path.clone()),
+        })
+        .expect("settings should load");
+        assert_eq!(loaded.appearance.skin, "mc-skin");
+
+        fs::remove_dir_all(&root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn save_settings_writes_mc_and_rc_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-save-settings-{stamp}"));
+        fs::create_dir_all(&root).expect("test directory should be created");
+
+        let mc_ini_path = root.join("mc.ini");
+        let rc_ini_path = root.join("settings.ini");
+        let mut settings = Settings::default();
+        settings.appearance.skin = String::from("xoria256");
+        settings.configuration.hotlist = vec![PathBuf::from("/tmp"), PathBuf::from("/var")];
+        settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
+
+        save_settings(
+            &SettingsPaths {
+                mc_ini_path: Some(mc_ini_path.clone()),
+                rc_ini_path: Some(rc_ini_path.clone()),
+            },
+            &settings,
+        )
+        .expect("settings should save");
+
+        let mc_ini = fs::read_to_string(&mc_ini_path).expect("mc ini should exist");
+        let rc_ini = fs::read_to_string(&rc_ini_path).expect("rc ini should exist");
+        assert!(mc_ini.contains("[Midnight-Commander]"));
+        assert!(mc_ini.contains("skin=xoria256"));
+        assert!(rc_ini.contains("[configuration]"));
+        assert!(rc_ini.contains("overwrite_policy=rename"));
+        assert!(rc_ini.contains("hotlist=/tmp"));
+
+        fs::remove_dir_all(&root).expect("test directory should be removed");
+    }
 }

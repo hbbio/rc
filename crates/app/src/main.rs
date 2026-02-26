@@ -173,12 +173,19 @@ fn report_keymap_parse_report(state: &mut AppState, report: &KeymapParseReport) 
 }
 
 fn apply_env_overrides(settings: &mut Settings) {
-    if let Ok(value) = std::env::var("RC_SKIN")
+    apply_env_overrides_with_lookup(settings, |name| std::env::var(name).ok());
+}
+
+fn apply_env_overrides_with_lookup(
+    settings: &mut Settings,
+    mut lookup_env: impl FnMut(&str) -> Option<String>,
+) {
+    if let Some(value) = lookup_env("RC_SKIN")
         && !value.trim().is_empty()
     {
         settings.appearance.skin = value.trim().to_string();
     }
-    if let Ok(value) = std::env::var("RC_SKIN_DIR")
+    if let Some(value) = lookup_env("RC_SKIN_DIR")
         && !value.trim().is_empty()
     {
         settings
@@ -186,12 +193,12 @@ fn apply_env_overrides(settings: &mut Settings) {
             .skin_dirs
             .insert(0, PathBuf::from(value));
     }
-    if let Ok(value) = std::env::var("RC_KEYMAP")
+    if let Some(value) = lookup_env("RC_KEYMAP")
         && !value.trim().is_empty()
     {
         settings.configuration.keymap_override = Some(PathBuf::from(value));
     }
-    if let Ok(value) = std::env::var("RC_MACOS_OPTION_COMPAT")
+    if let Some(value) = lookup_env("RC_MACOS_OPTION_COMPAT")
         && let Some(parsed) = settings_io::parse_bool(&value)
     {
         settings.configuration.macos_option_symbols = parsed;
@@ -985,6 +992,61 @@ mod tests {
         .expect("shift+1 should map to exclamation");
         assert_eq!(chord.code, KeyCode::Char('!'));
         assert!(!chord.modifiers.shift);
+    }
+
+    #[test]
+    fn settings_precedence_cli_overrides_env_and_persisted_values() {
+        let mut settings = Settings::default();
+        settings.appearance.skin = String::from("persisted-skin");
+        settings.appearance.skin_dirs = vec![PathBuf::from("/persisted/skins")];
+        settings.configuration.keymap_override = Some(PathBuf::from("/persisted/keymap"));
+        settings.configuration.macos_option_symbols = false;
+
+        apply_env_overrides_with_lookup(&mut settings, |name| match name {
+            "RC_SKIN" => Some(String::from("env-skin")),
+            "RC_SKIN_DIR" => Some(String::from("/env/skins")),
+            "RC_KEYMAP" => Some(String::from("/env/keymap")),
+            "RC_MACOS_OPTION_COMPAT" => Some(String::from("off")),
+            _ => None,
+        });
+        assert_eq!(settings.appearance.skin, "env-skin");
+        assert_eq!(
+            settings.configuration.keymap_override.as_deref(),
+            Some(std::path::Path::new("/env/keymap"))
+        );
+        assert!(!settings.configuration.macos_option_symbols);
+        assert_eq!(
+            settings.appearance.skin_dirs,
+            vec![
+                PathBuf::from("/env/skins"),
+                PathBuf::from("/persisted/skins")
+            ]
+        );
+
+        let cli = Cli {
+            tick_rate_ms: 200,
+            path: None,
+            skin: Some(String::from("cli-skin")),
+            skin_dir: Some(PathBuf::from("/cli/skins")),
+            keymap: Some(PathBuf::from("/cli/keymap")),
+            macos_option_compat: true,
+        };
+        apply_cli_overrides(&mut settings, &cli);
+
+        assert_eq!(settings.appearance.skin, "cli-skin");
+        assert_eq!(
+            settings.configuration.keymap_override.as_deref(),
+            Some(std::path::Path::new("/cli/keymap"))
+        );
+        assert!(settings.configuration.macos_option_symbols);
+        assert_eq!(
+            settings.appearance.skin_dirs,
+            vec![
+                PathBuf::from("/cli/skins"),
+                PathBuf::from("/env/skins"),
+                PathBuf::from("/persisted/skins")
+            ]
+        );
     }
 
     #[test]
