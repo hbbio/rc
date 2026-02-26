@@ -14,7 +14,7 @@ use rc_core::keymap::KeyContext;
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindResultsState, HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route,
-    TreeState, ViewerState, top_menus,
+    SettingsScreenState, TreeState, ViewerState, top_menus,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -126,6 +126,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Hotlist => render_hotlist_screen(frame, state, skin.as_ref()),
         Route::Help(help) => render_help_screen(frame, state, help, skin.as_ref()),
         Route::Menu(menu) => render_menu_overlay(frame, state, menu, skin.as_ref()),
+        Route::Settings(settings) => render_settings_screen(frame, settings, skin.as_ref()),
         Route::FileManager => {}
     }
 }
@@ -1362,6 +1363,50 @@ fn render_menu_overlay(frame: &mut Frame, state: &AppState, menu: &MenuState, sk
         state.select(Some(menu.selected_entry));
     }
     frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_settings_screen(frame: &mut Frame, settings: &SettingsScreenState, skin: &UiSkin) {
+    let area = centered_rect(frame.area(), 82, 20);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!("Options - {}", settings.title))
+        .borders(Borders::ALL)
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem<'_>> = if settings.entries.is_empty() {
+        vec![ListItem::new("<empty>")]
+    } else {
+        settings
+            .entries
+            .iter()
+            .map(|item| ListItem::new(item.as_str()))
+            .collect()
+    };
+    let list = List::new(items)
+        .style(skin.style("dialog", "_default_"))
+        .highlight_style(skin.style("dialog", "dfocus"))
+        .highlight_symbol(">> ");
+    let mut state = ListState::default();
+    if !settings.entries.is_empty() {
+        state.select(Some(settings.selected_entry));
+    }
+    frame.render_stateful_widget(list, layout[0], &mut state);
+
+    frame.render_widget(
+        Paragraph::new("Up/Down move | Enter apply | Esc close")
+            .style(skin.style("core", "disabled")),
+        layout[1],
+    );
 }
 
 fn render_help_screen(frame: &mut Frame, app: &AppState, help: &HelpState, skin: &UiSkin) {

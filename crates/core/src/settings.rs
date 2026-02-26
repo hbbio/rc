@@ -12,6 +12,33 @@ pub const DEFAULT_PANELIZE_PRESETS: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsCategory {
+    Configuration,
+    Layout,
+    PanelOptions,
+    Confirmation,
+    Appearance,
+    DisplayBits,
+    LearnKeys,
+    VirtualFs,
+}
+
+impl SettingsCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Configuration => "Configuration",
+            Self::Layout => "Layout",
+            Self::PanelOptions => "Panel options",
+            Self::Confirmation => "Confirmation",
+            Self::Appearance => "Appearance",
+            Self::DisplayBits => "Display bits",
+            Self::LearnKeys => "Learn keys",
+            Self::VirtualFs => "Virtual FS",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsSortField {
     Name,
     Size,

@@ -492,7 +492,8 @@ fn apply_and_dispatch(
 }
 
 fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig) {
-    if !state.settings().save_setup.dirty {
+    let save_requested = state.take_pending_save_setup();
+    if !save_requested && !state.settings().save_setup.dirty {
         return;
     }
 
@@ -504,6 +505,9 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
     }
 
     state.mark_settings_saved(SystemTime::now());
+    if save_requested {
+        state.set_status("Setup saved");
+    }
 }
 
 fn dispatch_pending_worker_commands(state: &mut AppState, worker_tx: &Sender<WorkerCommand>) {

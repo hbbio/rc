@@ -30,7 +30,8 @@ pub use jobs::{
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
-    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsSortField, VirtualFsSettings,
+    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, SettingsSortField,
+    VirtualFsSettings,
 };
 
 use crate::dialog::DialogEvent;
@@ -107,6 +108,15 @@ pub enum AppCommand {
     OpenInputDialog,
     OpenListboxDialog,
     OpenSkinDialog,
+    OpenOptionsConfiguration,
+    OpenOptionsLayout,
+    OpenOptionsPanelOptions,
+    OpenOptionsConfirmation,
+    OpenOptionsAppearance,
+    OpenOptionsDisplayBits,
+    OpenOptionsLearnKeys,
+    OpenOptionsVirtualFs,
+    SaveSetup,
     MenuMoveUp,
     MenuMoveDown,
     MenuMoveLeft,
@@ -293,6 +303,31 @@ impl AppCommand {
                 Some(Self::OpenListboxDialog)
             }
             (KeyContext::FileManager, KeyCommand::OpenSkinDialog) => Some(Self::OpenSkinDialog),
+            (KeyContext::FileManager, KeyCommand::OpenOptionsConfiguration) => {
+                Some(Self::OpenOptionsConfiguration)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsLayout) => {
+                Some(Self::OpenOptionsLayout)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsPanelOptions) => {
+                Some(Self::OpenOptionsPanelOptions)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsConfirmation) => {
+                Some(Self::OpenOptionsConfirmation)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsAppearance) => {
+                Some(Self::OpenOptionsAppearance)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsDisplayBits) => {
+                Some(Self::OpenOptionsDisplayBits)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsLearnKeys) => {
+                Some(Self::OpenOptionsLearnKeys)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsVirtualFs) => {
+                Some(Self::OpenOptionsVirtualFs)
+            }
+            (KeyContext::FileManager, KeyCommand::SaveSetup) => Some(Self::SaveSetup),
             (_, KeyCommand::DialogAccept) => Some(Self::DialogAccept),
             (_, KeyCommand::DialogCancel) => Some(Self::DialogCancel),
             (_, KeyCommand::DialogFocusNext) => Some(Self::DialogFocusNext),
@@ -421,11 +456,16 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 7] = [
     MenuEntry::action("Help", AppCommand::OpenHelp),
 ];
 
-const OPTIONS_MENU_ENTRIES: [MenuEntry; 4] = [
-    MenuEntry::action("Sort next", AppCommand::SortNext),
-    MenuEntry::action("Sort reverse", AppCommand::SortReverse),
-    MenuEntry::action("Reread", AppCommand::Reread),
-    MenuEntry::action("Skin", AppCommand::OpenSkinDialog),
+const OPTIONS_MENU_ENTRIES: [MenuEntry; 9] = [
+    MenuEntry::action("Configuration...", AppCommand::OpenOptionsConfiguration),
+    MenuEntry::action("Layout...", AppCommand::OpenOptionsLayout),
+    MenuEntry::action("Panel options...", AppCommand::OpenOptionsPanelOptions),
+    MenuEntry::action("Confirmation...", AppCommand::OpenOptionsConfirmation),
+    MenuEntry::action("Appearance...", AppCommand::OpenOptionsAppearance),
+    MenuEntry::action("Display bits...", AppCommand::OpenOptionsDisplayBits),
+    MenuEntry::action("Learn keys...", AppCommand::OpenOptionsLearnKeys),
+    MenuEntry::action("Virtual FS...", AppCommand::OpenOptionsVirtualFs),
+    MenuEntry::action("Save setup", AppCommand::SaveSetup),
 ];
 
 const TOP_MENUS: [TopMenu; 5] = [
@@ -1298,11 +1338,55 @@ impl MenuState {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsScreenState {
+    pub category: SettingsCategory,
+    pub title: String,
+    pub entries: Vec<String>,
+    pub selected_entry: usize,
+}
+
+impl SettingsScreenState {
+    fn new(category: SettingsCategory) -> Self {
+        Self {
+            category,
+            title: format!("{} options", category.label()),
+            entries: settings_category_placeholder_entries(category),
+            selected_entry: 0,
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected_entry = self.selected_entry.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if self.entries.is_empty() {
+            self.selected_entry = 0;
+            return;
+        }
+        self.selected_entry = self
+            .selected_entry
+            .saturating_add(1)
+            .min(self.entries.len().saturating_sub(1));
+    }
+}
+
+fn settings_category_placeholder_entries(category: SettingsCategory) -> Vec<String> {
+    vec![
+        format!("{} settings editor", category.label()),
+        String::from("Use Up/Down to navigate entries."),
+        String::from("Press Enter to toggle/apply (implementation in progress)."),
+        String::from("Press Esc to return."),
+    ]
+}
+
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
     Help(HelpState),
     Menu(MenuState),
+    Settings(SettingsScreenState),
     Jobs,
     Viewer(ViewerState),
     FindResults(FindResultsState),
@@ -1990,6 +2074,7 @@ pub struct AppState {
     panelize_presets: Vec<String>,
     keybinding_hints: KeybindingHints,
     xmap_pending: bool,
+    pending_save_setup: bool,
 }
 
 impl AppState {
@@ -2029,6 +2114,7 @@ impl AppState {
             panelize_presets: settings.configuration.panelize_presets.clone(),
             keybinding_hints: KeybindingHints::default(),
             xmap_pending: false,
+            pending_save_setup: false,
         })
     }
 
@@ -2260,6 +2346,10 @@ impl AppState {
 
     pub fn take_pending_skin_revert(&mut self) -> Option<String> {
         self.pending_skin_revert.take()
+    }
+
+    pub fn take_pending_save_setup(&mut self) -> bool {
+        std::mem::take(&mut self.pending_save_setup)
     }
 
     pub fn clear_xmap(&mut self) {
@@ -3136,6 +3226,41 @@ impl AppState {
         }
     }
 
+    fn open_settings_screen(&mut self, category: SettingsCategory) {
+        let next = SettingsScreenState::new(category);
+        if let Some(Route::Settings(current)) = self.routes.last_mut() {
+            *current = next;
+        } else {
+            self.routes.push(Route::Settings(next));
+        }
+        self.set_status(format!("Options: {}", category.label()));
+    }
+
+    fn close_settings_screen(&mut self) {
+        if matches!(self.top_route(), Route::Settings(_)) {
+            self.routes.pop();
+            self.set_status("Closed options");
+        }
+    }
+
+    fn settings_state_mut(&mut self) -> Option<&mut SettingsScreenState> {
+        let Some(Route::Settings(settings)) = self.routes.last_mut() else {
+            return None;
+        };
+        Some(settings)
+    }
+
+    fn apply_settings_entry(&mut self) {
+        let Some(settings) = self.settings_state_mut() else {
+            return;
+        };
+        let Some(entry) = settings.entries.get(settings.selected_entry) else {
+            return;
+        };
+        let message = format!("{}: {entry}", settings.category.label());
+        self.set_status(message);
+    }
+
     fn menu_state_mut(&mut self) -> Option<&mut MenuState> {
         let Some(Route::Menu(menu)) = self.routes.last_mut() else {
             return None;
@@ -4003,6 +4128,32 @@ impl AppState {
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::OpenOptionsConfiguration => {
+                self.open_settings_screen(SettingsCategory::Configuration)
+            }
+            AppCommand::OpenOptionsLayout => self.open_settings_screen(SettingsCategory::Layout),
+            AppCommand::OpenOptionsPanelOptions => {
+                self.open_settings_screen(SettingsCategory::PanelOptions)
+            }
+            AppCommand::OpenOptionsConfirmation => {
+                self.open_settings_screen(SettingsCategory::Confirmation)
+            }
+            AppCommand::OpenOptionsAppearance => {
+                self.open_settings_screen(SettingsCategory::Appearance)
+            }
+            AppCommand::OpenOptionsDisplayBits => {
+                self.open_settings_screen(SettingsCategory::DisplayBits)
+            }
+            AppCommand::OpenOptionsLearnKeys => {
+                self.open_settings_screen(SettingsCategory::LearnKeys)
+            }
+            AppCommand::OpenOptionsVirtualFs => {
+                self.open_settings_screen(SettingsCategory::VirtualFs)
+            }
+            AppCommand::SaveSetup => {
+                self.pending_save_setup = true;
+                self.set_status("Save setup requested");
+            }
             AppCommand::MenuMoveUp => {
                 if let Some(menu) = self.menu_state_mut() {
                     menu.move_up();
@@ -4118,8 +4269,20 @@ impl AppState {
                     help.open_prev_node();
                 }
             }
-            AppCommand::DialogAccept => self.handle_dialog_event(DialogEvent::Accept),
-            AppCommand::DialogCancel => self.handle_dialog_event(DialogEvent::Cancel),
+            AppCommand::DialogAccept => {
+                if matches!(self.top_route(), Route::Settings(_)) {
+                    self.apply_settings_entry();
+                } else {
+                    self.handle_dialog_event(DialogEvent::Accept);
+                }
+            }
+            AppCommand::DialogCancel => {
+                if matches!(self.top_route(), Route::Settings(_)) {
+                    self.close_settings_screen();
+                } else {
+                    self.handle_dialog_event(DialogEvent::Cancel);
+                }
+            }
             AppCommand::DialogFocusNext => {
                 if !self.toggle_panelize_dialog_focus() {
                     self.handle_dialog_event(DialogEvent::FocusNext);
@@ -4129,8 +4292,20 @@ impl AppState {
             AppCommand::DialogInputChar(ch) => {
                 self.handle_dialog_event(DialogEvent::InsertChar(ch))
             }
-            AppCommand::DialogListboxUp => self.handle_dialog_event(DialogEvent::MoveUp),
-            AppCommand::DialogListboxDown => self.handle_dialog_event(DialogEvent::MoveDown),
+            AppCommand::DialogListboxUp => {
+                if let Some(settings) = self.settings_state_mut() {
+                    settings.move_up();
+                } else {
+                    self.handle_dialog_event(DialogEvent::MoveUp);
+                }
+            }
+            AppCommand::DialogListboxDown => {
+                if let Some(settings) = self.settings_state_mut() {
+                    settings.move_down();
+                } else {
+                    self.handle_dialog_event(DialogEvent::MoveDown);
+                }
+            }
             AppCommand::ViewerMoveUp => {
                 if let Some(viewer) = self.active_viewer_mut() {
                     viewer.move_lines(-1);
@@ -4243,6 +4418,7 @@ impl AppState {
                 }
             }
             Route::Menu(_) => KeyContext::Menu,
+            Route::Settings(_) => KeyContext::Listbox,
             Route::FindResults(_) => KeyContext::FindResults,
             Route::Tree(_) => KeyContext::Tree,
             Route::Hotlist => KeyContext::Hotlist,
@@ -6068,7 +6244,7 @@ OpenJobs = f6
     }
 
     #[test]
-    fn side_menus_match_and_skin_is_only_in_options() {
+    fn side_menus_match_and_options_match_mc_shape() {
         let menus = top_menus();
         let left = menus
             .iter()
@@ -6106,18 +6282,21 @@ OpenJobs = f6
         assert!(file_labels.contains(&"Select group"));
         assert_eq!(file_labels.last(), Some(&"Exit"));
 
-        let skin_count = menus
-            .iter()
-            .flat_map(|menu| menu.entries.iter())
-            .filter(|entry| entry.command == AppCommand::OpenSkinDialog)
-            .count();
-        assert_eq!(skin_count, 1, "skin should appear in options only");
-        assert!(
-            options
-                .entries
-                .iter()
-                .any(|entry| entry.command == AppCommand::OpenSkinDialog),
-            "options menu should include skin"
+        let option_labels: Vec<&str> = options.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            option_labels,
+            vec![
+                "Configuration...",
+                "Layout...",
+                "Panel options...",
+                "Confirmation...",
+                "Appearance...",
+                "Display bits...",
+                "Learn keys...",
+                "Virtual FS...",
+                "Save setup",
+            ],
+            "options menu should follow mc ordering and labels"
         );
     }
 

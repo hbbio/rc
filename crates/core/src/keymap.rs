@@ -141,6 +141,15 @@ pub enum KeyCommand {
     OpenInputDialog,
     OpenListboxDialog,
     OpenSkinDialog,
+    OpenOptionsConfiguration,
+    OpenOptionsLayout,
+    OpenOptionsPanelOptions,
+    OpenOptionsConfirmation,
+    OpenOptionsAppearance,
+    OpenOptionsDisplayBits,
+    OpenOptionsLearnKeys,
+    OpenOptionsVirtualFs,
+    SaveSetup,
     HelpIndex,
     HelpBack,
     HelpLinkNext,
@@ -216,6 +225,15 @@ impl KeyCommand {
             "openinputdialog" | "demoinputdialog" | "makedir" | "mkdir" => Self::OpenInputDialog,
             "openlistboxdialog" | "demolistboxdialog" => Self::OpenListboxDialog,
             "openskindialog" | "skin" | "skins" => Self::OpenSkinDialog,
+            "optionsconfiguration" | "optionsconfig" => Self::OpenOptionsConfiguration,
+            "optionslayout" => Self::OpenOptionsLayout,
+            "optionspanel" | "optionspaneloptions" => Self::OpenOptionsPanelOptions,
+            "optionsconfirm" | "optionsconfirmation" => Self::OpenOptionsConfirmation,
+            "optionsappearance" => Self::OpenOptionsAppearance,
+            "optionsdisplaybits" => Self::OpenOptionsDisplayBits,
+            "optionslearnkeys" | "learnkeys" => Self::OpenOptionsLearnKeys,
+            "optionsvfs" | "optionsvirtualfs" => Self::OpenOptionsVirtualFs,
+            "savesetup" | "optionssavesetup" => Self::SaveSetup,
             "index" => Self::HelpIndex,
             "back" => Self::HelpBack,
             "linknext" => Self::HelpLinkNext,
@@ -1011,6 +1029,59 @@ Skin = alt-s
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, skin),
             Some(&KeyCommand::OpenSkinDialog)
+        );
+    }
+
+    #[test]
+    fn parser_maps_options_action_names() {
+        let source = r#"
+[filemanager]
+OptionsLayout = alt-l
+OptionsAppearance = alt-a
+OptionsPanel = alt-p
+OptionsConfirm = alt-c
+OptionsDisplayBits = alt-b
+OptionsVfs = alt-v
+SaveSetup = alt-s
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        let alt = |ch| KeyChord {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('l')),
+            Some(&KeyCommand::OpenOptionsLayout)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('a')),
+            Some(&KeyCommand::OpenOptionsAppearance)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('p')),
+            Some(&KeyCommand::OpenOptionsPanelOptions)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('c')),
+            Some(&KeyCommand::OpenOptionsConfirmation)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('b')),
+            Some(&KeyCommand::OpenOptionsDisplayBits)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('v')),
+            Some(&KeyCommand::OpenOptionsVirtualFs)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('s')),
+            Some(&KeyCommand::SaveSetup)
         );
     }
 
