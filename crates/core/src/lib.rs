@@ -1701,16 +1701,22 @@ pub fn run_background_worker(
     let mut running_find_tasks = Vec::new();
     #[cfg(not(test))]
     let mut running_panel_refresh_tasks = Vec::new();
+    #[cfg(not(test))]
+    let mut running_tree_tasks = Vec::new();
     while let Ok(command) = command_rx.recv() {
         reap_finished_find_tasks(&mut running_find_tasks);
         #[cfg(not(test))]
         reap_finished_panel_refresh_tasks(&mut running_panel_refresh_tasks);
+        #[cfg(not(test))]
+        reap_finished_tree_tasks(&mut running_tree_tasks);
         match execute_background_command(command, &event_tx) {
             BackgroundExecution::Continue => {}
             #[cfg(not(test))]
             BackgroundExecution::SpawnFind(task) => running_find_tasks.push(task),
             #[cfg(not(test))]
             BackgroundExecution::SpawnPanelRefresh(task) => running_panel_refresh_tasks.push(task),
+            #[cfg(not(test))]
+            BackgroundExecution::SpawnTree(task) => running_tree_tasks.push(task),
             BackgroundExecution::Stop => break,
         }
     }
@@ -1729,6 +1735,10 @@ pub fn run_background_worker(
     for task in running_panel_refresh_tasks {
         let _ = task.handle.join();
     }
+    #[cfg(not(test))]
+    for task in running_tree_tasks {
+        let _ = task.handle.join();
+    }
 }
 
 #[derive(Debug)]
@@ -1744,6 +1754,12 @@ struct RunningPanelRefreshTask {
     cancel_flag: Arc<AtomicBool>,
 }
 
+#[cfg(not(test))]
+#[derive(Debug)]
+struct RunningTreeTask {
+    handle: thread::JoinHandle<()>,
+}
+
 #[derive(Debug)]
 enum BackgroundExecution {
     Continue,
@@ -1751,6 +1767,8 @@ enum BackgroundExecution {
     SpawnFind(RunningFindTask),
     #[cfg(not(test))]
     SpawnPanelRefresh(RunningPanelRefreshTask),
+    #[cfg(not(test))]
+    SpawnTree(RunningTreeTask),
     Stop,
 }
 
@@ -1768,6 +1786,19 @@ fn reap_finished_find_tasks(tasks: &mut Vec<RunningFindTask>) {
 
 #[cfg(not(test))]
 fn reap_finished_panel_refresh_tasks(tasks: &mut Vec<RunningPanelRefreshTask>) {
+    let mut index = 0usize;
+    while index < tasks.len() {
+        if tasks[index].handle.is_finished() {
+            let task = tasks.swap_remove(index);
+            let _ = task.handle.join();
+        } else {
+            index += 1;
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn reap_finished_tree_tasks(tasks: &mut Vec<RunningTreeTask>) {
     let mut index = 0usize;
     while index < tasks.len() {
         if tasks[index].handle.is_finished() {
@@ -1961,14 +1992,44 @@ fn execute_background_command(
             max_depth,
             max_entries,
         } => {
-            let entries = build_tree_entries(&root, max_depth, max_entries);
-            if event_tx
-                .send(BackgroundEvent::TreeReady { root, entries })
-                .is_ok()
+            #[cfg(test)]
             {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
+                let entries = build_tree_entries(&root, max_depth, max_entries);
+                if event_tx
+                    .send(BackgroundEvent::TreeReady { root, entries })
+                    .is_ok()
+                {
+                    BackgroundExecution::Continue
+                } else {
+                    BackgroundExecution::Stop
+                }
+            }
+            #[cfg(not(test))]
+            {
+                let worker_event_tx = event_tx.clone();
+                let worker_root = root.clone();
+                match thread::Builder::new()
+                    .name(String::from("rc-tree"))
+                    .spawn(move || {
+                        let entries = build_tree_entries(&worker_root, max_depth, max_entries);
+                        let _ = worker_event_tx.send(BackgroundEvent::TreeReady {
+                            root: worker_root,
+                            entries,
+                        });
+                    }) {
+                    Ok(handle) => BackgroundExecution::SpawnTree(RunningTreeTask { handle }),
+                    Err(_error) => {
+                        let entries = build_tree_entries(&root, max_depth, max_entries);
+                        if event_tx
+                            .send(BackgroundEvent::TreeReady { root, entries })
+                            .is_ok()
+                        {
+                            BackgroundExecution::Continue
+                        } else {
+                            BackgroundExecution::Stop
+                        }
+                    }
+                }
             }
         }
         BackgroundCommand::Shutdown => BackgroundExecution::Stop,
