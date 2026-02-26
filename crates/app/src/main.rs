@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
+mod settings_io;
+
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgAction, Parser};
@@ -23,13 +25,9 @@ use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use rc_core::{
     AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, ExternalEditRequest,
-    JobEvent, WorkerCommand, run_background_worker, run_worker,
+    JobEvent, Settings, WorkerCommand, run_background_worker, run_worker,
 };
 use tracing_subscriber::EnvFilter;
-
-const DEFAULT_SKIN_NAME: &str = "default";
-const MC_CONFIG_SECTION: &str = "Midnight-Commander";
-const MC_SKIN_KEY: &str = "skin";
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Roadmap bootstrap for the rc file manager")]
@@ -42,6 +40,8 @@ struct Cli {
     skin: Option<String>,
     #[arg(long)]
     skin_dir: Option<PathBuf>,
+    #[arg(long)]
+    keymap: Option<PathBuf>,
     #[arg(
         long,
         action = ArgAction::Set,
@@ -60,42 +60,47 @@ fn main() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
-    let mc_ini_path = mc_ini_path();
-    let configured_skin =
-        mc_ini_path
-            .as_deref()
-            .and_then(|path| match read_skin_from_mc_ini(path) {
-                Ok(skin) => skin,
-                Err(error) => {
-                    tracing::warn!("failed to read mc config '{}': {error}", path.display());
-                    None
-                }
-            });
-    let initial_skin = cli
-        .skin
-        .clone()
-        .or(configured_skin)
-        .unwrap_or_else(|| String::from(DEFAULT_SKIN_NAME));
+    let settings_paths = settings_io::settings_paths();
+    let mut settings = settings_io::load_settings(&settings_paths).unwrap_or_else(|error| {
+        if let Some(path) = settings_paths.rc_ini_path.as_deref() {
+            tracing::warn!("failed to read settings '{}': {error}", path.display());
+        } else {
+            tracing::warn!("failed to read settings: {error}");
+        }
+        Settings::default()
+    });
+    apply_env_overrides(&mut settings);
+    apply_cli_overrides(&mut settings, &cli);
+
     let start_path = cli
         .path
         .unwrap_or(std::env::current_dir().context("failed to resolve current directory")?);
     let mut state = AppState::new(start_path).context("failed to initialize app state")?;
-    state.set_available_skins(rc_ui::list_available_skins(cli.skin_dir.as_deref()));
-    if let Err(error) = rc_ui::configure_skin(&initial_skin, cli.skin_dir.as_deref()) {
-        tracing::warn!("failed to load skin '{}': {error}", initial_skin);
-        state.set_status(format!("Skin '{}' unavailable: {error}", initial_skin));
+    state.replace_settings(settings.clone());
+
+    let skin_dir = settings.appearance.skin_dirs.first().cloned();
+    state.set_available_skins(rc_ui::list_available_skins(skin_dir.as_deref()));
+    if let Err(error) = rc_ui::configure_skin(&settings.appearance.skin, skin_dir.as_deref()) {
+        tracing::warn!(
+            "failed to load skin '{}': {error}",
+            settings.appearance.skin
+        );
+        state.set_status(format!(
+            "Skin '{}' unavailable: {error}",
+            settings.appearance.skin
+        ));
     }
     state.set_active_skin_name(rc_ui::current_skin_name());
-    let (keymap, keymap_report) = Keymap::bundled_mc_default_with_report()
-        .context("failed to load bundled mc.default.keymap")?;
+    let (keymap, keymap_report) = load_effective_keymap(&settings, &mut state)
+        .context("failed to load keymap configuration")?;
     state.set_keybinding_hints_from_keymap(&keymap);
     report_keymap_parse_report(&mut state, &keymap_report);
     let skin_runtime = SkinRuntimeConfig {
-        skin_dir: cli.skin_dir.clone(),
-        mc_ini_path,
+        skin_dir,
+        settings_paths,
     };
     let input_compatibility = InputCompatibility {
-        macos_option_symbols: cli.macos_option_compat,
+        macos_option_symbols: settings.configuration.macos_option_symbols,
     };
 
     run_app(
@@ -169,9 +174,73 @@ fn report_keymap_parse_report(state: &mut AppState, report: &KeymapParseReport) 
     ));
 }
 
+fn apply_env_overrides(settings: &mut Settings) {
+    if let Ok(value) = std::env::var("RC_SKIN")
+        && !value.trim().is_empty()
+    {
+        settings.appearance.skin = value.trim().to_string();
+    }
+    if let Ok(value) = std::env::var("RC_SKIN_DIR")
+        && !value.trim().is_empty()
+    {
+        settings
+            .appearance
+            .skin_dirs
+            .insert(0, PathBuf::from(value));
+    }
+    if let Ok(value) = std::env::var("RC_KEYMAP")
+        && !value.trim().is_empty()
+    {
+        settings.configuration.keymap_override = Some(PathBuf::from(value));
+    }
+    if let Ok(value) = std::env::var("RC_MACOS_OPTION_COMPAT")
+        && let Some(parsed) = settings_io::parse_bool(&value)
+    {
+        settings.configuration.macos_option_symbols = parsed;
+    }
+}
+
+fn apply_cli_overrides(settings: &mut Settings, cli: &Cli) {
+    if let Some(skin) = cli.skin.as_ref() {
+        settings.appearance.skin = skin.clone();
+    }
+    if let Some(skin_dir) = cli.skin_dir.as_ref() {
+        settings.appearance.skin_dirs.insert(0, skin_dir.clone());
+    }
+    if let Some(keymap) = cli.keymap.as_ref() {
+        settings.configuration.keymap_override = Some(keymap.clone());
+    }
+    settings.configuration.macos_option_symbols = cli.macos_option_compat;
+}
+
+fn load_effective_keymap(
+    settings: &Settings,
+    state: &mut AppState,
+) -> Result<(Keymap, KeymapParseReport)> {
+    let (mut keymap, mut report) = Keymap::bundled_mc_default_with_report()
+        .context("failed to load bundled mc.default.keymap")?;
+    let Some(path) = settings.configuration.keymap_override.as_ref() else {
+        return Ok((keymap, report));
+    };
+
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read keymap override '{}'", path.display()))?;
+    let (override_map, override_report) = Keymap::parse_with_report(&source)
+        .with_context(|| format!("failed to parse keymap override '{}'", path.display()))?;
+    keymap.merge_from(&override_map);
+    report
+        .unknown_actions
+        .extend(override_report.unknown_actions);
+    report
+        .skipped_bindings
+        .extend(override_report.skipped_bindings);
+    state.set_status(format!("Loaded keymap overrides from {}", path.display()));
+    Ok((keymap, report))
+}
+
 struct SkinRuntimeConfig {
     skin_dir: Option<PathBuf>,
-    mc_ini_path: Option<PathBuf>,
+    settings_paths: settings_io::SettingsPaths,
 }
 
 fn run_app(
@@ -416,9 +485,25 @@ fn apply_and_dispatch(
     apply_pending_skin_preview(state, skin_runtime);
     apply_pending_skin_change(state, skin_runtime);
     apply_pending_skin_revert(state, skin_runtime);
+    persist_dirty_settings(state, skin_runtime);
     dispatch_pending_worker_commands(state, worker_tx);
     dispatch_pending_background_commands(state, background_tx);
     Ok(result)
+}
+
+fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig) {
+    if !state.settings().save_setup.dirty {
+        return;
+    }
+
+    let snapshot = state.persisted_settings_snapshot();
+    if let Err(error) = settings_io::save_settings(&skin_runtime.settings_paths, &snapshot) {
+        tracing::warn!("failed to persist settings: {error}");
+        state.set_status(format!("Settings save failed: {error}"));
+        return;
+    }
+
+    state.mark_settings_saved(SystemTime::now());
 }
 
 fn dispatch_pending_worker_commands(state: &mut AppState, worker_tx: &Sender<WorkerCommand>) {
@@ -572,17 +657,8 @@ fn apply_pending_skin_change(state: &mut AppState, skin_runtime: &SkinRuntimeCon
         Ok(()) => {
             let applied_skin = rc_ui::current_skin_name();
             state.set_active_skin_name(applied_skin.clone());
-            if let Some(path) = skin_runtime.mc_ini_path.as_deref()
-                && let Err(error) = write_skin_to_mc_ini(path, &applied_skin)
-            {
-                tracing::warn!(
-                    "failed to persist skin '{}' to '{}': {error}",
-                    applied_skin,
-                    path.display()
-                );
-                state.set_status(format!("Skin changed to {applied_skin} (save failed)"));
-                return;
-            }
+            state.settings_mut().appearance.skin = applied_skin.clone();
+            state.mark_settings_dirty();
             state.set_status(format!("Skin changed to {applied_skin}"));
         }
         Err(error) => {
@@ -622,114 +698,6 @@ fn apply_pending_skin_revert(state: &mut AppState, skin_runtime: &SkinRuntimeCon
             state.set_status(format!("Skin '{}' unavailable: {error}", original_skin));
         }
     }
-}
-
-fn mc_ini_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/mc/ini"))
-}
-
-fn read_skin_from_mc_ini(path: &Path) -> io::Result<Option<String>> {
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-
-    let mut in_mc_section = false;
-    for raw_line in source.lines() {
-        let line = raw_line.trim();
-        if let Some(section_name) = parse_ini_section_name(line) {
-            in_mc_section = section_name.eq_ignore_ascii_case(MC_CONFIG_SECTION);
-            continue;
-        }
-        if !in_mc_section || line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim().eq_ignore_ascii_case(MC_SKIN_KEY) {
-            let value = value.trim();
-            if value.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(value.to_string()));
-        }
-    }
-
-    Ok(None)
-}
-
-fn write_skin_to_mc_ini(path: &Path, skin: &str) -> io::Result<()> {
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
-    };
-    let updated = upsert_skin_in_mc_ini(&source, skin);
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, updated)
-}
-
-fn upsert_skin_in_mc_ini(source: &str, skin: &str) -> String {
-    let mut lines: Vec<String> = source.lines().map(|line| line.to_string()).collect();
-    let mut section_start = None;
-
-    for (index, line) in lines.iter().enumerate() {
-        if let Some(section_name) = parse_ini_section_name(line)
-            && section_name.eq_ignore_ascii_case(MC_CONFIG_SECTION)
-        {
-            section_start = Some(index);
-            break;
-        }
-    }
-
-    match section_start {
-        Some(start) => {
-            let section_end = lines
-                .iter()
-                .enumerate()
-                .skip(start + 1)
-                .find_map(|(index, line)| parse_ini_section_name(line).map(|_| index))
-                .unwrap_or(lines.len());
-            let skin_line = (start + 1..section_end).find(|line_index| {
-                let line = lines[*line_index].trim();
-                if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                    return false;
-                }
-                line.split_once('=')
-                    .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case(MC_SKIN_KEY))
-            });
-
-            if let Some(line_index) = skin_line {
-                lines[line_index] = format!("{MC_SKIN_KEY}={skin}");
-            } else {
-                lines.insert(section_end, format!("{MC_SKIN_KEY}={skin}"));
-            }
-        }
-        None => {
-            if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
-                lines.push(String::new());
-            }
-            lines.push(format!("[{MC_CONFIG_SECTION}]"));
-            lines.push(format!("{MC_SKIN_KEY}={skin}"));
-        }
-    }
-
-    let mut output = lines.join("\n");
-    output.push('\n');
-    output
-}
-
-fn parse_ini_section_name(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.starts_with('[') && line.ends_with(']') {
-        return Some(line[1..line.len() - 1].trim());
-    }
-    None
 }
 
 fn drain_worker_events(
@@ -1026,7 +994,10 @@ mod tests {
         let (background_tx, _background_rx) = mpsc::channel();
         let skin_runtime = SkinRuntimeConfig {
             skin_dir: None,
-            mc_ini_path: None,
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
         };
 
         handle_key(
@@ -1073,7 +1044,10 @@ mod tests {
         let (background_tx, _background_rx) = mpsc::channel();
         let skin_runtime = SkinRuntimeConfig {
             skin_dir: None,
-            mc_ini_path: None,
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
         };
 
         handle_key(
@@ -1104,46 +1078,5 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
-    }
-
-    #[test]
-    fn read_skin_from_mc_ini_uses_midnight_commander_section() {
-        let source = "\
-[Midnight-Commander]
-skin=darkfar
-";
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be monotonic")
-            .as_nanos();
-        let path = env::temp_dir().join(format!("rc-read-mc-ini-{stamp}.ini"));
-        fs::write(&path, source).expect("test ini should be written");
-
-        let skin = read_skin_from_mc_ini(&path).expect("skin should parse from ini");
-        assert_eq!(skin, Some(String::from("darkfar")));
-
-        fs::remove_file(&path).expect("test ini should be removed");
-    }
-
-    #[test]
-    fn upsert_skin_in_mc_ini_updates_existing_skin_value() {
-        let source = "\
-[Midnight-Commander]
-verbose=true
-skin=default
-";
-        let updated = upsert_skin_in_mc_ini(source, "xoria256");
-        assert!(updated.contains("skin=xoria256"));
-        assert!(
-            !updated.contains("skin=default"),
-            "previous skin key should be replaced"
-        );
-    }
-
-    #[test]
-    fn upsert_skin_in_mc_ini_adds_section_when_missing() {
-        let updated = upsert_skin_in_mc_ini("[Layout]\nmenubar_visible=true\n", "julia256");
-        assert!(updated.contains("[Midnight-Commander]"));
-        assert!(updated.contains("skin=julia256"));
     }
 }

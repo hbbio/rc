@@ -353,6 +353,15 @@ impl Keymap {
             .and_then(|keys| keys.get(&chord))
     }
 
+    pub fn merge_from(&mut self, override_map: &Self) {
+        for (context, bindings) in &override_map.bindings {
+            self.bindings
+                .entry(*context)
+                .or_default()
+                .extend(bindings.clone());
+        }
+    }
+
     pub fn bindings_for_context(&self, context: KeyContext) -> Vec<(KeyChord, KeyCommand)> {
         self.bindings
             .get(&context)

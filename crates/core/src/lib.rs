@@ -2040,6 +2040,23 @@ impl AppState {
         &mut self.settings
     }
 
+    pub fn persisted_settings_snapshot(&self) -> Settings {
+        let mut settings = self.settings.clone();
+        settings.configuration.default_overwrite_policy = self.overwrite_policy;
+        settings.configuration.hotlist = self.hotlist.clone();
+        settings.configuration.panelize_presets = self.panelize_presets.clone();
+        settings.appearance.skin = self.active_skin_name.clone();
+        settings
+    }
+
+    pub fn mark_settings_saved(&mut self, saved_at: SystemTime) {
+        self.settings.mark_saved(saved_at);
+    }
+
+    pub fn mark_settings_dirty(&mut self) {
+        self.settings.mark_dirty();
+    }
+
     pub fn replace_settings(&mut self, settings: Settings) {
         self.overwrite_policy = settings.configuration.default_overwrite_policy;
         self.hotlist = settings.configuration.hotlist.clone();
@@ -3386,6 +3403,8 @@ impl AppState {
         };
 
         self.panelize_presets = preset_commands.clone();
+        self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+        self.settings.mark_dirty();
         self.routes.pop();
         let next_initial = if initial_command == removed_command {
             preset_commands
@@ -3676,6 +3695,8 @@ impl AppState {
         }
         self.hotlist.push(cwd.clone());
         self.hotlist_cursor = self.hotlist.len() - 1;
+        self.settings.configuration.hotlist = self.hotlist.clone();
+        self.settings.mark_dirty();
         self.set_status(format!("Added {} to hotlist", cwd.to_string_lossy()));
     }
 
@@ -3686,6 +3707,8 @@ impl AppState {
         }
         let removed = self.hotlist.remove(self.hotlist_cursor);
         self.clamp_hotlist_cursor();
+        self.settings.configuration.hotlist = self.hotlist.clone();
+        self.settings.mark_dirty();
         self.set_status(format!(
             "Removed {} from hotlist",
             removed.to_string_lossy()
@@ -4584,6 +4607,8 @@ impl AppState {
             ) => {
                 if let Some(index) = index {
                     self.overwrite_policy = overwrite_policy_from_index(index);
+                    self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                    self.settings.mark_dirty();
                     self.set_status(format!(
                         "Default overwrite policy: {}",
                         self.overwrite_policy.label()
@@ -4727,6 +4752,8 @@ impl AppState {
 
                 preset_commands.push(command.clone());
                 self.panelize_presets = preset_commands.clone();
+                self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+                self.settings.mark_dirty();
                 self.routes.pop();
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
                 self.set_status(format!("Added panelize preset: {command}"));
@@ -4775,6 +4802,8 @@ impl AppState {
                 *entry = command.clone();
 
                 self.panelize_presets = preset_commands.clone();
+                self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+                self.settings.mark_dirty();
                 self.routes.pop();
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
                 self.set_status(format!("Updated panelize preset: {command}"));
