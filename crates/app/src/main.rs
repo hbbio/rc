@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode as CrosstermKeyCode, KeyEvent,
     KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
@@ -42,6 +42,18 @@ struct Cli {
     skin: Option<String>,
     #[arg(long)]
     skin_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        default_value_t = cfg!(target_os = "macos"),
+        help = "Enable compatibility mapping for macOS Option-symbol keys (for example ƒ -> Alt-f)"
+    )]
+    macos_option_compat: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InputCompatibility {
+    macos_option_symbols: bool,
 }
 
 fn main() -> Result<()> {
@@ -82,12 +94,16 @@ fn main() -> Result<()> {
         skin_dir: cli.skin_dir.clone(),
         mc_ini_path,
     };
+    let input_compatibility = InputCompatibility {
+        macos_option_symbols: cli.macos_option_compat,
+    };
 
     run_app(
         &mut state,
         &keymap,
         Duration::from_millis(cli.tick_rate_ms),
         &skin_runtime,
+        input_compatibility,
     )
 }
 
@@ -163,6 +179,7 @@ fn run_app(
     keymap: &Keymap,
     tick_rate: Duration,
     skin_runtime: &SkinRuntimeConfig,
+    input_compatibility: InputCompatibility,
 ) -> Result<()> {
     let (worker_tx, worker_rx) = mpsc::channel();
     let (worker_event_tx, worker_event_rx) = mpsc::channel();
@@ -198,6 +215,7 @@ fn run_app(
             background_event_rx: &background_event_rx,
         },
         skin_runtime,
+        input_compatibility,
     );
     let shutdown_result = shutdown_worker(worker_tx, worker_handle);
     let shutdown_background_result = shutdown_background_worker(background_tx, background_handle);
@@ -258,6 +276,7 @@ fn run_event_loop(
     tick_rate: Duration,
     channels: RuntimeChannels<'_>,
     skin_runtime: &SkinRuntimeConfig,
+    input_compatibility: InputCompatibility,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
     let mut worker_disconnected = false;
@@ -288,6 +307,7 @@ fn run_event_loop(
                             channels.worker_tx,
                             channels.background_tx,
                             skin_runtime,
+                            input_compatibility,
                         )? =>
                 {
                     return Ok(());
@@ -320,6 +340,7 @@ fn handle_key(
     worker_tx: &Sender<WorkerCommand>,
     background_tx: &Sender<BackgroundCommand>,
     skin_runtime: &SkinRuntimeConfig,
+    input_compatibility: InputCompatibility,
 ) -> Result<bool> {
     let context = state.key_context();
 
@@ -332,7 +353,7 @@ fn handle_key(
         );
     }
 
-    let Some(chord) = map_key_event_to_chord(key_event) else {
+    let Some(chord) = map_key_event_to_chord(key_event, input_compatibility) else {
         return Ok(false);
     };
     let key_command = keymap.resolve(context, chord).or_else(|| {
@@ -769,7 +790,11 @@ fn input_char_command(key_event: &KeyEvent) -> Option<AppCommand> {
     None
 }
 
-fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
+fn map_key_event_to_chord(
+    key_event: KeyEvent,
+    input_compatibility: InputCompatibility,
+) -> Option<KeyChord> {
+    let key_event = normalize_key_event_for_compatibility(key_event, input_compatibility);
     let mut modifiers = KeyModifiers {
         ctrl: key_event
             .modifiers
@@ -785,12 +810,6 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
     let code = match key_event.code {
         CrosstermKeyCode::Char(ch) => {
             let mut ch = ch;
-            if !modifiers.ctrl
-                && let Some(mapped) = map_macos_option_symbol(ch)
-            {
-                modifiers.alt = true;
-                ch = mapped;
-            }
             if ch.is_ascii_uppercase() {
                 modifiers.shift = true;
                 KeyCode::Char(ch.to_ascii_lowercase())
@@ -829,6 +848,31 @@ fn map_key_event_to_chord(key_event: KeyEvent) -> Option<KeyChord> {
     };
 
     Some(KeyChord { code, modifiers })
+}
+
+fn normalize_key_event_for_compatibility(
+    mut key_event: KeyEvent,
+    input_compatibility: InputCompatibility,
+) -> KeyEvent {
+    if !input_compatibility.macos_option_symbols {
+        return key_event;
+    }
+
+    if key_event
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+    {
+        return key_event;
+    }
+
+    if let CrosstermKeyCode::Char(ch) = key_event.code
+        && let Some(mapped) = map_macos_option_symbol(ch)
+    {
+        key_event.code = CrosstermKeyCode::Char(mapped);
+        key_event.modifiers |= crossterm::event::KeyModifiers::ALT;
+    }
+
+    key_event
 }
 
 fn map_macos_option_symbol(ch: char) -> Option<char> {
@@ -880,55 +924,78 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
+    fn compat_enabled() -> InputCompatibility {
+        InputCompatibility {
+            macos_option_symbols: true,
+        }
+    }
+
+    fn compat_disabled() -> InputCompatibility {
+        InputCompatibility {
+            macos_option_symbols: false,
+        }
+    }
+
     #[test]
     fn macos_option_symbols_map_to_alt_key_chords() {
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('ƒ'),
-            KeyModifiers::NONE,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('ƒ'), KeyModifiers::NONE),
+            compat_enabled(),
+        )
         .expect("option-f should map to a chord");
         assert_eq!(chord.code, KeyCode::Char('f'));
         assert!(chord.modifiers.alt);
 
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('†'),
-            KeyModifiers::NONE,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('†'), KeyModifiers::NONE),
+            compat_enabled(),
+        )
         .expect("option-t should map to a chord");
         assert_eq!(chord.code, KeyCode::Char('t'));
         assert!(chord.modifiers.alt);
 
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('˙'),
-            KeyModifiers::NONE,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('˙'), KeyModifiers::NONE),
+            compat_enabled(),
+        )
         .expect("option-h should map to a chord");
         assert_eq!(chord.code, KeyCode::Char('h'));
         assert!(chord.modifiers.alt);
 
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('ß'),
-            KeyModifiers::NONE,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('ß'), KeyModifiers::NONE),
+            compat_enabled(),
+        )
         .expect("option-s should map to a chord");
         assert_eq!(chord.code, KeyCode::Char('s'));
         assert!(chord.modifiers.alt);
 
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('ƒ'),
-            KeyModifiers::ALT,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('ƒ'), KeyModifiers::ALT),
+            compat_enabled(),
+        )
         .expect("option-f with ALT modifier should map to a chord");
         assert_eq!(chord.code, KeyCode::Char('f'));
         assert!(chord.modifiers.alt);
     }
 
     #[test]
+    fn macos_option_symbols_do_not_map_when_compat_is_disabled() {
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('ƒ'), KeyModifiers::NONE),
+            compat_disabled(),
+        )
+        .expect("raw symbol should still map to a chord");
+        assert_eq!(chord.code, KeyCode::Char('ƒ'));
+        assert!(!chord.modifiers.alt);
+    }
+
+    #[test]
     fn shifted_symbol_char_drops_shift_modifier_for_lookup() {
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('!'),
-            KeyModifiers::SHIFT,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('!'), KeyModifiers::SHIFT),
+            compat_enabled(),
+        )
         .expect("shift+1 should map to exclamation");
         assert_eq!(chord.code, KeyCode::Char('!'));
         assert!(!chord.modifiers.shift);
@@ -936,10 +1003,10 @@ mod tests {
 
     #[test]
     fn shifted_digit_char_maps_to_shifted_symbol_for_lookup() {
-        let chord = map_key_event_to_chord(KeyEvent::new(
-            CrosstermKeyCode::Char('1'),
-            KeyModifiers::SHIFT,
-        ))
+        let chord = map_key_event_to_chord(
+            KeyEvent::new(CrosstermKeyCode::Char('1'), KeyModifiers::SHIFT),
+            compat_enabled(),
+        )
         .expect("shift+1 should map to exclamation");
         assert_eq!(chord.code, KeyCode::Char('!'));
         assert!(!chord.modifiers.shift);
@@ -969,6 +1036,7 @@ mod tests {
             &worker_tx,
             &background_tx,
             &skin_runtime,
+            compat_enabled(),
         )
         .expect("ctrl-x should enter xmap mode");
         handle_key(
@@ -978,6 +1046,7 @@ mod tests {
             &worker_tx,
             &background_tx,
             &skin_runtime,
+            compat_enabled(),
         )
         .expect("ctrl-x ! should open external panelize");
 
@@ -1014,6 +1083,7 @@ mod tests {
             &worker_tx,
             &background_tx,
             &skin_runtime,
+            compat_enabled(),
         )
         .expect("ctrl-x should enter xmap mode");
         handle_key(
@@ -1023,6 +1093,7 @@ mod tests {
             &worker_tx,
             &background_tx,
             &skin_runtime,
+            compat_enabled(),
         )
         .expect("ctrl-x shift+1 should open external panelize");
 
