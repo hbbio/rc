@@ -78,9 +78,11 @@ fn main() -> Result<()> {
     let mut state = AppState::new(start_path).context("failed to initialize app state")?;
     state.replace_settings(settings.clone());
 
-    let skin_dir = settings.appearance.skin_dirs.first().cloned();
-    state.set_available_skins(rc_ui::list_available_skins(skin_dir.as_deref()));
-    if let Err(error) = rc_ui::configure_skin(&settings.appearance.skin, skin_dir.as_deref()) {
+    let skin_dirs = settings.appearance.skin_dirs.clone();
+    state.set_available_skins(rc_ui::list_available_skins_with_search_roots(&skin_dirs));
+    if let Err(error) =
+        rc_ui::configure_skin_with_search_roots(&settings.appearance.skin, &skin_dirs)
+    {
         tracing::warn!(
             "failed to load skin '{}': {error}",
             settings.appearance.skin
@@ -96,7 +98,7 @@ fn main() -> Result<()> {
     state.set_keybinding_hints_from_keymap(&keymap);
     report_keymap_parse_report(&mut state, &keymap_report);
     let skin_runtime = SkinRuntimeConfig {
-        skin_dir,
+        skin_dirs,
         settings_paths,
     };
     run_app(
@@ -235,7 +237,7 @@ fn load_effective_keymap(
 }
 
 struct SkinRuntimeConfig {
-    skin_dir: Option<PathBuf>,
+    skin_dirs: Vec<PathBuf>,
     settings_paths: settings_io::SettingsPaths,
 }
 
@@ -655,7 +657,7 @@ fn apply_pending_skin_change(state: &mut AppState, skin_runtime: &SkinRuntimeCon
         return;
     };
 
-    match rc_ui::configure_skin(&requested_skin, skin_runtime.skin_dir.as_deref()) {
+    match rc_ui::configure_skin_with_search_roots(&requested_skin, &skin_runtime.skin_dirs) {
         Ok(()) => {
             let applied_skin = rc_ui::current_skin_name();
             state.set_active_skin_name(applied_skin.clone());
@@ -675,7 +677,7 @@ fn apply_pending_skin_preview(state: &mut AppState, skin_runtime: &SkinRuntimeCo
         return;
     };
 
-    match rc_ui::configure_skin(&requested_skin, skin_runtime.skin_dir.as_deref()) {
+    match rc_ui::configure_skin_with_search_roots(&requested_skin, &skin_runtime.skin_dirs) {
         Ok(()) => {
             state.set_active_skin_name(rc_ui::current_skin_name());
         }
@@ -691,7 +693,7 @@ fn apply_pending_skin_revert(state: &mut AppState, skin_runtime: &SkinRuntimeCon
         return;
     };
 
-    match rc_ui::configure_skin(&original_skin, skin_runtime.skin_dir.as_deref()) {
+    match rc_ui::configure_skin_with_search_roots(&original_skin, &skin_runtime.skin_dirs) {
         Ok(()) => {
             state.set_active_skin_name(rc_ui::current_skin_name());
         }
@@ -995,7 +997,7 @@ mod tests {
         let (worker_tx, _worker_rx) = mpsc::channel();
         let (background_tx, _background_rx) = mpsc::channel();
         let skin_runtime = SkinRuntimeConfig {
-            skin_dir: None,
+            skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
                 mc_ini_path: None,
                 rc_ini_path: None,
@@ -1045,7 +1047,7 @@ mod tests {
         let (worker_tx, _worker_rx) = mpsc::channel();
         let (background_tx, _background_rx) = mpsc::channel();
         let skin_runtime = SkinRuntimeConfig {
-            skin_dir: None,
+            skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
                 mc_ini_path: None,
                 rc_ini_path: None,

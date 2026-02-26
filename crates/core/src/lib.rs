@@ -526,12 +526,7 @@ pub enum ApplyResult {
     Quit,
 }
 
-const DEFAULT_PAGE_STEP: usize = 10;
-const DEFAULT_VIEWER_PAGE_STEP: usize = 20;
-const MAX_FIND_RESULTS: usize = 2_000;
 const FIND_EVENT_CHUNK_SIZE: usize = 64;
-const TREE_MAX_DEPTH: usize = 6;
-const TREE_MAX_ENTRIES: usize = 2_000;
 const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
 const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";
 
@@ -743,8 +738,8 @@ impl PanelState {
         self.cursor = next;
     }
 
-    pub fn move_cursor_page(&mut self, pages: isize) {
-        let delta = pages.saturating_mul(DEFAULT_PAGE_STEP as isize);
+    pub fn move_cursor_page(&mut self, pages: isize, page_step: usize) {
+        let delta = pages.saturating_mul(page_step as isize);
         self.move_cursor(delta);
     }
 
@@ -977,8 +972,8 @@ impl ViewerState {
         }
     }
 
-    pub fn move_pages(&mut self, pages: isize) {
-        self.move_lines(pages.saturating_mul(DEFAULT_VIEWER_PAGE_STEP as isize));
+    pub fn move_pages(&mut self, pages: isize, viewer_page_step: usize) {
+        self.move_lines(pages.saturating_mul(viewer_page_step as isize));
     }
 
     pub fn move_home(&mut self) {
@@ -1132,8 +1127,8 @@ impl FindResultsState {
         self.cursor = next;
     }
 
-    fn move_page(&mut self, pages: isize) {
-        self.move_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    fn move_page(&mut self, pages: isize, page_step: usize) {
+        self.move_cursor(pages.saturating_mul(page_step as isize));
     }
 
     fn move_home(&mut self) {
@@ -1196,8 +1191,8 @@ impl TreeState {
         self.cursor = next;
     }
 
-    fn move_page(&mut self, pages: isize) {
-        self.move_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    fn move_page(&mut self, pages: isize, page_step: usize) {
+        self.move_cursor(pages.saturating_mul(page_step as isize));
     }
 
     fn move_home(&mut self) {
@@ -4101,7 +4096,7 @@ impl AppState {
         let Some(Route::FindResults(results)) = self.routes.last_mut() else {
             return;
         };
-        results.move_page(pages);
+        results.move_page(pages, self.settings.advanced.page_step);
     }
 
     fn move_find_results_home(&mut self) {
@@ -4216,8 +4211,8 @@ impl AppState {
         self.pending_background_commands
             .push(BackgroundCommand::BuildTree {
                 root,
-                max_depth: TREE_MAX_DEPTH,
-                max_entries: TREE_MAX_ENTRIES,
+                max_depth: self.settings.advanced.tree_max_depth,
+                max_entries: self.settings.advanced.tree_max_entries,
             });
         self.set_status("Loading directory tree...");
     }
@@ -4240,7 +4235,7 @@ impl AppState {
         let Some(Route::Tree(tree)) = self.routes.last_mut() else {
             return;
         };
-        tree.move_page(pages);
+        tree.move_page(pages, self.settings.advanced.page_step);
     }
 
     fn move_tree_home(&mut self) {
@@ -4317,7 +4312,7 @@ impl AppState {
     }
 
     fn move_hotlist_page(&mut self, pages: isize) {
-        self.move_hotlist_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+        self.move_hotlist_cursor(pages.saturating_mul(self.settings.advanced.page_step as isize));
     }
 
     fn move_hotlist_home(&mut self) {
@@ -4540,8 +4535,14 @@ impl AppState {
             }
             AppCommand::MoveUp => self.move_cursor(-1),
             AppCommand::MoveDown => self.move_cursor(1),
-            AppCommand::PageUp => self.active_panel_mut().move_cursor_page(-1),
-            AppCommand::PageDown => self.active_panel_mut().move_cursor_page(1),
+            AppCommand::PageUp => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(-1, page_step);
+            }
+            AppCommand::PageDown => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(1, page_step);
+            }
             AppCommand::MoveHome => self.active_panel_mut().move_cursor_home(),
             AppCommand::MoveEnd => self.active_panel_mut().move_cursor_end(),
             AppCommand::ToggleTag => {
@@ -4857,13 +4858,15 @@ impl AppState {
                 }
             }
             AppCommand::ViewerPageUp => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
                 if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_pages(-1);
+                    viewer.move_pages(-1, viewer_page_step);
                 }
             }
             AppCommand::ViewerPageDown => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
                 if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_pages(1);
+                    viewer.move_pages(1, viewer_page_step);
                 }
             }
             AppCommand::ViewerHome => {
@@ -5423,7 +5426,7 @@ impl AppState {
                         job_id,
                         query: query.clone(),
                         base_dir,
-                        max_results: MAX_FIND_RESULTS,
+                        max_results: self.settings.advanced.max_find_results,
                         cancel_flag: worker_job.cancel_flag(),
                         pause_flag,
                     });
@@ -6509,10 +6512,10 @@ mod tests {
         panel.move_cursor_end();
         assert_eq!(panel.cursor, 3);
 
-        panel.move_cursor_page(1);
+        panel.move_cursor_page(1, 10);
         assert_eq!(panel.cursor, 3);
 
-        panel.move_cursor_page(-1);
+        panel.move_cursor_page(-1, 10);
         assert_eq!(panel.cursor, 0);
     }
 

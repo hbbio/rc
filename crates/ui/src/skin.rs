@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 const BUNDLED_SKIN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/skins");
-const HOMEBREW_CELLAR_SKIN_DIR: &str =
-    "/opt/homebrew/Cellar/midnight-commander/4.8.33/share/mc/skins";
 const HOMEBREW_PREFIX_SKIN_DIR: &str = "/opt/homebrew/share/mc/skins";
 const LOCAL_SKIN_DIR: &str = "/usr/local/share/mc/skins";
 const SYSTEM_SKIN_DIR: &str = "/usr/share/mc/skins";
@@ -93,11 +91,12 @@ impl UiSkin {
         }
     }
 
-    fn from_named_skin(name: &str, skin_dir: Option<&Path>) -> Result<Self, String> {
-        let path = resolve_skin_path(name, skin_dir).ok_or_else(|| {
-            let mut searched = search_dirs(skin_dir);
-            searched.sort();
-            searched.dedup();
+    fn from_named_skin(name: &str, extra_skin_dirs: &[PathBuf]) -> Result<Self, String> {
+        let path = resolve_skin_path(name, extra_skin_dirs).ok_or_else(|| {
+            let searched = search_dirs(extra_skin_dirs)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
             format!("unable to locate skin '{name}' in: {}", searched.join(", "))
         })?;
 
@@ -133,7 +132,17 @@ impl UiSkin {
 }
 
 pub fn configure_skin(name: &str, skin_dir: Option<&Path>) -> Result<(), String> {
-    let skin = Arc::new(UiSkin::from_named_skin(name, skin_dir)?);
+    let extra_dirs = skin_dir
+        .map(|path| vec![path.to_path_buf()])
+        .unwrap_or_default();
+    configure_skin_with_search_roots(name, &extra_dirs)
+}
+
+pub fn configure_skin_with_search_roots(
+    name: &str,
+    extra_skin_dirs: &[PathBuf],
+) -> Result<(), String> {
+    let skin = Arc::new(UiSkin::from_named_skin(name, extra_skin_dirs)?);
     let store = ACTIVE_SKIN.get_or_init(|| RwLock::new(Arc::new(UiSkin::fallback())));
     let mut guard = store
         .write()
@@ -155,11 +164,17 @@ pub fn current_skin_name() -> String {
 }
 
 pub fn list_available_skins(skin_dir: Option<&Path>) -> Vec<String> {
+    let extra_dirs = skin_dir
+        .map(|path| vec![path.to_path_buf()])
+        .unwrap_or_default();
+    list_available_skins_with_search_roots(&extra_dirs)
+}
+
+pub fn list_available_skins_with_search_roots(extra_skin_dirs: &[PathBuf]) -> Vec<String> {
     let mut names = BTreeSet::new();
 
-    for directory in search_dirs(skin_dir) {
-        let path = PathBuf::from(directory);
-        let Ok(entries) = fs::read_dir(path) else {
+    for directory in search_dirs(extra_skin_dirs) {
+        let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -179,7 +194,7 @@ pub fn list_available_skins(skin_dir: Option<&Path>) -> Vec<String> {
     names.into_iter().collect()
 }
 
-fn resolve_skin_path(name: &str, skin_dir: Option<&Path>) -> Option<PathBuf> {
+fn resolve_skin_path(name: &str, extra_skin_dirs: &[PathBuf]) -> Option<PathBuf> {
     let requested_path = Path::new(name);
     if requested_path.is_absolute() || name.contains('/') {
         if requested_path.exists() {
@@ -196,8 +211,8 @@ fn resolve_skin_path(name: &str, skin_dir: Option<&Path>) -> Option<PathBuf> {
     } else {
         format!("{name}.ini")
     };
-    for directory in search_dirs(skin_dir) {
-        let path = Path::new(&directory).join(&file_name);
+    for directory in search_dirs(extra_skin_dirs) {
+        let path = directory.join(&file_name);
         if path.exists() {
             return Some(path);
         }
@@ -205,16 +220,29 @@ fn resolve_skin_path(name: &str, skin_dir: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-fn search_dirs(skin_dir: Option<&Path>) -> Vec<String> {
+fn search_dirs(extra_skin_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(path) = skin_dir {
-        dirs.push(path.to_string_lossy().into_owned());
+    let mut seen = HashSet::new();
+
+    for path in extra_skin_dirs {
+        let key = path.to_string_lossy().into_owned();
+        if seen.insert(key) {
+            dirs.push(path.clone());
+        }
     }
-    dirs.push(BUNDLED_SKIN_DIR.to_string());
-    dirs.push(HOMEBREW_CELLAR_SKIN_DIR.to_string());
-    dirs.push(HOMEBREW_PREFIX_SKIN_DIR.to_string());
-    dirs.push(LOCAL_SKIN_DIR.to_string());
-    dirs.push(SYSTEM_SKIN_DIR.to_string());
+
+    for path in [
+        PathBuf::from(BUNDLED_SKIN_DIR),
+        PathBuf::from(HOMEBREW_PREFIX_SKIN_DIR),
+        PathBuf::from(LOCAL_SKIN_DIR),
+        PathBuf::from(SYSTEM_SKIN_DIR),
+    ] {
+        let key = path.to_string_lossy().into_owned();
+        if seen.insert(key) {
+            dirs.push(path);
+        }
+    }
+
     dirs
 }
 

@@ -28,7 +28,10 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 use nix::sys::statvfs::statvfs;
 
 use skin::{UiSkin, current_skin};
-pub use skin::{configure_skin, current_skin_name, list_available_skins};
+pub use skin::{
+    configure_skin, configure_skin_with_search_roots, current_skin_name, list_available_skins,
+    list_available_skins_with_search_roots,
+};
 
 struct HighlightResources {
     syntax_set: SyntaxSet,
