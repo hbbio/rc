@@ -16,6 +16,7 @@ Implemented milestones:
 - Milestone 2: copy/move/mkdir/delete with background jobs and cancel
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
 - Milestone 4 (partial): find dialog/results, tree, and hotlist
+- Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup persistence
 
 Planned next major milestones include `mc.ext.ini`, user menu, editor, diff viewer,
 remote VFS, and subshell integration. See [doc/roadmap.md](doc/roadmap.md).
@@ -56,6 +57,19 @@ cargo run -p rc -- --skin julia256 --skin-dir /path/to/mc/skins
 
 `rc` looks up skins in `crates/ui/assets/skins` (bundled originals) and standard
 system locations like `/usr/share/mc/skins` and Homebrew paths.
+
+## Settings and setup
+
+- Options menu now follows MC categories:
+  `Configuration`, `Layout`, `Panel options`, `Confirmation`, `Appearance`,
+  `Display bits`, `Learn keys`, `Virtual FS`, and `Save setup`.
+- Settings are loaded with deterministic precedence:
+  built-in defaults -> persisted config -> environment overrides -> CLI flags.
+- `Save setup` persists to:
+  - `~/.config/rc/settings.ini` for rc-owned settings.
+  - `~/.config/mc/ini` for MC-compatible skin key.
+- Skin discovery uses ordered search roots:
+  custom configured dirs, then bundled/system MC skin directories.
 
 ## Key controls (current defaults)
 

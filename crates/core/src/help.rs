@@ -15,6 +15,7 @@ const HELP_NODE_SPECS: &[(&str, &str, &str)] = &[
 Choose a topic:\n\
   [General movement keys](help-viewer)\n\
   [File manager](file-manager)\n\
+  [Options and setup](options)\n\
   [Viewer](viewer)\n\
   [Jobs screen](jobs)\n\
   [Find results](find-results)\n\
@@ -61,7 +62,24 @@ File operations:\n\
   {{fm_toggle_tag}} toggle selection\n\
   {{fm_file_ops}} copy/move/delete\n\
 \n\
-More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist).",
+More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
+    ),
+    (
+        "options",
+        "Options and Setup",
+        "Options menu mirrors MC categories:\n\
+  Configuration, Layout, Panel options,\n\
+  Confirmation, Appearance, Display bits,\n\
+  Learn keys, Virtual FS.\n\
+\n\
+Open Options via {{fm_external_panelize_menu}} -> Options.\n\
+\n\
+Behavior notes:\n\
+  Live changes apply immediately.\n\
+  Changes stay dirty until Save setup is used.\n\
+  Save setup writes rc settings and mc skin selection.\n\
+\n\
+See also [File manager](file-manager) and [Panelize and VFS](panelize).",
     ),
     (
         "viewer",
@@ -652,5 +670,15 @@ mod tests {
         assert!(content.contains("Find results panelize"));
         assert!(content.contains("External panelize (Ctrl-X !)"));
         assert!(content.contains("How this differs from VFS"));
+    }
+
+    #[test]
+    fn options_topic_mentions_mc_categories_and_save_setup() {
+        let mut help = HelpState::for_context(KeyContext::FileManager);
+        help.open_topic("options", false);
+
+        let content = flatten_help_lines(help.lines());
+        assert!(content.contains("Options menu mirrors MC categories"));
+        assert!(content.contains("Save setup writes rc settings and mc skin selection"));
     }
 }
