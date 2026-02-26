@@ -45,10 +45,11 @@ struct Cli {
     #[arg(
         long,
         action = ArgAction::Set,
-        default_value_t = cfg!(target_os = "macos"),
+        default_missing_value = "true",
+        num_args = 0..=1,
         help = "Enable compatibility mapping for macOS Option-symbol keys (for example ƒ -> Alt-f)"
     )]
-    macos_option_compat: bool,
+    macos_option_compat: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -215,7 +216,9 @@ fn apply_cli_overrides(settings: &mut Settings, cli: &Cli) {
     if let Some(keymap) = cli.keymap.as_ref() {
         settings.configuration.keymap_override = Some(keymap.clone());
     }
-    settings.configuration.macos_option_symbols = cli.macos_option_compat;
+    if let Some(macos_option_compat) = cli.macos_option_compat {
+        settings.configuration.macos_option_symbols = macos_option_compat;
+    }
 }
 
 fn load_effective_keymap(
@@ -1029,7 +1032,7 @@ mod tests {
             skin: Some(String::from("cli-skin")),
             skin_dir: Some(PathBuf::from("/cli/skins")),
             keymap: Some(PathBuf::from("/cli/keymap")),
-            macos_option_compat: true,
+            macos_option_compat: Some(true),
         };
         apply_cli_overrides(&mut settings, &cli);
 
@@ -1047,6 +1050,29 @@ mod tests {
                 PathBuf::from("/persisted/skins")
             ]
         );
+    }
+
+    #[test]
+    fn settings_precedence_without_cli_macos_option_override_keeps_existing_value() {
+        let mut settings = Settings::default();
+        settings.configuration.macos_option_symbols = false;
+
+        apply_env_overrides_with_lookup(&mut settings, |name| match name {
+            "RC_MACOS_OPTION_COMPAT" => Some(String::from("off")),
+            _ => None,
+        });
+
+        let cli = Cli {
+            tick_rate_ms: 200,
+            path: None,
+            skin: None,
+            skin_dir: None,
+            keymap: None,
+            macos_option_compat: None,
+        };
+        apply_cli_overrides(&mut settings, &cli);
+
+        assert!(!settings.configuration.macos_option_symbols);
     }
 
     #[test]
