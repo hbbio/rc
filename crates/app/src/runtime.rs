@@ -6,17 +6,18 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, WorkerCommand,
-    execute_worker_job, run_background_command_sync,
+    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, JobKind,
+    PanelListingSource, WorkerCommand, execute_worker_job, run_background_command_sync,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 const RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 256;
-const WORKER_CONCURRENCY_LIMIT: usize = 2;
-const BACKGROUND_SCAN_CONCURRENCY_LIMIT: usize = 4;
-const BACKGROUND_VIEWER_CONCURRENCY_LIMIT: usize = 2;
+const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
+const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
+const SCAN_CONCURRENCY_LIMIT: usize = 4;
+const PROCESS_CONCURRENCY_LIMIT: usize = 2;
 
 pub(crate) struct RuntimeBridge {
     command_tx: tokio_mpsc::Sender<RuntimeCommand>,
@@ -43,6 +44,16 @@ pub(crate) enum RuntimeCommand {
 enum TaskCompletion {
     Worker { job_id: JobId },
     Background,
+}
+
+struct WorkerTaskSpec {
+    limit: Arc<Semaphore>,
+    runtime_shutdown: CancellationToken,
+    job_cancel: CancellationToken,
+    worker_class: &'static str,
+    worker_job: rc_core::WorkerJob,
+    worker_event_tx: Sender<JobEvent>,
+    queued_at: Instant,
 }
 
 impl RuntimeBridge {
@@ -225,9 +236,10 @@ async fn run_runtime_loop(
     worker_event_tx: Sender<JobEvent>,
     background_event_tx: Sender<BackgroundEvent>,
 ) {
-    let worker_limit = Arc::new(Semaphore::new(WORKER_CONCURRENCY_LIMIT));
-    let background_scan_limit = Arc::new(Semaphore::new(BACKGROUND_SCAN_CONCURRENCY_LIMIT));
-    let background_viewer_limit = Arc::new(Semaphore::new(BACKGROUND_VIEWER_CONCURRENCY_LIMIT));
+    let fs_mutation_limit = Arc::new(Semaphore::new(FS_MUTATION_CONCURRENCY_LIMIT));
+    let settings_limit = Arc::new(Semaphore::new(SETTINGS_CONCURRENCY_LIMIT));
+    let background_scan_limit = Arc::new(Semaphore::new(SCAN_CONCURRENCY_LIMIT));
+    let background_process_limit = Arc::new(Semaphore::new(PROCESS_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
     let mut worker_cancellations = HashMap::<JobId, CancellationToken>::new();
     let mut tasks = JoinSet::new();
@@ -260,16 +272,28 @@ async fn run_runtime_loop(
                     } => {
                         let worker_job = *job;
                         let job_id = worker_job.id;
+                        let (limit, worker_class) = match worker_job.request.kind() {
+                            JobKind::PersistSettings => (Arc::clone(&settings_limit), "settings"),
+                            JobKind::Copy
+                            | JobKind::Move
+                            | JobKind::Delete
+                            | JobKind::Mkdir
+                            | JobKind::Rename => (Arc::clone(&fs_mutation_limit), "fs_mutation"),
+                            JobKind::Find => (Arc::clone(&background_scan_limit), "scan"),
+                        };
                         let job_cancel = shutdown.child_token();
                         worker_cancellations.insert(job_id, job_cancel.clone());
                         spawn_worker_task(
                             &mut tasks,
-                            Arc::clone(&worker_limit),
-                            shutdown.child_token(),
-                            job_cancel,
-                            worker_job,
-                            worker_event_tx.clone(),
-                            queued_at,
+                            WorkerTaskSpec {
+                                limit,
+                                runtime_shutdown: shutdown.child_token(),
+                                job_cancel,
+                                worker_class,
+                                worker_job,
+                                worker_event_tx: worker_event_tx.clone(),
+                                queued_at,
+                            },
                         );
                     }
                     RuntimeCommand::Worker {
@@ -311,16 +335,23 @@ async fn run_runtime_loop(
                         break;
                     }
                     RuntimeCommand::Background { command, queued_at } => {
-                        let limit = match &command {
+                        let (limit, scheduler_class) = match &command {
                             BackgroundCommand::LoadViewer { .. } => {
-                                Arc::clone(&background_viewer_limit)
+                                (Arc::clone(&background_process_limit), "process")
                             }
-                            _ => Arc::clone(&background_scan_limit),
+                            BackgroundCommand::RefreshPanel {
+                                source: PanelListingSource::Panelize { .. },
+                                ..
+                            } => {
+                                (Arc::clone(&background_process_limit), "process")
+                            }
+                            _ => (Arc::clone(&background_scan_limit), "scan"),
                         };
                         spawn_background_task(
                             &mut tasks,
                             limit,
                             shutdown.child_token(),
+                            scheduler_class,
                             command,
                             background_event_tx.clone(),
                             queued_at,
@@ -344,15 +375,16 @@ async fn run_runtime_loop(
     }
 }
 
-fn spawn_worker_task(
-    tasks: &mut JoinSet<TaskCompletion>,
-    limit: Arc<Semaphore>,
-    shutdown: CancellationToken,
-    job_cancel: CancellationToken,
-    worker_job: rc_core::WorkerJob,
-    worker_event_tx: Sender<JobEvent>,
-    queued_at: Instant,
-) {
+fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) {
+    let WorkerTaskSpec {
+        limit,
+        runtime_shutdown,
+        job_cancel,
+        worker_class,
+        worker_job,
+        worker_event_tx,
+        queued_at,
+    } = spec;
     let job_id = worker_job.id;
     let job_kind = worker_job.request.kind().label();
     tasks.spawn(async move {
@@ -360,14 +392,15 @@ fn spawn_worker_task(
             return TaskCompletion::Worker { job_id };
         };
         let queue_wait_ms = queued_at.elapsed().as_millis();
-        if shutdown.is_cancelled() || job_cancel.is_cancelled() {
+        if runtime_shutdown.is_cancelled() || job_cancel.is_cancelled() {
             tracing::debug!(
                 runtime_event = "canceled",
                 command_class = "worker",
+                scheduler_class = worker_class,
                 job_id = %job_id,
                 job_kind,
                 queue_wait_ms,
-                reason = if shutdown.is_cancelled() {
+                reason = if runtime_shutdown.is_cancelled() {
                     "runtime shutdown"
                 } else {
                     "job cancellation token"
@@ -382,6 +415,7 @@ fn spawn_worker_task(
             tracing::debug!(
                 runtime_event = "started",
                 command_class = "worker",
+                scheduler_class = worker_class,
                 job_id = %job_id,
                 job_kind,
                 queue_wait_ms,
@@ -391,6 +425,7 @@ fn spawn_worker_task(
             tracing::debug!(
                 runtime_event = "finished",
                 command_class = "worker",
+                scheduler_class = worker_class,
                 job_id = %job_id,
                 job_kind,
                 queue_wait_ms,
@@ -402,6 +437,7 @@ fn spawn_worker_task(
             tracing::warn!(
                 runtime_event = "failed",
                 command_class = "worker",
+                scheduler_class = worker_class,
                 error_class = "join_error",
                 job_id = %job_id,
                 job_kind,
@@ -417,6 +453,7 @@ fn spawn_background_task(
     tasks: &mut JoinSet<TaskCompletion>,
     limit: Arc<Semaphore>,
     shutdown: CancellationToken,
+    scheduler_class: &'static str,
     command: BackgroundCommand,
     background_event_tx: Sender<BackgroundEvent>,
     queued_at: Instant,
@@ -431,6 +468,7 @@ fn spawn_background_task(
             tracing::debug!(
                 runtime_event = "canceled",
                 command_class = "background",
+                scheduler_class,
                 command = command_name,
                 queue_wait_ms,
                 reason = "runtime shutdown",
@@ -444,6 +482,7 @@ fn spawn_background_task(
             tracing::debug!(
                 runtime_event = "started",
                 command_class = "background",
+                scheduler_class,
                 command = command_name,
                 queue_wait_ms,
                 "runtime background task started"
@@ -452,6 +491,7 @@ fn spawn_background_task(
             tracing::debug!(
                 runtime_event = "finished",
                 command_class = "background",
+                scheduler_class,
                 command = command_name,
                 queue_wait_ms,
                 run_time_ms = run_started.elapsed().as_millis(),
@@ -462,6 +502,7 @@ fn spawn_background_task(
             tracing::warn!(
                 runtime_event = "failed",
                 command_class = "background",
+                scheduler_class,
                 command = command_name,
                 error_class = "join_error",
                 queue_wait_ms,
