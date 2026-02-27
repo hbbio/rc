@@ -299,7 +299,8 @@ struct RuntimeBridge {
 
 const RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 256;
 const WORKER_CONCURRENCY_LIMIT: usize = 2;
-const BACKGROUND_CONCURRENCY_LIMIT: usize = 4;
+const BACKGROUND_SCAN_CONCURRENCY_LIMIT: usize = 4;
+const BACKGROUND_VIEWER_CONCURRENCY_LIMIT: usize = 2;
 
 #[derive(Debug)]
 enum RuntimeCommand {
@@ -438,7 +439,8 @@ async fn run_runtime_loop(
     background_event_tx: Sender<BackgroundEvent>,
 ) {
     let worker_limit = Arc::new(Semaphore::new(WORKER_CONCURRENCY_LIMIT));
-    let background_limit = Arc::new(Semaphore::new(BACKGROUND_CONCURRENCY_LIMIT));
+    let background_scan_limit = Arc::new(Semaphore::new(BACKGROUND_SCAN_CONCURRENCY_LIMIT));
+    let background_viewer_limit = Arc::new(Semaphore::new(BACKGROUND_VIEWER_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
     let mut tasks = JoinSet::new();
 
@@ -470,9 +472,15 @@ async fn run_runtime_loop(
                         break;
                     }
                     RuntimeCommand::Background(command) => {
+                        let limit = match &command {
+                            BackgroundCommand::LoadViewer { .. } => {
+                                Arc::clone(&background_viewer_limit)
+                            }
+                            _ => Arc::clone(&background_scan_limit),
+                        };
                         spawn_background_task(
                             &mut tasks,
-                            Arc::clone(&background_limit),
+                            limit,
                             shutdown.child_token(),
                             command,
                             background_event_tx.clone(),
@@ -498,7 +506,10 @@ fn spawn_worker_task(
     worker_job: rc_core::WorkerJob,
     worker_event_tx: Sender<JobEvent>,
 ) {
+    let job_id = worker_job.id;
+    let job_kind = worker_job.request.kind().label();
     tasks.spawn(async move {
+        tracing::debug!(job_id = %job_id, job_kind, "runtime worker task queued");
         let Ok(permit) = limit.acquire_owned().await else {
             return;
         };
@@ -507,10 +518,17 @@ fn spawn_worker_task(
         }
         let blocking = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let started = Instant::now();
             execute_worker_job(worker_job, &worker_event_tx);
+            tracing::debug!(
+                job_id = %job_id,
+                job_kind,
+                elapsed_ms = started.elapsed().as_millis(),
+                "runtime worker task finished"
+            );
         });
         if let Err(error) = blocking.await {
-            tracing::warn!("worker task panicked: {error}");
+            tracing::warn!(job_id = %job_id, job_kind, "worker task panicked: {error}");
         }
     });
 }
@@ -522,7 +540,9 @@ fn spawn_background_task(
     command: BackgroundCommand,
     background_event_tx: Sender<BackgroundEvent>,
 ) {
+    let command_name = background_command_name(&command);
     tasks.spawn(async move {
+        tracing::debug!(command = command_name, "runtime background task queued");
         let Ok(permit) = limit.acquire_owned().await else {
             return;
         };
@@ -531,12 +551,28 @@ fn spawn_background_task(
         }
         let blocking = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let started = Instant::now();
             let _ = run_background_command_sync(command, &background_event_tx);
+            tracing::debug!(
+                command = command_name,
+                elapsed_ms = started.elapsed().as_millis(),
+                "runtime background task finished"
+            );
         });
         if let Err(error) = blocking.await {
-            tracing::warn!("background task panicked: {error}");
+            tracing::warn!(command = command_name, "background task panicked: {error}");
         }
     });
+}
+
+fn background_command_name(command: &BackgroundCommand) -> &'static str {
+    match command {
+        BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
+        BackgroundCommand::LoadViewer { .. } => "load-viewer",
+        BackgroundCommand::FindEntries { .. } => "find-entries",
+        BackgroundCommand::BuildTree { .. } => "build-tree",
+        BackgroundCommand::Shutdown => "shutdown",
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -1023,18 +1059,27 @@ mod tests {
         }
     }
 
-    fn test_runtime_bridge() -> RuntimeBridge {
-        let (command_tx, _command_rx) = tokio_mpsc::channel(1);
+    fn test_runtime_bridge_with_capacity(
+        capacity: usize,
+    ) -> (RuntimeBridge, tokio_mpsc::Receiver<RuntimeCommand>) {
+        let (command_tx, command_rx) = tokio_mpsc::channel(capacity);
         let (_worker_event_tx, worker_event_rx) = mpsc::channel();
         let (_background_event_tx, background_event_rx) = mpsc::channel();
-        RuntimeBridge {
-            command_tx,
-            worker_event_rx,
-            background_event_rx,
-            runtime_handle: None,
-            worker_disconnected: false,
-            background_disconnected: false,
-        }
+        (
+            RuntimeBridge {
+                command_tx,
+                worker_event_rx,
+                background_event_rx,
+                runtime_handle: None,
+                worker_disconnected: false,
+                background_disconnected: false,
+            },
+            command_rx,
+        )
+    }
+
+    fn test_runtime_bridge() -> RuntimeBridge {
+        test_runtime_bridge_with_capacity(4).0
     }
 
     #[test]
@@ -1329,6 +1374,81 @@ mod tests {
         assert!(
             state.status_line.contains("External panelize"),
             "status line should acknowledge external panelize dialog"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn save_setup_queues_persist_settings_job_without_sync_write() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-save-setup-job-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, mut command_rx) = test_runtime_bridge_with_capacity(4);
+        let mc_ini = root.join("mc.ini");
+        let rc_ini = root.join("settings.ini");
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: Some(mc_ini.clone()),
+                rc_ini_path: Some(rc_ini.clone()),
+            },
+        };
+
+        apply_and_dispatch(&mut state, AppCommand::SaveSetup, &runtime, &skin_runtime)
+            .expect("save setup dispatch should succeed");
+
+        assert!(
+            !mc_ini.exists() && !rc_ini.exists(),
+            "save setup should enqueue persistence instead of writing inline"
+        );
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker(WorkerCommand::Run(job))) => match &job.request {
+                JobRequest::PersistSettings { paths, .. } => {
+                    assert_eq!(paths.mc_ini_path.as_deref(), Some(mc_ini.as_path()));
+                    assert_eq!(paths.rc_ini_path.as_deref(), Some(rc_ini.as_path()));
+                }
+                _ => panic!("save setup should enqueue persist settings request"),
+            },
+            Ok(other) => panic!("unexpected runtime command: {other:?}"),
+            Err(error) => panic!("runtime queue should contain a save-setup job: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn bounded_runtime_queue_marks_overflowed_job_failed() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-overflow-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, _command_rx) = test_runtime_bridge_with_capacity(1);
+        state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("overflow"),
+        });
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        let counts = state.jobs_status_counts();
+        assert_eq!(counts.queued, 1, "first job should remain queued");
+        assert_eq!(counts.failed, 1, "overflowed job should be marked failed");
+        assert!(
+            state.status_line.contains("runtime queue is full"),
+            "status should report queue backpressure"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
