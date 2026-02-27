@@ -1762,13 +1762,12 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use rc_core::{
-        AppCommand, AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobRequest,
-        WorkerCommand, execute_worker_job, run_background_worker,
+        AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
+        execute_worker_job,
     };
     use std::env;
     use std::fs;
     use std::sync::mpsc;
-    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
@@ -1826,30 +1825,6 @@ mod tests {
                     }
                     WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {}
                 }
-            }
-
-            let commands = state.take_pending_background_commands();
-            if !commands.is_empty() {
-                progressed = true;
-            }
-            for command in commands {
-                let (command_tx, command_rx) = mpsc::channel();
-                let (event_tx, event_rx) = mpsc::channel();
-                let handle = thread::spawn(move || run_background_worker(command_rx, event_tx));
-
-                command_tx
-                    .send(command)
-                    .expect("background command should send");
-                let event = event_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .expect("background event should arrive");
-                state.handle_background_event(event);
-                command_tx
-                    .send(BackgroundCommand::Shutdown)
-                    .expect("background shutdown should send");
-                handle
-                    .join()
-                    .expect("background worker should shut down cleanly");
             }
 
             if !progressed {

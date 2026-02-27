@@ -1660,7 +1660,6 @@ pub struct AppState {
     paused_find_results: Option<FindResultsState>,
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
-    pending_background_commands: Vec<BackgroundCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh_job_ids: [Option<JobId>; 2],
     panel_refresh_request_ids: [u64; 2],
@@ -1705,7 +1704,6 @@ impl AppState {
             paused_find_results: None,
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
-            pending_background_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
             panel_refresh_job_ids: [None; 2],
             panel_refresh_request_ids: [0; 2],
@@ -2638,10 +2636,6 @@ impl AppState {
 
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
         std::mem::take(&mut self.pending_worker_commands)
-    }
-
-    pub fn take_pending_background_commands(&mut self) -> Vec<BackgroundCommand> {
-        std::mem::take(&mut self.pending_background_commands)
     }
 
     pub fn take_pending_external_edit_requests(&mut self) -> Vec<ExternalEditRequest> {
@@ -6065,20 +6059,6 @@ mod tests {
                 }
             }
 
-            let commands = app.take_pending_background_commands();
-            if !commands.is_empty() {
-                progressed = true;
-            }
-            for command in commands {
-                let (event_tx, event_rx) = std::sync::mpsc::channel();
-                if !run_background_command_sync(command, &event_tx) {
-                    return;
-                }
-                for event in event_rx.try_iter() {
-                    app.handle_background_event(event);
-                }
-            }
-
             if !progressed {
                 break;
             }
@@ -7310,10 +7290,7 @@ OpenJobs = f6
         assert_eq!(request.editor_command, "nvim");
         assert_eq!(request.path, file_path);
         assert_eq!(request.cwd, root);
-        assert!(
-            app.take_pending_background_commands().is_empty(),
-            "external edit should not queue viewer load"
-        );
+        assert!(app.take_pending_worker_commands().is_empty());
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

@@ -36,16 +36,11 @@ pub(crate) enum RuntimeCommand {
         command: WorkerCommand,
         queued_at: Instant,
     },
-    Background {
-        command: BackgroundCommand,
-        queued_at: Instant,
-    },
     Shutdown,
 }
 
 enum TaskCompletion {
     Worker { job_id: JobId },
-    Background,
 }
 
 struct WorkerTaskSpec {
@@ -143,34 +138,6 @@ impl RuntimeBridge {
                 }
             }
         }
-
-        for command in state.take_pending_background_commands() {
-            let command_name = background_command_name(&command);
-            let queued_at = Instant::now();
-            match self
-                .command_tx
-                .try_send(RuntimeCommand::Background { command, queued_at })
-            {
-                Ok(()) => {
-                    tracing::debug!(
-                        runtime_event = "enqueued",
-                        command_class = "background",
-                        command = command_name,
-                        queue_depth = runtime_queue_depth(&self.command_tx),
-                        queue_capacity = self.command_tx.max_capacity(),
-                        "runtime command enqueued"
-                    );
-                }
-                Err(tokio_mpsc::error::TrySendError::Full(_)) => {
-                    state.set_status("runtime queue is full");
-                    break;
-                }
-                Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
-                    state.set_status("runtime is unavailable");
-                    break;
-                }
-            }
-        }
     }
 
     pub(crate) fn drain_events(&mut self, state: &mut AppState) {
@@ -254,7 +221,6 @@ async fn run_runtime_loop(
                     Ok(TaskCompletion::Worker { job_id }) => {
                         worker_cancellations.remove(&job_id);
                     }
-                    Ok(TaskCompletion::Background) => {}
                     Err(error) => {
                         tracing::warn!(
                             runtime_event = "task_failed",
@@ -346,33 +312,9 @@ async fn run_runtime_loop(
                         command: WorkerCommand::Shutdown,
                         ..
                     }
-                    | RuntimeCommand::Background {
-                        command: BackgroundCommand::Shutdown,
-                        ..
-                    }
                     | RuntimeCommand::Shutdown => {
                         tracing::debug!(runtime_event = "shutdown", "runtime shutdown requested");
                         break;
-                    }
-                    RuntimeCommand::Background { command, queued_at } => {
-                        let (limit, scheduler_class) = match &command {
-                            BackgroundCommand::RefreshPanel {
-                                source: PanelListingSource::Panelize { .. },
-                                ..
-                            } => {
-                                (Arc::clone(&background_process_limit), "process")
-                            }
-                            _ => (Arc::clone(&background_scan_limit), "scan"),
-                        };
-                        spawn_background_task(
-                            &mut tasks,
-                            limit,
-                            shutdown.child_token(),
-                            scheduler_class,
-                            command,
-                            background_event_tx.clone(),
-                            queued_at,
-                        );
                     }
                 }
             }
@@ -637,70 +579,6 @@ fn execute_tree_worker_job(
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
-fn spawn_background_task(
-    tasks: &mut JoinSet<TaskCompletion>,
-    limit: Arc<Semaphore>,
-    shutdown: CancellationToken,
-    scheduler_class: &'static str,
-    command: BackgroundCommand,
-    background_event_tx: Sender<BackgroundEvent>,
-    queued_at: Instant,
-) {
-    let command_name = background_command_name(&command);
-    tasks.spawn(async move {
-        let Ok(permit) = limit.acquire_owned().await else {
-            return TaskCompletion::Background;
-        };
-        let queue_wait_ms = queued_at.elapsed().as_millis();
-        if shutdown.is_cancelled() {
-            tracing::debug!(
-                runtime_event = "canceled",
-                command_class = "background",
-                scheduler_class,
-                command = command_name,
-                queue_wait_ms,
-                reason = "runtime shutdown",
-                "runtime background task canceled before start"
-            );
-            return TaskCompletion::Background;
-        }
-        let blocking = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let run_started = Instant::now();
-            tracing::debug!(
-                runtime_event = "started",
-                command_class = "background",
-                scheduler_class,
-                command = command_name,
-                queue_wait_ms,
-                "runtime background task started"
-            );
-            let _ = run_background_command_sync(command, &background_event_tx);
-            tracing::debug!(
-                runtime_event = "finished",
-                command_class = "background",
-                scheduler_class,
-                command = command_name,
-                queue_wait_ms,
-                run_time_ms = run_started.elapsed().as_millis(),
-                "runtime background task finished"
-            );
-        });
-        if let Err(error) = blocking.await {
-            tracing::warn!(
-                runtime_event = "failed",
-                command_class = "background",
-                scheduler_class,
-                command = command_name,
-                error_class = "join_error",
-                queue_wait_ms,
-                "background task panicked: {error}"
-            );
-        }
-        TaskCompletion::Background
-    });
-}
-
 fn runtime_queue_depth(command_tx: &tokio_mpsc::Sender<RuntimeCommand>) -> usize {
     command_tx
         .max_capacity()
@@ -712,13 +590,5 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
         WorkerCommand::Run(_) => "run",
         WorkerCommand::Cancel(_) => "cancel",
         WorkerCommand::Shutdown => "shutdown",
-    }
-}
-
-fn background_command_name(command: &BackgroundCommand) -> &'static str {
-    match command {
-        BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
-        BackgroundCommand::BuildTree { .. } => "build-tree",
-        BackgroundCommand::Shutdown => "shutdown",
     }
 }
