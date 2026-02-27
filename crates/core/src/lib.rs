@@ -24,8 +24,8 @@ use std::time::SystemTime;
 #[cfg(test)]
 use background::stream_find_entries;
 pub use background::{
-    BackgroundCommand, BackgroundEvent, run_background_command_sync, run_background_worker,
-    run_find_entries,
+    BackgroundCommand, BackgroundEvent, build_tree_ready_event, refresh_panel_event,
+    run_background_command_sync, run_background_worker, run_find_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
@@ -5948,30 +5948,20 @@ mod tests {
                                 request_id,
                             } => {
                                 let _ = event_tx.send(JobEvent::Started { id: job_id });
-                                let (background_tx, background_rx) = std::sync::mpsc::channel();
-                                let delivered = run_background_command_sync(
-                                    BackgroundCommand::RefreshPanel {
-                                        panel: *panel,
-                                        cwd: cwd.clone(),
-                                        source: source.clone(),
-                                        sort_mode: *sort_mode,
-                                        show_hidden_files: *show_hidden_files,
-                                        request_id: *request_id,
-                                        cancel_flag: job.cancel_flag(),
-                                    },
-                                    &background_tx,
-                                );
-                                for event in background_rx.try_iter() {
-                                    app.handle_background_event(event);
-                                }
-                                let result = if delivered {
-                                    Ok(())
-                                } else {
-                                    Err(JobError::from_message(
-                                        "background event channel disconnected",
-                                    ))
-                                };
-                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                                let cancel_flag = job.cancel_flag();
+                                app.handle_background_event(refresh_panel_event(
+                                    *panel,
+                                    cwd.clone(),
+                                    source.clone(),
+                                    *sort_mode,
+                                    *show_hidden_files,
+                                    *request_id,
+                                    cancel_flag.as_ref(),
+                                ));
+                                let _ = event_tx.send(JobEvent::Finished {
+                                    id: job_id,
+                                    result: Ok(()),
+                                });
                             }
                             JobRequest::Find {
                                 query,
@@ -6026,26 +6016,15 @@ mod tests {
                                 max_entries,
                             } => {
                                 let _ = event_tx.send(JobEvent::Started { id: job_id });
-                                let (background_tx, background_rx) = std::sync::mpsc::channel();
-                                let delivered = run_background_command_sync(
-                                    BackgroundCommand::BuildTree {
-                                        root: root.clone(),
-                                        max_depth: *max_depth,
-                                        max_entries: *max_entries,
-                                    },
-                                    &background_tx,
-                                );
-                                for event in background_rx.try_iter() {
-                                    app.handle_background_event(event);
-                                }
-                                let result = if delivered {
-                                    Ok(())
-                                } else {
-                                    Err(JobError::from_message(
-                                        "background event channel disconnected",
-                                    ))
-                                };
-                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                                app.handle_background_event(build_tree_ready_event(
+                                    root.clone(),
+                                    *max_depth,
+                                    *max_entries,
+                                ));
+                                let _ = event_tx.send(JobEvent::Finished {
+                                    id: job_id,
+                                    result: Ok(()),
+                                });
                             }
                             _ => {
                                 execute_worker_job(job, &event_tx);

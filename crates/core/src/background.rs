@@ -81,37 +81,55 @@ pub fn run_background_command_sync(
             show_hidden_files,
             request_id,
             cancel_flag,
-        } => {
-            let result = refresh_panel_entries(
-                &cwd,
-                &source,
+        } => event_tx
+            .send(refresh_panel_event(
+                panel,
+                cwd,
+                source,
                 sort_mode,
                 show_hidden_files,
+                request_id,
                 cancel_flag.as_ref(),
-            );
-            event_tx
-                .send(BackgroundEvent::PanelRefreshed {
-                    panel,
-                    cwd,
-                    source,
-                    sort_mode,
-                    request_id,
-                    result,
-                })
-                .is_ok()
-        }
+            ))
+            .is_ok(),
         BackgroundCommand::BuildTree {
             root,
             max_depth,
             max_entries,
-        } => {
-            let entries = build_tree_entries(&root, max_depth, max_entries);
-            event_tx
-                .send(BackgroundEvent::TreeReady { root, entries })
-                .is_ok()
-        }
+        } => event_tx
+            .send(build_tree_ready_event(root, max_depth, max_entries))
+            .is_ok(),
         BackgroundCommand::Shutdown => false,
     }
+}
+
+pub fn refresh_panel_event(
+    panel: ActivePanel,
+    cwd: PathBuf,
+    source: PanelListingSource,
+    sort_mode: SortMode,
+    show_hidden_files: bool,
+    request_id: u64,
+    cancel_flag: &AtomicBool,
+) -> BackgroundEvent {
+    let result = refresh_panel_entries(&cwd, &source, sort_mode, show_hidden_files, cancel_flag);
+    BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        result,
+    }
+}
+
+pub fn build_tree_ready_event(
+    root: PathBuf,
+    max_depth: usize,
+    max_entries: usize,
+) -> BackgroundEvent {
+    let entries = build_tree_entries(&root, max_depth, max_entries);
+    BackgroundEvent::TreeReady { root, entries }
 }
 
 fn refresh_panel_entries(

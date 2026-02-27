@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, JobRequest,
-    PanelListingSource, WorkerCommand, execute_worker_job, run_background_command_sync,
+    AppState, BackgroundEvent, JobError, JobEvent, JobId, JobRequest, PanelListingSource,
+    WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_event,
     run_find_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
@@ -484,18 +484,17 @@ fn execute_refresh_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let delivered = run_background_command_sync(
-        BackgroundCommand::RefreshPanel {
+    let delivered = background_event_tx
+        .send(refresh_panel_event(
             panel,
             cwd,
             source,
             sort_mode,
             show_hidden_files,
             request_id,
-            cancel_flag,
-        },
-        background_event_tx,
-    );
+            cancel_flag.as_ref(),
+        ))
+        .is_ok();
     let result = if delivered {
         Ok(())
     } else {
@@ -561,14 +560,9 @@ fn execute_tree_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let delivered = run_background_command_sync(
-        BackgroundCommand::BuildTree {
-            root,
-            max_depth,
-            max_entries,
-        },
-        background_event_tx,
-    );
+    let delivered = background_event_tx
+        .send(build_tree_ready_event(root, max_depth, max_entries))
+        .is_ok();
     let result = if delivered {
         Ok(())
     } else {
