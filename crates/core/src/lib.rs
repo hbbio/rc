@@ -2988,6 +2988,12 @@ impl AppState {
         self.clamp_jobs_cursor();
         match event {
             JobEvent::Started { id } => {
+                let job_kind = self
+                    .jobs
+                    .job(id)
+                    .map(|job| job.kind.label())
+                    .unwrap_or("unknown");
+                tracing::debug!(job_event = "started", job_kind, job_id = %id, "job started");
                 if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
                     self.set_status(format!("Job #{id} started: {}", job.summary));
                 } else {
@@ -2996,6 +3002,22 @@ impl AppState {
             }
             JobEvent::Progress { id, progress } => {
                 let percent = progress.percent();
+                let job_kind = self
+                    .jobs
+                    .job(id)
+                    .map(|job| job.kind.label())
+                    .unwrap_or("unknown");
+                tracing::debug!(
+                    job_event = "progress",
+                    job_kind,
+                    job_id = %id,
+                    percent,
+                    items_done = progress.items_done,
+                    items_total = progress.items_total,
+                    bytes_done = progress.bytes_done,
+                    bytes_total = progress.bytes_total,
+                    "job progress update"
+                );
                 let path_label = progress
                     .current_path
                     .as_deref()
@@ -3012,6 +3034,18 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
+                    let job_kind = self
+                        .jobs
+                        .job(id)
+                        .map(|job| job.kind.label())
+                        .unwrap_or("unknown");
+                    tracing::info!(
+                        job_event = "finished",
+                        outcome = "succeeded",
+                        job_kind,
+                        job_id = %id,
+                        "job finished successfully"
+                    );
                     let is_persist_settings = self
                         .jobs
                         .job(id)
@@ -3044,13 +3078,37 @@ impl AppState {
                     }
                 }
                 Err(error) => {
+                    let job_kind = self
+                        .jobs
+                        .job(id)
+                        .map(|job| job.kind.label())
+                        .unwrap_or("unknown");
                     let is_persist_settings = self
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
                     if error.is_canceled() {
+                        tracing::info!(
+                            job_event = "finished",
+                            outcome = "canceled",
+                            job_kind,
+                            job_id = %id,
+                            error_code = ?error.code,
+                            retry_hint = ?error.retry_hint,
+                            "job canceled"
+                        );
                         self.set_status(format!("Job #{id} canceled"));
                     } else {
+                        tracing::warn!(
+                            job_event = "finished",
+                            outcome = "failed",
+                            job_kind,
+                            job_id = %id,
+                            error_code = ?error.code,
+                            retry_hint = ?error.retry_hint,
+                            error_message = %error.message,
+                            "job failed"
+                        );
                         self.set_status(format!("Job #{id} failed: {}", error.message));
                     }
                     if is_persist_settings
@@ -3234,6 +3292,14 @@ impl AppState {
     }
 
     pub fn handle_job_dispatch_failure(&mut self, id: JobId, error: JobError) {
+        tracing::warn!(
+            job_event = "dispatch_failed",
+            job_id = %id,
+            error_code = ?error.code,
+            retry_hint = ?error.retry_hint,
+            error_message = %error.message,
+            "job dispatch failed"
+        );
         self.handle_job_event(JobEvent::Finished {
             id,
             result: Err(error),
@@ -5101,20 +5167,42 @@ impl AppState {
     fn queue_worker_job_request(&mut self, request: JobRequest) -> JobId {
         if matches!(request, JobRequest::PersistSettings { .. }) {
             if let Some(existing_id) = self.replace_pending_persist_settings_request(&request) {
+                tracing::debug!(
+                    job_event = "coalesced",
+                    job_kind = JobKind::PersistSettings.label(),
+                    job_id = %existing_id,
+                    queue_depth = self.pending_worker_commands.len(),
+                    "coalesced pending persist-settings job request"
+                );
                 self.set_status(format!("Updated pending setup save for job #{existing_id}"));
                 return existing_id;
             }
             if let Some(active_id) = self.active_persist_settings_job_id() {
                 self.deferred_persist_settings_request = Some(request);
+                tracing::debug!(
+                    job_event = "deferred",
+                    job_kind = JobKind::PersistSettings.label(),
+                    job_id = %active_id,
+                    "deferred persist-settings request behind active job"
+                );
                 self.set_status(format!("Queued latest setup save after job #{active_id}"));
                 return active_id;
             }
         }
+        let job_kind = request.kind().label();
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
         self.pending_worker_commands
             .push(WorkerCommand::Run(Box::new(worker_job)));
+        tracing::debug!(
+            job_event = "queued",
+            job_kind,
+            job_id = %job_id,
+            queue_depth = self.pending_worker_commands.len(),
+            summary = %summary,
+            "queued worker job"
+        );
         self.set_status(format!("Queued job #{job_id}: {summary}"));
         job_id
     }
@@ -5166,6 +5254,17 @@ impl AppState {
         if !self.jobs.request_cancel(job_id) {
             return false;
         }
+        let job_kind = self
+            .jobs
+            .job(job_id)
+            .map(|job| job.kind.label())
+            .unwrap_or("unknown");
+        tracing::debug!(
+            job_event = "cancel_requested",
+            job_kind,
+            job_id = %job_id,
+            "requested job cancellation"
+        );
         let is_worker_job = self
             .jobs
             .job(job_id)

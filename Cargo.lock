@@ -803,6 +803,7 @@ version = "0.1.0"
 dependencies = [
  "filetime",
  "nix",
+ "tracing",
 ]
 
 [[package]]
