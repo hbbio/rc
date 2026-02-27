@@ -257,18 +257,7 @@ fn run_app(
     tick_rate: Duration,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<()> {
-    let (worker_tx, worker_rx) = mpsc::channel();
-    let (worker_event_tx, worker_event_rx) = mpsc::channel();
-    let worker_handle = thread::Builder::new()
-        .name(String::from("rc-worker"))
-        .spawn(move || run_worker(worker_rx, worker_event_tx))
-        .map_err(|error| anyhow!("failed to spawn worker thread: {error}"))?;
-    let (background_tx, background_rx) = mpsc::channel();
-    let (background_event_tx, background_event_rx) = mpsc::channel();
-    let background_handle = thread::Builder::new()
-        .name(String::from("rc-background"))
-        .spawn(move || run_background_worker(background_rx, background_event_tx))
-        .map_err(|error| anyhow!("failed to spawn background worker thread: {error}"))?;
+    let mut runtime = RuntimeBridge::spawn()?;
 
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
@@ -284,45 +273,131 @@ fn run_app(
         state,
         keymap,
         tick_rate,
-        RuntimeChannels {
-            worker_tx: &worker_tx,
-            worker_event_rx: &worker_event_rx,
-            background_tx: &background_tx,
-            background_event_rx: &background_event_rx,
-        },
+        &mut runtime,
         skin_runtime,
     );
-    let shutdown_result = shutdown_worker(worker_tx, worker_handle);
-    let shutdown_background_result = shutdown_background_worker(background_tx, background_handle);
+    let shutdown_result = runtime.shutdown();
     let restore_result = restore_terminal(&mut terminal);
 
     loop_result?;
     shutdown_result?;
-    shutdown_background_result?;
     restore_result?;
     Ok(())
 }
 
-fn shutdown_worker(
+struct RuntimeBridge {
     worker_tx: Sender<WorkerCommand>,
-    worker_handle: thread::JoinHandle<()>,
-) -> Result<()> {
-    let _ = worker_tx.send(WorkerCommand::Shutdown);
-    worker_handle
-        .join()
-        .map_err(|_| anyhow!("worker thread panicked"))?;
-    Ok(())
+    worker_event_rx: Receiver<JobEvent>,
+    worker_handle: Option<thread::JoinHandle<()>>,
+    background_tx: Sender<BackgroundCommand>,
+    background_event_rx: Receiver<BackgroundEvent>,
+    background_handle: Option<thread::JoinHandle<()>>,
+    worker_disconnected: bool,
+    background_disconnected: bool,
 }
 
-fn shutdown_background_worker(
-    background_tx: Sender<BackgroundCommand>,
-    background_handle: thread::JoinHandle<()>,
-) -> Result<()> {
-    let _ = background_tx.send(BackgroundCommand::Shutdown);
-    background_handle
-        .join()
-        .map_err(|_| anyhow!("background worker thread panicked"))?;
-    Ok(())
+impl RuntimeBridge {
+    fn spawn() -> Result<Self> {
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let worker_handle = thread::Builder::new()
+            .name(String::from("rc-worker"))
+            .spawn(move || run_worker(worker_rx, worker_event_tx))
+            .map_err(|error| anyhow!("failed to spawn worker thread: {error}"))?;
+
+        let (background_tx, background_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+        let background_handle = thread::Builder::new()
+            .name(String::from("rc-background"))
+            .spawn(move || run_background_worker(background_rx, background_event_tx))
+            .map_err(|error| anyhow!("failed to spawn background worker thread: {error}"))?;
+
+        Ok(Self {
+            worker_tx,
+            worker_event_rx,
+            worker_handle: Some(worker_handle),
+            background_tx,
+            background_event_rx,
+            background_handle: Some(background_handle),
+            worker_disconnected: false,
+            background_disconnected: false,
+        })
+    }
+
+    fn dispatch_pending_commands(&self, state: &mut AppState) {
+        for command in state.take_pending_worker_commands() {
+            let run_job_id = match &command {
+                WorkerCommand::Run(job) => Some(job.id),
+                _ => None,
+            };
+            if let Err(error) = self.worker_tx.send(command) {
+                if let Some(job_id) = run_job_id {
+                    state.handle_job_dispatch_failure(
+                        job_id,
+                        format!("worker channel is unavailable: {error}"),
+                    );
+                } else {
+                    state.set_status(format!("worker channel is unavailable: {error}"));
+                }
+                break;
+            }
+        }
+
+        for command in state.take_pending_background_commands() {
+            if let Err(error) = self.background_tx.send(command) {
+                state.set_status(format!("background worker channel is unavailable: {error}"));
+                break;
+            }
+        }
+    }
+
+    fn drain_events(&mut self, state: &mut AppState) {
+        loop {
+            match self.worker_event_rx.try_recv() {
+                Ok(event) => state.handle_job_event(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.worker_disconnected {
+                        state.set_status("Worker channel disconnected");
+                        self.worker_disconnected = true;
+                    }
+                    break;
+                }
+            }
+        }
+
+        loop {
+            match self.background_event_rx.try_recv() {
+                Ok(event) => state.handle_background_event(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.background_disconnected {
+                        state.set_status("Background worker channel disconnected");
+                        self.background_disconnected = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn shutdown(mut self) -> Result<()> {
+        let _ = self.worker_tx.send(WorkerCommand::Shutdown);
+        if let Some(handle) = self.worker_handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow!("worker thread panicked"))?;
+        }
+
+        let _ = self.background_tx.send(BackgroundCommand::Shutdown);
+        if let Some(handle) = self.background_handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow!("background worker thread panicked"))?;
+        }
+
+        Ok(())
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -337,32 +412,18 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     Ok(())
 }
 
-struct RuntimeChannels<'a> {
-    worker_tx: &'a Sender<WorkerCommand>,
-    worker_event_rx: &'a Receiver<JobEvent>,
-    background_tx: &'a Sender<BackgroundCommand>,
-    background_event_rx: &'a Receiver<BackgroundEvent>,
-}
-
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
     keymap: &Keymap,
     tick_rate: Duration,
-    channels: RuntimeChannels<'_>,
+    runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
-    let mut worker_disconnected = false;
-    let mut background_disconnected = false;
 
     loop {
-        drain_worker_events(state, channels.worker_event_rx, &mut worker_disconnected);
-        drain_background_events(
-            state,
-            channels.background_event_rx,
-            &mut background_disconnected,
-        );
+        runtime.drain_events(state);
         dispatch_pending_external_edit_requests(terminal, state);
 
         terminal
@@ -378,8 +439,7 @@ fn run_event_loop(
                             state,
                             keymap,
                             key_event,
-                            channels.worker_tx,
-                            channels.background_tx,
+                            runtime,
                             skin_runtime,
                             InputCompatibility {
                                 macos_option_symbols: state
@@ -392,13 +452,7 @@ fn run_event_loop(
                     return Ok(());
                 }
                 Event::Mouse(mouse_event)
-                    if handle_mouse(
-                        state,
-                        mouse_event,
-                        channels.worker_tx,
-                        channels.background_tx,
-                        skin_runtime,
-                    )? =>
+                    if handle_mouse(state, mouse_event, runtime, skin_runtime)? =>
                 {
                     return Ok(());
                 }
@@ -416,8 +470,7 @@ fn handle_key(
     state: &mut AppState,
     keymap: &Keymap,
     key_event: KeyEvent,
-    worker_tx: &Sender<WorkerCommand>,
-    background_tx: &Sender<BackgroundCommand>,
+    runtime: &RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
     input_compatibility: InputCompatibility,
 ) -> Result<bool> {
@@ -426,10 +479,7 @@ fn handle_key(
     if context == KeyContext::Input
         && let Some(command) = input_char_command(&key_event)
     {
-        return Ok(
-            apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
-                == ApplyResult::Quit,
-        );
+        return Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit);
     }
 
     let Some(chord) = map_key_event_to_chord(key_event, input_compatibility) else {
@@ -461,17 +511,13 @@ fn handle_key(
         return Ok(false);
     };
 
-    Ok(
-        apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
-            == ApplyResult::Quit,
-    )
+    Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
 
 fn handle_mouse(
     state: &mut AppState,
     mouse_event: MouseEvent,
-    worker_tx: &Sender<WorkerCommand>,
-    background_tx: &Sender<BackgroundCommand>,
+    runtime: &RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
     if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -481,17 +527,13 @@ fn handle_mouse(
     let Some(command) = state.command_for_left_click(mouse_event.column, mouse_event.row) else {
         return Ok(false);
     };
-    Ok(
-        apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
-            == ApplyResult::Quit,
-    )
+    Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
 
 fn apply_and_dispatch(
     state: &mut AppState,
     command: AppCommand,
-    worker_tx: &Sender<WorkerCommand>,
-    background_tx: &Sender<BackgroundCommand>,
+    runtime: &RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<ApplyResult> {
     let result = state.apply(command)?;
@@ -499,8 +541,7 @@ fn apply_and_dispatch(
     apply_pending_skin_change(state, skin_runtime);
     apply_pending_skin_revert(state, skin_runtime);
     persist_dirty_settings(state, skin_runtime);
-    dispatch_pending_worker_commands(state, worker_tx);
-    dispatch_pending_background_commands(state, background_tx);
+    runtime.dispatch_pending_commands(state);
     Ok(result)
 }
 
@@ -520,38 +561,6 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
     state.mark_settings_saved(SystemTime::now());
     if save_requested {
         state.set_status("Setup saved");
-    }
-}
-
-fn dispatch_pending_worker_commands(state: &mut AppState, worker_tx: &Sender<WorkerCommand>) {
-    for command in state.take_pending_worker_commands() {
-        let run_job_id = match &command {
-            WorkerCommand::Run(job) => Some(job.id),
-            _ => None,
-        };
-        if let Err(error) = worker_tx.send(command) {
-            if let Some(job_id) = run_job_id {
-                state.handle_job_dispatch_failure(
-                    job_id,
-                    format!("worker channel is unavailable: {error}"),
-                );
-            } else {
-                state.set_status(format!("worker channel is unavailable: {error}"));
-            }
-            break;
-        }
-    }
-}
-
-fn dispatch_pending_background_commands(
-    state: &mut AppState,
-    background_tx: &Sender<BackgroundCommand>,
-) {
-    for command in state.take_pending_background_commands() {
-        if let Err(error) = background_tx.send(command) {
-            state.set_status(format!("background worker channel is unavailable: {error}"));
-            break;
-        }
     }
 }
 
@@ -713,46 +722,6 @@ fn apply_pending_skin_revert(state: &mut AppState, skin_runtime: &SkinRuntimeCon
         Err(error) => {
             tracing::warn!("failed to restore skin '{}': {error}", original_skin);
             state.set_status(format!("Skin '{}' unavailable: {error}", original_skin));
-        }
-    }
-}
-
-fn drain_worker_events(
-    state: &mut AppState,
-    worker_event_rx: &Receiver<JobEvent>,
-    worker_disconnected: &mut bool,
-) {
-    loop {
-        match worker_event_rx.try_recv() {
-            Ok(event) => state.handle_job_event(event),
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => {
-                if !*worker_disconnected {
-                    state.set_status("Worker channel disconnected");
-                    *worker_disconnected = true;
-                }
-                break;
-            }
-        }
-    }
-}
-
-fn drain_background_events(
-    state: &mut AppState,
-    background_event_rx: &Receiver<BackgroundEvent>,
-    background_disconnected: &mut bool,
-) {
-    loop {
-        match background_event_rx.try_recv() {
-            Ok(event) => state.handle_background_event(event),
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => {
-                if !*background_disconnected {
-                    state.set_status("Background worker channel disconnected");
-                    *background_disconnected = true;
-                }
-                break;
-            }
         }
     }
 }
@@ -921,6 +890,23 @@ mod tests {
         }
     }
 
+    fn test_runtime_bridge() -> RuntimeBridge {
+        let (worker_tx, _worker_rx) = mpsc::channel();
+        let (_worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_tx, _background_rx) = mpsc::channel();
+        let (_background_event_tx, background_event_rx) = mpsc::channel();
+        RuntimeBridge {
+            worker_tx,
+            worker_event_rx,
+            worker_handle: None,
+            background_tx,
+            background_event_rx,
+            background_handle: None,
+            worker_disconnected: false,
+            background_disconnected: false,
+        }
+    }
+
     #[test]
     fn macos_option_symbols_map_to_alt_key_chords() {
         let chord = map_key_event_to_chord(
@@ -1085,8 +1071,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let (worker_tx, _worker_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
+        let runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1111,8 +1096,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1136,8 +1120,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let (worker_tx, _worker_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
+        let runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1150,8 +1133,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1160,8 +1142,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('!'), KeyModifiers::SHIFT),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1186,8 +1167,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let (worker_tx, _worker_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
+        let runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1200,8 +1180,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1210,8 +1189,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('1'), KeyModifiers::SHIFT),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
