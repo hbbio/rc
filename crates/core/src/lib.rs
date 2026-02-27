@@ -26,7 +26,8 @@ pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
 pub use jobs::{
     JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
-    JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, run_worker,
+    JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, execute_worker_job,
+    run_worker,
 };
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
@@ -1834,6 +1835,107 @@ fn refresh_panel_entries(
             base_dir, paths, ..
         } => read_panelized_paths(base_dir, paths, sort_mode, Some(cancel_flag))
             .map_err(|error| error.to_string()),
+    }
+}
+
+pub fn run_background_command_sync(
+    command: BackgroundCommand,
+    event_tx: &Sender<BackgroundEvent>,
+) -> bool {
+    !matches!(
+        execute_background_command_sync(command, event_tx),
+        BackgroundExecution::Stop
+    )
+}
+
+fn execute_background_command_sync(
+    command: BackgroundCommand,
+    event_tx: &Sender<BackgroundEvent>,
+) -> BackgroundExecution {
+    match command {
+        BackgroundCommand::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            show_hidden_files,
+            request_id,
+            cancel_flag,
+        } => {
+            let result = refresh_panel_entries(
+                &cwd,
+                &source,
+                sort_mode,
+                show_hidden_files,
+                cancel_flag.as_ref(),
+            );
+            if event_tx
+                .send(BackgroundEvent::PanelRefreshed {
+                    panel,
+                    cwd,
+                    source,
+                    sort_mode,
+                    request_id,
+                    result,
+                })
+                .is_ok()
+            {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
+        }
+        BackgroundCommand::LoadViewer { path } => {
+            if event_tx
+                .send(BackgroundEvent::ViewerLoaded {
+                    path: path.clone(),
+                    result: ViewerState::open(path).map_err(|error| error.to_string()),
+                })
+                .is_ok()
+            {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
+        }
+        BackgroundCommand::FindEntries {
+            job_id,
+            query,
+            base_dir,
+            max_results,
+            cancel_flag,
+            pause_flag,
+        } => {
+            if run_find_search(
+                event_tx,
+                job_id,
+                query,
+                base_dir,
+                max_results,
+                cancel_flag.as_ref(),
+                pause_flag.as_ref(),
+            ) {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
+        }
+        BackgroundCommand::BuildTree {
+            root,
+            max_depth,
+            max_entries,
+        } => {
+            let entries = build_tree_entries(&root, max_depth, max_entries);
+            if event_tx
+                .send(BackgroundEvent::TreeReady { root, entries })
+                .is_ok()
+            {
+                BackgroundExecution::Continue
+            } else {
+                BackgroundExecution::Stop
+            }
+        }
+        BackgroundCommand::Shutdown => BackgroundExecution::Stop,
     }
 }
 

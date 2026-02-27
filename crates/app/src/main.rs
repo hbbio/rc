@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,8 +25,11 @@ use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, Keyma
 use rc_core::settings_io;
 use rc_core::{
     AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, ExternalEditRequest,
-    JobEvent, JobRequest, Settings, WorkerCommand, run_background_worker, run_worker,
+    JobEvent, JobRequest, Settings, WorkerCommand, execute_worker_job, run_background_command_sync,
 };
+use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -285,39 +289,52 @@ fn run_app(
 }
 
 struct RuntimeBridge {
-    worker_tx: Sender<WorkerCommand>,
+    command_tx: tokio_mpsc::Sender<RuntimeCommand>,
     worker_event_rx: Receiver<JobEvent>,
-    worker_handle: Option<thread::JoinHandle<()>>,
-    background_tx: Sender<BackgroundCommand>,
     background_event_rx: Receiver<BackgroundEvent>,
-    background_handle: Option<thread::JoinHandle<()>>,
+    runtime_handle: Option<thread::JoinHandle<Result<()>>>,
     worker_disconnected: bool,
     background_disconnected: bool,
 }
 
+const RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 256;
+const WORKER_CONCURRENCY_LIMIT: usize = 2;
+const BACKGROUND_CONCURRENCY_LIMIT: usize = 4;
+
+#[derive(Debug)]
+enum RuntimeCommand {
+    Worker(WorkerCommand),
+    Background(BackgroundCommand),
+    Shutdown,
+}
+
 impl RuntimeBridge {
     fn spawn() -> Result<Self> {
-        let (worker_tx, worker_rx) = mpsc::channel();
+        let (command_tx, command_rx) = tokio_mpsc::channel(RUNTIME_COMMAND_QUEUE_CAPACITY);
         let (worker_event_tx, worker_event_rx) = mpsc::channel();
-        let worker_handle = thread::Builder::new()
-            .name(String::from("rc-worker"))
-            .spawn(move || run_worker(worker_rx, worker_event_tx))
-            .map_err(|error| anyhow!("failed to spawn worker thread: {error}"))?;
-
-        let (background_tx, background_rx) = mpsc::channel();
         let (background_event_tx, background_event_rx) = mpsc::channel();
-        let background_handle = thread::Builder::new()
-            .name(String::from("rc-background"))
-            .spawn(move || run_background_worker(background_rx, background_event_tx))
-            .map_err(|error| anyhow!("failed to spawn background worker thread: {error}"))?;
+        let runtime_handle = thread::Builder::new()
+            .name(String::from("rc-runtime"))
+            .spawn(move || -> Result<()> {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .build()
+                    .map_err(|error| anyhow!("failed to build runtime: {error}"))?;
+                runtime.block_on(run_runtime_loop(
+                    command_rx,
+                    worker_event_tx,
+                    background_event_tx,
+                ));
+                Ok(())
+            })
+            .map_err(|error| anyhow!("failed to spawn runtime thread: {error}"))?;
 
         Ok(Self {
-            worker_tx,
+            command_tx,
             worker_event_rx,
-            worker_handle: Some(worker_handle),
-            background_tx,
             background_event_rx,
-            background_handle: Some(background_handle),
+            runtime_handle: Some(runtime_handle),
             worker_disconnected: false,
             background_disconnected: false,
         })
@@ -329,23 +346,47 @@ impl RuntimeBridge {
                 WorkerCommand::Run(job) => Some(job.id),
                 _ => None,
             };
-            if let Err(error) = self.worker_tx.send(command) {
-                if let Some(job_id) = run_job_id {
-                    state.handle_job_dispatch_failure(
-                        job_id,
-                        format!("worker channel is unavailable: {error}"),
-                    );
-                } else {
-                    state.set_status(format!("worker channel is unavailable: {error}"));
+            match self.command_tx.try_send(RuntimeCommand::Worker(command)) {
+                Ok(()) => {}
+                Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                    if let Some(job_id) = run_job_id {
+                        state.handle_job_dispatch_failure(
+                            job_id,
+                            String::from("runtime queue is full"),
+                        );
+                    } else {
+                        state.set_status("runtime queue is full");
+                    }
+                    break;
                 }
-                break;
+                Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                    if let Some(job_id) = run_job_id {
+                        state.handle_job_dispatch_failure(
+                            job_id,
+                            String::from("runtime is unavailable"),
+                        );
+                    } else {
+                        state.set_status("runtime is unavailable");
+                    }
+                    break;
+                }
             }
         }
 
         for command in state.take_pending_background_commands() {
-            if let Err(error) = self.background_tx.send(command) {
-                state.set_status(format!("background worker channel is unavailable: {error}"));
-                break;
+            match self
+                .command_tx
+                .try_send(RuntimeCommand::Background(command))
+            {
+                Ok(()) => {}
+                Err(tokio_mpsc::error::TrySendError::Full(_)) => {
+                    state.set_status("runtime queue is full");
+                    break;
+                }
+                Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                    state.set_status("runtime is unavailable");
+                    break;
+                }
             }
         }
     }
@@ -381,22 +422,121 @@ impl RuntimeBridge {
     }
 
     fn shutdown(mut self) -> Result<()> {
-        let _ = self.worker_tx.send(WorkerCommand::Shutdown);
-        if let Some(handle) = self.worker_handle.take() {
+        let _ = self.command_tx.blocking_send(RuntimeCommand::Shutdown);
+        if let Some(handle) = self.runtime_handle.take() {
             handle
                 .join()
-                .map_err(|_| anyhow!("worker thread panicked"))?;
+                .map_err(|_| anyhow!("runtime thread panicked"))??;
         }
-
-        let _ = self.background_tx.send(BackgroundCommand::Shutdown);
-        if let Some(handle) = self.background_handle.take() {
-            handle
-                .join()
-                .map_err(|_| anyhow!("background worker thread panicked"))?;
-        }
-
         Ok(())
     }
+}
+
+async fn run_runtime_loop(
+    mut command_rx: tokio_mpsc::Receiver<RuntimeCommand>,
+    worker_event_tx: Sender<JobEvent>,
+    background_event_tx: Sender<BackgroundEvent>,
+) {
+    let worker_limit = Arc::new(Semaphore::new(WORKER_CONCURRENCY_LIMIT));
+    let background_limit = Arc::new(Semaphore::new(BACKGROUND_CONCURRENCY_LIMIT));
+    let shutdown = CancellationToken::new();
+    let mut tasks = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            Some(join_result) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Err(error) = join_result {
+                    tracing::warn!("runtime task failed: {error}");
+                }
+            }
+            command = command_rx.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    RuntimeCommand::Worker(WorkerCommand::Run(job)) => {
+                        spawn_worker_task(
+                            &mut tasks,
+                            Arc::clone(&worker_limit),
+                            shutdown.child_token(),
+                            *job,
+                            worker_event_tx.clone(),
+                        );
+                    }
+                    RuntimeCommand::Worker(WorkerCommand::Cancel(_)) => {}
+                    RuntimeCommand::Worker(WorkerCommand::Shutdown)
+                    | RuntimeCommand::Background(BackgroundCommand::Shutdown)
+                    | RuntimeCommand::Shutdown => {
+                        break;
+                    }
+                    RuntimeCommand::Background(command) => {
+                        spawn_background_task(
+                            &mut tasks,
+                            Arc::clone(&background_limit),
+                            shutdown.child_token(),
+                            command,
+                            background_event_tx.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    shutdown.cancel();
+    while let Some(join_result) = tasks.join_next().await {
+        if let Err(error) = join_result {
+            tracing::warn!("runtime task failed during shutdown: {error}");
+        }
+    }
+}
+
+fn spawn_worker_task(
+    tasks: &mut JoinSet<()>,
+    limit: Arc<Semaphore>,
+    shutdown: CancellationToken,
+    worker_job: rc_core::WorkerJob,
+    worker_event_tx: Sender<JobEvent>,
+) {
+    tasks.spawn(async move {
+        let Ok(permit) = limit.acquire_owned().await else {
+            return;
+        };
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let blocking = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            execute_worker_job(worker_job, &worker_event_tx);
+        });
+        if let Err(error) = blocking.await {
+            tracing::warn!("worker task panicked: {error}");
+        }
+    });
+}
+
+fn spawn_background_task(
+    tasks: &mut JoinSet<()>,
+    limit: Arc<Semaphore>,
+    shutdown: CancellationToken,
+    command: BackgroundCommand,
+    background_event_tx: Sender<BackgroundEvent>,
+) {
+    tasks.spawn(async move {
+        let Ok(permit) = limit.acquire_owned().await else {
+            return;
+        };
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let blocking = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _ = run_background_command_sync(command, &background_event_tx);
+        });
+        if let Err(error) = blocking.await {
+            tracing::warn!("background task panicked: {error}");
+        }
+    });
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -884,17 +1024,14 @@ mod tests {
     }
 
     fn test_runtime_bridge() -> RuntimeBridge {
-        let (worker_tx, _worker_rx) = mpsc::channel();
+        let (command_tx, _command_rx) = tokio_mpsc::channel(1);
         let (_worker_event_tx, worker_event_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
         let (_background_event_tx, background_event_rx) = mpsc::channel();
         RuntimeBridge {
-            worker_tx,
+            command_tx,
             worker_event_rx,
-            worker_handle: None,
-            background_tx,
             background_event_rx,
-            background_handle: None,
+            runtime_handle: None,
             worker_disconnected: false,
             background_disconnected: false,
         }

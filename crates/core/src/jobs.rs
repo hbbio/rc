@@ -444,6 +444,10 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
     }
 }
 
+pub fn execute_worker_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
+    run_single_job(job, event_tx);
+}
+
 fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     let WorkerJob {
         id,
