@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
@@ -5,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, WorkerCommand,
+    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, WorkerCommand,
     execute_worker_job, run_background_command_sync,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
@@ -37,6 +38,11 @@ pub(crate) enum RuntimeCommand {
         queued_at: Instant,
     },
     Shutdown,
+}
+
+enum TaskCompletion {
+    Worker { job_id: JobId },
+    Background,
 }
 
 impl RuntimeBridge {
@@ -223,17 +229,24 @@ async fn run_runtime_loop(
     let background_scan_limit = Arc::new(Semaphore::new(BACKGROUND_SCAN_CONCURRENCY_LIMIT));
     let background_viewer_limit = Arc::new(Semaphore::new(BACKGROUND_VIEWER_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
+    let mut worker_cancellations = HashMap::<JobId, CancellationToken>::new();
     let mut tasks = JoinSet::new();
 
     loop {
         tokio::select! {
             Some(join_result) = tasks.join_next(), if !tasks.is_empty() => {
-                if let Err(error) = join_result {
-                    tracing::warn!(
-                        runtime_event = "task_failed",
-                        error_class = "join_error",
-                        "runtime task failed: {error}"
-                    );
+                match join_result {
+                    Ok(TaskCompletion::Worker { job_id }) => {
+                        worker_cancellations.remove(&job_id);
+                    }
+                    Ok(TaskCompletion::Background) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            runtime_event = "task_failed",
+                            error_class = "join_error",
+                            "runtime task failed: {error}"
+                        );
+                    }
                 }
             }
             command = command_rx.recv() => {
@@ -245,11 +258,16 @@ async fn run_runtime_loop(
                         command: WorkerCommand::Run(job),
                         queued_at,
                     } => {
+                        let worker_job = *job;
+                        let job_id = worker_job.id;
+                        let job_cancel = shutdown.child_token();
+                        worker_cancellations.insert(job_id, job_cancel.clone());
                         spawn_worker_task(
                             &mut tasks,
                             Arc::clone(&worker_limit),
                             shutdown.child_token(),
-                            *job,
+                            job_cancel,
+                            worker_job,
                             worker_event_tx.clone(),
                             queued_at,
                         );
@@ -258,15 +276,27 @@ async fn run_runtime_loop(
                         command: WorkerCommand::Cancel(job_id),
                         queued_at,
                     } => {
-                        tracing::debug!(
-                            runtime_event = "skipped",
-                            command_class = "worker",
-                            command = "cancel",
-                            job_id = %job_id,
-                            queue_wait_ms = queued_at.elapsed().as_millis(),
-                            reason = "cancel handled in app state",
-                            "runtime command skipped"
-                        );
+                        if let Some(cancel) = worker_cancellations.get(&job_id) {
+                            cancel.cancel();
+                            tracing::debug!(
+                                runtime_event = "canceled",
+                                command_class = "worker",
+                                command = "cancel",
+                                job_id = %job_id,
+                                queue_wait_ms = queued_at.elapsed().as_millis(),
+                                "runtime cancellation token triggered"
+                            );
+                        } else {
+                            tracing::debug!(
+                                runtime_event = "skipped",
+                                command_class = "worker",
+                                command = "cancel",
+                                job_id = %job_id,
+                                queue_wait_ms = queued_at.elapsed().as_millis(),
+                                reason = "job already finished",
+                                "runtime cancel command skipped"
+                            );
+                        }
                     }
                     RuntimeCommand::Worker {
                         command: WorkerCommand::Shutdown,
@@ -302,6 +332,7 @@ async fn run_runtime_loop(
     }
 
     shutdown.cancel();
+    worker_cancellations.clear();
     while let Some(join_result) = tasks.join_next().await {
         if let Err(error) = join_result {
             tracing::warn!(
@@ -314,9 +345,10 @@ async fn run_runtime_loop(
 }
 
 fn spawn_worker_task(
-    tasks: &mut JoinSet<()>,
+    tasks: &mut JoinSet<TaskCompletion>,
     limit: Arc<Semaphore>,
     shutdown: CancellationToken,
+    job_cancel: CancellationToken,
     worker_job: rc_core::WorkerJob,
     worker_event_tx: Sender<JobEvent>,
     queued_at: Instant,
@@ -325,20 +357,24 @@ fn spawn_worker_task(
     let job_kind = worker_job.request.kind().label();
     tasks.spawn(async move {
         let Ok(permit) = limit.acquire_owned().await else {
-            return;
+            return TaskCompletion::Worker { job_id };
         };
         let queue_wait_ms = queued_at.elapsed().as_millis();
-        if shutdown.is_cancelled() {
+        if shutdown.is_cancelled() || job_cancel.is_cancelled() {
             tracing::debug!(
                 runtime_event = "canceled",
                 command_class = "worker",
                 job_id = %job_id,
                 job_kind,
                 queue_wait_ms,
-                reason = "runtime shutdown",
+                reason = if shutdown.is_cancelled() {
+                    "runtime shutdown"
+                } else {
+                    "job cancellation token"
+                },
                 "runtime worker task canceled before start"
             );
-            return;
+            return TaskCompletion::Worker { job_id };
         }
         let blocking = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -373,11 +409,12 @@ fn spawn_worker_task(
                 "worker task panicked: {error}"
             );
         }
+        TaskCompletion::Worker { job_id }
     });
 }
 
 fn spawn_background_task(
-    tasks: &mut JoinSet<()>,
+    tasks: &mut JoinSet<TaskCompletion>,
     limit: Arc<Semaphore>,
     shutdown: CancellationToken,
     command: BackgroundCommand,
@@ -387,7 +424,7 @@ fn spawn_background_task(
     let command_name = background_command_name(&command);
     tasks.spawn(async move {
         let Ok(permit) = limit.acquire_owned().await else {
-            return;
+            return TaskCompletion::Background;
         };
         let queue_wait_ms = queued_at.elapsed().as_millis();
         if shutdown.is_cancelled() {
@@ -399,7 +436,7 @@ fn spawn_background_task(
                 reason = "runtime shutdown",
                 "runtime background task canceled before start"
             );
-            return;
+            return TaskCompletion::Background;
         }
         let blocking = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -431,6 +468,7 @@ fn spawn_background_task(
                 "background task panicked: {error}"
             );
         }
+        TaskCompletion::Background
     });
 }
 
