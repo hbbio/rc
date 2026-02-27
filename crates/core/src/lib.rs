@@ -2003,6 +2003,7 @@ pub struct AppState {
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
+    deferred_persist_settings_request: Option<JobRequest>,
     panelize_presets: Vec<String>,
     keybinding_hints: KeybindingHints,
     keymap_unknown_actions: usize,
@@ -2047,6 +2048,7 @@ impl AppState {
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
+            deferred_persist_settings_request: None,
             panelize_presets: settings.configuration.panelize_presets.clone(),
             keybinding_hints: KeybindingHints::default(),
             keymap_unknown_actions: 0,
@@ -3035,12 +3037,26 @@ impl AppState {
                     } else {
                         self.set_status(format!("Job #{id} finished"));
                     }
+                    if is_persist_settings
+                        && let Some(request) = self.deferred_persist_settings_request.take()
+                    {
+                        self.queue_worker_job_request(request);
+                    }
                 }
                 Err(error) => {
+                    let is_persist_settings = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
                     if error.is_canceled() {
                         self.set_status(format!("Job #{id} canceled"));
                     } else {
                         self.set_status(format!("Job #{id} failed: {}", error.message));
+                    }
+                    if is_persist_settings
+                        && let Some(request) = self.deferred_persist_settings_request.take()
+                    {
+                        self.queue_worker_job_request(request);
                     }
                 }
             },
@@ -5083,6 +5099,17 @@ impl AppState {
     }
 
     fn queue_worker_job_request(&mut self, request: JobRequest) -> JobId {
+        if matches!(request, JobRequest::PersistSettings { .. }) {
+            if let Some(existing_id) = self.replace_pending_persist_settings_request(&request) {
+                self.set_status(format!("Updated pending setup save for job #{existing_id}"));
+                return existing_id;
+            }
+            if let Some(active_id) = self.active_persist_settings_job_id() {
+                self.deferred_persist_settings_request = Some(request);
+                self.set_status(format!("Queued latest setup save after job #{active_id}"));
+                return active_id;
+            }
+        }
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
@@ -5090,6 +5117,31 @@ impl AppState {
             .push(WorkerCommand::Run(Box::new(worker_job)));
         self.set_status(format!("Queued job #{job_id}: {summary}"));
         job_id
+    }
+
+    fn active_persist_settings_job_id(&self) -> Option<JobId> {
+        self.jobs
+            .jobs()
+            .iter()
+            .rev()
+            .find(|job| {
+                matches!(job.kind, JobKind::PersistSettings)
+                    && matches!(job.status, JobStatus::Queued | JobStatus::Running)
+            })
+            .map(|job| job.id)
+    }
+
+    fn replace_pending_persist_settings_request(&mut self, request: &JobRequest) -> Option<JobId> {
+        for command in self.pending_worker_commands.iter_mut().rev() {
+            let WorkerCommand::Run(job) = command else {
+                continue;
+            };
+            if matches!(job.request, JobRequest::PersistSettings { .. }) {
+                job.request = request.clone();
+                return Some(job.id);
+            }
+        }
+        None
     }
 
     fn cancel_latest_job(&mut self) {
@@ -6875,6 +6927,115 @@ OpenJobs = f6
         app.apply(AppCommand::SaveSetup)
             .expect("save setup command should succeed");
         assert!(app.take_pending_save_setup());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn persist_settings_job_coalesces_pending_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-persist-coalesce-pending-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let snapshot_one = app.persisted_settings_snapshot();
+        let mut snapshot_two = app.persisted_settings_snapshot();
+        snapshot_two.appearance.skin = String::from("coalesced-skin");
+
+        let first_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(snapshot_one),
+        });
+        let second_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(snapshot_two.clone()),
+        });
+        assert_eq!(first_id, second_id, "coalescing should reuse queued job id");
+
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "pending save setup should coalesce to one job"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::PersistSettings { paths, snapshot } => {
+                    assert_eq!(paths, &settings_paths);
+                    assert_eq!(snapshot.appearance.skin, snapshot_two.appearance.skin);
+                }
+                _ => panic!("expected persist settings request"),
+            },
+            _ => panic!("expected queued worker command"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn persist_settings_job_defers_latest_while_active() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-persist-coalesce-active-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let first_snapshot = app.persisted_settings_snapshot();
+        let mut second_snapshot = app.persisted_settings_snapshot();
+        second_snapshot.appearance.skin = String::from("deferred-skin");
+
+        let first_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(first_snapshot),
+        });
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "first save setup should be queued");
+
+        let deferred_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(second_snapshot.clone()),
+        });
+        assert_eq!(
+            deferred_id, first_id,
+            "deferred save should attach to active job"
+        );
+        assert!(
+            app.take_pending_worker_commands().is_empty(),
+            "deferred save should not enqueue until active job finishes"
+        );
+
+        app.handle_job_event(JobEvent::Finished {
+            id: first_id,
+            result: Ok(()),
+        });
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "latest deferred save should enqueue after finish"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::PersistSettings { snapshot, .. } => {
+                    assert_eq!(snapshot.appearance.skin, second_snapshot.appearance.skin);
+                }
+                _ => panic!("expected persist settings request"),
+            },
+            _ => panic!("expected queued worker command"),
+        }
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
