@@ -13,6 +13,9 @@ use nix::errno::Errno;
 #[cfg(unix)]
 use nix::unistd::{Gid, Uid, chown};
 
+use crate::settings::Settings;
+use crate::settings_io::{SettingsPaths, save_settings};
+
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
@@ -30,6 +33,9 @@ pub enum JobKind {
     Copy,
     Move,
     Delete,
+    Mkdir,
+    Rename,
+    PersistSettings,
     Find,
 }
 
@@ -39,6 +45,9 @@ impl JobKind {
             Self::Copy => "copy",
             Self::Move => "move",
             Self::Delete => "delete",
+            Self::Mkdir => "mkdir",
+            Self::Rename => "rename",
+            Self::PersistSettings => "persist-settings",
             Self::Find => "find",
         }
     }
@@ -77,6 +86,17 @@ pub enum JobRequest {
     Delete {
         targets: Vec<PathBuf>,
     },
+    Mkdir {
+        path: PathBuf,
+    },
+    Rename {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    PersistSettings {
+        paths: SettingsPaths,
+        snapshot: Box<Settings>,
+    },
     Find {
         query: String,
         base_dir: PathBuf,
@@ -89,6 +109,9 @@ impl JobRequest {
             Self::Copy { .. } => JobKind::Copy,
             Self::Move { .. } => JobKind::Move,
             Self::Delete { .. } => JobKind::Delete,
+            Self::Mkdir { .. } => JobKind::Mkdir,
+            Self::Rename { .. } => JobKind::Rename,
+            Self::PersistSettings { .. } => JobKind::PersistSettings,
             Self::Find { .. } => JobKind::Find,
         }
     }
@@ -98,6 +121,9 @@ impl JobRequest {
             Self::Copy { sources, .. } => sources.len(),
             Self::Move { sources, .. } => sources.len(),
             Self::Delete { targets } => targets.len(),
+            Self::Mkdir { .. } => 1,
+            Self::Rename { .. } => 1,
+            Self::PersistSettings { .. } => 1,
             Self::Find { .. } => 1,
         }
     }
@@ -125,6 +151,24 @@ impl JobRequest {
                 overwrite.label(),
             ),
             Self::Delete { targets } => format!("delete {} item(s)", targets.len()),
+            Self::Mkdir { path } => format!("mkdir {}", path.to_string_lossy()),
+            Self::Rename {
+                source,
+                destination,
+            } => format!(
+                "rename {} -> {}",
+                source.to_string_lossy(),
+                destination.to_string_lossy()
+            ),
+            Self::PersistSettings { paths, .. } => {
+                let target = paths
+                    .rc_ini_path
+                    .as_ref()
+                    .or(paths.mc_ini_path.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| String::from("<none>"));
+                format!("save setup -> {target}")
+            }
             Self::Find { query, base_dir } => {
                 format!("find '{}' under {}", query, base_dir.to_string_lossy())
             }
@@ -196,7 +240,7 @@ impl WorkerJob {
 
 #[derive(Debug)]
 pub enum WorkerCommand {
-    Run(WorkerJob),
+    Run(Box<WorkerJob>),
     Cancel(JobId),
     Shutdown,
 }
@@ -386,6 +430,7 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
     while let Ok(command) = command_rx.recv() {
         match command {
             WorkerCommand::Run(job) => {
+                let job = *job;
                 if queued_cancellations.remove(&job.id) {
                     job.cancel_flag.store(true, Ordering::Relaxed);
                 }
@@ -455,6 +500,32 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
             overwrite,
         } => move_paths(&sources, &destination_dir, overwrite, progress),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
+        JobRequest::Mkdir { path } => {
+            progress.set_current_path(&path);
+            fs::create_dir(&path)?;
+            progress.complete_item(&path);
+            Ok(())
+        }
+        JobRequest::Rename {
+            source,
+            destination,
+        } => {
+            progress.set_current_path(&source);
+            fs::rename(&source, &destination)?;
+            progress.complete_item(&destination);
+            Ok(())
+        }
+        JobRequest::PersistSettings { paths, snapshot } => {
+            let marker = paths
+                .rc_ini_path
+                .as_deref()
+                .or(paths.mc_ini_path.as_deref())
+                .unwrap_or_else(|| Path::new("."));
+            progress.set_current_path(marker);
+            save_settings(&paths, snapshot.as_ref())?;
+            progress.complete_item(marker);
+            Ok(())
+        }
         JobRequest::Find { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "find jobs are executed by the background worker",
@@ -836,6 +907,9 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
+        JobRequest::Mkdir { .. }
+        | JobRequest::Rename { .. }
+        | JobRequest::PersistSettings { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
 }
@@ -1082,7 +1156,7 @@ mod tests {
             "cancel request should succeed for queued job"
         );
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         command_tx
             .send(WorkerCommand::Cancel(copy_id))
@@ -1136,7 +1210,7 @@ mod tests {
             .send(WorkerCommand::Cancel(copy_id))
             .expect("cancel command should send");
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
 
         let finished = recv_until_finished(&event_rx, &mut manager);
@@ -1203,7 +1277,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1252,7 +1326,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1298,7 +1372,7 @@ mod tests {
             overwrite: OverwritePolicy::Rename,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1351,7 +1425,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1401,7 +1475,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1452,7 +1526,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1495,7 +1569,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(move_job))
+            .send(WorkerCommand::Run(Box::new(move_job)))
             .expect("move command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         match finished {
@@ -1541,7 +1615,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let copy_done = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1559,7 +1633,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(move_job))
+            .send(WorkerCommand::Run(Box::new(move_job)))
             .expect("move command should send");
         let move_done = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1580,7 +1654,7 @@ mod tests {
             targets: vec![moved_file.clone()],
         });
         command_tx
-            .send(WorkerCommand::Run(delete_job))
+            .send(WorkerCommand::Run(Box::new(delete_job)))
             .expect("delete command should send");
         let delete_done = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1621,7 +1695,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
 
         let mut saw_progress = false;

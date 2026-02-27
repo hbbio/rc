@@ -1,4 +1,4 @@
-use rc_core::{OverwritePolicy, Settings, SettingsSortField};
+use crate::{OverwritePolicy, Settings, SettingsSortField};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

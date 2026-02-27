@@ -1,14 +1,12 @@
 #![forbid(unsafe_code)]
 
-mod settings_io;
-
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgAction, Parser};
@@ -23,9 +21,10 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
+use rc_core::settings_io;
 use rc_core::{
     AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, ExternalEditRequest,
-    JobEvent, Settings, WorkerCommand, run_background_worker, run_worker,
+    JobEvent, JobRequest, Settings, WorkerCommand, run_background_worker, run_worker,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -552,16 +551,10 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
     }
 
     let snapshot = state.persisted_settings_snapshot();
-    if let Err(error) = settings_io::save_settings(&skin_runtime.settings_paths, &snapshot) {
-        tracing::warn!("failed to persist settings: {error}");
-        state.set_status(format!("Settings save failed: {error}"));
-        return;
-    }
-
-    state.mark_settings_saved(SystemTime::now());
-    if save_requested {
-        state.set_status("Setup saved");
-    }
+    state.enqueue_worker_job_request(JobRequest::PersistSettings {
+        paths: skin_runtime.settings_paths.clone(),
+        snapshot: Box::new(snapshot),
+    });
 }
 
 fn dispatch_pending_external_edit_requests(

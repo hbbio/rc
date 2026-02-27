@@ -5,6 +5,7 @@ pub mod help;
 pub mod jobs;
 pub mod keymap;
 pub mod settings;
+pub mod settings_io;
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -3245,8 +3246,22 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
+                    let is_persist_settings = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
+                    if is_persist_settings {
+                        self.mark_settings_saved(SystemTime::now());
+                    }
                     let should_refresh = self.jobs.job(id).is_some_and(|job| {
-                        matches!(job.kind, JobKind::Copy | JobKind::Move | JobKind::Delete)
+                        matches!(
+                            job.kind,
+                            JobKind::Copy
+                                | JobKind::Move
+                                | JobKind::Delete
+                                | JobKind::Mkdir
+                                | JobKind::Rename
+                        )
                     });
                     if should_refresh {
                         self.refresh_panels();
@@ -5292,12 +5307,21 @@ impl AppState {
                 overwrite,
             },
         };
+        self.queue_worker_job_request(request);
+    }
+
+    pub fn enqueue_worker_job_request(&mut self, request: JobRequest) -> JobId {
+        self.queue_worker_job_request(request)
+    }
+
+    fn queue_worker_job_request(&mut self, request: JobRequest) -> JobId {
         let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
         let job_id = worker_job.id;
         self.pending_worker_commands
-            .push(WorkerCommand::Run(worker_job));
+            .push(WorkerCommand::Run(Box::new(worker_job)));
         self.set_status(format!("Queued job #{job_id}: {summary}"));
+        job_id
     }
 
     fn cancel_latest_job(&mut self) {
@@ -5347,13 +5371,7 @@ impl AppState {
     }
 
     fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
-        let request = JobRequest::Delete { targets };
-        let summary = request.summary();
-        let worker_job = self.jobs.enqueue(request);
-        let job_id = worker_job.id;
-        self.pending_worker_commands
-            .push(WorkerCommand::Run(worker_job));
-        self.set_status(format!("Queued job #{job_id}: {summary}"));
+        self.queue_worker_job_request(JobRequest::Delete { targets });
     }
 
     fn finish_dialog(&mut self, result: DialogResult) {
@@ -5394,18 +5412,7 @@ impl AppState {
                 } else {
                     base_dir.join(input_path)
                 };
-                match fs::create_dir(&destination) {
-                    Ok(()) => {
-                        self.refresh_active_panel();
-                        self.set_status(format!(
-                            "Created directory {}",
-                            destination.to_string_lossy()
-                        ));
-                    }
-                    Err(error) => {
-                        self.set_status(format!("Mkdir failed: {error}"));
-                    }
-                }
+                self.queue_worker_job_request(JobRequest::Mkdir { path: destination });
             }
             (Some(PendingDialogAction::Mkdir { .. }), DialogResult::Canceled) => {
                 self.set_status("Mkdir canceled");
@@ -5428,15 +5435,10 @@ impl AppState {
                     self.set_status("Rename skipped: name unchanged");
                     return;
                 }
-                match fs::rename(&source, &destination) {
-                    Ok(()) => {
-                        self.refresh_panels();
-                        self.set_status(format!("Renamed to {}", destination.to_string_lossy()));
-                    }
-                    Err(error) => {
-                        self.set_status(format!("Rename failed: {error}"));
-                    }
-                }
+                self.queue_worker_job_request(JobRequest::Rename {
+                    source,
+                    destination,
+                });
             }
             (Some(PendingDialogAction::RenameEntry { .. }), DialogResult::Canceled) => {
                 self.set_status("Rename canceled");
@@ -6760,7 +6762,7 @@ mod tests {
     }
 
     #[test]
-    fn mkdir_dialog_creates_directory() {
+    fn mkdir_dialog_queues_mkdir_job() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -6778,10 +6780,69 @@ mod tests {
         app.apply(AppCommand::DialogAccept)
             .expect("mkdir dialog should submit");
 
-        assert!(
-            root.join("newdir").exists(),
-            "mkdir should create directory"
-        );
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "mkdir should enqueue one worker command");
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Mkdir { path } => {
+                    assert_eq!(path, &root.join("newdir"));
+                }
+                _ => panic!("expected mkdir request"),
+            },
+            _ => panic!("expected worker run command"),
+        }
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn rename_dialog_queues_rename_job() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-rename-dialog-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let source = root.join("before.txt");
+        fs::write(&source, "before").expect("must create source file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let source_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry should be visible");
+        app.active_panel_mut().cursor = source_index;
+
+        app.apply(AppCommand::OpenConfirmDialog)
+            .expect("rename dialog should open");
+        for _ in 0.."before.txt".len() {
+            app.apply(AppCommand::DialogBackspace)
+                .expect("rename input should accept backspace");
+        }
+        for ch in "after.txt".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("rename input should accept typing");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("rename dialog should submit");
+
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "rename should enqueue one worker command");
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Rename {
+                    source,
+                    destination,
+                } => {
+                    assert_eq!(source, &root.join("before.txt"));
+                    assert_eq!(destination, &root.join("after.txt"));
+                }
+                _ => panic!("expected rename request"),
+            },
+            _ => panic!("expected worker run command"),
+        }
+
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
