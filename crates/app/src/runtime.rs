@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, JobKind,
+    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, JobKind, JobRequest,
     PanelListingSource, WorkerCommand, execute_worker_job, run_background_command_sync,
+    run_find_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
@@ -53,6 +55,7 @@ struct WorkerTaskSpec {
     worker_class: &'static str,
     worker_job: rc_core::WorkerJob,
     worker_event_tx: Sender<JobEvent>,
+    background_event_tx: Sender<BackgroundEvent>,
     queued_at: Instant,
 }
 
@@ -292,6 +295,7 @@ async fn run_runtime_loop(
                                 worker_class,
                                 worker_job,
                                 worker_event_tx: worker_event_tx.clone(),
+                                background_event_tx: background_event_tx.clone(),
                                 queued_at,
                             },
                         );
@@ -383,6 +387,7 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
         worker_class,
         worker_job,
         worker_event_tx,
+        background_event_tx,
         queued_at,
     } = spec;
     let job_id = worker_job.id;
@@ -407,6 +412,10 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
                 },
                 "runtime worker task canceled before start"
             );
+            let _ = worker_event_tx.send(JobEvent::Finished {
+                id: job_id,
+                result: Err(JobError::canceled()),
+            });
             return TaskCompletion::Worker { job_id };
         }
         let blocking = tokio::task::spawn_blocking(move || {
@@ -421,7 +430,7 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
                 queue_wait_ms,
                 "runtime worker task started"
             );
-            execute_worker_job(worker_job, &worker_event_tx);
+            execute_runtime_worker_job(worker_job, &worker_event_tx, &background_event_tx);
             tracing::debug!(
                 runtime_event = "finished",
                 command_class = "worker",
@@ -447,6 +456,69 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
         }
         TaskCompletion::Worker { job_id }
     });
+}
+
+fn execute_runtime_worker_job(
+    worker_job: rc_core::WorkerJob,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let (query, base_dir, max_results) = match &worker_job.request {
+        JobRequest::Find {
+            query,
+            base_dir,
+            max_results,
+        } => (
+            Some(query.clone()),
+            Some(base_dir.clone()),
+            Some(*max_results),
+        ),
+        _ => (None, None, None),
+    };
+    let Some(query) = query else {
+        execute_worker_job(worker_job, worker_event_tx);
+        return;
+    };
+    let base_dir = base_dir.expect("find jobs must include a base directory");
+    let max_results = max_results.expect("find jobs must include max results");
+    execute_find_worker_job(
+        worker_job,
+        worker_event_tx,
+        background_event_tx,
+        query,
+        base_dir,
+        max_results,
+    );
+}
+
+fn execute_find_worker_job(
+    worker_job: rc_core::WorkerJob,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+    query: String,
+    base_dir: std::path::PathBuf,
+    max_results: usize,
+) {
+    let job_id = worker_job.id;
+    let cancel_flag = worker_job.cancel_flag();
+    let pause_flag = worker_job
+        .find_pause_flag()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let result = run_find_entries(
+        &base_dir,
+        &query,
+        max_results,
+        cancel_flag.as_ref(),
+        pause_flag.as_ref(),
+        |entries| {
+            background_event_tx
+                .send(BackgroundEvent::FindEntriesChunk { job_id, entries })
+                .is_ok()
+        },
+    )
+    .map_err(JobError::from_message);
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
 fn spawn_background_task(
@@ -531,7 +603,6 @@ fn background_command_name(command: &BackgroundCommand) -> &'static str {
     match command {
         BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
         BackgroundCommand::LoadViewer { .. } => "load-viewer",
-        BackgroundCommand::FindEntries { .. } => "find-entries",
         BackgroundCommand::BuildTree { .. } => "build-tree",
         BackgroundCommand::Shutdown => "shutdown",
     }

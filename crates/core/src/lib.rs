@@ -25,6 +25,7 @@ use std::time::SystemTime;
 use background::stream_find_entries;
 pub use background::{
     BackgroundCommand, BackgroundEvent, run_background_command_sync, run_background_worker,
+    run_find_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
@@ -2641,20 +2642,14 @@ impl AppState {
         let command_name = match &command {
             BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
             BackgroundCommand::LoadViewer { .. } => "load-viewer",
-            BackgroundCommand::FindEntries { .. } => "find-entries",
             BackgroundCommand::BuildTree { .. } => "build-tree",
             BackgroundCommand::Shutdown => "shutdown",
-        };
-        let find_job_id = match &command {
-            BackgroundCommand::FindEntries { job_id, .. } => Some(*job_id),
-            _ => None,
         };
         self.pending_background_commands.push(command);
         tracing::debug!(
             runtime_event = "queued",
             command_class = "background",
             command = command_name,
-            find_job_id = ?find_job_id,
             queue_depth = self.pending_background_commands.len(),
             "queued background command"
         );
@@ -2742,8 +2737,15 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
+                    let is_find = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::Find));
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
+                    }
+                    if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
+                        results.loading = false;
                     }
                     let should_refresh = self.jobs.job(id).is_some_and(|job| {
                         matches!(
@@ -2758,7 +2760,17 @@ impl AppState {
                     if should_refresh {
                         self.refresh_panels();
                     }
-                    if let Some(job) = self.jobs.job(id) {
+                    if is_find {
+                        if let Some(results) = self.find_results_by_job_id(id) {
+                            self.set_status(format!(
+                                "Find '{}': {} result(s)",
+                                results.query,
+                                results.entries.len()
+                            ));
+                        } else {
+                            self.set_status(format!("Job #{id} finished"));
+                        }
+                    } else if let Some(job) = self.jobs.job(id) {
                         self.set_status(format!("Job #{id} finished: {}", job.summary));
                     } else {
                         self.set_status(format!("Job #{id} finished"));
@@ -2779,6 +2791,13 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
+                    let is_find = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::Find));
+                    if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
+                        results.loading = false;
+                    }
                     if error.is_canceled() {
                         tracing::info!(
                             job_event = "finished",
@@ -2912,12 +2931,6 @@ impl AppState {
                     self.set_status(format!("Viewer open failed: {error}"));
                 }
             },
-            BackgroundEvent::FindEntriesStarted { job_id } => {
-                self.handle_job_event(JobEvent::Started { id: job_id });
-                if let Some(results) = self.find_results_by_job_id_mut(job_id) {
-                    results.loading = true;
-                }
-            }
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
                 let status_message = if let Some(results) = self.find_results_by_job_id_mut(job_id)
                 {
@@ -2931,31 +2944,6 @@ impl AppState {
                         results.query,
                         results.entries.len()
                     ))
-                } else {
-                    None
-                };
-                if let Some(status_message) = status_message {
-                    self.set_status(status_message);
-                }
-            }
-            BackgroundEvent::FindEntriesFinished { job_id, result } => {
-                if let Some(results) = self.find_results_by_job_id_mut(job_id) {
-                    results.loading = false;
-                }
-                let job_result = result.map_err(JobError::from_message);
-                let completed_successfully = job_result.is_ok();
-                self.handle_job_event(JobEvent::Finished {
-                    id: job_id,
-                    result: job_result,
-                });
-                let status_message = if completed_successfully {
-                    self.find_results_by_job_id(job_id).map(|results| {
-                        format!(
-                            "Find '{}': {} result(s)",
-                            results.query,
-                            results.entries.len()
-                        )
-                    })
                 } else {
                     None
                 };
@@ -4880,10 +4868,14 @@ impl AppState {
                 return active_id;
             }
         }
-        let job_kind = request.kind().label();
-        let summary = request.summary();
         let worker_job = self.jobs.enqueue(request);
+        self.queue_worker_job(worker_job)
+    }
+
+    fn queue_worker_job(&mut self, worker_job: WorkerJob) -> JobId {
         let job_id = worker_job.id;
+        let job_kind = worker_job.request.kind().label();
+        let summary = worker_job.request.summary();
         self.pending_worker_commands
             .push(WorkerCommand::Run(Box::new(worker_job)));
         tracing::debug!(
@@ -4956,14 +4948,8 @@ impl AppState {
             job_id = %job_id,
             "requested job cancellation"
         );
-        let is_worker_job = self
-            .jobs
-            .job(job_id)
-            .is_some_and(|job| !matches!(job.kind, JobKind::Find));
-        if is_worker_job {
-            self.pending_worker_commands
-                .push(WorkerCommand::Cancel(job_id));
-        }
+        self.pending_worker_commands
+            .push(WorkerCommand::Cancel(job_id));
         true
     }
 
@@ -5168,27 +5154,20 @@ impl AppState {
                 let request = JobRequest::Find {
                     query: query.clone(),
                     base_dir: base_dir.clone(),
+                    max_results: self.settings.advanced.max_find_results,
                 };
-                let summary = request.summary();
-                let worker_job = self.jobs.enqueue(request);
+                let mut worker_job = self.jobs.enqueue(request);
                 let job_id = worker_job.id;
                 let pause_flag = Arc::new(AtomicBool::new(false));
                 self.find_pause_flags.insert(job_id, pause_flag.clone());
+                worker_job.set_find_pause_flag(pause_flag);
                 self.routes
                     .push(Route::FindResults(FindResultsState::loading(
                         job_id,
                         query.clone(),
                         base_dir.clone(),
                     )));
-                self.queue_background_command(BackgroundCommand::FindEntries {
-                    job_id,
-                    query: query.clone(),
-                    base_dir,
-                    max_results: self.settings.advanced.max_find_results,
-                    cancel_flag: worker_job.cancel_flag(),
-                    pause_flag,
-                });
-                self.set_status(format!("Queued job #{job_id}: {summary}"));
+                self.queue_worker_job(worker_job);
             }
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
@@ -5933,6 +5912,8 @@ mod tests {
     use super::*;
     use crate::keymap::KeyModifiers;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::thread;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use std::{env, fs};
@@ -5950,9 +5931,69 @@ mod tests {
 
     fn drain_background(app: &mut AppState) {
         loop {
+            let mut progressed = false;
+
+            let worker_commands = app.take_pending_worker_commands();
+            if !worker_commands.is_empty() {
+                progressed = true;
+            }
+            for command in worker_commands {
+                match command {
+                    WorkerCommand::Run(job) => {
+                        let job = *job;
+                        let job_id = job.id;
+                        let (event_tx, event_rx) = std::sync::mpsc::channel();
+                        match &job.request {
+                            JobRequest::Find {
+                                query,
+                                base_dir,
+                                max_results,
+                            } => {
+                                let query = query.clone();
+                                let base_dir = base_dir.clone();
+                                let max_results = *max_results;
+                                let cancel_flag = job.cancel_flag();
+                                let pause_flag = job
+                                    .find_pause_flag()
+                                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
+                                let result = run_find_entries(
+                                    &base_dir,
+                                    &query,
+                                    max_results,
+                                    cancel_flag.as_ref(),
+                                    pause_flag.as_ref(),
+                                    |entries| {
+                                        chunk_tx
+                                            .send(BackgroundEvent::FindEntriesChunk {
+                                                job_id,
+                                                entries,
+                                            })
+                                            .is_ok()
+                                    },
+                                )
+                                .map_err(JobError::from_message);
+                                for event in chunk_rx.try_iter() {
+                                    app.handle_background_event(event);
+                                }
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            _ => {
+                                execute_worker_job(job, &event_tx);
+                            }
+                        }
+                        for event in event_rx.try_iter() {
+                            app.handle_job_event(event);
+                        }
+                    }
+                    WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {}
+                }
+            }
+
             let commands = app.take_pending_background_commands();
-            if commands.is_empty() {
-                break;
+            if !commands.is_empty() {
+                progressed = true;
             }
             for command in commands {
                 let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -5962,6 +6003,10 @@ mod tests {
                 for event in event_rx.try_iter() {
                     app.handle_background_event(event);
                 }
+            }
+
+            if !progressed {
+                break;
             }
         }
     }
@@ -7542,7 +7587,7 @@ OpenJobs = f6
     }
 
     #[test]
-    fn find_cancel_uses_job_flag_without_worker_cancel_command() {
+    fn find_cancel_routes_through_worker_cancel_command() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -7561,17 +7606,23 @@ OpenJobs = f6
         }
         app.apply(AppCommand::DialogAccept)
             .expect("find dialog should submit");
-        assert!(
-            app.take_pending_worker_commands().is_empty(),
-            "find should not queue worker commands"
-        );
+        let queued_counts = app.jobs_status_counts();
+        assert_eq!(queued_counts.queued, 1, "find should enqueue a worker job");
 
         app.apply(AppCommand::CancelJob)
             .expect("cancel job should succeed");
+        let commands = app.take_pending_worker_commands();
         assert!(
-            app.take_pending_worker_commands().is_empty(),
-            "canceling find should not send worker cancel command"
+            commands
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::Cancel(_))),
+            "canceling find should enqueue worker cancel command"
         );
+        for command in commands {
+            if let WorkerCommand::Run(job) = command {
+                app.pending_worker_commands.push(WorkerCommand::Run(job));
+            }
+        }
 
         drain_background(&mut app);
         let find_job = app.jobs.last_job().expect("find job should be present");

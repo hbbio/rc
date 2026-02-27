@@ -100,6 +100,7 @@ pub enum JobRequest {
     Find {
         query: String,
         base_dir: PathBuf,
+        max_results: usize,
     },
 }
 
@@ -169,7 +170,9 @@ impl JobRequest {
                     .unwrap_or_else(|| String::from("<none>"));
                 format!("save setup -> {target}")
             }
-            Self::Find { query, base_dir } => {
+            Self::Find {
+                query, base_dir, ..
+            } => {
                 format!("find '{}' under {}", query, base_dir.to_string_lossy())
             }
         }
@@ -342,11 +345,20 @@ pub struct WorkerJob {
     pub id: JobId,
     pub request: JobRequest,
     cancel_flag: Arc<AtomicBool>,
+    find_pause_flag: Option<Arc<AtomicBool>>,
 }
 
 impl WorkerJob {
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel_flag)
+    }
+
+    pub fn set_find_pause_flag(&mut self, pause_flag: Arc<AtomicBool>) {
+        self.find_pause_flag = Some(pause_flag);
+    }
+
+    pub fn find_pause_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.find_pause_flag.as_ref().map(Arc::clone)
     }
 }
 
@@ -413,6 +425,7 @@ impl JobManager {
                 .get(&id)
                 .expect("job cancellation flag should exist")
                 .clone(),
+            find_pause_flag: None,
         }
     }
 
@@ -591,6 +604,7 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>, fs_backend: &dyn 
         id,
         request,
         cancel_flag,
+        ..
     } = job;
     let _ = event_tx.send(JobEvent::Started { id });
 

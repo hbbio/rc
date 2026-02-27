@@ -28,14 +28,6 @@ pub enum BackgroundCommand {
     LoadViewer {
         path: PathBuf,
     },
-    FindEntries {
-        job_id: JobId,
-        query: String,
-        base_dir: PathBuf,
-        max_results: usize,
-        cancel_flag: Arc<AtomicBool>,
-        pause_flag: Arc<AtomicBool>,
-    },
     BuildTree {
         root: PathBuf,
         max_depth: usize,
@@ -58,16 +50,9 @@ pub enum BackgroundEvent {
         path: PathBuf,
         result: Result<ViewerState, String>,
     },
-    FindEntriesStarted {
-        job_id: JobId,
-    },
     FindEntriesChunk {
         job_id: JobId,
         entries: Vec<FindResultEntry>,
-    },
-    FindEntriesFinished {
-        job_id: JobId,
-        result: Result<(), String>,
     },
     TreeReady {
         root: PathBuf,
@@ -124,22 +109,6 @@ pub fn run_background_command_sync(
                 result: ViewerState::open(path).map_err(|error| error.to_string()),
             })
             .is_ok(),
-        BackgroundCommand::FindEntries {
-            job_id,
-            query,
-            base_dir,
-            max_results,
-            cancel_flag,
-            pause_flag,
-        } => run_find_search(
-            event_tx,
-            job_id,
-            query,
-            base_dir,
-            max_results,
-            cancel_flag.as_ref(),
-            pause_flag.as_ref(),
-        ),
         BackgroundCommand::BuildTree {
             root,
             max_depth,
@@ -180,42 +149,29 @@ fn refresh_panel_entries(
     }
 }
 
-fn run_find_search(
-    event_tx: &Sender<BackgroundEvent>,
-    job_id: JobId,
-    query: String,
-    base_dir: PathBuf,
+pub fn run_find_entries<F>(
+    base_dir: &Path,
+    query: &str,
     max_results: usize,
     cancel_flag: &AtomicBool,
     pause_flag: &AtomicBool,
-) -> bool {
-    if event_tx
-        .send(BackgroundEvent::FindEntriesStarted { job_id })
-        .is_err()
-    {
-        return false;
-    }
-
-    let result = stream_find_entries(
-        &base_dir,
-        &query,
+    emit_chunk: F,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<FindResultEntry>) -> bool,
+{
+    stream_find_entries(
+        base_dir,
+        query,
         max_results,
         cancel_flag,
         pause_flag,
         FIND_EVENT_CHUNK_SIZE,
-        |entries| {
-            event_tx
-                .send(BackgroundEvent::FindEntriesChunk { job_id, entries })
-                .is_ok()
-        },
-    );
-
-    event_tx
-        .send(BackgroundEvent::FindEntriesFinished { job_id, result })
-        .is_ok()
+        emit_chunk,
+    )
 }
 
-pub(crate) fn stream_find_entries<F>(
+pub fn stream_find_entries<F>(
     base_dir: &Path,
     query: &str,
     max_results: usize,
