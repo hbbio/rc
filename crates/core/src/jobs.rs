@@ -529,7 +529,31 @@ pub struct JobStatusCounts {
     pub failed: usize,
 }
 
+pub trait FsBackend {
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()>;
+    fn persist_settings(&self, paths: &SettingsPaths, snapshot: &Settings) -> io::Result<()>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LocalFsBackend;
+
+impl FsBackend for LocalFsBackend {
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir(path)
+    }
+
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        fs::rename(source, destination)
+    }
+
+    fn persist_settings(&self, paths: &SettingsPaths, snapshot: &Settings) -> io::Result<()> {
+        save_settings(paths, snapshot)
+    }
+}
+
 pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent>) {
+    let fs_backend = LocalFsBackend;
     let mut queued_cancellations = HashSet::new();
     while let Ok(command) = command_rx.recv() {
         match command {
@@ -538,7 +562,7 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
                 if queued_cancellations.remove(&job.id) {
                     job.cancel_flag.store(true, Ordering::Relaxed);
                 }
-                run_single_job(job, &event_tx);
+                run_single_job(job, &event_tx, &fs_backend);
             }
             WorkerCommand::Cancel(id) => {
                 queued_cancellations.insert(id);
@@ -549,10 +573,20 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
 }
 
 pub fn execute_worker_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
-    run_single_job(job, event_tx);
+    let fs_backend = LocalFsBackend;
+    run_single_job(job, event_tx, &fs_backend);
 }
 
-fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
+#[cfg(test)]
+fn execute_worker_job_with_backend(
+    job: WorkerJob,
+    event_tx: &Sender<JobEvent>,
+    fs_backend: &dyn FsBackend,
+) {
+    run_single_job(job, event_tx, fs_backend);
+}
+
+fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>, fs_backend: &dyn FsBackend) {
     let WorkerJob {
         id,
         request,
@@ -588,14 +622,18 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
         });
         return;
     }
-    let result = execute_job(request, &mut progress).map_err(JobError::from_io);
+    let result = execute_job(request, &mut progress, fs_backend).map_err(JobError::from_io);
     if result.is_ok() {
         progress.mark_done();
     }
     let _ = event_tx.send(JobEvent::Finished { id, result });
 }
 
-fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
+fn execute_job(
+    request: JobRequest,
+    progress: &mut ProgressTracker<'_>,
+    fs_backend: &dyn FsBackend,
+) -> io::Result<()> {
     match request {
         JobRequest::Copy {
             sources,
@@ -610,7 +648,7 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
         JobRequest::Mkdir { path } => {
             progress.set_current_path(&path);
-            fs::create_dir(&path)?;
+            fs_backend.create_dir(&path)?;
             progress.complete_item(&path);
             Ok(())
         }
@@ -619,7 +657,7 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
             destination,
         } => {
             progress.set_current_path(&source);
-            fs::rename(&source, &destination)?;
+            fs_backend.rename(&source, &destination)?;
             progress.complete_item(&destination);
             Ok(())
         }
@@ -630,7 +668,7 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
                 .or(paths.mc_ini_path.as_deref())
                 .unwrap_or_else(|| Path::new("."));
             progress.set_current_path(marker);
-            save_settings(&paths, snapshot.as_ref())?;
+            fs_backend.persist_settings(&paths, snapshot.as_ref())?;
             progress.complete_item(marker);
             Ok(())
         }
@@ -1155,6 +1193,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{self, Receiver};
     use std::thread;
@@ -1200,6 +1239,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingFsBackend {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingFsBackend {
+        fn push_call(&self, call: &str) {
+            self.calls
+                .lock()
+                .expect("fs backend call log should not be poisoned")
+                .push(String::from(call));
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .expect("fs backend call log should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl FsBackend for RecordingFsBackend {
+        fn create_dir(&self, _path: &Path) -> io::Result<()> {
+            self.push_call("mkdir");
+            Ok(())
+        }
+
+        fn rename(&self, _source: &Path, _destination: &Path) -> io::Result<()> {
+            self.push_call("rename");
+            Ok(())
+        }
+
+        fn persist_settings(&self, _paths: &SettingsPaths, _snapshot: &Settings) -> io::Result<()> {
+            self.push_call("persist-settings");
+            Ok(())
+        }
+    }
+
+    fn execute_request_with_backend(
+        request: JobRequest,
+        fs_backend: &dyn FsBackend,
+    ) -> (JobEvent, JobStatusCounts) {
+        let mut manager = JobManager::new();
+        let worker_job = manager.enqueue(request);
+        let (event_tx, event_rx) = mpsc::channel();
+        execute_worker_job_with_backend(worker_job, &event_tx, fs_backend);
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        (finished, manager.status_counts())
+    }
+
     #[test]
     fn job_manager_tracks_status_and_progress() {
         let mut manager = JobManager::new();
@@ -1234,6 +1323,92 @@ mod tests {
             result: Ok(()),
         });
         assert_eq!(manager.status_counts().succeeded, 1);
+    }
+
+    #[test]
+    fn mkdir_request_uses_fs_backend() {
+        let root = make_temp_dir("mkdir-backend");
+        let target = root.join("created");
+        let fs_backend = RecordingFsBackend::default();
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Mkdir {
+                path: target.clone(),
+            },
+            &fs_backend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "mkdir request should succeed through backend"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert!(
+            !target.exists(),
+            "test backend should avoid touching the filesystem directly"
+        );
+        assert_eq!(fs_backend.calls(), vec![String::from("mkdir")]);
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn rename_request_uses_fs_backend() {
+        let root = make_temp_dir("rename-backend");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "source").expect("source payload should be writable");
+        let fs_backend = RecordingFsBackend::default();
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Rename {
+                source: source.clone(),
+                destination: destination.clone(),
+            },
+            &fs_backend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "rename request should succeed through backend"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert!(
+            source.exists() && !destination.exists(),
+            "test backend should keep source in place without filesystem rename"
+        );
+        assert_eq!(fs_backend.calls(), vec![String::from("rename")]);
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn persist_settings_request_uses_fs_backend() {
+        let root = make_temp_dir("persist-backend");
+        let rc_ini = root.join("rc.ini");
+        let mc_ini = root.join("mc.ini");
+        let fs_backend = RecordingFsBackend::default();
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::PersistSettings {
+                paths: SettingsPaths {
+                    mc_ini_path: Some(mc_ini.clone()),
+                    rc_ini_path: Some(rc_ini.clone()),
+                },
+                snapshot: Box::new(Settings::default()),
+            },
+            &fs_backend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "persist-settings request should succeed through backend"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert!(
+            !rc_ini.exists() && !mc_ini.exists(),
+            "test backend should avoid inline settings writes"
+        );
+        assert_eq!(fs_backend.calls(), vec![String::from("persist-settings")]);
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
     #[test]
