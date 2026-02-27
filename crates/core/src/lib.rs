@@ -1892,8 +1892,7 @@ impl AppState {
             return EditSelectionResult::OpenedExternal;
         }
 
-        self.pending_background_commands
-            .push(BackgroundCommand::LoadViewer { path });
+        self.queue_background_command(BackgroundCommand::LoadViewer { path });
         EditSelectionResult::OpenedInternal
     }
 
@@ -1905,10 +1904,9 @@ impl AppState {
             return false;
         }
 
-        self.pending_background_commands
-            .push(BackgroundCommand::LoadViewer {
-                path: entry.path.clone(),
-            });
+        self.queue_background_command(BackgroundCommand::LoadViewer {
+            path: entry.path.clone(),
+        });
         true
     }
 
@@ -2618,18 +2616,48 @@ impl AppState {
         self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
         self.panel_refresh_request_ids[panel_index] = request_id;
 
-        let panel_state = &mut self.panels[panel.index()];
-        panel_state.loading = true;
-        self.pending_background_commands
-            .push(BackgroundCommand::RefreshPanel {
-                panel,
-                cwd: panel_state.cwd.clone(),
-                source: panel_state.source.clone(),
-                sort_mode: panel_state.sort_mode,
-                show_hidden_files: panel_state.show_hidden_files,
-                request_id,
-                cancel_flag,
-            });
+        let (cwd, source, sort_mode, show_hidden_files) = {
+            let panel_state = &mut self.panels[panel.index()];
+            panel_state.loading = true;
+            (
+                panel_state.cwd.clone(),
+                panel_state.source.clone(),
+                panel_state.sort_mode,
+                panel_state.show_hidden_files,
+            )
+        };
+        self.queue_background_command(BackgroundCommand::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            show_hidden_files,
+            request_id,
+            cancel_flag,
+        });
+    }
+
+    fn queue_background_command(&mut self, command: BackgroundCommand) {
+        let command_name = match &command {
+            BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
+            BackgroundCommand::LoadViewer { .. } => "load-viewer",
+            BackgroundCommand::FindEntries { .. } => "find-entries",
+            BackgroundCommand::BuildTree { .. } => "build-tree",
+            BackgroundCommand::Shutdown => "shutdown",
+        };
+        let find_job_id = match &command {
+            BackgroundCommand::FindEntries { job_id, .. } => Some(*job_id),
+            _ => None,
+        };
+        self.pending_background_commands.push(command);
+        tracing::debug!(
+            runtime_event = "queued",
+            command_class = "background",
+            command = command_name,
+            find_job_id = ?find_job_id,
+            queue_depth = self.pending_background_commands.len(),
+            "queued background command"
+        );
     }
 
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
@@ -3884,12 +3912,11 @@ impl AppState {
         let root = self.active_panel().cwd.clone();
         self.routes
             .push(Route::Tree(TreeState::loading(root.clone())));
-        self.pending_background_commands
-            .push(BackgroundCommand::BuildTree {
-                root,
-                max_depth: self.settings.advanced.tree_max_depth,
-                max_entries: self.settings.advanced.tree_max_entries,
-            });
+        self.queue_background_command(BackgroundCommand::BuildTree {
+            root,
+            max_depth: self.settings.advanced.tree_max_depth,
+            max_entries: self.settings.advanced.tree_max_entries,
+        });
         self.set_status("Loading directory tree...");
     }
 
@@ -5153,15 +5180,14 @@ impl AppState {
                         query.clone(),
                         base_dir.clone(),
                     )));
-                self.pending_background_commands
-                    .push(BackgroundCommand::FindEntries {
-                        job_id,
-                        query: query.clone(),
-                        base_dir,
-                        max_results: self.settings.advanced.max_find_results,
-                        cancel_flag: worker_job.cancel_flag(),
-                        pause_flag,
-                    });
+                self.queue_background_command(BackgroundCommand::FindEntries {
+                    job_id,
+                    query: query.clone(),
+                    base_dir,
+                    max_results: self.settings.advanced.max_find_results,
+                    cancel_flag: worker_job.cancel_flag(),
+                    pause_flag,
+                });
                 self.set_status(format!("Queued job #{job_id}: {summary}"));
             }
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
