@@ -1099,7 +1099,10 @@ mod tests {
         );
 
         match command_rx.try_recv() {
-            Ok(RuntimeCommand::Worker(WorkerCommand::Run(job))) => match &job.request {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => match &job.request {
                 JobRequest::PersistSettings { paths, .. } => {
                     assert_eq!(paths.mc_ini_path.as_deref(), Some(mc_ini.as_path()));
                     assert_eq!(paths.rc_ini_path.as_deref(), Some(rc_ini.as_path()));
