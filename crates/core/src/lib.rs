@@ -24,8 +24,7 @@ use std::time::SystemTime;
 #[cfg(test)]
 use background::stream_find_entries;
 pub use background::{
-    BackgroundCommand, BackgroundEvent, build_tree_ready_event, refresh_panel_event,
-    run_background_command_sync, run_background_worker, run_find_entries,
+    BackgroundEvent, build_tree_ready_event, refresh_panel_event, run_find_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};

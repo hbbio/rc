@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -13,25 +11,6 @@ use crate::{
 };
 
 const FIND_EVENT_CHUNK_SIZE: usize = 64;
-
-#[derive(Clone, Debug)]
-pub enum BackgroundCommand {
-    RefreshPanel {
-        panel: ActivePanel,
-        cwd: PathBuf,
-        source: PanelListingSource,
-        sort_mode: SortMode,
-        show_hidden_files: bool,
-        request_id: u64,
-        cancel_flag: Arc<AtomicBool>,
-    },
-    BuildTree {
-        root: PathBuf,
-        max_depth: usize,
-        max_entries: usize,
-    },
-    Shutdown,
-}
 
 #[derive(Clone, Debug)]
 pub enum BackgroundEvent {
@@ -55,52 +34,6 @@ pub enum BackgroundEvent {
         root: PathBuf,
         entries: Vec<TreeEntry>,
     },
-}
-
-pub fn run_background_worker(
-    command_rx: Receiver<BackgroundCommand>,
-    event_tx: Sender<BackgroundEvent>,
-) {
-    while let Ok(command) = command_rx.recv() {
-        if !run_background_command_sync(command, &event_tx) {
-            break;
-        }
-    }
-}
-
-pub fn run_background_command_sync(
-    command: BackgroundCommand,
-    event_tx: &Sender<BackgroundEvent>,
-) -> bool {
-    match command {
-        BackgroundCommand::RefreshPanel {
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
-            cancel_flag,
-        } => event_tx
-            .send(refresh_panel_event(
-                panel,
-                cwd,
-                source,
-                sort_mode,
-                show_hidden_files,
-                request_id,
-                cancel_flag.as_ref(),
-            ))
-            .is_ok(),
-        BackgroundCommand::BuildTree {
-            root,
-            max_depth,
-            max_entries,
-        } => event_tx
-            .send(build_tree_ready_event(root, max_depth, max_entries))
-            .is_ok(),
-        BackgroundCommand::Shutdown => false,
-    }
 }
 
 pub fn refresh_panel_event(

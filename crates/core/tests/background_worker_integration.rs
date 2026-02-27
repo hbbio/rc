@@ -3,11 +3,9 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rc_core::{BackgroundCommand, run_background_worker};
+use rc_core::{BackgroundEvent, build_tree_ready_event};
 
 fn make_temp_dir(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -20,28 +18,24 @@ fn make_temp_dir(label: &str) -> PathBuf {
 }
 
 #[test]
-fn shutdown_stops_background_worker_loop() {
+fn build_tree_event_includes_root_entry() {
     let root = make_temp_dir("shutdown");
     fs::write(root.join("needle.txt"), "needle").expect("fixture file should be writable");
 
-    let (command_tx, command_rx) = mpsc::channel();
-    let (event_tx, _event_rx) = mpsc::channel();
-    let worker = thread::spawn(move || run_background_worker(command_rx, event_tx));
-
-    command_tx
-        .send(BackgroundCommand::BuildTree {
-            root: root.clone(),
-            max_depth: 2,
-            max_entries: 64,
-        })
-        .expect("tree command should send");
-
-    command_tx
-        .send(BackgroundCommand::Shutdown)
-        .expect("shutdown command should send");
-    worker
-        .join()
-        .expect("background worker should join cleanly");
+    let event = build_tree_ready_event(root.clone(), 2, 64);
+    match event {
+        BackgroundEvent::TreeReady {
+            root: event_root,
+            entries,
+        } => {
+            assert_eq!(event_root, root);
+            assert!(
+                entries.iter().any(|entry| entry.path == root),
+                "tree event should include the root directory"
+            );
+        }
+        other => panic!("expected tree-ready event, got {other:?}"),
+    }
 
     fs::remove_dir_all(&root).expect("temp tree should be removable");
 }
