@@ -215,6 +215,118 @@ pub enum JobStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobRetryHint {
+    None,
+    Retry,
+    Elevated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobErrorCode {
+    Canceled,
+    PermissionDenied,
+    AlreadyExists,
+    NotFound,
+    InvalidInput,
+    Interrupted,
+    Unsupported,
+    Dispatch,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobError {
+    pub code: JobErrorCode,
+    pub message: String,
+    pub retry_hint: JobRetryHint,
+}
+
+pub type JobResult = Result<(), JobError>;
+
+impl JobError {
+    pub fn canceled() -> Self {
+        Self {
+            code: JobErrorCode::Canceled,
+            message: String::from(JOB_CANCELED_MESSAGE),
+            retry_hint: JobRetryHint::None,
+        }
+    }
+
+    pub fn dispatch(message: impl Into<String>) -> Self {
+        Self {
+            code: JobErrorCode::Dispatch,
+            message: message.into(),
+            retry_hint: JobRetryHint::Retry,
+        }
+    }
+
+    pub fn from_io(error: io::Error) -> Self {
+        let kind = error.kind();
+        let message = error.to_string();
+        match kind {
+            io::ErrorKind::PermissionDenied => Self {
+                code: JobErrorCode::PermissionDenied,
+                message,
+                retry_hint: JobRetryHint::Elevated,
+            },
+            io::ErrorKind::AlreadyExists => Self {
+                code: JobErrorCode::AlreadyExists,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::NotFound => Self {
+                code: JobErrorCode::NotFound,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::InvalidInput => Self {
+                code: JobErrorCode::InvalidInput,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::Unsupported => Self {
+                code: JobErrorCode::Unsupported,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::Interrupted => {
+                if is_canceled_message(&message) {
+                    Self::canceled()
+                } else {
+                    Self {
+                        code: JobErrorCode::Interrupted,
+                        message,
+                        retry_hint: JobRetryHint::Retry,
+                    }
+                }
+            }
+            _ => Self {
+                code: JobErrorCode::Other,
+                message,
+                retry_hint: JobRetryHint::Retry,
+            },
+        }
+    }
+
+    pub fn from_message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        if is_canceled_message(&message) {
+            Self::canceled()
+        } else {
+            Self {
+                code: JobErrorCode::Other,
+                message,
+                retry_hint: JobRetryHint::Retry,
+            }
+        }
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        matches!(self.code, JobErrorCode::Canceled)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobRecord {
     pub id: JobId,
@@ -247,17 +359,9 @@ pub enum WorkerCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobEvent {
-    Started {
-        id: JobId,
-    },
-    Progress {
-        id: JobId,
-        progress: JobProgress,
-    },
-    Finished {
-        id: JobId,
-        result: Result<(), String>,
-    },
+    Started { id: JobId },
+    Progress { id: JobId, progress: JobProgress },
+    Finished { id: JobId, result: JobResult },
 }
 
 #[derive(Debug)]
@@ -338,13 +442,13 @@ impl JobManager {
                             }
                             job.last_error = None;
                         }
-                        Err(message) => {
-                            if is_canceled_message(message) {
+                        Err(error) => {
+                            if error.is_canceled() {
                                 job.status = JobStatus::Canceled;
                                 job.last_error = None;
                             } else {
                                 job.status = JobStatus::Failed;
-                                job.last_error = Some(message.clone());
+                                job.last_error = Some(error.message.clone());
                             }
                         }
                     }
@@ -459,7 +563,7 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     if let Err(error) = ensure_not_canceled(cancel_flag.as_ref()) {
         let _ = event_tx.send(JobEvent::Finished {
             id,
-            result: Err(error.to_string()),
+            result: Err(JobError::from_io(error)),
         });
         return;
     }
@@ -469,7 +573,7 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
         Err(error) => {
             let _ = event_tx.send(JobEvent::Finished {
                 id,
-                result: Err(error.to_string()),
+                result: Err(JobError::from_io(error)),
             });
             return;
         }
@@ -480,11 +584,11 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     if let Err(error) = progress.ensure_not_canceled() {
         let _ = event_tx.send(JobEvent::Finished {
             id,
-            result: Err(error.to_string()),
+            result: Err(JobError::from_io(error)),
         });
         return;
     }
-    let result = execute_job(request, &mut progress).map_err(|error| error.to_string());
+    let result = execute_job(request, &mut progress).map_err(JobError::from_io);
     if result.is_ok() {
         progress.mark_done();
     }
@@ -1170,10 +1274,7 @@ mod tests {
         match finished {
             JobEvent::Finished {
                 result: Err(error), ..
-            } => assert!(
-                is_canceled_message(&error),
-                "finished error should be a cancellation marker"
-            ),
+            } => assert!(error.is_canceled(), "finished error should be cancellation"),
             _ => panic!("job should finish with a cancellation error"),
         }
         assert_eq!(manager.status_counts().canceled, 1);
@@ -1221,10 +1322,7 @@ mod tests {
         match finished {
             JobEvent::Finished {
                 result: Err(error), ..
-            } => assert!(
-                is_canceled_message(&error),
-                "finished error should be a cancellation marker"
-            ),
+            } => assert!(error.is_canceled(), "finished error should be cancellation"),
             _ => panic!("job should finish with a cancellation error"),
         }
         assert_eq!(manager.status_counts().canceled, 1);
@@ -1580,7 +1678,7 @@ mod tests {
             JobEvent::Finished {
                 result: Err(error), ..
             } => assert!(
-                error.contains("cannot move directory into itself"),
+                error.message.contains("cannot move directory into itself"),
                 "move should reject recursive destination"
             ),
             _ => panic!("move should fail for recursive destination"),
@@ -1736,5 +1834,15 @@ mod tests {
             .join()
             .expect("worker thread should terminate cleanly");
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn permission_denied_maps_to_elevated_retry_hint() {
+        let error = JobError::from_io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert_eq!(error.code, JobErrorCode::PermissionDenied);
+        assert_eq!(error.retry_hint, JobRetryHint::Elevated);
     }
 }

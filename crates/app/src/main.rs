@@ -25,7 +25,8 @@ use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, Keyma
 use rc_core::settings_io;
 use rc_core::{
     AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, ExternalEditRequest,
-    JobEvent, JobRequest, Settings, WorkerCommand, execute_worker_job, run_background_command_sync,
+    JobError, JobEvent, JobRequest, Settings, WorkerCommand, execute_worker_job,
+    run_background_command_sync,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
@@ -353,7 +354,7 @@ impl RuntimeBridge {
                     if let Some(job_id) = run_job_id {
                         state.handle_job_dispatch_failure(
                             job_id,
-                            String::from("runtime queue is full"),
+                            JobError::dispatch("runtime queue is full"),
                         );
                     } else {
                         state.set_status("runtime queue is full");
@@ -364,7 +365,7 @@ impl RuntimeBridge {
                     if let Some(job_id) = run_job_id {
                         state.handle_job_dispatch_failure(
                             job_id,
-                            String::from("runtime is unavailable"),
+                            JobError::dispatch("runtime is unavailable"),
                         );
                     } else {
                         state.set_status("runtime is unavailable");

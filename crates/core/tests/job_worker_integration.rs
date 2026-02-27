@@ -8,8 +8,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rc_core::{
-    JOB_CANCELED_MESSAGE, JobEvent, JobManager, JobRequest, JobStatus, OverwritePolicy,
-    WorkerCommand, run_worker,
+    JobEvent, JobManager, JobRequest, JobStatus, OverwritePolicy, WorkerCommand, run_worker,
 };
 
 fn make_temp_dir(label: &str) -> PathBuf {
@@ -236,7 +235,7 @@ fn canceled_copy_job_reports_canceled_status() {
     match canceled_result {
         JobEvent::Finished {
             result: Err(error), ..
-        } => assert_eq!(error, JOB_CANCELED_MESSAGE),
+        } => assert!(error.is_canceled()),
         _ => panic!("job should finish with cancellation"),
     }
     assert_eq!(

@@ -25,9 +25,9 @@ use std::time::SystemTime;
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
 pub use jobs::{
-    JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
-    JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, execute_worker_job,
-    run_worker,
+    JOB_CANCELED_MESSAGE, JobError, JobErrorCode, JobEvent, JobId, JobKind, JobManager,
+    JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
+    WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
@@ -1700,114 +1700,9 @@ pub fn run_background_worker(
     command_rx: Receiver<BackgroundCommand>,
     event_tx: Sender<BackgroundEvent>,
 ) {
-    let mut running_find_tasks = Vec::new();
-    #[cfg(not(test))]
-    let mut running_panel_refresh_tasks = Vec::new();
-    #[cfg(not(test))]
-    let mut running_tree_tasks = Vec::new();
     while let Ok(command) = command_rx.recv() {
-        reap_finished_find_tasks(&mut running_find_tasks);
-        #[cfg(not(test))]
-        reap_finished_panel_refresh_tasks(&mut running_panel_refresh_tasks);
-        #[cfg(not(test))]
-        reap_finished_tree_tasks(&mut running_tree_tasks);
-        match execute_background_command(command, &event_tx) {
-            BackgroundExecution::Continue => {}
-            #[cfg(not(test))]
-            BackgroundExecution::SpawnFind(task) => running_find_tasks.push(task),
-            #[cfg(not(test))]
-            BackgroundExecution::SpawnPanelRefresh(task) => running_panel_refresh_tasks.push(task),
-            #[cfg(not(test))]
-            BackgroundExecution::SpawnTree(task) => running_tree_tasks.push(task),
-            BackgroundExecution::Stop => break,
-        }
-    }
-
-    for task in &running_find_tasks {
-        task.cancel_flag.store(true, AtomicOrdering::Relaxed);
-    }
-    #[cfg(not(test))]
-    for task in &running_panel_refresh_tasks {
-        task.cancel_flag.store(true, AtomicOrdering::Relaxed);
-    }
-    for task in running_find_tasks {
-        let _ = task.handle.join();
-    }
-    #[cfg(not(test))]
-    for task in running_panel_refresh_tasks {
-        let _ = task.handle.join();
-    }
-    #[cfg(not(test))]
-    for task in running_tree_tasks {
-        let _ = task.handle.join();
-    }
-}
-
-#[derive(Debug)]
-struct RunningFindTask {
-    handle: thread::JoinHandle<()>,
-    cancel_flag: Arc<AtomicBool>,
-}
-
-#[cfg(not(test))]
-#[derive(Debug)]
-struct RunningPanelRefreshTask {
-    handle: thread::JoinHandle<()>,
-    cancel_flag: Arc<AtomicBool>,
-}
-
-#[cfg(not(test))]
-#[derive(Debug)]
-struct RunningTreeTask {
-    handle: thread::JoinHandle<()>,
-}
-
-#[derive(Debug)]
-enum BackgroundExecution {
-    Continue,
-    #[cfg(not(test))]
-    SpawnFind(RunningFindTask),
-    #[cfg(not(test))]
-    SpawnPanelRefresh(RunningPanelRefreshTask),
-    #[cfg(not(test))]
-    SpawnTree(RunningTreeTask),
-    Stop,
-}
-
-fn reap_finished_find_tasks(tasks: &mut Vec<RunningFindTask>) {
-    let mut index = 0usize;
-    while index < tasks.len() {
-        if tasks[index].handle.is_finished() {
-            let task = tasks.swap_remove(index);
-            let _ = task.handle.join();
-        } else {
-            index += 1;
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn reap_finished_panel_refresh_tasks(tasks: &mut Vec<RunningPanelRefreshTask>) {
-    let mut index = 0usize;
-    while index < tasks.len() {
-        if tasks[index].handle.is_finished() {
-            let task = tasks.swap_remove(index);
-            let _ = task.handle.join();
-        } else {
-            index += 1;
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn reap_finished_tree_tasks(tasks: &mut Vec<RunningTreeTask>) {
-    let mut index = 0usize;
-    while index < tasks.len() {
-        if tasks[index].handle.is_finished() {
-            let task = tasks.swap_remove(index);
-            let _ = task.handle.join();
-        } else {
-            index += 1;
+        if !run_background_command_sync(command, &event_tx) {
+            break;
         }
     }
 }
@@ -1842,16 +1737,6 @@ pub fn run_background_command_sync(
     command: BackgroundCommand,
     event_tx: &Sender<BackgroundEvent>,
 ) -> bool {
-    !matches!(
-        execute_background_command_sync(command, event_tx),
-        BackgroundExecution::Stop
-    )
-}
-
-fn execute_background_command_sync(
-    command: BackgroundCommand,
-    event_tx: &Sender<BackgroundEvent>,
-) -> BackgroundExecution {
     match command {
         BackgroundCommand::RefreshPanel {
             panel,
@@ -1869,7 +1754,7 @@ fn execute_background_command_sync(
                 show_hidden_files,
                 cancel_flag.as_ref(),
             );
-            if event_tx
+            event_tx
                 .send(BackgroundEvent::PanelRefreshed {
                     panel,
                     cwd,
@@ -1879,25 +1764,13 @@ fn execute_background_command_sync(
                     result,
                 })
                 .is_ok()
-            {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
-            }
         }
-        BackgroundCommand::LoadViewer { path } => {
-            if event_tx
-                .send(BackgroundEvent::ViewerLoaded {
-                    path: path.clone(),
-                    result: ViewerState::open(path).map_err(|error| error.to_string()),
-                })
-                .is_ok()
-            {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
-            }
-        }
+        BackgroundCommand::LoadViewer { path } => event_tx
+            .send(BackgroundEvent::ViewerLoaded {
+                path: path.clone(),
+                result: ViewerState::open(path).map_err(|error| error.to_string()),
+            })
+            .is_ok(),
         BackgroundCommand::FindEntries {
             job_id,
             query,
@@ -1905,237 +1778,26 @@ fn execute_background_command_sync(
             max_results,
             cancel_flag,
             pause_flag,
-        } => {
-            if run_find_search(
-                event_tx,
-                job_id,
-                query,
-                base_dir,
-                max_results,
-                cancel_flag.as_ref(),
-                pause_flag.as_ref(),
-            ) {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
-            }
-        }
+        } => run_find_search(
+            event_tx,
+            job_id,
+            query,
+            base_dir,
+            max_results,
+            cancel_flag.as_ref(),
+            pause_flag.as_ref(),
+        ),
         BackgroundCommand::BuildTree {
             root,
             max_depth,
             max_entries,
         } => {
             let entries = build_tree_entries(&root, max_depth, max_entries);
-            if event_tx
+            event_tx
                 .send(BackgroundEvent::TreeReady { root, entries })
                 .is_ok()
-            {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
-            }
         }
-        BackgroundCommand::Shutdown => BackgroundExecution::Stop,
-    }
-}
-
-fn execute_background_command(
-    command: BackgroundCommand,
-    event_tx: &Sender<BackgroundEvent>,
-) -> BackgroundExecution {
-    match command {
-        BackgroundCommand::RefreshPanel {
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
-            cancel_flag,
-        } => {
-            #[cfg(test)]
-            {
-                let result = refresh_panel_entries(
-                    &cwd,
-                    &source,
-                    sort_mode,
-                    show_hidden_files,
-                    cancel_flag.as_ref(),
-                );
-                if event_tx
-                    .send(BackgroundEvent::PanelRefreshed {
-                        panel,
-                        cwd,
-                        source,
-                        sort_mode,
-                        request_id,
-                        result,
-                    })
-                    .is_ok()
-                {
-                    BackgroundExecution::Continue
-                } else {
-                    BackgroundExecution::Stop
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let worker_event_tx = event_tx.clone();
-                let worker_cancel_flag = cancel_flag.clone();
-                let worker_cwd = cwd.clone();
-                let worker_source = source.clone();
-                match thread::Builder::new()
-                    .name(format!("rc-refresh-{}-{request_id}", panel.index()))
-                    .spawn(move || {
-                        let result = refresh_panel_entries(
-                            &worker_cwd,
-                            &worker_source,
-                            sort_mode,
-                            show_hidden_files,
-                            worker_cancel_flag.as_ref(),
-                        );
-                        let _ = worker_event_tx.send(BackgroundEvent::PanelRefreshed {
-                            panel,
-                            cwd: worker_cwd,
-                            source: worker_source,
-                            sort_mode,
-                            request_id,
-                            result,
-                        });
-                    }) {
-                    Ok(handle) => BackgroundExecution::SpawnPanelRefresh(RunningPanelRefreshTask {
-                        handle,
-                        cancel_flag,
-                    }),
-                    Err(error) => {
-                        let _ = event_tx.send(BackgroundEvent::PanelRefreshed {
-                            panel,
-                            cwd,
-                            source,
-                            sort_mode,
-                            request_id,
-                            result: Err(format!("failed to spawn panel refresh worker: {error}")),
-                        });
-                        BackgroundExecution::Continue
-                    }
-                }
-            }
-        }
-        BackgroundCommand::LoadViewer { path } => {
-            if event_tx
-                .send(BackgroundEvent::ViewerLoaded {
-                    path: path.clone(),
-                    result: ViewerState::open(path).map_err(|error| error.to_string()),
-                })
-                .is_ok()
-            {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
-            }
-        }
-        BackgroundCommand::FindEntries {
-            job_id,
-            query,
-            base_dir,
-            max_results,
-            cancel_flag,
-            pause_flag,
-        } => {
-            #[cfg(test)]
-            {
-                if run_find_search(
-                    event_tx,
-                    job_id,
-                    query,
-                    base_dir,
-                    max_results,
-                    cancel_flag.as_ref(),
-                    pause_flag.as_ref(),
-                ) {
-                    BackgroundExecution::Continue
-                } else {
-                    BackgroundExecution::Stop
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let worker_event_tx = event_tx.clone();
-                let worker_cancel_flag = cancel_flag.clone();
-                let worker_pause_flag = pause_flag.clone();
-                match thread::Builder::new()
-                    .name(format!("rc-find-{job_id}"))
-                    .spawn(move || {
-                        let _ = run_find_search(
-                            &worker_event_tx,
-                            job_id,
-                            query,
-                            base_dir,
-                            max_results,
-                            worker_cancel_flag.as_ref(),
-                            worker_pause_flag.as_ref(),
-                        );
-                    }) {
-                    Ok(handle) => BackgroundExecution::SpawnFind(RunningFindTask {
-                        handle,
-                        cancel_flag,
-                    }),
-                    Err(error) => {
-                        let _ = event_tx.send(BackgroundEvent::FindEntriesFinished {
-                            job_id,
-                            result: Err(format!("failed to spawn find worker: {error}")),
-                        });
-                        BackgroundExecution::Continue
-                    }
-                }
-            }
-        }
-        BackgroundCommand::BuildTree {
-            root,
-            max_depth,
-            max_entries,
-        } => {
-            #[cfg(test)]
-            {
-                let entries = build_tree_entries(&root, max_depth, max_entries);
-                if event_tx
-                    .send(BackgroundEvent::TreeReady { root, entries })
-                    .is_ok()
-                {
-                    BackgroundExecution::Continue
-                } else {
-                    BackgroundExecution::Stop
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let worker_event_tx = event_tx.clone();
-                let worker_root = root.clone();
-                match thread::Builder::new()
-                    .name(String::from("rc-tree"))
-                    .spawn(move || {
-                        let entries = build_tree_entries(&worker_root, max_depth, max_entries);
-                        let _ = worker_event_tx.send(BackgroundEvent::TreeReady {
-                            root: worker_root,
-                            entries,
-                        });
-                    }) {
-                    Ok(handle) => BackgroundExecution::SpawnTree(RunningTreeTask { handle }),
-                    Err(_error) => {
-                        let entries = build_tree_entries(&root, max_depth, max_entries);
-                        if event_tx
-                            .send(BackgroundEvent::TreeReady { root, entries })
-                            .is_ok()
-                        {
-                            BackgroundExecution::Continue
-                        } else {
-                            BackgroundExecution::Stop
-                        }
-                    }
-                }
-            }
-        }
-        BackgroundCommand::Shutdown => BackgroundExecution::Stop,
+        BackgroundCommand::Shutdown => false,
     }
 }
 
@@ -3375,10 +3037,10 @@ impl AppState {
                     }
                 }
                 Err(error) => {
-                    if error == JOB_CANCELED_MESSAGE {
+                    if error.is_canceled() {
                         self.set_status(format!("Job #{id} canceled"));
                     } else {
-                        self.set_status(format!("Job #{id} failed: {error}"));
+                        self.set_status(format!("Job #{id} failed: {}", error.message));
                     }
                 }
             },
@@ -3514,8 +3176,12 @@ impl AppState {
                 if let Some(results) = self.find_results_by_job_id_mut(job_id) {
                     results.loading = false;
                 }
-                let completed_successfully = result.is_ok();
-                self.handle_job_event(JobEvent::Finished { id: job_id, result });
+                let job_result = result.map_err(JobError::from_message);
+                let completed_successfully = job_result.is_ok();
+                self.handle_job_event(JobEvent::Finished {
+                    id: job_id,
+                    result: job_result,
+                });
                 let status_message = if completed_successfully {
                     self.find_results_by_job_id(job_id).map(|results| {
                         format!(
@@ -3551,7 +3217,7 @@ impl AppState {
         }
     }
 
-    pub fn handle_job_dispatch_failure(&mut self, id: JobId, error: String) {
+    pub fn handle_job_dispatch_failure(&mut self, id: JobId, error: JobError) {
         self.handle_job_event(JobEvent::Finished {
             id,
             result: Err(error),
@@ -6444,13 +6110,8 @@ mod tests {
             }
             for command in commands {
                 let (event_tx, event_rx) = std::sync::mpsc::channel();
-                match execute_background_command(command, &event_tx) {
-                    BackgroundExecution::Continue => {}
-                    #[cfg(not(test))]
-                    BackgroundExecution::SpawnFind(task) => {
-                        let _ = task.handle.join();
-                    }
-                    BackgroundExecution::Stop => return,
+                if !run_background_command_sync(command, &event_tx) {
+                    return;
                 }
                 for event in event_rx.try_iter() {
                     app.handle_background_event(event);
