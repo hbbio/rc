@@ -38,6 +38,7 @@ pub enum JobKind {
     PersistSettings,
     Find,
     LoadViewer,
+    BuildTree,
 }
 
 impl JobKind {
@@ -51,6 +52,7 @@ impl JobKind {
             Self::PersistSettings => "persist-settings",
             Self::Find => "find",
             Self::LoadViewer => "load-viewer",
+            Self::BuildTree => "build-tree",
         }
     }
 }
@@ -107,6 +109,11 @@ pub enum JobRequest {
     LoadViewer {
         path: PathBuf,
     },
+    BuildTree {
+        root: PathBuf,
+        max_depth: usize,
+        max_entries: usize,
+    },
 }
 
 impl JobRequest {
@@ -120,6 +127,7 @@ impl JobRequest {
             Self::PersistSettings { .. } => JobKind::PersistSettings,
             Self::Find { .. } => JobKind::Find,
             Self::LoadViewer { .. } => JobKind::LoadViewer,
+            Self::BuildTree { .. } => JobKind::BuildTree,
         }
     }
 
@@ -133,6 +141,7 @@ impl JobRequest {
             Self::PersistSettings { .. } => 1,
             Self::Find { .. } => 1,
             Self::LoadViewer { .. } => 1,
+            Self::BuildTree { .. } => 1,
         }
     }
 
@@ -183,6 +192,18 @@ impl JobRequest {
                 format!("find '{}' under {}", query, base_dir.to_string_lossy())
             }
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
+            Self::BuildTree {
+                root,
+                max_depth,
+                max_entries,
+            } => {
+                format!(
+                    "build tree for {} [depth={}, entries={}]",
+                    root.to_string_lossy(),
+                    max_depth,
+                    max_entries
+                )
+            }
         }
     }
 }
@@ -702,6 +723,10 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "viewer jobs are executed by the runtime adapter",
         )),
+        JobRequest::BuildTree { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "tree jobs are executed by the runtime adapter",
+        )),
     }
 }
 
@@ -1082,7 +1107,8 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         JobRequest::Mkdir { .. }
         | JobRequest::Rename { .. }
         | JobRequest::PersistSettings { .. }
-        | JobRequest::LoadViewer { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
+        | JobRequest::LoadViewer { .. }
+        | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
 }

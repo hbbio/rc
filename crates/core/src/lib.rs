@@ -3899,7 +3899,7 @@ impl AppState {
         let root = self.active_panel().cwd.clone();
         self.routes
             .push(Route::Tree(TreeState::loading(root.clone())));
-        self.queue_background_command(BackgroundCommand::BuildTree {
+        self.queue_worker_job_request(JobRequest::BuildTree {
             root,
             max_depth: self.settings.advanced.tree_max_depth,
             max_entries: self.settings.advanced.tree_max_entries,
@@ -5988,6 +5988,33 @@ mod tests {
                                 });
                                 let result =
                                     viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            JobRequest::BuildTree {
+                                root,
+                                max_depth,
+                                max_entries,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let (background_tx, background_rx) = std::sync::mpsc::channel();
+                                let delivered = run_background_command_sync(
+                                    BackgroundCommand::BuildTree {
+                                        root: root.clone(),
+                                        max_depth: *max_depth,
+                                        max_entries: *max_entries,
+                                    },
+                                    &background_tx,
+                                );
+                                for event in background_rx.try_iter() {
+                                    app.handle_background_event(event);
+                                }
+                                let result = if delivered {
+                                    Ok(())
+                                } else {
+                                    Err(JobError::from_message(
+                                        "background event channel disconnected",
+                                    ))
+                                };
                                 let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                             }
                             _ => {

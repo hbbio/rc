@@ -282,7 +282,9 @@ async fn run_runtime_loop(
                             | JobKind::Delete
                             | JobKind::Mkdir
                             | JobKind::Rename => (Arc::clone(&fs_mutation_limit), "fs_mutation"),
-                            JobKind::Find => (Arc::clone(&background_scan_limit), "scan"),
+                            JobKind::Find | JobKind::BuildTree => {
+                                (Arc::clone(&background_scan_limit), "scan")
+                            }
                             JobKind::LoadViewer => {
                                 (Arc::clone(&background_process_limit), "process")
                             }
@@ -479,6 +481,18 @@ fn execute_runtime_worker_job(
         JobRequest::LoadViewer { path } => {
             execute_viewer_worker_job(worker_job.id, path, worker_event_tx, background_event_tx)
         }
+        JobRequest::BuildTree {
+            root,
+            max_depth,
+            max_entries,
+        } => execute_tree_worker_job(
+            worker_job.id,
+            root,
+            max_depth,
+            max_entries,
+            worker_event_tx,
+            background_event_tx,
+        ),
         _ => execute_worker_job(worker_job, worker_event_tx),
     }
 }
@@ -526,6 +540,33 @@ fn execute_viewer_worker_job(
         result: viewer_result.clone(),
     });
     let result = viewer_result.map(|_| ()).map_err(JobError::from_message);
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
+fn execute_tree_worker_job(
+    job_id: JobId,
+    root: std::path::PathBuf,
+    max_depth: usize,
+    max_entries: usize,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let delivered = run_background_command_sync(
+        BackgroundCommand::BuildTree {
+            root,
+            max_depth,
+            max_entries,
+        },
+        background_event_tx,
+    );
+    let result = if delivered {
+        Ok(())
+    } else {
+        Err(JobError::from_message(
+            "background event channel disconnected",
+        ))
+    };
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
