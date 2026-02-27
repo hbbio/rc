@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, JobKind, JobRequest,
+    AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobId, JobRequest,
     PanelListingSource, WorkerCommand, execute_worker_job, run_background_command_sync,
     run_find_entries,
 };
@@ -275,18 +275,29 @@ async fn run_runtime_loop(
                     } => {
                         let worker_job = *job;
                         let job_id = worker_job.id;
-                        let (limit, worker_class) = match worker_job.request.kind() {
-                            JobKind::PersistSettings => (Arc::clone(&settings_limit), "settings"),
-                            JobKind::Copy
-                            | JobKind::Move
-                            | JobKind::Delete
-                            | JobKind::Mkdir
-                            | JobKind::Rename => (Arc::clone(&fs_mutation_limit), "fs_mutation"),
-                            JobKind::Find | JobKind::BuildTree => {
+                        let (limit, worker_class) = match &worker_job.request {
+                            JobRequest::PersistSettings { .. } => {
+                                (Arc::clone(&settings_limit), "settings")
+                            }
+                            JobRequest::Copy { .. }
+                            | JobRequest::Move { .. }
+                            | JobRequest::Delete { .. }
+                            | JobRequest::Mkdir { .. }
+                            | JobRequest::Rename { .. } => {
+                                (Arc::clone(&fs_mutation_limit), "fs_mutation")
+                            }
+                            JobRequest::Find { .. } | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan")
                             }
-                            JobKind::LoadViewer => {
+                            JobRequest::LoadViewer { .. } => {
                                 (Arc::clone(&background_process_limit), "process")
+                            }
+                            JobRequest::RefreshPanel {
+                                source: PanelListingSource::Panelize { .. },
+                                ..
+                            } => (Arc::clone(&background_process_limit), "process"),
+                            JobRequest::RefreshPanel { .. } => {
+                                (Arc::clone(&background_scan_limit), "scan")
                             }
                         };
                         let job_cancel = shutdown.child_token();
@@ -465,7 +476,27 @@ fn execute_runtime_worker_job(
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
+    let cancel_flag = worker_job.cancel_flag();
     match worker_job.request.clone() {
+        JobRequest::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            show_hidden_files,
+            request_id,
+        } => execute_refresh_worker_job(
+            worker_job.id,
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            show_hidden_files,
+            request_id,
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
         JobRequest::Find {
             query,
             base_dir,
@@ -495,6 +526,42 @@ fn execute_runtime_worker_job(
         ),
         _ => execute_worker_job(worker_job, worker_event_tx),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_refresh_worker_job(
+    job_id: JobId,
+    panel: rc_core::ActivePanel,
+    cwd: std::path::PathBuf,
+    source: PanelListingSource,
+    sort_mode: rc_core::SortMode,
+    show_hidden_files: bool,
+    request_id: u64,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let delivered = run_background_command_sync(
+        BackgroundCommand::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            show_hidden_files,
+            request_id,
+            cancel_flag,
+        },
+        background_event_tx,
+    );
+    let result = if delivered {
+        Ok(())
+    } else {
+        Err(JobError::from_message(
+            "background event channel disconnected",
+        ))
+    };
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
 fn execute_find_worker_job(

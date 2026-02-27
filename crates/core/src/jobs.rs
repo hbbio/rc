@@ -15,6 +15,7 @@ use nix::unistd::{Gid, Uid, chown};
 
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
+use crate::{ActivePanel, PanelListingSource, SortMode};
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
@@ -36,6 +37,7 @@ pub enum JobKind {
     Mkdir,
     Rename,
     PersistSettings,
+    RefreshPanel,
     Find,
     LoadViewer,
     BuildTree,
@@ -50,6 +52,7 @@ impl JobKind {
             Self::Mkdir => "mkdir",
             Self::Rename => "rename",
             Self::PersistSettings => "persist-settings",
+            Self::RefreshPanel => "refresh-panel",
             Self::Find => "find",
             Self::LoadViewer => "load-viewer",
             Self::BuildTree => "build-tree",
@@ -101,6 +104,14 @@ pub enum JobRequest {
         paths: SettingsPaths,
         snapshot: Box<Settings>,
     },
+    RefreshPanel {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+        show_hidden_files: bool,
+        request_id: u64,
+    },
     Find {
         query: String,
         base_dir: PathBuf,
@@ -125,6 +136,7 @@ impl JobRequest {
             Self::Mkdir { .. } => JobKind::Mkdir,
             Self::Rename { .. } => JobKind::Rename,
             Self::PersistSettings { .. } => JobKind::PersistSettings,
+            Self::RefreshPanel { .. } => JobKind::RefreshPanel,
             Self::Find { .. } => JobKind::Find,
             Self::LoadViewer { .. } => JobKind::LoadViewer,
             Self::BuildTree { .. } => JobKind::BuildTree,
@@ -139,6 +151,7 @@ impl JobRequest {
             Self::Mkdir { .. } => 1,
             Self::Rename { .. } => 1,
             Self::PersistSettings { .. } => 1,
+            Self::RefreshPanel { .. } => 1,
             Self::Find { .. } => 1,
             Self::LoadViewer { .. } => 1,
             Self::BuildTree { .. } => 1,
@@ -185,6 +198,25 @@ impl JobRequest {
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_else(|| String::from("<none>"));
                 format!("save setup -> {target}")
+            }
+            Self::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                request_id,
+                ..
+            } => {
+                let source_label = match source {
+                    PanelListingSource::Directory => "directory",
+                    PanelListingSource::Panelize { .. } => "panelize",
+                    PanelListingSource::FindResults { .. } => "find-results",
+                };
+                format!(
+                    "refresh {:?} panel at {} [{}] (request #{request_id})",
+                    panel,
+                    cwd.to_string_lossy(),
+                    source_label
+                )
             }
             Self::Find {
                 query, base_dir, ..
@@ -715,6 +747,10 @@ fn execute_job(
             progress.complete_item(marker);
             Ok(())
         }
+        JobRequest::RefreshPanel { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "panel refresh jobs are executed by the runtime adapter",
+        )),
         JobRequest::Find { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "find jobs are executed by the runtime adapter",
@@ -1107,6 +1143,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         JobRequest::Mkdir { .. }
         | JobRequest::Rename { .. }
         | JobRequest::PersistSettings { .. }
+        | JobRequest::RefreshPanel { .. }
         | JobRequest::LoadViewer { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),

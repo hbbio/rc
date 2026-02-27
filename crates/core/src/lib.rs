@@ -1662,7 +1662,7 @@ pub struct AppState {
     pending_worker_commands: Vec<WorkerCommand>,
     pending_background_commands: Vec<BackgroundCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
-    panel_refresh_cancel_flags: [Option<Arc<AtomicBool>>; 2],
+    panel_refresh_job_ids: [Option<JobId>; 2],
     panel_refresh_request_ids: [u64; 2],
     next_panel_refresh_request_id: u64,
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
@@ -1707,7 +1707,7 @@ impl AppState {
             pending_worker_commands: Vec::new(),
             pending_background_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
-            panel_refresh_cancel_flags: std::array::from_fn(|_| None),
+            panel_refresh_job_ids: [None; 2],
             panel_refresh_request_ids: [0; 2],
             next_panel_refresh_request_id: 1,
             pending_panel_focus: None,
@@ -2608,11 +2608,9 @@ impl AppState {
 
     fn queue_panel_refresh(&mut self, panel: ActivePanel) {
         let panel_index = panel.index();
-        if let Some(cancel_flag) = self.panel_refresh_cancel_flags[panel_index].as_ref() {
-            cancel_flag.store(true, AtomicOrdering::Relaxed);
+        if let Some(previous_job_id) = self.panel_refresh_job_ids[panel_index].take() {
+            let _ = self.request_cancel_for_job(previous_job_id);
         }
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        self.panel_refresh_cancel_flags[panel_index] = Some(cancel_flag.clone());
         let request_id = self.next_panel_refresh_request_id;
         self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
         self.panel_refresh_request_ids[panel_index] = request_id;
@@ -2627,31 +2625,15 @@ impl AppState {
                 panel_state.show_hidden_files,
             )
         };
-        self.queue_background_command(BackgroundCommand::RefreshPanel {
+        let job_id = self.queue_worker_job_request(JobRequest::RefreshPanel {
             panel,
             cwd,
             source,
             sort_mode,
             show_hidden_files,
             request_id,
-            cancel_flag,
         });
-    }
-
-    fn queue_background_command(&mut self, command: BackgroundCommand) {
-        let command_name = match &command {
-            BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
-            BackgroundCommand::BuildTree { .. } => "build-tree",
-            BackgroundCommand::Shutdown => "shutdown",
-        };
-        self.pending_background_commands.push(command);
-        tracing::debug!(
-            runtime_event = "queued",
-            command_class = "background",
-            command = command_name,
-            queue_depth = self.pending_background_commands.len(),
-            "queued background command"
-        );
+        self.panel_refresh_job_ids[panel_index] = Some(job_id);
     }
 
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
@@ -2679,11 +2661,17 @@ impl AppState {
                     .job(id)
                     .map(|job| job.kind.label())
                     .unwrap_or("unknown");
+                let is_refresh = self
+                    .jobs
+                    .job(id)
+                    .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
                 tracing::debug!(job_event = "started", job_kind, job_id = %id, "job started");
-                if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
-                    self.set_status(format!("Job #{id} started: {}", job.summary));
-                } else {
-                    self.set_status(format!("Job #{id} started"));
+                if !is_refresh {
+                    if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
+                        self.set_status(format!("Job #{id} started: {}", job.summary));
+                    } else {
+                        self.set_status(format!("Job #{id} started"));
+                    }
                 }
             }
             JobEvent::Progress { id, progress } => {
@@ -2740,6 +2728,10 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::Find));
+                    let is_refresh = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
@@ -2770,8 +2762,10 @@ impl AppState {
                             self.set_status(format!("Job #{id} finished"));
                         }
                     } else if let Some(job) = self.jobs.job(id) {
-                        self.set_status(format!("Job #{id} finished: {}", job.summary));
-                    } else {
+                        if !is_refresh {
+                            self.set_status(format!("Job #{id} finished: {}", job.summary));
+                        }
+                    } else if !is_refresh {
                         self.set_status(format!("Job #{id} finished"));
                     }
                     if is_persist_settings
@@ -2794,6 +2788,10 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::Find));
+                    let is_refresh = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
                         results.loading = false;
                     }
@@ -2807,7 +2805,9 @@ impl AppState {
                             retry_hint = ?error.retry_hint,
                             "job canceled"
                         );
-                        self.set_status(format!("Job #{id} canceled"));
+                        if !is_refresh {
+                            self.set_status(format!("Job #{id} canceled"));
+                        }
                     } else {
                         tracing::warn!(
                             job_event = "finished",
@@ -2819,7 +2819,9 @@ impl AppState {
                             error_message = %error.message,
                             "job failed"
                         );
-                        self.set_status(format!("Job #{id} failed: {}", error.message));
+                        if !is_refresh {
+                            self.set_status(format!("Job #{id} failed: {}", error.message));
+                        }
                     }
                     if is_persist_settings
                         && let Some(request) = self.deferred_persist_settings_request.take()
@@ -2913,7 +2915,7 @@ impl AppState {
                         }
                     }
                 }
-                self.panel_refresh_cancel_flags[panel.index()] = None;
+                self.panel_refresh_job_ids[panel.index()] = None;
                 if clear_focus_target {
                     self.pending_panel_focus = None;
                 }
@@ -5943,6 +5945,40 @@ mod tests {
                         let job_id = job.id;
                         let (event_tx, event_rx) = std::sync::mpsc::channel();
                         match &job.request {
+                            JobRequest::RefreshPanel {
+                                panel,
+                                cwd,
+                                source,
+                                sort_mode,
+                                show_hidden_files,
+                                request_id,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let (background_tx, background_rx) = std::sync::mpsc::channel();
+                                let delivered = run_background_command_sync(
+                                    BackgroundCommand::RefreshPanel {
+                                        panel: *panel,
+                                        cwd: cwd.clone(),
+                                        source: source.clone(),
+                                        sort_mode: *sort_mode,
+                                        show_hidden_files: *show_hidden_files,
+                                        request_id: *request_id,
+                                        cancel_flag: job.cancel_flag(),
+                                    },
+                                    &background_tx,
+                                );
+                                for event in background_rx.try_iter() {
+                                    app.handle_background_event(event);
+                                }
+                                let result = if delivered {
+                                    Ok(())
+                                } else {
+                                    Err(JobError::from_message(
+                                        "background event channel disconnected",
+                                    ))
+                                };
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
                             JobRequest::Find {
                                 query,
                                 base_dir,
@@ -8372,16 +8408,18 @@ OpenJobs = f6
 
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.refresh_active_panel();
-        assert_eq!(app.pending_background_commands.len(), 1);
+        assert_eq!(app.pending_worker_commands.len(), 1);
 
-        let (first_request_id, first_cancel_flag) = match &app.pending_background_commands[0] {
-            BackgroundCommand::RefreshPanel {
-                request_id,
-                cancel_flag,
-                ..
-            } => (*request_id, Arc::clone(cancel_flag)),
-            _ => panic!("expected panel refresh command"),
-        };
+        let (first_job_id, first_request_id, first_cancel_flag) =
+            match &app.pending_worker_commands[0] {
+                WorkerCommand::Run(job) => match &job.request {
+                    JobRequest::RefreshPanel { request_id, .. } => {
+                        (job.id, *request_id, job.cancel_flag())
+                    }
+                    _ => panic!("expected refresh-panel job request"),
+                },
+                _ => panic!("expected worker run command"),
+            };
         assert!(
             !first_cancel_flag.load(AtomicOrdering::Relaxed),
             "initial refresh should not be canceled"
@@ -8392,19 +8430,27 @@ OpenJobs = f6
             first_cancel_flag.load(AtomicOrdering::Relaxed),
             "second refresh should cancel the previous in-flight request"
         );
+        assert!(
+            app.pending_worker_commands.iter().any(
+                |command| matches!(command, WorkerCommand::Cancel(job_id) if *job_id == first_job_id)
+            ),
+            "second refresh should enqueue cancellation for the previous refresh job"
+        );
 
-        let (second_request_id, second_cancel_flag) = match app
-            .pending_background_commands
-            .last()
-            .expect("second refresh command should be queued")
-        {
-            BackgroundCommand::RefreshPanel {
-                request_id,
-                cancel_flag,
-                ..
-            } => (*request_id, Arc::clone(cancel_flag)),
-            _ => panic!("expected panel refresh command"),
-        };
+        let (second_request_id, second_cancel_flag) = app
+            .pending_worker_commands
+            .iter()
+            .rev()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                let JobRequest::RefreshPanel { request_id, .. } = &job.request else {
+                    return None;
+                };
+                Some((*request_id, job.cancel_flag()))
+            })
+            .expect("second refresh command should be queued");
         assert!(
             second_request_id > first_request_id,
             "request ids should advance for newer refresh commands"
@@ -8429,26 +8475,30 @@ OpenJobs = f6
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.refresh_active_panel();
         app.refresh_active_panel();
-        let commands = app.take_pending_background_commands();
-        assert_eq!(commands.len(), 2);
+        let commands = app.take_pending_worker_commands();
+        let refresh_requests: Vec<_> = commands
+            .into_iter()
+            .filter_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                match job.request {
+                    JobRequest::RefreshPanel {
+                        panel,
+                        cwd,
+                        source,
+                        sort_mode,
+                        request_id,
+                        ..
+                    } => Some((panel, cwd, source, sort_mode, request_id)),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(refresh_requests.len(), 2);
 
-        let first = commands[0].clone();
-        let second = commands[1].clone();
-        let (panel, cwd, source, sort_mode, first_request_id) = match first {
-            BackgroundCommand::RefreshPanel {
-                panel,
-                cwd,
-                source,
-                sort_mode,
-                request_id,
-                ..
-            } => (panel, cwd, source, sort_mode, request_id),
-            _ => panic!("expected panel refresh command"),
-        };
-        let second_request_id = match second {
-            BackgroundCommand::RefreshPanel { request_id, .. } => request_id,
-            _ => panic!("expected panel refresh command"),
-        };
+        let (panel, cwd, source, sort_mode, first_request_id) = refresh_requests[0].clone();
+        let second_request_id = refresh_requests[1].4;
 
         app.handle_background_event(BackgroundEvent::PanelRefreshed {
             panel,
