@@ -4,6 +4,7 @@ pub mod dialog;
 pub mod help;
 pub mod jobs;
 pub mod keymap;
+pub mod settings;
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -26,11 +27,17 @@ pub use jobs::{
     JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
     JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, run_worker,
 };
+pub use settings::{
+    AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
+    DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
+    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, SettingsSortField,
+    VirtualFsSettings,
+};
 
 use crate::dialog::DialogEvent;
-use crate::keymap::{KeyCommand, KeyContext};
+use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap, KeymapParseReport};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
     OpenHelp,
     CloseHelp,
@@ -101,6 +108,15 @@ pub enum AppCommand {
     OpenInputDialog,
     OpenListboxDialog,
     OpenSkinDialog,
+    OpenOptionsConfiguration,
+    OpenOptionsLayout,
+    OpenOptionsPanelOptions,
+    OpenOptionsConfirmation,
+    OpenOptionsAppearance,
+    OpenOptionsDisplayBits,
+    OpenOptionsLearnKeys,
+    OpenOptionsVirtualFs,
+    SaveSetup,
     MenuMoveUp,
     MenuMoveDown,
     MenuMoveLeft,
@@ -144,6 +160,8 @@ pub enum AppCommand {
     ViewerGoto,
     ViewerToggleWrap,
     ViewerToggleHex,
+    MenuNoop,
+    MenuNotImplemented(&'static str),
 }
 
 impl AppCommand {
@@ -285,6 +303,31 @@ impl AppCommand {
                 Some(Self::OpenListboxDialog)
             }
             (KeyContext::FileManager, KeyCommand::OpenSkinDialog) => Some(Self::OpenSkinDialog),
+            (KeyContext::FileManager, KeyCommand::OpenOptionsConfiguration) => {
+                Some(Self::OpenOptionsConfiguration)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsLayout) => {
+                Some(Self::OpenOptionsLayout)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsPanelOptions) => {
+                Some(Self::OpenOptionsPanelOptions)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsConfirmation) => {
+                Some(Self::OpenOptionsConfirmation)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsAppearance) => {
+                Some(Self::OpenOptionsAppearance)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsDisplayBits) => {
+                Some(Self::OpenOptionsDisplayBits)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsLearnKeys) => {
+                Some(Self::OpenOptionsLearnKeys)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenOptionsVirtualFs) => {
+                Some(Self::OpenOptionsVirtualFs)
+            }
+            (KeyContext::FileManager, KeyCommand::SaveSetup) => Some(Self::SaveSetup),
             (_, KeyCommand::DialogAccept) => Some(Self::DialogAccept),
             (_, KeyCommand::DialogCancel) => Some(Self::DialogCancel),
             (_, KeyCommand::DialogFocusNext) => Some(Self::DialogFocusNext),
@@ -298,7 +341,70 @@ impl AppCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MenuEntry {
     pub label: &'static str,
+    pub shortcut: &'static str,
+    pub literal_shortcut: bool,
     pub command: AppCommand,
+    pub selectable: bool,
+}
+
+impl MenuEntry {
+    const fn action(label: &'static str, command: AppCommand) -> Self {
+        Self {
+            label,
+            shortcut: "",
+            literal_shortcut: false,
+            command,
+            selectable: true,
+        }
+    }
+
+    const fn action_with_shortcut(
+        label: &'static str,
+        shortcut: &'static str,
+        command: AppCommand,
+    ) -> Self {
+        Self {
+            label,
+            shortcut,
+            literal_shortcut: false,
+            command,
+            selectable: true,
+        }
+    }
+
+    const fn action_with_literal_shortcut(
+        label: &'static str,
+        shortcut: &'static str,
+        command: AppCommand,
+    ) -> Self {
+        Self {
+            label,
+            shortcut,
+            literal_shortcut: true,
+            command,
+            selectable: true,
+        }
+    }
+
+    const fn stub(label: &'static str, shortcut: &'static str) -> Self {
+        Self {
+            label,
+            shortcut,
+            literal_shortcut: true,
+            command: AppCommand::MenuNotImplemented(label),
+            selectable: true,
+        }
+    }
+
+    const fn separator() -> Self {
+        Self {
+            label: "",
+            shortcut: "",
+            literal_shortcut: true,
+            command: AppCommand::MenuNoop,
+            selectable: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,137 +421,93 @@ pub struct MenuBarItem {
     pub end_x: u16,
 }
 
-const LEFT_MENU_ENTRIES: [MenuEntry; 6] = [
-    MenuEntry {
-        label: "Find file",
-        command: AppCommand::OpenFindDialog,
-    },
-    MenuEntry {
-        label: "Directory tree",
-        command: AppCommand::OpenTree,
-    },
-    MenuEntry {
-        label: "Directory hotlist",
-        command: AppCommand::OpenHotlist,
-    },
-    MenuEntry {
-        label: "External panelize",
-        command: AppCommand::OpenPanelizeDialog,
-    },
-    MenuEntry {
-        label: "Skin",
-        command: AppCommand::OpenSkinDialog,
-    },
-    MenuEntry {
-        label: "Help",
-        command: AppCommand::OpenHelp,
-    },
+const SIDE_MENU_ENTRIES: [MenuEntry; 16] = [
+    MenuEntry::stub("File listing", ""),
+    MenuEntry::stub("Quick view", "C-x q"),
+    MenuEntry::stub("Info", "C-x i"),
+    MenuEntry::action("Tree", AppCommand::OpenTree),
+    MenuEntry::separator(),
+    MenuEntry::stub("Listing format...", ""),
+    MenuEntry::stub("Sort order...", ""),
+    MenuEntry::stub("Filter...", ""),
+    MenuEntry::stub("Encoding...", "M-e"),
+    MenuEntry::separator(),
+    MenuEntry::stub("FTP link...", ""),
+    MenuEntry::stub("Shell link...", ""),
+    MenuEntry::stub("SFTP link...", ""),
+    MenuEntry::action("Panelize", AppCommand::OpenPanelizeDialog),
+    MenuEntry::separator(),
+    MenuEntry::action_with_shortcut("Rescan", "C-r", AppCommand::Reread),
 ];
 
-const FILE_MENU_ENTRIES: [MenuEntry; 8] = [
-    MenuEntry {
-        label: "View",
-        command: AppCommand::OpenEntry,
-    },
-    MenuEntry {
-        label: "Edit",
-        command: AppCommand::EditEntry,
-    },
-    MenuEntry {
-        label: "Copy",
-        command: AppCommand::Copy,
-    },
-    MenuEntry {
-        label: "Move",
-        command: AppCommand::Move,
-    },
-    MenuEntry {
-        label: "Mkdir",
-        command: AppCommand::OpenInputDialog,
-    },
-    MenuEntry {
-        label: "Delete",
-        command: AppCommand::Delete,
-    },
-    MenuEntry {
-        label: "Rename",
-        command: AppCommand::OpenConfirmDialog,
-    },
-    MenuEntry {
-        label: "Quit",
-        command: AppCommand::Quit,
-    },
+const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
+    MenuEntry::action_with_shortcut("View", "F3", AppCommand::OpenEntry),
+    MenuEntry::stub("View file...", ""),
+    MenuEntry::stub("Filtered view", "M-!"),
+    MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
+    MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
+    MenuEntry::stub("Chmod", "C-x c"),
+    MenuEntry::stub("Link", "C-x l"),
+    MenuEntry::stub("Symlink", "C-x s"),
+    MenuEntry::stub("Relative symlink", "C-x v"),
+    MenuEntry::stub("Edit symlink", "C-x C-s"),
+    MenuEntry::stub("Chown", "C-x o"),
+    MenuEntry::stub("Advanced chown", ""),
+    MenuEntry::action_with_shortcut("Rename/Move", "F6", AppCommand::Move),
+    MenuEntry::action_with_shortcut("Mkdir", "F7", AppCommand::OpenInputDialog),
+    MenuEntry::action_with_shortcut("Delete", "F8", AppCommand::Delete),
+    MenuEntry::stub("Quick cd", "M-c"),
+    MenuEntry::separator(),
+    MenuEntry::stub("Select group", "+"),
+    MenuEntry::stub("Unselect group", "-"),
+    MenuEntry::action_with_shortcut("Invert selection", "*", AppCommand::InvertTags),
+    MenuEntry::separator(),
+    MenuEntry::action_with_shortcut("Exit", "F10", AppCommand::Quit),
 ];
 
-const COMMAND_MENU_ENTRIES: [MenuEntry; 7] = [
-    MenuEntry {
-        label: "Jobs",
-        command: AppCommand::OpenJobsScreen,
-    },
-    MenuEntry {
-        label: "Cancel job",
-        command: AppCommand::CancelJob,
-    },
-    MenuEntry {
-        label: "Find file",
-        command: AppCommand::OpenFindDialog,
-    },
-    MenuEntry {
-        label: "Directory tree",
-        command: AppCommand::OpenTree,
-    },
-    MenuEntry {
-        label: "Directory hotlist",
-        command: AppCommand::OpenHotlist,
-    },
-    MenuEntry {
-        label: "External panelize",
-        command: AppCommand::OpenPanelizeDialog,
-    },
-    MenuEntry {
-        label: "Help",
-        command: AppCommand::OpenHelp,
-    },
+const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
+    MenuEntry::stub("User menu", "F2"),
+    MenuEntry::action("Directory tree", AppCommand::OpenTree),
+    MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
+    MenuEntry::stub("Swap panels", "C-u"),
+    MenuEntry::stub("Switch panels on/off", "C-o"),
+    MenuEntry::stub("Compare directories", "C-x d"),
+    MenuEntry::stub("Compare files", "C-x C-d"),
+    MenuEntry::action_with_literal_shortcut(
+        "External panelize",
+        "C-x !",
+        AppCommand::OpenPanelizeDialog,
+    ),
+    MenuEntry::stub("Show directory sizes", "C-Space"),
+    MenuEntry::separator(),
+    MenuEntry::stub("Command history", "M-h"),
+    MenuEntry::stub("Viewed/edited files history", "M-E"),
+    MenuEntry::action_with_literal_shortcut("Directory hotlist", "C-\\", AppCommand::OpenHotlist),
+    MenuEntry::stub("Active VFS list", "C-x a"),
+    MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
+    MenuEntry::stub("Screen list", "M-`"),
+    MenuEntry::separator(),
+    MenuEntry::stub("Edit extension file", ""),
+    MenuEntry::stub("Edit menu file", ""),
+    MenuEntry::stub("Edit highlighting group file", ""),
 ];
 
-const OPTIONS_MENU_ENTRIES: [MenuEntry; 4] = [
-    MenuEntry {
-        label: "Sort next",
-        command: AppCommand::SortNext,
-    },
-    MenuEntry {
-        label: "Sort reverse",
-        command: AppCommand::SortReverse,
-    },
-    MenuEntry {
-        label: "Reread",
-        command: AppCommand::Reread,
-    },
-    MenuEntry {
-        label: "Skin",
-        command: AppCommand::OpenSkinDialog,
-    },
-];
-
-const RIGHT_MENU_ENTRIES: [MenuEntry; 3] = [
-    MenuEntry {
-        label: "Swap panels",
-        command: AppCommand::SwitchPanel,
-    },
-    MenuEntry {
-        label: "Directory tree",
-        command: AppCommand::OpenTree,
-    },
-    MenuEntry {
-        label: "Directory hotlist",
-        command: AppCommand::OpenHotlist,
-    },
+const OPTIONS_MENU_ENTRIES: [MenuEntry; 9] = [
+    MenuEntry::action("Configuration...", AppCommand::OpenOptionsConfiguration),
+    MenuEntry::action("Layout...", AppCommand::OpenOptionsLayout),
+    MenuEntry::action("Panel options...", AppCommand::OpenOptionsPanelOptions),
+    MenuEntry::action("Confirmation...", AppCommand::OpenOptionsConfirmation),
+    MenuEntry::action("Appearance...", AppCommand::OpenOptionsAppearance),
+    MenuEntry::action("Display bits...", AppCommand::OpenOptionsDisplayBits),
+    MenuEntry::action("Learn keys...", AppCommand::OpenOptionsLearnKeys),
+    MenuEntry::action("Virtual FS...", AppCommand::OpenOptionsVirtualFs),
+    MenuEntry::action("Save setup", AppCommand::SaveSetup),
 ];
 
 const TOP_MENUS: [TopMenu; 5] = [
     TopMenu {
         title: "Left",
-        entries: &LEFT_MENU_ENTRIES,
+        entries: &SIDE_MENU_ENTRIES,
     },
     TopMenu {
         title: "File",
@@ -461,7 +523,7 @@ const TOP_MENUS: [TopMenu; 5] = [
     },
     TopMenu {
         title: "Right",
-        entries: &RIGHT_MENU_ENTRIES,
+        entries: &SIDE_MENU_ENTRIES,
     },
 ];
 
@@ -500,21 +562,9 @@ pub enum ApplyResult {
     Quit,
 }
 
-const DEFAULT_PAGE_STEP: usize = 10;
-const DEFAULT_VIEWER_PAGE_STEP: usize = 20;
-const MAX_FIND_RESULTS: usize = 2_000;
 const FIND_EVENT_CHUNK_SIZE: usize = 64;
-const TREE_MAX_DEPTH: usize = 6;
-const TREE_MAX_ENTRIES: usize = 2_000;
 const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
 const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";
-const PANELIZE_PRESET_COMMANDS: &[&str] = &[
-    "find . -type f",
-    "find . -name '*.orig'",
-    "find . -name '*.rej'",
-    "find . -name core",
-    "find . -type f -perm -4000",
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
@@ -537,6 +587,14 @@ impl SortField {
             Self::Name => "name",
             Self::Size => "size",
             Self::Modified => "mtime",
+        }
+    }
+
+    fn from_settings(field: SettingsSortField) -> Self {
+        match field {
+            SettingsSortField::Name => Self::Name,
+            SettingsSortField::Size => Self::Size,
+            SettingsSortField::Modified => Self::Modified,
         }
     }
 }
@@ -648,6 +706,7 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    show_hidden_files: bool,
     source: PanelListingSource,
     tagged: HashSet<PathBuf>,
     pub loading: bool,
@@ -660,6 +719,7 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -670,7 +730,9 @@ impl PanelState {
 
     pub fn refresh(&mut self) -> io::Result<()> {
         let entries = match &self.source {
-            PanelListingSource::Directory => read_entries(&self.cwd, self.sort_mode)?,
+            PanelListingSource::Directory => {
+                read_entries_with_visibility(&self.cwd, self.sort_mode, self.show_hidden_files)?
+            }
             PanelListingSource::Panelize { command } => {
                 read_panelized_entries(&self.cwd, command, self.sort_mode)?
             }
@@ -712,9 +774,13 @@ impl PanelState {
         self.cursor = next;
     }
 
-    pub fn move_cursor_page(&mut self, pages: isize) {
-        let delta = pages.saturating_mul(DEFAULT_PAGE_STEP as isize);
+    pub fn move_cursor_page(&mut self, pages: isize, page_step: usize) {
+        let delta = pages.saturating_mul(page_step as isize);
         self.move_cursor(delta);
+    }
+
+    pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) {
+        self.show_hidden_files = show_hidden_files;
     }
 
     pub fn move_cursor_home(&mut self) {
@@ -942,8 +1008,8 @@ impl ViewerState {
         }
     }
 
-    pub fn move_pages(&mut self, pages: isize) {
-        self.move_lines(pages.saturating_mul(DEFAULT_VIEWER_PAGE_STEP as isize));
+    pub fn move_pages(&mut self, pages: isize, viewer_page_step: usize) {
+        self.move_lines(pages.saturating_mul(viewer_page_step as isize));
     }
 
     pub fn move_home(&mut self) {
@@ -1097,8 +1163,8 @@ impl FindResultsState {
         self.cursor = next;
     }
 
-    fn move_page(&mut self, pages: isize) {
-        self.move_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    fn move_page(&mut self, pages: isize, page_step: usize) {
+        self.move_cursor(pages.saturating_mul(page_step as isize));
     }
 
     fn move_home(&mut self) {
@@ -1161,8 +1227,8 @@ impl TreeState {
         self.cursor = next;
     }
 
-    fn move_page(&mut self, pages: isize) {
-        self.move_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+    fn move_page(&mut self, pages: isize, page_step: usize) {
+        self.move_cursor(pages.saturating_mul(page_step as isize));
     }
 
     fn move_home(&mut self) {
@@ -1214,64 +1280,43 @@ impl MenuState {
             .unwrap_or(0)
     }
 
-    pub fn popup_width(&self) -> u16 {
-        let inner = self
-            .active_entries()
-            .iter()
-            .map(|entry| entry.label.chars().count() as u16)
-            .max()
-            .unwrap_or(1)
-            .saturating_add(2);
-        inner.saturating_add(2)
-    }
-
     pub fn popup_height(&self) -> u16 {
         self.active_entries().len() as u16 + 2
     }
 
     fn set_active_menu(&mut self, active_menu: usize) {
         self.active_menu = active_menu.min(TOP_MENUS.len().saturating_sub(1));
-        self.selected_entry = 0;
+        self.selected_entry = self.first_selectable_entry().unwrap_or(0);
         self.clamp_selected_entry();
     }
 
     fn move_up(&mut self) {
-        if self.active_entries().is_empty() {
-            self.selected_entry = 0;
-            return;
-        }
-        self.selected_entry = self.selected_entry.saturating_sub(1);
+        self.move_to_adjacent_selectable(-1);
     }
 
     fn move_down(&mut self) {
-        if self.active_entries().is_empty() {
-            self.selected_entry = 0;
-            return;
-        }
-        let last = self.active_entries().len() - 1;
-        self.selected_entry = self.selected_entry.saturating_add(1).min(last);
+        self.move_to_adjacent_selectable(1);
     }
 
     fn move_left(&mut self) {
-        if self.active_menu == 0 {
-            self.active_menu = TOP_MENUS.len() - 1;
+        let next = if self.active_menu == 0 {
+            TOP_MENUS.len() - 1
         } else {
-            self.active_menu -= 1;
-        }
-        self.selected_entry = 0;
+            self.active_menu - 1
+        };
+        self.set_active_menu(next);
     }
 
     fn move_right(&mut self) {
-        self.active_menu = (self.active_menu + 1) % TOP_MENUS.len();
-        self.selected_entry = 0;
+        self.set_active_menu((self.active_menu + 1) % TOP_MENUS.len());
     }
 
     fn move_home(&mut self) {
-        self.selected_entry = 0;
+        self.selected_entry = self.first_selectable_entry().unwrap_or(0);
     }
 
     fn move_end(&mut self) {
-        self.selected_entry = self.active_entries().len().saturating_sub(1);
+        self.selected_entry = self.last_selectable_entry().unwrap_or(0);
     }
 
     fn select_entry(&mut self, index: usize) {
@@ -1282,26 +1327,8 @@ impl MenuState {
     fn selected_command(&self) -> Option<AppCommand> {
         self.active_entries()
             .get(self.selected_entry)
+            .filter(|entry| entry.selectable)
             .map(|entry| entry.command)
-    }
-
-    fn hit_test_entry(&self, column: u16, row: u16) -> Option<usize> {
-        let x = self.popup_origin_x();
-        let y = 1u16;
-        let width = self.popup_width();
-        let items = self.active_entries().len() as u16;
-        if items == 0 {
-            return None;
-        }
-
-        if row < y + 1 || row >= y + 1 + items {
-            return None;
-        }
-        if column < x + 1 || column >= x + width.saturating_sub(1) {
-            return None;
-        }
-
-        Some((row - (y + 1)) as usize)
     }
 
     fn active_menu(&self) -> &'static TopMenu {
@@ -1314,7 +1341,136 @@ impl MenuState {
         } else if self.selected_entry >= self.active_entries().len() {
             self.selected_entry = self.active_entries().len() - 1;
         }
+
+        if self
+            .active_entries()
+            .get(self.selected_entry)
+            .is_none_or(|entry| !entry.selectable)
+        {
+            self.selected_entry = self.first_selectable_entry().unwrap_or(0);
+        }
     }
+
+    fn first_selectable_entry(&self) -> Option<usize> {
+        self.active_entries()
+            .iter()
+            .position(|entry| entry.selectable)
+    }
+
+    fn last_selectable_entry(&self) -> Option<usize> {
+        self.active_entries()
+            .iter()
+            .rposition(|entry| entry.selectable)
+    }
+
+    fn move_to_adjacent_selectable(&mut self, direction: isize) {
+        let entries = self.active_entries();
+        if entries.is_empty() || direction == 0 {
+            self.selected_entry = 0;
+            return;
+        }
+
+        let mut index = self.selected_entry as isize;
+        loop {
+            let next = index + direction;
+            if next < 0 || next >= entries.len() as isize {
+                break;
+            }
+            index = next;
+            if entries[index as usize].selectable {
+                self.selected_entry = index as usize;
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsScreenState {
+    pub category: SettingsCategory,
+    pub title: String,
+    pub entries: Vec<SettingsEntry>,
+    pub selected_entry: usize,
+}
+
+impl SettingsScreenState {
+    fn new(category: SettingsCategory, entries: Vec<SettingsEntry>) -> Self {
+        Self {
+            category,
+            title: format!("{} options", category.label()),
+            entries,
+            selected_entry: 0,
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected_entry = self.selected_entry.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if self.entries.is_empty() {
+            self.selected_entry = 0;
+            return;
+        }
+        self.selected_entry = self
+            .selected_entry
+            .saturating_add(1)
+            .min(self.entries.len().saturating_sub(1));
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettingsEntry {
+    pub label: String,
+    pub value: String,
+    action: SettingsEntryAction,
+}
+
+impl SettingsEntry {
+    fn new(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        action: SettingsEntryAction,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            action,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        if self.value.is_empty() {
+            return self.label.clone();
+        }
+        format!("{}: {}", self.label, self.value)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SettingsEntryAction {
+    ToggleUseInternalEditor,
+    CycleDefaultOverwritePolicy,
+    ToggleMacosOptionSymbols,
+    ToggleLayoutShowMenuBar,
+    ToggleLayoutShowButtonBar,
+    ToggleLayoutShowDebugStatus,
+    ToggleLayoutShowPanelTotals,
+    TogglePanelShowHiddenFiles,
+    CyclePanelSortField,
+    TogglePanelSortReverse,
+    ToggleConfirmDelete,
+    ToggleConfirmOverwrite,
+    ToggleConfirmQuit,
+    OpenSkinDialog,
+    ToggleUtf8Output,
+    ToggleEightBitInput,
+    LearnKeysCapture,
+    ToggleVfsEnabled,
+    ToggleVfsFtpEnabled,
+    ToggleVfsShellLinkEnabled,
+    ToggleVfsSftpEnabled,
+    Info,
 }
 
 #[derive(Clone, Debug)]
@@ -1322,6 +1478,7 @@ pub enum Route {
     FileManager,
     Help(HelpState),
     Menu(MenuState),
+    Settings(SettingsScreenState),
     Jobs,
     Viewer(ViewerState),
     FindResults(FindResultsState),
@@ -1341,6 +1498,7 @@ enum PendingDialogAction {
     ConfirmDelete {
         targets: Vec<PathBuf>,
     },
+    ConfirmQuit,
     Mkdir {
         base_dir: PathBuf,
     },
@@ -1393,6 +1551,7 @@ pub enum BackgroundCommand {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        show_hidden_files: bool,
         request_id: u64,
         cancel_flag: Arc<AtomicBool>,
     },
@@ -1461,6 +1620,80 @@ enum EditSelectionResult {
     SelectedEntryIsDirectory,
 }
 
+#[derive(Clone, Debug, Default)]
+struct KeybindingHints {
+    labels_by_context_and_command: HashMap<(KeyContext, AppCommand), Vec<String>>,
+}
+
+impl KeybindingHints {
+    fn from_keymap(keymap: &Keymap) -> Self {
+        let mut chords_by_context_and_command: HashMap<(KeyContext, AppCommand), Vec<KeyChord>> =
+            HashMap::new();
+        let contexts = [
+            KeyContext::FileManager,
+            KeyContext::FileManagerXMap,
+            KeyContext::Help,
+            KeyContext::Jobs,
+            KeyContext::FindResults,
+            KeyContext::Tree,
+            KeyContext::Hotlist,
+            KeyContext::Dialog,
+            KeyContext::Input,
+            KeyContext::Listbox,
+            KeyContext::Menu,
+            KeyContext::Editor,
+            KeyContext::Viewer,
+            KeyContext::ViewerHex,
+            KeyContext::DiffViewer,
+        ];
+
+        for context in contexts {
+            for (chord, key_command) in keymap.bindings_for_context(context) {
+                let app_command =
+                    AppCommand::from_key_command(context, &key_command).or_else(|| {
+                        (context == KeyContext::FileManagerXMap)
+                            .then(|| {
+                                AppCommand::from_key_command(KeyContext::FileManager, &key_command)
+                            })
+                            .flatten()
+                    });
+                let Some(app_command) = app_command else {
+                    continue;
+                };
+                chords_by_context_and_command
+                    .entry((context, app_command))
+                    .or_default()
+                    .push(chord);
+            }
+        }
+
+        let mut labels_by_context_and_command = HashMap::new();
+        for ((context, app_command), mut chords) in chords_by_context_and_command {
+            chords.sort_by_key(key_chord_sort_key);
+            let mut labels = Vec::new();
+            for chord in chords {
+                let label = format_key_chord(chord);
+                if !labels.iter().any(|existing| existing == &label) {
+                    labels.push(label);
+                }
+            }
+            if !labels.is_empty() {
+                labels_by_context_and_command.insert((context, app_command), labels);
+            }
+        }
+
+        Self {
+            labels_by_context_and_command,
+        }
+    }
+
+    fn labels_for(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
+        self.labels_by_context_and_command
+            .get(&(context, command))
+            .map(Vec::as_slice)
+    }
+}
+
 pub fn run_background_worker(
     command_rx: Receiver<BackgroundCommand>,
     event_tx: Sender<BackgroundEvent>,
@@ -1468,16 +1701,22 @@ pub fn run_background_worker(
     let mut running_find_tasks = Vec::new();
     #[cfg(not(test))]
     let mut running_panel_refresh_tasks = Vec::new();
+    #[cfg(not(test))]
+    let mut running_tree_tasks = Vec::new();
     while let Ok(command) = command_rx.recv() {
         reap_finished_find_tasks(&mut running_find_tasks);
         #[cfg(not(test))]
         reap_finished_panel_refresh_tasks(&mut running_panel_refresh_tasks);
+        #[cfg(not(test))]
+        reap_finished_tree_tasks(&mut running_tree_tasks);
         match execute_background_command(command, &event_tx) {
             BackgroundExecution::Continue => {}
             #[cfg(not(test))]
             BackgroundExecution::SpawnFind(task) => running_find_tasks.push(task),
             #[cfg(not(test))]
             BackgroundExecution::SpawnPanelRefresh(task) => running_panel_refresh_tasks.push(task),
+            #[cfg(not(test))]
+            BackgroundExecution::SpawnTree(task) => running_tree_tasks.push(task),
             BackgroundExecution::Stop => break,
         }
     }
@@ -1496,6 +1735,10 @@ pub fn run_background_worker(
     for task in running_panel_refresh_tasks {
         let _ = task.handle.join();
     }
+    #[cfg(not(test))]
+    for task in running_tree_tasks {
+        let _ = task.handle.join();
+    }
 }
 
 #[derive(Debug)]
@@ -1511,6 +1754,12 @@ struct RunningPanelRefreshTask {
     cancel_flag: Arc<AtomicBool>,
 }
 
+#[cfg(not(test))]
+#[derive(Debug)]
+struct RunningTreeTask {
+    handle: thread::JoinHandle<()>,
+}
+
 #[derive(Debug)]
 enum BackgroundExecution {
     Continue,
@@ -1518,6 +1767,8 @@ enum BackgroundExecution {
     SpawnFind(RunningFindTask),
     #[cfg(not(test))]
     SpawnPanelRefresh(RunningPanelRefreshTask),
+    #[cfg(not(test))]
+    SpawnTree(RunningTreeTask),
     Stop,
 }
 
@@ -1546,17 +1797,34 @@ fn reap_finished_panel_refresh_tasks(tasks: &mut Vec<RunningPanelRefreshTask>) {
     }
 }
 
+#[cfg(not(test))]
+fn reap_finished_tree_tasks(tasks: &mut Vec<RunningTreeTask>) {
+    let mut index = 0usize;
+    while index < tasks.len() {
+        if tasks[index].handle.is_finished() {
+            let task = tasks.swap_remove(index);
+            let _ = task.handle.join();
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn refresh_panel_entries(
     cwd: &Path,
     source: &PanelListingSource,
     sort_mode: SortMode,
+    show_hidden_files: bool,
     cancel_flag: &AtomicBool,
 ) -> Result<Vec<FileEntry>, String> {
     match source {
-        PanelListingSource::Directory => {
-            read_entries_with_cancel(cwd, sort_mode, Some(cancel_flag))
-                .map_err(|error| error.to_string())
-        }
+        PanelListingSource::Directory => read_entries_with_visibility_cancel(
+            cwd,
+            sort_mode,
+            show_hidden_files,
+            Some(cancel_flag),
+        )
+        .map_err(|error| error.to_string()),
         PanelListingSource::Panelize { command } => {
             read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
                 .map_err(|error| error.to_string())
@@ -1578,12 +1846,19 @@ fn execute_background_command(
             cwd,
             source,
             sort_mode,
+            show_hidden_files,
             request_id,
             cancel_flag,
         } => {
             #[cfg(test)]
             {
-                let result = refresh_panel_entries(&cwd, &source, sort_mode, cancel_flag.as_ref());
+                let result = refresh_panel_entries(
+                    &cwd,
+                    &source,
+                    sort_mode,
+                    show_hidden_files,
+                    cancel_flag.as_ref(),
+                );
                 if event_tx
                     .send(BackgroundEvent::PanelRefreshed {
                         panel,
@@ -1613,6 +1888,7 @@ fn execute_background_command(
                             &worker_cwd,
                             &worker_source,
                             sort_mode,
+                            show_hidden_files,
                             worker_cancel_flag.as_ref(),
                         );
                         let _ = worker_event_tx.send(BackgroundEvent::PanelRefreshed {
@@ -1716,14 +1992,44 @@ fn execute_background_command(
             max_depth,
             max_entries,
         } => {
-            let entries = build_tree_entries(&root, max_depth, max_entries);
-            if event_tx
-                .send(BackgroundEvent::TreeReady { root, entries })
-                .is_ok()
+            #[cfg(test)]
             {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
+                let entries = build_tree_entries(&root, max_depth, max_entries);
+                if event_tx
+                    .send(BackgroundEvent::TreeReady { root, entries })
+                    .is_ok()
+                {
+                    BackgroundExecution::Continue
+                } else {
+                    BackgroundExecution::Stop
+                }
+            }
+            #[cfg(not(test))]
+            {
+                let worker_event_tx = event_tx.clone();
+                let worker_root = root.clone();
+                match thread::Builder::new()
+                    .name(String::from("rc-tree"))
+                    .spawn(move || {
+                        let entries = build_tree_entries(&worker_root, max_depth, max_entries);
+                        let _ = worker_event_tx.send(BackgroundEvent::TreeReady {
+                            root: worker_root,
+                            entries,
+                        });
+                    }) {
+                    Ok(handle) => BackgroundExecution::SpawnTree(RunningTreeTask { handle }),
+                    Err(_error) => {
+                        let entries = build_tree_entries(&root, max_depth, max_entries);
+                        if event_tx
+                            .send(BackgroundEvent::TreeReady { root, entries })
+                            .is_ok()
+                        {
+                            BackgroundExecution::Continue
+                        } else {
+                            BackgroundExecution::Stop
+                        }
+                    }
+                }
             }
         }
         BackgroundCommand::Shutdown => BackgroundExecution::Stop,
@@ -1905,6 +2211,7 @@ fn wildcard_match(text: &str, pattern: &str) -> bool {
 
 #[derive(Debug)]
 pub struct AppState {
+    settings: Settings,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     pub status_line: String,
@@ -1932,26 +2239,34 @@ pub struct AppState {
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
     panelize_presets: Vec<String>,
+    keybinding_hints: KeybindingHints,
+    keymap_unknown_actions: usize,
+    keymap_invalid_bindings: usize,
+    pending_learn_keys_capture: bool,
     xmap_pending: bool,
+    pending_save_setup: bool,
+    pending_quit: bool,
 }
 
 impl AppState {
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
+        let settings = Settings::default();
         let left = PanelState::new(start_path.clone())?;
         let right = PanelState::new(start_path)?;
 
         Ok(Self {
+            settings: settings.clone(),
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from("Press F1 for help"),
             last_dialog_result: None,
             jobs: JobManager::new(),
-            overwrite_policy: OverwritePolicy::Skip,
+            overwrite_policy: settings.configuration.default_overwrite_policy,
             jobs_cursor: 0,
-            hotlist: Vec::new(),
+            hotlist: settings.configuration.hotlist.clone(),
             hotlist_cursor: 0,
             available_skins: Vec::new(),
-            active_skin_name: String::from("default"),
+            active_skin_name: settings.appearance.skin.clone(),
             pending_skin_change: None,
             pending_skin_preview: None,
             pending_skin_revert: None,
@@ -1967,9 +2282,104 @@ impl AppState {
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
-            panelize_presets: panelize_preset_commands(),
+            panelize_presets: settings.configuration.panelize_presets.clone(),
+            keybinding_hints: KeybindingHints::default(),
+            keymap_unknown_actions: 0,
+            keymap_invalid_bindings: 0,
+            pending_learn_keys_capture: false,
             xmap_pending: false,
+            pending_save_setup: false,
+            pending_quit: false,
         })
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn settings_mut(&mut self) -> &mut Settings {
+        &mut self.settings
+    }
+
+    pub fn persisted_settings_snapshot(&self) -> Settings {
+        let mut settings = self.settings.clone();
+        settings.configuration.default_overwrite_policy = self.overwrite_policy;
+        settings.configuration.hotlist = self.hotlist.clone();
+        settings.configuration.panelize_presets = self.panelize_presets.clone();
+        settings.appearance.skin = self.active_skin_name.clone();
+        settings
+    }
+
+    pub fn mark_settings_saved(&mut self, saved_at: SystemTime) {
+        self.settings.mark_saved(saved_at);
+    }
+
+    pub fn mark_settings_dirty(&mut self) {
+        self.settings.mark_dirty();
+    }
+
+    pub fn show_menu_bar(&self) -> bool {
+        self.settings.layout.show_menu_bar
+    }
+
+    pub fn show_button_bar(&self) -> bool {
+        self.settings.layout.show_button_bar
+    }
+
+    pub fn show_debug_status(&self) -> bool {
+        self.settings.layout.show_debug_status
+    }
+
+    pub fn show_panel_totals(&self) -> bool {
+        self.settings.layout.show_panel_totals
+    }
+
+    pub fn jobs_dialog_size(&self) -> (u16, u16) {
+        (
+            self.settings.layout.jobs_dialog_width,
+            self.settings.layout.jobs_dialog_height,
+        )
+    }
+
+    pub fn help_dialog_size(&self) -> (u16, u16) {
+        (
+            self.settings.layout.help_dialog_width,
+            self.settings.layout.help_dialog_height,
+        )
+    }
+
+    pub fn disk_usage_cache_ttl(&self) -> Duration {
+        Duration::from_millis(self.settings.advanced.disk_usage_cache_ttl_ms)
+    }
+
+    pub fn disk_usage_cache_max_entries(&self) -> usize {
+        self.settings.advanced.disk_usage_cache_max_entries
+    }
+
+    pub fn replace_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+        self.overwrite_policy = self.settings.configuration.default_overwrite_policy;
+        self.hotlist = self.settings.configuration.hotlist.clone();
+        self.hotlist_cursor = self
+            .hotlist_cursor
+            .min(self.hotlist.len().saturating_sub(1));
+        self.panelize_presets = self.settings.configuration.panelize_presets.clone();
+        self.active_skin_name = self.settings.appearance.skin.clone();
+
+        let sort_mode = self.default_panel_sort_mode();
+        let show_hidden_files = self.settings.panel_options.show_hidden_files;
+        for panel in &mut self.panels {
+            panel.sort_mode = sort_mode;
+            panel.set_show_hidden_files(show_hidden_files);
+            let _ = panel.refresh();
+        }
+    }
+
+    fn default_panel_sort_mode(&self) -> SortMode {
+        SortMode {
+            field: SortField::from_settings(self.settings.panel_options.sort_field),
+            reverse: self.settings.panel_options.sort_reverse,
+        }
     }
 
     pub fn active_panel(&self) -> &PanelState {
@@ -2152,6 +2562,7 @@ impl AppState {
 
     pub fn set_active_skin_name(&mut self, skin_name: impl Into<String>) {
         self.active_skin_name = skin_name.into();
+        self.refresh_settings_entries();
     }
 
     pub fn take_pending_skin_change(&mut self) -> Option<String> {
@@ -2166,8 +2577,603 @@ impl AppState {
         self.pending_skin_revert.take()
     }
 
+    pub fn take_pending_save_setup(&mut self) -> bool {
+        std::mem::take(&mut self.pending_save_setup)
+    }
+
     pub fn clear_xmap(&mut self) {
         self.xmap_pending = false;
+    }
+
+    pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
+        self.keybinding_hints = KeybindingHints::from_keymap(keymap);
+    }
+
+    pub fn set_keymap_parse_report(&mut self, report: &KeymapParseReport) {
+        self.keymap_unknown_actions = report.unknown_actions.len();
+        self.keymap_invalid_bindings = report.skipped_bindings.len();
+    }
+
+    pub fn capture_learn_keys_chord(&mut self, chord: KeyChord) -> bool {
+        if !self.pending_learn_keys_capture {
+            return false;
+        }
+
+        self.pending_learn_keys_capture = false;
+        if chord.code == KeyCode::Esc
+            && !chord.modifiers.ctrl
+            && !chord.modifiers.alt
+            && !chord.modifiers.shift
+        {
+            self.set_status("Learn keys capture canceled");
+            return true;
+        }
+
+        let captured = format_key_chord(chord);
+        self.settings.learn_keys.last_learned_binding = Some(captured.clone());
+        self.settings.mark_dirty();
+        let target = self
+            .settings
+            .configuration
+            .keymap_override
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("<none>"));
+        self.set_status(format!(
+            "Captured key chord: {captured} (override target: {target})"
+        ));
+        self.refresh_settings_entries();
+        true
+    }
+
+    pub fn keybinding_labels(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
+        self.keybinding_hints.labels_for(context, command)
+    }
+
+    pub fn keybinding_primary_label(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+    ) -> Option<&str> {
+        self.keybinding_labels(context, command)
+            .and_then(|labels| labels.first().map(String::as_str))
+    }
+
+    pub fn keybinding_joined_label(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        separator: &str,
+        limit: usize,
+    ) -> Option<String> {
+        let labels = self.keybinding_labels(context, command)?;
+        let clipped = if limit == 0 {
+            labels
+        } else {
+            &labels[..labels.len().min(limit)]
+        };
+        Some(clipped.join(separator))
+    }
+
+    pub fn menu_entry_shortcut_label(&self, entry: &MenuEntry) -> String {
+        if entry.literal_shortcut && !entry.shortcut.is_empty() {
+            return entry.shortcut.to_string();
+        }
+        if let Some(dynamic) = self.keybinding_primary_label(KeyContext::FileManager, entry.command)
+        {
+            return dynamic.to_string();
+        }
+        entry.shortcut.to_string()
+    }
+
+    pub fn menu_popup_width(&self, menu: &MenuState) -> u16 {
+        let inner = menu
+            .active_entries()
+            .iter()
+            .map(|entry| {
+                let label_width = entry.label.chars().count() as u16;
+                let shortcut = self.menu_entry_shortcut_label(entry);
+                let shortcut_width = shortcut.chars().count() as u16;
+                if shortcut_width == 0 {
+                    label_width
+                } else {
+                    label_width.saturating_add(1).saturating_add(shortcut_width)
+                }
+            })
+            .max()
+            .unwrap_or(1)
+            .saturating_add(2);
+        inner.saturating_add(2)
+    }
+
+    fn keybinding_primary_or_fallback(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        fallback: &str,
+    ) -> String {
+        self.keybinding_primary_label(context, command)
+            .map_or_else(|| fallback.to_string(), ToString::to_string)
+    }
+
+    fn keybinding_joined_or_fallback(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        fallback: &str,
+        limit: usize,
+    ) -> String {
+        self.keybinding_joined_label(context, command, " / ", limit)
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn xmap_sequence_or_fallback(&self, command: AppCommand, fallback: &str) -> String {
+        let prefix = self.keybinding_primary_label(KeyContext::FileManager, AppCommand::EnterXMap);
+        let suffix = self.keybinding_primary_label(KeyContext::FileManagerXMap, command);
+        match (prefix, suffix) {
+            (Some(prefix), Some(suffix)) => format!("{prefix} {suffix}"),
+            _ => fallback.to_string(),
+        }
+    }
+
+    fn help_replacements(&self) -> HashMap<&'static str, String> {
+        let mut replacements = HashMap::new();
+
+        replacements.insert(
+            "help_link_cycle",
+            format!(
+                "{} / {}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpLinkNext,
+                    "Tab"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpLinkPrev,
+                    "Shift-Tab",
+                ),
+            ),
+        );
+        replacements.insert(
+            "help_follow",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::HelpFollowLink,
+                "Enter / Right",
+                2,
+            ),
+        );
+        replacements.insert(
+            "help_back",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::HelpBack,
+                "Left / F3 / l",
+                3,
+            ),
+        );
+        replacements.insert(
+            "help_index",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::HelpIndex,
+                "F2 / c",
+                2,
+            ),
+        );
+        replacements.insert(
+            "help_node_cycle",
+            format!(
+                "{} / {}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpNodeNext,
+                    "n"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Help,
+                    AppCommand::HelpNodePrev,
+                    "p"
+                ),
+            ),
+        );
+        replacements.insert(
+            "help_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Help,
+                AppCommand::CloseHelp,
+                "F10 / Esc",
+                2,
+            ),
+        );
+
+        replacements.insert(
+            "fm_switch_panel",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::SwitchPanel,
+                "Tab",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_open_entry",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenEntry,
+                "Enter/F3",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_parent",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::CdUp,
+                "Backspace",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_find",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenFindDialog,
+                "Alt-F",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_tree",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenTree,
+                "Alt-T",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_hotlist",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenHotlist,
+                "Alt-H",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_external_panelize",
+            format!(
+                "{} (or {})",
+                self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
+                self.keybinding_joined_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenPanelizeDialog,
+                    "Alt/Ctrl-P",
+                    2,
+                )
+            ),
+        );
+        replacements.insert(
+            "fm_external_panelize_menu",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenMenu,
+                "F9",
+            ),
+        );
+        replacements.insert(
+            "fm_open_jobs",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenJobsScreen,
+                "Ctrl-J",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_cancel_job",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::CancelJob,
+                "Alt-J",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_skin",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenSkinDialog,
+                "Alt-S/Ctrl-K",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_quit",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::Quit,
+                "q/F10",
+                2,
+            ),
+        );
+        replacements.insert("fm_move", "Up/Down".to_string());
+        replacements.insert(
+            "fm_toggle_tag",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::ToggleTag,
+                "Insert/Ctrl-T",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_file_ops",
+            format!(
+                "{}/{}/{}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Copy,
+                    "F5"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Move,
+                    "F6"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Delete,
+                    "F8"
+                ),
+            ),
+        );
+
+        replacements.insert("viewer_scroll", "Up/Down and PgUp/PgDn".to_string());
+        replacements.insert(
+            "viewer_search",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerSearchForward,
+                "F7",
+            ),
+        );
+        replacements.insert(
+            "viewer_search_back",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerSearchBackward,
+                "Shift-F7",
+            ),
+        );
+        replacements.insert(
+            "viewer_search_continue",
+            format!(
+                "{} / {}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Viewer,
+                    AppCommand::ViewerSearchContinue,
+                    "n"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::Viewer,
+                    AppCommand::ViewerSearchContinueBackward,
+                    "Shift-n",
+                ),
+            ),
+        );
+        replacements.insert(
+            "viewer_goto",
+            self.keybinding_primary_or_fallback(KeyContext::Viewer, AppCommand::ViewerGoto, "g"),
+        );
+        replacements.insert(
+            "viewer_wrap",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerToggleWrap,
+                "w",
+            ),
+        );
+        replacements.insert(
+            "viewer_hex",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Viewer,
+                AppCommand::ViewerToggleHex,
+                "h",
+            ),
+        );
+
+        replacements.insert("jobs_move", "Up/Down".to_string());
+        replacements.insert(
+            "jobs_cancel",
+            self.keybinding_joined_or_fallback(KeyContext::Jobs, AppCommand::CancelJob, "Alt-J", 1),
+        );
+        replacements.insert(
+            "jobs_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Jobs,
+                AppCommand::CloseJobsScreen,
+                "Esc/q",
+                2,
+            ),
+        );
+
+        replacements.insert("find_move", "Up/Down".to_string());
+        replacements.insert("find_nav", "PgUp/PgDn/Home/End".to_string());
+        replacements.insert(
+            "find_open",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsOpenEntry,
+                "Enter",
+            ),
+        );
+        replacements.insert(
+            "find_panelize",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsPanelize,
+                "F5",
+            ),
+        );
+        replacements.insert(
+            "find_cancel",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::CancelJob,
+                "Alt-J",
+                1,
+            ),
+        );
+        replacements.insert(
+            "find_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::CloseFindResults,
+                "Esc/q",
+                2,
+            ),
+        );
+
+        replacements.insert(
+            "panelize_find_results",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsPanelize,
+                "F5",
+            ),
+        );
+        replacements.insert(
+            "panelize_find_entry",
+            format!(
+                "{} search, then {} in results",
+                self.keybinding_joined_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenFindDialog,
+                    "Alt-?",
+                    1
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FindResults,
+                    AppCommand::FindResultsPanelize,
+                    "F5",
+                ),
+            ),
+        );
+        replacements.insert(
+            "panelize_external",
+            self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
+        );
+        replacements.insert(
+            "panelize_external_entry",
+            format!(
+                "{} or {} -> Command -> External panelize",
+                self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenMenu,
+                    "F9"
+                ),
+            ),
+        );
+        replacements.insert(
+            "panelize_dialog_keys",
+            "Up/Down, Tab, Enter, Esc, F2/F4/F8".to_string(),
+        );
+        replacements.insert(
+            "panelize_ops",
+            format!(
+                "{}/{}/{}/{}/{}",
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::OpenEntry,
+                    "F3"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::EditEntry,
+                    "F4"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Copy,
+                    "F5"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Move,
+                    "F6"
+                ),
+                self.keybinding_primary_or_fallback(
+                    KeyContext::FileManager,
+                    AppCommand::Delete,
+                    "F8"
+                ),
+            ),
+        );
+        replacements.insert(
+            "panelize_refresh",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::Reread,
+                "Ctrl-R",
+                1,
+            ),
+        );
+
+        replacements.insert("tree_move", "Up/Down".to_string());
+        replacements.insert("tree_nav", "PgUp/PgDn/Home/End".to_string());
+        replacements.insert(
+            "tree_open",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Tree,
+                AppCommand::TreeOpenEntry,
+                "Enter",
+            ),
+        );
+        replacements.insert(
+            "tree_close",
+            self.keybinding_joined_or_fallback(KeyContext::Tree, AppCommand::CloseTree, "Esc/q", 2),
+        );
+
+        replacements.insert(
+            "hotlist_open",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistOpenEntry,
+                "Enter",
+            ),
+        );
+        replacements.insert(
+            "hotlist_add",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistAddCurrentDirectory,
+                "a",
+            ),
+        );
+        replacements.insert(
+            "hotlist_remove",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistRemoveSelected,
+                "d/delete",
+                2,
+            ),
+        );
+        replacements.insert(
+            "hotlist_close",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::CloseHotlist,
+                "Esc/q",
+                2,
+            ),
+        );
+
+        replacements
     }
 
     fn queue_panel_refresh(&mut self, panel: ActivePanel) {
@@ -2189,6 +3195,7 @@ impl AppState {
                 cwd: panel_state.cwd.clone(),
                 source: panel_state.source.clone(),
                 sort_mode: panel_state.sort_mode,
+                show_hidden_files: panel_state.show_hidden_files,
                 request_id,
                 cancel_flag,
             });
@@ -2446,8 +3453,12 @@ impl AppState {
             return;
         }
 
+        let replacements = self.help_replacements();
         self.routes
-            .push(Route::Help(HelpState::for_context(context)));
+            .push(Route::Help(HelpState::for_context_with_replacements(
+                context,
+                &replacements,
+            )));
         self.set_status("Opened help");
     }
 
@@ -2483,6 +3494,438 @@ impl AppState {
             self.routes.pop();
             self.set_status("Closed menu");
         }
+    }
+
+    fn open_settings_screen(&mut self, category: SettingsCategory) {
+        self.pending_learn_keys_capture = false;
+        let next = SettingsScreenState::new(category, self.settings_entries_for_category(category));
+        if let Some(Route::Settings(current)) = self.routes.last_mut() {
+            *current = next;
+        } else {
+            self.routes.push(Route::Settings(next));
+        }
+        self.set_status(format!("Options: {}", category.label()));
+    }
+
+    fn close_settings_screen(&mut self) {
+        if matches!(self.top_route(), Route::Settings(_)) {
+            self.pending_learn_keys_capture = false;
+            self.routes.pop();
+            self.set_status("Closed options");
+        }
+    }
+
+    fn settings_state_mut(&mut self) -> Option<&mut SettingsScreenState> {
+        let Some(Route::Settings(settings)) = self.routes.last_mut() else {
+            return None;
+        };
+        Some(settings)
+    }
+
+    fn settings_entries_for_category(&self, category: SettingsCategory) -> Vec<SettingsEntry> {
+        match category {
+            SettingsCategory::Configuration => vec![
+                SettingsEntry::new(
+                    "Use internal editor",
+                    bool_label(self.settings.configuration.use_internal_editor),
+                    SettingsEntryAction::ToggleUseInternalEditor,
+                ),
+                SettingsEntry::new(
+                    "Default overwrite policy",
+                    self.overwrite_policy.label(),
+                    SettingsEntryAction::CycleDefaultOverwritePolicy,
+                ),
+                SettingsEntry::new(
+                    "macOS Option-symbol compatibility",
+                    bool_label(self.settings.configuration.macos_option_symbols),
+                    SettingsEntryAction::ToggleMacosOptionSymbols,
+                ),
+                SettingsEntry::new(
+                    "Keymap override",
+                    self.settings
+                        .configuration
+                        .keymap_override
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| String::from("<none>")),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Hotlist entries",
+                    self.hotlist.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Panelize presets",
+                    self.panelize_presets.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+            ],
+            SettingsCategory::Layout => vec![
+                SettingsEntry::new(
+                    "Show menu bar",
+                    bool_label(self.settings.layout.show_menu_bar),
+                    SettingsEntryAction::ToggleLayoutShowMenuBar,
+                ),
+                SettingsEntry::new(
+                    "Show button bar",
+                    bool_label(self.settings.layout.show_button_bar),
+                    SettingsEntryAction::ToggleLayoutShowButtonBar,
+                ),
+                SettingsEntry::new(
+                    "Show debug status",
+                    bool_label(self.settings.layout.show_debug_status),
+                    SettingsEntryAction::ToggleLayoutShowDebugStatus,
+                ),
+                SettingsEntry::new(
+                    "Show panel totals",
+                    bool_label(self.settings.layout.show_panel_totals),
+                    SettingsEntryAction::ToggleLayoutShowPanelTotals,
+                ),
+            ],
+            SettingsCategory::PanelOptions => vec![
+                SettingsEntry::new(
+                    "Show hidden files",
+                    bool_label(self.settings.panel_options.show_hidden_files),
+                    SettingsEntryAction::TogglePanelShowHiddenFiles,
+                ),
+                SettingsEntry::new(
+                    "Default sort field",
+                    match self.settings.panel_options.sort_field {
+                        SettingsSortField::Name => "name",
+                        SettingsSortField::Size => "size",
+                        SettingsSortField::Modified => "mtime",
+                    },
+                    SettingsEntryAction::CyclePanelSortField,
+                ),
+                SettingsEntry::new(
+                    "Default sort reverse",
+                    bool_label(self.settings.panel_options.sort_reverse),
+                    SettingsEntryAction::TogglePanelSortReverse,
+                ),
+            ],
+            SettingsCategory::Confirmation => vec![
+                SettingsEntry::new(
+                    "Confirm delete",
+                    bool_label(self.settings.confirmation.confirm_delete),
+                    SettingsEntryAction::ToggleConfirmDelete,
+                ),
+                SettingsEntry::new(
+                    "Confirm overwrite",
+                    bool_label(self.settings.confirmation.confirm_overwrite),
+                    SettingsEntryAction::ToggleConfirmOverwrite,
+                ),
+                SettingsEntry::new(
+                    "Confirm quit",
+                    bool_label(self.settings.confirmation.confirm_quit),
+                    SettingsEntryAction::ToggleConfirmQuit,
+                ),
+            ],
+            SettingsCategory::Appearance => vec![
+                SettingsEntry::new(
+                    "Skin...",
+                    self.active_skin_name.clone(),
+                    SettingsEntryAction::OpenSkinDialog,
+                ),
+                SettingsEntry::new(
+                    "Available skins",
+                    self.available_skins.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Custom skin directories",
+                    self.settings.appearance.skin_dirs.len().to_string(),
+                    SettingsEntryAction::Info,
+                ),
+            ],
+            SettingsCategory::DisplayBits => vec![
+                SettingsEntry::new(
+                    "UTF-8 output",
+                    bool_label(self.settings.display_bits.utf8_output),
+                    SettingsEntryAction::ToggleUtf8Output,
+                ),
+                SettingsEntry::new(
+                    "8-bit input",
+                    bool_label(self.settings.display_bits.eight_bit_input),
+                    SettingsEntryAction::ToggleEightBitInput,
+                ),
+            ],
+            SettingsCategory::LearnKeys => vec![
+                SettingsEntry::new(
+                    "Last learned binding",
+                    self.settings
+                        .learn_keys
+                        .last_learned_binding
+                        .clone()
+                        .unwrap_or_else(|| String::from("<none>")),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Override target",
+                    self.settings
+                        .configuration
+                        .keymap_override
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| String::from("<none>")),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Unknown keymap actions",
+                    self.keymap_unknown_actions.to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Invalid key bindings",
+                    self.keymap_invalid_bindings.to_string(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Capture binding (scaffold)",
+                    "",
+                    SettingsEntryAction::LearnKeysCapture,
+                ),
+            ],
+            SettingsCategory::VirtualFs => vec![
+                SettingsEntry::new(
+                    "Enable virtual FS",
+                    bool_label(self.settings.virtual_fs.vfs_enabled),
+                    SettingsEntryAction::ToggleVfsEnabled,
+                ),
+                SettingsEntry::new(
+                    "Enable FTP links",
+                    bool_label(self.settings.virtual_fs.ftp_enabled),
+                    SettingsEntryAction::ToggleVfsFtpEnabled,
+                ),
+                SettingsEntry::new(
+                    "Enable shell links",
+                    bool_label(self.settings.virtual_fs.shell_link_enabled),
+                    SettingsEntryAction::ToggleVfsShellLinkEnabled,
+                ),
+                SettingsEntry::new(
+                    "Enable SFTP links",
+                    bool_label(self.settings.virtual_fs.sftp_enabled),
+                    SettingsEntryAction::ToggleVfsSftpEnabled,
+                ),
+            ],
+        }
+    }
+
+    fn refresh_settings_entries(&mut self) {
+        let Some((category, selected)) = self.routes.last().and_then(|route| match route {
+            Route::Settings(current) => Some((current.category, current.selected_entry)),
+            _ => None,
+        }) else {
+            return;
+        };
+        let entries = self.settings_entries_for_category(category);
+        if let Some(Route::Settings(current)) = self.routes.last_mut() {
+            current.entries = entries;
+            if current.entries.is_empty() {
+                current.selected_entry = 0;
+            } else {
+                current.selected_entry = selected.min(current.entries.len().saturating_sub(1));
+            }
+        }
+    }
+
+    fn apply_settings_entry(&mut self) {
+        let Some(route) = self.routes.last() else {
+            return;
+        };
+        let Route::Settings(settings) = route else {
+            return;
+        };
+        let Some(entry) = settings.entries.get(settings.selected_entry).cloned() else {
+            return;
+        };
+
+        match entry.action {
+            SettingsEntryAction::ToggleUseInternalEditor => {
+                self.settings.configuration.use_internal_editor =
+                    !self.settings.configuration.use_internal_editor;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Use internal editor: {}",
+                    bool_label(self.settings.configuration.use_internal_editor)
+                ));
+            }
+            SettingsEntryAction::CycleDefaultOverwritePolicy => {
+                self.overwrite_policy = next_overwrite_policy(self.overwrite_policy);
+                self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Default overwrite policy: {}",
+                    self.overwrite_policy.label()
+                ));
+            }
+            SettingsEntryAction::ToggleMacosOptionSymbols => {
+                self.settings.configuration.macos_option_symbols =
+                    !self.settings.configuration.macos_option_symbols;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "macOS Option-symbol compatibility: {}",
+                    bool_label(self.settings.configuration.macos_option_symbols)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowMenuBar => {
+                self.settings.layout.show_menu_bar = !self.settings.layout.show_menu_bar;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show menu bar: {}",
+                    bool_label(self.settings.layout.show_menu_bar)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowButtonBar => {
+                self.settings.layout.show_button_bar = !self.settings.layout.show_button_bar;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show button bar: {}",
+                    bool_label(self.settings.layout.show_button_bar)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowDebugStatus => {
+                self.settings.layout.show_debug_status = !self.settings.layout.show_debug_status;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show debug status: {}",
+                    bool_label(self.settings.layout.show_debug_status)
+                ));
+            }
+            SettingsEntryAction::ToggleLayoutShowPanelTotals => {
+                self.settings.layout.show_panel_totals = !self.settings.layout.show_panel_totals;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Show panel totals: {}",
+                    bool_label(self.settings.layout.show_panel_totals)
+                ));
+            }
+            SettingsEntryAction::TogglePanelShowHiddenFiles => {
+                self.settings.panel_options.show_hidden_files =
+                    !self.settings.panel_options.show_hidden_files;
+                let show_hidden_files = self.settings.panel_options.show_hidden_files;
+                for panel in &mut self.panels {
+                    panel.set_show_hidden_files(show_hidden_files);
+                }
+                self.settings.mark_dirty();
+                self.refresh_panels();
+                self.set_status(format!(
+                    "Show hidden files: {}",
+                    bool_label(show_hidden_files)
+                ));
+            }
+            SettingsEntryAction::CyclePanelSortField => {
+                self.settings.panel_options.sort_field =
+                    next_settings_sort_field(self.settings.panel_options.sort_field);
+                let sort_mode = self.default_panel_sort_mode();
+                for panel in &mut self.panels {
+                    panel.sort_mode = sort_mode;
+                }
+                self.settings.mark_dirty();
+                self.refresh_panels();
+                self.set_status(format!("Default sort: {}", sort_mode.field.label()));
+            }
+            SettingsEntryAction::TogglePanelSortReverse => {
+                self.settings.panel_options.sort_reverse =
+                    !self.settings.panel_options.sort_reverse;
+                let sort_mode = self.default_panel_sort_mode();
+                for panel in &mut self.panels {
+                    panel.sort_mode = sort_mode;
+                }
+                self.settings.mark_dirty();
+                self.refresh_panels();
+                self.set_status(format!(
+                    "Default sort reverse: {}",
+                    bool_label(self.settings.panel_options.sort_reverse)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmDelete => {
+                self.settings.confirmation.confirm_delete =
+                    !self.settings.confirmation.confirm_delete;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm delete: {}",
+                    bool_label(self.settings.confirmation.confirm_delete)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmOverwrite => {
+                self.settings.confirmation.confirm_overwrite =
+                    !self.settings.confirmation.confirm_overwrite;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm overwrite: {}",
+                    bool_label(self.settings.confirmation.confirm_overwrite)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmQuit => {
+                self.settings.confirmation.confirm_quit = !self.settings.confirmation.confirm_quit;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm quit: {}",
+                    bool_label(self.settings.confirmation.confirm_quit)
+                ));
+            }
+            SettingsEntryAction::OpenSkinDialog => self.start_skin_dialog(),
+            SettingsEntryAction::ToggleUtf8Output => {
+                self.settings.display_bits.utf8_output = !self.settings.display_bits.utf8_output;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "UTF-8 output: {}",
+                    bool_label(self.settings.display_bits.utf8_output)
+                ));
+            }
+            SettingsEntryAction::ToggleEightBitInput => {
+                self.settings.display_bits.eight_bit_input =
+                    !self.settings.display_bits.eight_bit_input;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "8-bit input: {}",
+                    bool_label(self.settings.display_bits.eight_bit_input)
+                ));
+            }
+            SettingsEntryAction::LearnKeysCapture => {
+                self.pending_learn_keys_capture = true;
+                self.set_status("Press a key chord to capture (Esc to cancel)");
+            }
+            SettingsEntryAction::ToggleVfsEnabled => {
+                self.settings.virtual_fs.vfs_enabled = !self.settings.virtual_fs.vfs_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable virtual FS: {}",
+                    bool_label(self.settings.virtual_fs.vfs_enabled)
+                ));
+            }
+            SettingsEntryAction::ToggleVfsFtpEnabled => {
+                self.settings.virtual_fs.ftp_enabled = !self.settings.virtual_fs.ftp_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable FTP links: {}",
+                    bool_label(self.settings.virtual_fs.ftp_enabled)
+                ));
+            }
+            SettingsEntryAction::ToggleVfsShellLinkEnabled => {
+                self.settings.virtual_fs.shell_link_enabled =
+                    !self.settings.virtual_fs.shell_link_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable shell links: {}",
+                    bool_label(self.settings.virtual_fs.shell_link_enabled)
+                ));
+            }
+            SettingsEntryAction::ToggleVfsSftpEnabled => {
+                self.settings.virtual_fs.sftp_enabled = !self.settings.virtual_fs.sftp_enabled;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Enable SFTP links: {}",
+                    bool_label(self.settings.virtual_fs.sftp_enabled)
+                ));
+            }
+            SettingsEntryAction::Info => {
+                self.set_status(format!("{}: {}", entry.label, entry.value));
+            }
+        }
+
+        self.refresh_settings_entries();
     }
 
     fn menu_state_mut(&mut self) -> Option<&mut MenuState> {
@@ -2522,11 +3965,34 @@ impl AppState {
             return None;
         };
 
-        if let Some(entry_index) = menu.hit_test_entry(column, row) {
+        if let Some(entry_index) = self.menu_hit_test_entry(menu, column, row) {
             return Some(AppCommand::MenuSelectAt(entry_index));
         }
 
         Some(AppCommand::CloseMenu)
+    }
+
+    fn menu_hit_test_entry(&self, menu: &MenuState, column: u16, row: u16) -> Option<usize> {
+        let x = menu.popup_origin_x();
+        let y = 1u16;
+        let width = self.menu_popup_width(menu);
+        let items = menu.active_entries().len() as u16;
+        if items == 0 {
+            return None;
+        }
+
+        if row < y + 1 || row >= y + 1 + items {
+            return None;
+        }
+        if column < x + 1 || column >= x + width.saturating_sub(1) {
+            return None;
+        }
+
+        let index = (row - (y + 1)) as usize;
+        menu.active_entries()
+            .get(index)
+            .filter(|entry| entry.selectable)
+            .map(|_| index)
     }
 
     fn open_jobs_screen(&mut self) {
@@ -2729,6 +4195,8 @@ impl AppState {
         };
 
         self.panelize_presets = preset_commands.clone();
+        self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+        self.settings.mark_dirty();
         self.routes.pop();
         let next_initial = if initial_command == removed_command {
             preset_commands
@@ -2775,7 +4243,7 @@ impl AppState {
         let Some(Route::FindResults(results)) = self.routes.last_mut() else {
             return;
         };
-        results.move_page(pages);
+        results.move_page(pages, self.settings.advanced.page_step);
     }
 
     fn move_find_results_home(&mut self) {
@@ -2890,8 +4358,8 @@ impl AppState {
         self.pending_background_commands
             .push(BackgroundCommand::BuildTree {
                 root,
-                max_depth: TREE_MAX_DEPTH,
-                max_entries: TREE_MAX_ENTRIES,
+                max_depth: self.settings.advanced.tree_max_depth,
+                max_entries: self.settings.advanced.tree_max_entries,
             });
         self.set_status("Loading directory tree...");
     }
@@ -2914,7 +4382,7 @@ impl AppState {
         let Some(Route::Tree(tree)) = self.routes.last_mut() else {
             return;
         };
-        tree.move_page(pages);
+        tree.move_page(pages, self.settings.advanced.page_step);
     }
 
     fn move_tree_home(&mut self) {
@@ -2991,7 +4459,7 @@ impl AppState {
     }
 
     fn move_hotlist_page(&mut self, pages: isize) {
-        self.move_hotlist_cursor(pages.saturating_mul(DEFAULT_PAGE_STEP as isize));
+        self.move_hotlist_cursor(pages.saturating_mul(self.settings.advanced.page_step as isize));
     }
 
     fn move_hotlist_home(&mut self) {
@@ -3019,6 +4487,8 @@ impl AppState {
         }
         self.hotlist.push(cwd.clone());
         self.hotlist_cursor = self.hotlist.len() - 1;
+        self.settings.configuration.hotlist = self.hotlist.clone();
+        self.settings.mark_dirty();
         self.set_status(format!("Added {} to hotlist", cwd.to_string_lossy()));
     }
 
@@ -3029,6 +4499,8 @@ impl AppState {
         }
         let removed = self.hotlist.remove(self.hotlist_cursor);
         self.clamp_hotlist_cursor();
+        self.settings.configuration.hotlist = self.hotlist.clone();
+        self.settings.mark_dirty();
         self.set_status(format!(
             "Removed {} from hotlist",
             removed.to_string_lossy()
@@ -3166,14 +4638,22 @@ impl AppState {
         let mut follow_up_command = None;
 
         match command {
+            AppCommand::MenuNoop => {}
+            AppCommand::MenuNotImplemented(label) => {
+                self.set_status(format!("{label} is not implemented yet"));
+            }
             AppCommand::OpenMenu => self.open_menu(0),
             AppCommand::OpenMenuAt(index) => self.open_menu(index),
             AppCommand::CloseMenu => self.close_menu(),
             AppCommand::OpenHelp => self.open_help_screen(),
             AppCommand::CloseHelp => self.close_help_screen(),
             AppCommand::Quit => {
-                self.request_cancel_for_all_jobs();
-                return Ok(ApplyResult::Quit);
+                if self.settings.confirmation.confirm_quit {
+                    self.start_quit_confirmation();
+                } else {
+                    self.request_cancel_for_all_jobs();
+                    return Ok(ApplyResult::Quit);
+                }
             }
             AppCommand::CloseViewer => self.close_viewer(),
             AppCommand::OpenFindDialog => self.open_find_dialog(),
@@ -3202,8 +4682,14 @@ impl AppState {
             }
             AppCommand::MoveUp => self.move_cursor(-1),
             AppCommand::MoveDown => self.move_cursor(1),
-            AppCommand::PageUp => self.active_panel_mut().move_cursor_page(-1),
-            AppCommand::PageDown => self.active_panel_mut().move_cursor_page(1),
+            AppCommand::PageUp => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(-1, page_step);
+            }
+            AppCommand::PageDown => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(1, page_step);
+            }
             AppCommand::MoveHome => self.active_panel_mut().move_cursor_home(),
             AppCommand::MoveEnd => self.active_panel_mut().move_cursor_end(),
             AppCommand::ToggleTag => {
@@ -3242,7 +4728,18 @@ impl AppState {
             }
             AppCommand::Copy => self.start_copy_dialog(),
             AppCommand::Move => self.start_move_dialog(),
-            AppCommand::Delete => self.start_delete_confirmation(),
+            AppCommand::Delete => {
+                if self.settings.confirmation.confirm_delete {
+                    self.start_delete_confirmation();
+                } else {
+                    let targets = self.selected_operation_paths();
+                    if targets.is_empty() {
+                        self.set_status("Delete requires a selected or tagged entry");
+                    } else {
+                        self.queue_delete_job(targets);
+                    }
+                }
+            }
             AppCommand::CancelJob => self.cancel_latest_job(),
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
@@ -3319,6 +4816,32 @@ impl AppState {
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::OpenOptionsConfiguration => {
+                self.open_settings_screen(SettingsCategory::Configuration)
+            }
+            AppCommand::OpenOptionsLayout => self.open_settings_screen(SettingsCategory::Layout),
+            AppCommand::OpenOptionsPanelOptions => {
+                self.open_settings_screen(SettingsCategory::PanelOptions)
+            }
+            AppCommand::OpenOptionsConfirmation => {
+                self.open_settings_screen(SettingsCategory::Confirmation)
+            }
+            AppCommand::OpenOptionsAppearance => {
+                self.open_settings_screen(SettingsCategory::Appearance)
+            }
+            AppCommand::OpenOptionsDisplayBits => {
+                self.open_settings_screen(SettingsCategory::DisplayBits)
+            }
+            AppCommand::OpenOptionsLearnKeys => {
+                self.open_settings_screen(SettingsCategory::LearnKeys)
+            }
+            AppCommand::OpenOptionsVirtualFs => {
+                self.open_settings_screen(SettingsCategory::VirtualFs)
+            }
+            AppCommand::SaveSetup => {
+                self.pending_save_setup = true;
+                self.set_status("Save setup requested");
+            }
             AppCommand::MenuMoveUp => {
                 if let Some(menu) = self.menu_state_mut() {
                     menu.move_up();
@@ -3434,8 +4957,20 @@ impl AppState {
                     help.open_prev_node();
                 }
             }
-            AppCommand::DialogAccept => self.handle_dialog_event(DialogEvent::Accept),
-            AppCommand::DialogCancel => self.handle_dialog_event(DialogEvent::Cancel),
+            AppCommand::DialogAccept => {
+                if matches!(self.top_route(), Route::Settings(_)) {
+                    self.apply_settings_entry();
+                } else {
+                    self.handle_dialog_event(DialogEvent::Accept);
+                }
+            }
+            AppCommand::DialogCancel => {
+                if matches!(self.top_route(), Route::Settings(_)) {
+                    self.close_settings_screen();
+                } else {
+                    self.handle_dialog_event(DialogEvent::Cancel);
+                }
+            }
             AppCommand::DialogFocusNext => {
                 if !self.toggle_panelize_dialog_focus() {
                     self.handle_dialog_event(DialogEvent::FocusNext);
@@ -3445,8 +4980,20 @@ impl AppState {
             AppCommand::DialogInputChar(ch) => {
                 self.handle_dialog_event(DialogEvent::InsertChar(ch))
             }
-            AppCommand::DialogListboxUp => self.handle_dialog_event(DialogEvent::MoveUp),
-            AppCommand::DialogListboxDown => self.handle_dialog_event(DialogEvent::MoveDown),
+            AppCommand::DialogListboxUp => {
+                if let Some(settings) = self.settings_state_mut() {
+                    settings.move_up();
+                } else {
+                    self.handle_dialog_event(DialogEvent::MoveUp);
+                }
+            }
+            AppCommand::DialogListboxDown => {
+                if let Some(settings) = self.settings_state_mut() {
+                    settings.move_down();
+                } else {
+                    self.handle_dialog_event(DialogEvent::MoveDown);
+                }
+            }
             AppCommand::ViewerMoveUp => {
                 if let Some(viewer) = self.active_viewer_mut() {
                     viewer.move_lines(-1);
@@ -3458,13 +5005,15 @@ impl AppState {
                 }
             }
             AppCommand::ViewerPageUp => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
                 if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_pages(-1);
+                    viewer.move_pages(-1, viewer_page_step);
                 }
             }
             AppCommand::ViewerPageDown => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
                 if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_pages(1);
+                    viewer.move_pages(1, viewer_page_step);
                 }
             }
             AppCommand::ViewerHome => {
@@ -3524,6 +5073,11 @@ impl AppState {
             self.xmap_pending = false;
         }
 
+        if self.pending_quit {
+            self.pending_quit = false;
+            return Ok(ApplyResult::Quit);
+        }
+
         if let Some(next_command) = follow_up_command {
             return self.apply(next_command);
         }
@@ -3559,6 +5113,7 @@ impl AppState {
                 }
             }
             Route::Menu(_) => KeyContext::Menu,
+            Route::Settings(_) => KeyContext::Listbox,
             Route::FindResults(_) => KeyContext::FindResults,
             Route::Tree(_) => KeyContext::Tree,
             Route::Hotlist => KeyContext::Hotlist,
@@ -3640,6 +5195,13 @@ impl AppState {
         self.routes
             .push(Route::Dialog(DialogState::confirm("Delete", message)));
         self.set_status("Confirm delete");
+    }
+
+    fn start_quit_confirmation(&mut self) {
+        self.pending_dialog_action = Some(PendingDialogAction::ConfirmQuit);
+        self.routes
+            .push(Route::Dialog(DialogState::confirm("Quit", "Exit rc?")));
+        self.set_status("Confirm quit");
     }
 
     fn start_rename_dialog(&mut self) {
@@ -3784,6 +5346,16 @@ impl AppState {
         }
     }
 
+    fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
+        let request = JobRequest::Delete { targets };
+        let summary = request.summary();
+        let worker_job = self.jobs.enqueue(request);
+        let job_id = worker_job.id;
+        self.pending_worker_commands
+            .push(WorkerCommand::Run(worker_job));
+        self.set_status(format!("Queued job #{job_id}: {summary}"));
+    }
+
     fn finish_dialog(&mut self, result: DialogResult) {
         let pending = self.pending_dialog_action.take();
         match (pending, result) {
@@ -3792,17 +5364,20 @@ impl AppState {
                 Some(PendingDialogAction::ConfirmDelete { targets }),
                 DialogResult::ConfirmAccepted,
             ) => {
-                let request = JobRequest::Delete { targets };
-                let summary = request.summary();
-                let worker_job = self.jobs.enqueue(request);
-                let job_id = worker_job.id;
-                self.pending_worker_commands
-                    .push(WorkerCommand::Run(worker_job));
-                self.set_status(format!("Queued job #{job_id}: {summary}"));
+                self.queue_delete_job(targets);
             }
             (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::ConfirmDeclined)
             | (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::Canceled) => {
                 self.set_status("Delete canceled");
+            }
+            (Some(PendingDialogAction::ConfirmQuit), DialogResult::ConfirmAccepted) => {
+                self.request_cancel_for_all_jobs();
+                self.pending_quit = true;
+                self.set_status("Quitting...");
+            }
+            (Some(PendingDialogAction::ConfirmQuit), DialogResult::ConfirmDeclined)
+            | (Some(PendingDialogAction::ConfirmQuit), DialogResult::Canceled) => {
+                self.set_status("Quit canceled");
             }
             (
                 Some(PendingDialogAction::Mkdir { base_dir }),
@@ -3885,18 +5460,27 @@ impl AppState {
                 } else {
                     source_base_dir.join(input_path)
                 };
-                let selected = overwrite_policy_index(self.overwrite_policy);
-                self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
-                    kind,
-                    sources,
-                    destination_dir,
-                });
-                self.routes.push(Route::Dialog(DialogState::listbox(
-                    "Overwrite Policy",
-                    overwrite_policy_items(),
-                    selected,
-                )));
-                self.set_status("Choose overwrite policy");
+                if self.settings.confirmation.confirm_overwrite {
+                    let selected = overwrite_policy_index(self.overwrite_policy);
+                    self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
+                        kind,
+                        sources,
+                        destination_dir,
+                    });
+                    self.routes.push(Route::Dialog(DialogState::listbox(
+                        "Overwrite Policy",
+                        overwrite_policy_items(),
+                        selected,
+                    )));
+                    self.set_status("Choose overwrite policy");
+                } else {
+                    self.queue_copy_or_move_job(
+                        kind,
+                        sources,
+                        destination_dir,
+                        self.overwrite_policy,
+                    );
+                }
             }
             (Some(PendingDialogAction::TransferDestination { .. }), DialogResult::Canceled) => {
                 self.set_status("Copy/Move canceled");
@@ -3923,6 +5507,8 @@ impl AppState {
             ) => {
                 if let Some(index) = index {
                     self.overwrite_policy = overwrite_policy_from_index(index);
+                    self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                    self.settings.mark_dirty();
                     self.set_status(format!(
                         "Default overwrite policy: {}",
                         self.overwrite_policy.label()
@@ -3987,7 +5573,7 @@ impl AppState {
                         job_id,
                         query: query.clone(),
                         base_dir,
-                        max_results: MAX_FIND_RESULTS,
+                        max_results: self.settings.advanced.max_find_results,
                         cancel_flag: worker_job.cancel_flag(),
                         pause_flag,
                     });
@@ -4066,6 +5652,8 @@ impl AppState {
 
                 preset_commands.push(command.clone());
                 self.panelize_presets = preset_commands.clone();
+                self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+                self.settings.mark_dirty();
                 self.routes.pop();
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
                 self.set_status(format!("Added panelize preset: {command}"));
@@ -4114,6 +5702,8 @@ impl AppState {
                 *entry = command.clone();
 
                 self.panelize_presets = preset_commands.clone();
+                self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+                self.settings.mark_dirty();
                 self.routes.pop();
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
                 self.set_status(format!("Updated panelize preset: {command}"));
@@ -4388,11 +5978,24 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
     }
 }
 
-fn panelize_preset_commands() -> Vec<String> {
-    PANELIZE_PRESET_COMMANDS
-        .iter()
-        .map(|command| (*command).to_string())
-        .collect()
+fn next_overwrite_policy(policy: OverwritePolicy) -> OverwritePolicy {
+    match policy {
+        OverwritePolicy::Overwrite => OverwritePolicy::Skip,
+        OverwritePolicy::Skip => OverwritePolicy::Rename,
+        OverwritePolicy::Rename => OverwritePolicy::Overwrite,
+    }
+}
+
+fn next_settings_sort_field(field: SettingsSortField) -> SettingsSortField {
+    match field {
+        SettingsSortField::Name => SettingsSortField::Size,
+        SettingsSortField::Size => SettingsSortField::Modified,
+        SettingsSortField::Modified => SettingsSortField::Name,
+    }
+}
+
+fn bool_label(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
 }
 
 fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[String]) -> usize {
@@ -4402,13 +6005,23 @@ fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[Stri
         .map_or(0, |index| index.saturating_add(1))
 }
 
+#[cfg(test)]
 fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
-    read_entries_with_cancel(dir, sort_mode, None)
+    read_entries_with_visibility_cancel(dir, sort_mode, true, None)
 }
 
-fn read_entries_with_cancel(
+fn read_entries_with_visibility(
     dir: &Path,
     sort_mode: SortMode,
+    show_hidden_files: bool,
+) -> io::Result<Vec<FileEntry>> {
+    read_entries_with_visibility_cancel(dir, sort_mode, show_hidden_files, None)
+}
+
+fn read_entries_with_visibility_cancel(
+    dir: &Path,
+    sort_mode: SortMode,
+    show_hidden_files: bool,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
@@ -4418,6 +6031,9 @@ fn read_entries_with_cancel(
         let entry = entry_result?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
+        if !show_hidden_files && name.starts_with('.') {
+            continue;
+        }
         let file_type = entry.file_type()?;
         let metadata = entry.metadata().ok();
         let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
@@ -4599,6 +6215,77 @@ fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
     }
 }
 
+fn key_chord_sort_key(chord: &KeyChord) -> (u8, u16, String) {
+    let has_ctrl_or_alt = chord.modifiers.ctrl || chord.modifiers.alt;
+    let has_any_modifiers = chord.modifiers.ctrl || chord.modifiers.alt || chord.modifiers.shift;
+    let rank = match chord.code {
+        KeyCode::F(_) if !has_any_modifiers => 0,
+        KeyCode::F(_) => 1,
+        _ if has_ctrl_or_alt => 2,
+        KeyCode::Enter
+        | KeyCode::Esc
+        | KeyCode::Tab
+        | KeyCode::Backspace
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Insert
+        | KeyCode::Delete => 3,
+        KeyCode::Char(ch) if ch.is_ascii_alphabetic() && !has_any_modifiers => 4,
+        KeyCode::Char(_) if !has_any_modifiers => 5,
+        KeyCode::Char(_) => 6,
+    };
+
+    let number = match chord.code {
+        KeyCode::F(value) => value as u16,
+        _ => 0,
+    };
+    (rank, number, format_key_chord(*chord))
+}
+
+fn format_key_chord(chord: KeyChord) -> String {
+    let key = match chord.code {
+        KeyCode::Char(ch) => ch.to_string(),
+        KeyCode::F(number) => format!("F{number}"),
+        KeyCode::Enter => String::from("Enter"),
+        KeyCode::Esc => String::from("Esc"),
+        KeyCode::Tab => String::from("Tab"),
+        KeyCode::Backspace => String::from("Backspace"),
+        KeyCode::Up => String::from("Up"),
+        KeyCode::Down => String::from("Down"),
+        KeyCode::Left => String::from("Left"),
+        KeyCode::Right => String::from("Right"),
+        KeyCode::Home => String::from("Home"),
+        KeyCode::End => String::from("End"),
+        KeyCode::PageUp => String::from("PgUp"),
+        KeyCode::PageDown => String::from("PgDn"),
+        KeyCode::Insert => String::from("Insert"),
+        KeyCode::Delete => String::from("Delete"),
+    };
+
+    let mut modifiers = Vec::new();
+    if chord.modifiers.ctrl {
+        modifiers.push("Ctrl");
+    }
+    if chord.modifiers.alt {
+        modifiers.push("Alt");
+    }
+    if chord.modifiers.shift {
+        modifiers.push("Shift");
+    }
+
+    if modifiers.is_empty() {
+        key
+    } else {
+        format!("{}-{key}", modifiers.join("-"))
+    }
+}
+
 fn resolve_external_editor_command() -> Option<String> {
     resolve_external_editor_command_with_lookup(|name| std::env::var(name).ok())
 }
@@ -4745,6 +6432,7 @@ fn join_command_output_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::KeyModifiers;
     use std::path::Path;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use std::{env, fs};
@@ -4783,6 +6471,28 @@ mod tests {
         }
     }
 
+    fn move_menu_selection_to_label(app: &mut AppState, label: &str) {
+        let len = match app.top_route() {
+            Route::Menu(menu) => menu.active_entries().len(),
+            _ => panic!("menu route should be active"),
+        };
+        for _ in 0..len {
+            let matches_target = match app.top_route() {
+                Route::Menu(menu) => menu
+                    .active_entries()
+                    .get(menu.selected_entry)
+                    .is_some_and(|entry| entry.label == label),
+                _ => false,
+            };
+            if matches_target {
+                return;
+            }
+            app.apply(AppCommand::MenuMoveDown)
+                .expect("menu movement should succeed");
+        }
+        panic!("menu entry '{label}' should exist");
+    }
+
     fn submit_panelize_custom_command(app: &mut AppState, command: &str) {
         app.open_panelize_dialog();
         app.finish_dialog(DialogResult::ListboxSubmitted {
@@ -4808,6 +6518,7 @@ mod tests {
             entries: vec![file_entry("a"), file_entry("b")],
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -4923,6 +6634,7 @@ mod tests {
             ],
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -4958,6 +6670,7 @@ mod tests {
             entries,
             cursor: 1,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -4969,10 +6682,10 @@ mod tests {
         panel.move_cursor_end();
         assert_eq!(panel.cursor, 3);
 
-        panel.move_cursor_page(1);
+        panel.move_cursor_page(1, 10);
         assert_eq!(panel.cursor, 3);
 
-        panel.move_cursor_page(-1);
+        panel.move_cursor_page(-1, 10);
         assert_eq!(panel.cursor, 0);
     }
 
@@ -4983,6 +6696,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            show_hidden_files: true,
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
@@ -5182,6 +6896,94 @@ mod tests {
     }
 
     #[test]
+    fn menu_shortcuts_follow_loaded_keymap_bindings() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-shortcuts-keymap-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::parse(
+            r#"
+[filemanager]
+View = f11
+Edit = f12
+Copy = ctrl-y
+"#,
+        )
+        .expect("keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+
+        let view_entry = FILE_MENU_ENTRIES
+            .iter()
+            .find(|entry| entry.label == "View")
+            .expect("View entry should exist");
+        let edit_entry = FILE_MENU_ENTRIES
+            .iter()
+            .find(|entry| entry.label == "Edit")
+            .expect("Edit entry should exist");
+        let copy_entry = FILE_MENU_ENTRIES
+            .iter()
+            .find(|entry| entry.label == "Copy")
+            .expect("Copy entry should exist");
+
+        assert_eq!(app.menu_entry_shortcut_label(view_entry), "F11");
+        assert_eq!(app.menu_entry_shortcut_label(edit_entry), "F12");
+        assert_eq!(app.menu_entry_shortcut_label(copy_entry), "Ctrl-y");
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn help_content_applies_keybinding_replacements() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-help-keybindings-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::parse(
+            r#"
+[filemanager]
+OpenJobs = f6
+"#,
+        )
+        .expect("keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+        app.apply(AppCommand::OpenHelp)
+            .expect("help route should open");
+
+        let Route::Help(help) = app.top_route() else {
+            panic!("top route should be help");
+        };
+        let mut content = String::new();
+        for line in help.lines() {
+            for span in &line.spans {
+                match span {
+                    HelpSpan::Text(text) => content.push_str(text),
+                    HelpSpan::Link { label, .. } => content.push_str(label),
+                }
+            }
+            content.push('\n');
+        }
+
+        assert!(
+            !content.contains("{{"),
+            "help content should not contain unresolved template tokens"
+        );
+        assert!(
+            content.contains("F6 open jobs screen"),
+            "help should reflect keymap-derived shortcuts"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn menu_route_supports_keyboard_navigation_and_selection() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5195,9 +6997,285 @@ mod tests {
             .expect("menu route should open");
         assert_eq!(app.key_context(), KeyContext::Menu);
 
+        move_menu_selection_to_label(&mut app, "Background jobs");
         app.apply(AppCommand::MenuAccept)
             .expect("menu accept should execute selected action");
         assert_eq!(app.key_context(), KeyContext::Jobs);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn menu_stub_action_reports_not_implemented_status() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-menu-stub-action-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenMenuAt(0))
+            .expect("left menu should open");
+        app.apply(AppCommand::MenuAccept)
+            .expect("accepting stub menu action should succeed");
+        assert_eq!(app.key_context(), KeyContext::FileManager);
+        assert!(
+            app.status_line.contains("not implemented"),
+            "stub actions should report a not-implemented status"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn side_menus_match_and_options_match_mc_shape() {
+        let menus = top_menus();
+        let left = menus
+            .iter()
+            .find(|menu| menu.title == "Left")
+            .expect("left menu should exist");
+        let right = menus
+            .iter()
+            .find(|menu| menu.title == "Right")
+            .expect("right menu should exist");
+        let file = menus
+            .iter()
+            .find(|menu| menu.title == "File")
+            .expect("file menu should exist");
+        let options = menus
+            .iter()
+            .find(|menu| menu.title == "Options")
+            .expect("options menu should exist");
+        let command = menus
+            .iter()
+            .find(|menu| menu.title == "Command")
+            .expect("command menu should exist");
+
+        let left_labels: Vec<&str> = left.entries.iter().map(|entry| entry.label).collect();
+        let right_labels: Vec<&str> = right.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            left_labels, right_labels,
+            "left and right menu entries should remain identical"
+        );
+        assert!(
+            left_labels.contains(&"File listing")
+                && left_labels.contains(&"Panelize")
+                && left_labels.contains(&"Rescan"),
+            "side menus should include MC-style panel controls"
+        );
+
+        let file_labels: Vec<&str> = file.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(file_labels.first(), Some(&"View"));
+        assert!(file_labels.contains(&"Rename/Move"));
+        assert!(file_labels.contains(&"Select group"));
+        assert_eq!(file_labels.last(), Some(&"Exit"));
+
+        let command_labels: Vec<&str> = command.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            command_labels,
+            vec![
+                "User menu",
+                "Directory tree",
+                "Find file",
+                "Swap panels",
+                "Switch panels on/off",
+                "Compare directories",
+                "Compare files",
+                "External panelize",
+                "Show directory sizes",
+                "",
+                "Command history",
+                "Viewed/edited files history",
+                "Directory hotlist",
+                "Active VFS list",
+                "Background jobs",
+                "Screen list",
+                "",
+                "Edit extension file",
+                "Edit menu file",
+                "Edit highlighting group file",
+            ],
+            "command menu should follow MC structure and ordering"
+        );
+
+        let command_shortcuts: Vec<&str> =
+            command.entries.iter().map(|entry| entry.shortcut).collect();
+        assert_eq!(command_shortcuts[0], "F2");
+        assert_eq!(command_shortcuts[2], "M-?");
+        assert_eq!(command_shortcuts[7], "C-x !");
+        assert_eq!(command_shortcuts[12], "C-\\");
+        assert_eq!(command_shortcuts[14], "C-x j");
+
+        let option_labels: Vec<&str> = options.entries.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            option_labels,
+            vec![
+                "Configuration...",
+                "Layout...",
+                "Panel options...",
+                "Confirmation...",
+                "Appearance...",
+                "Display bits...",
+                "Learn keys...",
+                "Virtual FS...",
+                "Save setup",
+            ],
+            "options menu should follow mc ordering and labels"
+        );
+    }
+
+    #[test]
+    fn options_commands_open_settings_routes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-options-route-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenOptionsLayout)
+            .expect("layout options should open");
+        let Route::Settings(settings) = app.top_route() else {
+            panic!("settings route should open");
+        };
+        assert_eq!(settings.category, SettingsCategory::Layout);
+        assert!(!settings.entries.is_empty());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn settings_toggle_marks_dirty_and_save_setup_sets_pending_flag() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-options-dirty-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        assert!(!app.settings().save_setup.dirty);
+
+        app.apply(AppCommand::OpenOptionsConfiguration)
+            .expect("configuration options should open");
+        app.apply(AppCommand::DialogAccept)
+            .expect("toggle should apply");
+        assert!(app.settings().save_setup.dirty);
+
+        app.apply(AppCommand::SaveSetup)
+            .expect("save setup command should succeed");
+        assert!(app.take_pending_save_setup());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn learn_keys_capture_stores_chord_and_marks_settings_dirty() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-keys-capture-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenOptionsLearnKeys)
+            .expect("learn keys options should open");
+        for _ in 0..4 {
+            app.apply(AppCommand::DialogListboxDown)
+                .expect("selection should move down");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("capture entry should activate");
+        assert!(
+            app.status_line.contains("Press a key chord"),
+            "capture mode status should be shown"
+        );
+
+        assert!(app.capture_learn_keys_chord(KeyChord {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers {
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        }));
+        assert_eq!(
+            app.settings().learn_keys.last_learned_binding.as_deref(),
+            Some("Ctrl-x")
+        );
+        assert!(app.settings().save_setup.dirty);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn learn_keys_capture_can_be_canceled_with_escape() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-keys-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings_mut().learn_keys.last_learned_binding = Some(String::from("F5"));
+        app.apply(AppCommand::OpenOptionsLearnKeys)
+            .expect("learn keys options should open");
+        for _ in 0..4 {
+            app.apply(AppCommand::DialogListboxDown)
+                .expect("selection should move down");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("capture entry should activate");
+
+        assert!(app.capture_learn_keys_chord(KeyChord {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::default(),
+        }));
+        assert_eq!(
+            app.settings().learn_keys.last_learned_binding.as_deref(),
+            Some("F5")
+        );
+        assert!(
+            app.status_line.contains("canceled"),
+            "cancel status should be shown"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn confirm_quit_setting_requires_dialog_before_quit() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-confirm-quit-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenOptionsConfirmation)
+            .expect("confirmation options should open");
+        app.apply(AppCommand::DialogListboxDown)
+            .expect("move to confirm overwrite");
+        app.apply(AppCommand::DialogListboxDown)
+            .expect("move to confirm quit");
+        app.apply(AppCommand::DialogAccept)
+            .expect("toggle confirm quit");
+
+        let result = app
+            .apply(AppCommand::Quit)
+            .expect("quit should open confirmation");
+        assert_eq!(result, ApplyResult::Continue);
+        assert!(matches!(app.top_route(), Route::Dialog(_)));
+
+        let quit_result = app
+            .apply(AppCommand::DialogAccept)
+            .expect("confirm quit should return quit result");
+        assert_eq!(quit_result, ApplyResult::Quit);
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -5214,10 +7292,7 @@ mod tests {
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.apply(AppCommand::OpenMenuAt(2))
             .expect("command menu should open");
-        for _ in 0..5 {
-            app.apply(AppCommand::MenuMoveDown)
-                .expect("menu movement should succeed");
-        }
+        move_menu_selection_to_label(&mut app, "External panelize");
         app.apply(AppCommand::MenuAccept)
             .expect("external panelize menu entry should open dialog");
         assert_eq!(app.key_context(), KeyContext::Listbox);

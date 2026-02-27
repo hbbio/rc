@@ -10,15 +10,16 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
+use rc_core::keymap::KeyContext;
 use rc_core::{
-    ActivePanel, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry, FindResultsState,
-    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route, TreeState,
-    ViewerState, top_menu_bar_items, top_menus,
+    ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
+    FindResultsState, HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route,
+    SettingsScreenState, TreeState, ViewerState, top_menus,
 };
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -27,7 +28,10 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 use nix::sys::statvfs::statvfs;
 
 use skin::{UiSkin, current_skin};
-pub use skin::{configure_skin, current_skin_name, list_available_skins};
+pub use skin::{
+    configure_skin, configure_skin_with_search_roots, current_skin_name, list_available_skins,
+    list_available_skins_with_search_roots,
+};
 
 struct HighlightResources {
     syntax_set: SyntaxSet,
@@ -40,8 +44,6 @@ static DISK_USAGE_SUMMARY_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Ins
     OnceLock::new();
 const PANEL_SIZE_COL_WIDTH: usize = 12;
 const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
-const DISK_USAGE_CACHE_TTL: Duration = Duration::from_millis(750);
-const DISK_USAGE_CACHE_MAX_ENTRIES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ViewerHighlightKey {
@@ -59,13 +61,15 @@ struct CachedViewerHighlight {
 pub fn render(frame: &mut Frame, state: &AppState) {
     let skin = current_skin();
     let job_counts = state.jobs_status_counts();
+    let menu_height = if state.show_menu_bar() { 1 } else { 0 };
+    let button_height = if state.show_button_bar() { 1 } else { 0 };
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(menu_height),
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(button_height),
         ])
         .split(frame.area());
 
@@ -73,7 +77,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Menu(menu) => Some(menu.active_menu),
         _ => None,
     };
-    render_menu_bar(frame, root[0], skin.as_ref(), active_menu);
+    if state.show_menu_bar() {
+        render_menu_bar(frame, root[0], skin.as_ref(), active_menu);
+    }
 
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
@@ -89,6 +95,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             &state.panels[0],
             state.active_panel == ActivePanel::Left,
             skin.as_ref(),
+            state,
         );
         render_panel(
             frame,
@@ -96,33 +103,43 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             &state.panels[1],
             state.active_panel == ActivePanel::Right,
             skin.as_ref(),
+            state,
         );
     }
 
-    let status = format!(
-        "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
-        state.key_context(),
-        state.route_depth(),
-        skin.name(),
-        job_counts.queued,
-        job_counts.running,
-        job_counts.succeeded,
-        job_counts.canceled,
-        job_counts.failed,
-        state.status_line
-    );
+    let status = if state.show_debug_status() {
+        format!(
+            "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
+            state.key_context(),
+            state.route_depth(),
+            skin.name(),
+            job_counts.queued,
+            job_counts.running,
+            job_counts.succeeded,
+            job_counts.canceled,
+            job_counts.failed,
+            state.status_line
+        )
+    } else {
+        state.status_line.clone()
+    };
     frame.render_widget(Paragraph::new(status), root[2]);
-    render_button_bar(frame, root[3], skin.as_ref(), state.top_route());
+    if state.show_button_bar() {
+        render_button_bar(frame, root[3], skin.as_ref(), state);
+    }
 
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
         Route::Jobs => render_jobs_screen(frame, state, skin.as_ref()),
         Route::Viewer(_) => {}
-        Route::FindResults(results) => render_find_results_screen(frame, results, skin.as_ref()),
-        Route::Tree(tree) => render_tree_screen(frame, tree, skin.as_ref()),
+        Route::FindResults(results) => {
+            render_find_results_screen(frame, state, results, skin.as_ref())
+        }
+        Route::Tree(tree) => render_tree_screen(frame, state, tree, skin.as_ref()),
         Route::Hotlist => render_hotlist_screen(frame, state, skin.as_ref()),
-        Route::Help(help) => render_help_screen(frame, help, skin.as_ref()),
-        Route::Menu(menu) => render_menu_overlay(frame, menu, skin.as_ref()),
+        Route::Help(help) => render_help_screen(frame, state, help, skin.as_ref()),
+        Route::Menu(menu) => render_menu_overlay(frame, state, menu, skin.as_ref()),
+        Route::Settings(settings) => render_settings_screen(frame, settings, skin.as_ref()),
         Route::FileManager => {}
     }
 }
@@ -147,58 +164,185 @@ fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, active_menu: Op
     frame.render_widget(Paragraph::new(Line::from(spans)).style(menu_style), area);
 }
 
-fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, route: &Route) {
+type ButtonBinding = Option<(KeyContext, AppCommand, Option<u8>)>;
+type ButtonLabel<'a> = (&'a str, &'a str, ButtonBinding);
+
+fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppState) {
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
-    let labels: [(&str, &str); 10] = match route {
+    let labels: [ButtonLabel<'_>; 10] = match state.top_route() {
         Route::FindResults(_) => [
-            ("1", "Help"),
-            ("2", ""),
-            ("3", ""),
-            ("4", ""),
-            ("5", "Panelize"),
-            ("6", ""),
-            ("7", ""),
-            ("8", ""),
-            ("9", ""),
-            ("10", "Close"),
+            (
+                "1",
+                "Help",
+                Some((KeyContext::FindResults, AppCommand::OpenHelp, Some(1))),
+            ),
+            ("2", "", None),
+            ("3", "", None),
+            ("4", "", None),
+            (
+                "5",
+                "Panelize",
+                Some((
+                    KeyContext::FindResults,
+                    AppCommand::FindResultsPanelize,
+                    Some(5),
+                )),
+            ),
+            ("6", "", None),
+            ("7", "", None),
+            ("8", "", None),
+            ("9", "", None),
+            (
+                "10",
+                "Close",
+                Some((
+                    KeyContext::FindResults,
+                    AppCommand::CloseFindResults,
+                    Some(10),
+                )),
+            ),
         ],
         Route::Help(_) => [
-            ("1", "Help"),
-            ("2", "Index"),
-            ("3", "Prev"),
-            ("4", ""),
-            ("5", ""),
-            ("6", ""),
-            ("7", ""),
-            ("8", ""),
-            ("9", ""),
-            ("10", "Quit"),
+            (
+                "1",
+                "Help",
+                Some((KeyContext::Help, AppCommand::OpenHelp, Some(1))),
+            ),
+            (
+                "2",
+                "Index",
+                Some((KeyContext::Help, AppCommand::HelpIndex, Some(2))),
+            ),
+            (
+                "3",
+                "Prev",
+                Some((KeyContext::Help, AppCommand::HelpBack, Some(3))),
+            ),
+            ("4", "", None),
+            ("5", "", None),
+            ("6", "", None),
+            ("7", "", None),
+            ("8", "", None),
+            ("9", "", None),
+            (
+                "10",
+                "Quit",
+                Some((KeyContext::Help, AppCommand::CloseHelp, Some(10))),
+            ),
         ],
         _ => [
-            ("1", "Help"),
-            ("2", "Menu"),
-            ("3", "View"),
-            ("4", "Edit"),
-            ("5", "Copy"),
-            ("6", "RenMov"),
-            ("7", "Mkdir"),
-            ("8", "Delete"),
-            ("9", "PullDn"),
-            ("10", "Quit"),
+            (
+                "1",
+                "Help",
+                Some((KeyContext::FileManager, AppCommand::OpenHelp, Some(1))),
+            ),
+            (
+                "2",
+                "Menu",
+                Some((KeyContext::FileManager, AppCommand::OpenMenu, Some(2))),
+            ),
+            (
+                "3",
+                "View",
+                Some((KeyContext::FileManager, AppCommand::OpenEntry, Some(3))),
+            ),
+            (
+                "4",
+                "Edit",
+                Some((KeyContext::FileManager, AppCommand::EditEntry, Some(4))),
+            ),
+            (
+                "5",
+                "Copy",
+                Some((KeyContext::FileManager, AppCommand::Copy, Some(5))),
+            ),
+            (
+                "6",
+                "RenMov",
+                Some((KeyContext::FileManager, AppCommand::Move, Some(6))),
+            ),
+            (
+                "7",
+                "Mkdir",
+                Some((
+                    KeyContext::FileManager,
+                    AppCommand::OpenInputDialog,
+                    Some(7),
+                )),
+            ),
+            (
+                "8",
+                "Delete",
+                Some((KeyContext::FileManager, AppCommand::Delete, Some(8))),
+            ),
+            (
+                "9",
+                "PullDn",
+                Some((KeyContext::FileManager, AppCommand::OpenMenu, Some(9))),
+            ),
+            (
+                "10",
+                "Quit",
+                Some((KeyContext::FileManager, AppCommand::Quit, Some(10))),
+            ),
         ],
     };
 
     let mut spans: Vec<Span<'_>> = Vec::new();
-    for (index, (number, label)) in labels.into_iter().enumerate() {
+    for (index, (fallback_hotkey, label, binding)) in labels.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(" ", button_style));
         }
-        spans.push(Span::styled(number, hotkey_style));
+        let hotkey = binding
+            .and_then(|(context, command, preferred_f)| {
+                button_bar_hotkey_label(state, context, command, preferred_f)
+            })
+            .unwrap_or_else(|| fallback_hotkey.to_string());
+        spans.push(Span::styled(hotkey, hotkey_style));
         spans.push(Span::styled(label, button_style));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
+}
+
+fn button_bar_hotkey_label(
+    state: &AppState,
+    context: KeyContext,
+    command: AppCommand,
+    preferred_function_key: Option<u8>,
+) -> Option<String> {
+    let labels = state.keybinding_labels(context, command)?;
+    if let Some(function_key) = preferred_function_key {
+        let preferred_label = format!("F{function_key}");
+        if labels.iter().any(|label| label == &preferred_label) {
+            return Some(preferred_label);
+        }
+    }
+    labels.first().cloned()
+}
+
+fn keybinding_primary_or(
+    state: &AppState,
+    context: KeyContext,
+    command: AppCommand,
+    fallback: &str,
+) -> String {
+    state
+        .keybinding_primary_label(context, command)
+        .map_or_else(|| fallback.to_string(), ToString::to_string)
+}
+
+fn keybinding_joined_or(
+    state: &AppState,
+    context: KeyContext,
+    command: AppCommand,
+    fallback: &str,
+    limit: usize,
+) -> String {
+    state
+        .keybinding_joined_label(context, command, "/", limit)
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn panel_title(panel: &PanelState) -> String {
@@ -217,7 +361,14 @@ fn panel_title(panel: &PanelState) -> String {
     )
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool, skin: &UiSkin) {
+fn render_panel(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+    app: &AppState,
+) {
     let title = panel_title(panel);
     let selected_tagged = panel
         .selected_entry()
@@ -326,17 +477,17 @@ fn render_panel(frame: &mut Frame, area: Rect, panel: &PanelState, active: bool,
     }
 
     let (selected_count, selected_size) = panel_selected_totals(panel);
-    let selected_summary = if selected_count == 0 {
-        String::new()
-    } else {
+    let selected_summary = if app.show_panel_totals() && selected_count > 0 {
         format!(
             "{} in {} {}",
             format_human_size(selected_size),
             selected_count,
             if selected_count == 1 { "file" } else { "files" }
         )
+    } else {
+        String::new()
     };
-    let disk_summary = panel_disk_summary(panel);
+    let disk_summary = panel_disk_summary(panel, app);
     let footer_style = if active {
         skin.style("core", "selected")
     } else {
@@ -825,7 +976,8 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
 }
 
 fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 92, 24);
+    let (width, height) = state.jobs_dialog_size();
+    let area = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -860,6 +1012,12 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
         state.jobs.jobs().iter().map(job_row).collect()
     };
 
+    let cancel = state
+        .keybinding_joined_label(KeyContext::Jobs, AppCommand::CancelJob, " / ", 1)
+        .unwrap_or_else(|| String::from("Alt-J"));
+    let close = state
+        .keybinding_joined_label(KeyContext::Jobs, AppCommand::CloseJobsScreen, " / ", 2)
+        .unwrap_or_else(|| String::from("Esc/q"));
     let table = Table::new(
         rows,
         [
@@ -878,7 +1036,7 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
     .block(
         Block::default()
             .borders(Borders::NONE)
-            .title("Up/Down select | Alt-J cancel | Esc/q close"),
+            .title(format!("Up/Down select | {cancel} cancel | {close} close")),
     );
 
     let mut table_state = TableState::default();
@@ -888,7 +1046,12 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
     frame.render_stateful_widget(table, inner, &mut table_state);
 }
 
-fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState, skin: &UiSkin) {
+fn render_find_results_screen(
+    frame: &mut Frame,
+    app: &AppState,
+    results: &FindResultsState,
+    skin: &UiSkin,
+) {
     let area = centered_rect(frame.area(), 96, 28);
     frame.render_widget(Clear, area);
 
@@ -963,16 +1126,35 @@ fn render_find_results_screen(frame: &mut Frame, results: &FindResultsState, ski
     }
     frame.render_stateful_widget(list, layout[1], &mut state);
 
-    frame.render_widget(
-        Paragraph::new(
-            "Enter locate | F5 panelize | Up/Down move | PgUp/PgDn | Home/End | Alt-J cancel | Esc/q close",
+    let open = app
+        .keybinding_primary_label(KeyContext::FindResults, AppCommand::FindResultsOpenEntry)
+        .unwrap_or("Enter")
+        .to_string();
+    let panelize = app
+        .keybinding_primary_label(KeyContext::FindResults, AppCommand::FindResultsPanelize)
+        .unwrap_or("F5")
+        .to_string();
+    let cancel = app
+        .keybinding_joined_label(KeyContext::FindResults, AppCommand::CancelJob, " / ", 1)
+        .unwrap_or_else(|| String::from("Alt-J"));
+    let close = app
+        .keybinding_joined_label(
+            KeyContext::FindResults,
+            AppCommand::CloseFindResults,
+            " / ",
+            2,
         )
+        .unwrap_or_else(|| String::from("Esc/q"));
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{open} locate | {panelize} panelize | Up/Down move | PgUp/PgDn | Home/End | {cancel} cancel | {close} close"
+        ))
         .style(skin.style("core", "disabled")),
         layout[2],
     );
 }
 
-fn render_tree_screen(frame: &mut Frame, tree: &TreeState, skin: &UiSkin) {
+fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 88, 28);
     frame.render_widget(Clear, area);
 
@@ -1043,9 +1225,18 @@ fn render_tree_screen(frame: &mut Frame, tree: &TreeState, skin: &UiSkin) {
     }
     frame.render_stateful_widget(list, layout[1], &mut state);
 
+    let open = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeOpenEntry)
+        .unwrap_or("Enter")
+        .to_string();
+    let close = app
+        .keybinding_joined_label(KeyContext::Tree, AppCommand::CloseTree, " / ", 2)
+        .unwrap_or_else(|| String::from("Esc/q"));
     frame.render_widget(
-        Paragraph::new("Enter open | Up/Down move | PgUp/PgDn | Home/End | Esc/q close")
-            .style(skin.style("core", "disabled")),
+        Paragraph::new(format!(
+            "{open} open | Up/Down move | PgUp/PgDn | Home/End | {close} close"
+        ))
+        .style(skin.style("core", "disabled")),
         layout[2],
     );
 }
@@ -1100,21 +1291,35 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     }
     frame.render_stateful_widget(list, layout[0], &mut state);
 
+    let open = app
+        .keybinding_primary_label(KeyContext::Hotlist, AppCommand::HotlistOpenEntry)
+        .unwrap_or("Enter")
+        .to_string();
+    let add = app
+        .keybinding_primary_label(KeyContext::Hotlist, AppCommand::HotlistAddCurrentDirectory)
+        .unwrap_or("a")
+        .to_string();
+    let remove = app
+        .keybinding_joined_label(
+            KeyContext::Hotlist,
+            AppCommand::HotlistRemoveSelected,
+            " / ",
+            2,
+        )
+        .unwrap_or_else(|| String::from("d/delete"));
+    let close = app
+        .keybinding_joined_label(KeyContext::Hotlist, AppCommand::CloseHotlist, " / ", 2)
+        .unwrap_or_else(|| String::from("Esc/q"));
     frame.render_widget(
-        Paragraph::new("Enter open | a add current dir | d/delete remove | Esc/q close")
-            .style(skin.style("core", "disabled")),
+        Paragraph::new(format!(
+            "{open} open | {add} add current dir | {remove} remove | {close} close"
+        ))
+        .style(skin.style("core", "disabled")),
         layout[1],
     );
 }
 
-fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
-    let Some(menu_item) = top_menu_bar_items()
-        .into_iter()
-        .find(|item| item.index == menu.active_menu)
-    else {
-        return;
-    };
-
+fn render_menu_overlay(frame: &mut Frame, state: &AppState, menu: &MenuState, skin: &UiSkin) {
     let area = frame.area();
     if area.height <= 2 {
         return;
@@ -1122,7 +1327,9 @@ fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
 
     let popup_x = menu.popup_origin_x().min(area.width.saturating_sub(1));
     let popup_y = 1u16;
-    let popup_width = menu.popup_width().min(area.width.saturating_sub(popup_x));
+    let popup_width = state
+        .menu_popup_width(menu)
+        .min(area.width.saturating_sub(popup_x));
     let popup_height = menu.popup_height().min(area.height.saturating_sub(popup_y));
     if popup_width == 0 || popup_height == 0 {
         return;
@@ -1132,7 +1339,6 @@ fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(menu_item.title)
         .borders(Borders::ALL)
         .border_set(skin.dialog_border_set())
         .border_style(skin.style("menu", "_default_"))
@@ -1140,10 +1346,34 @@ fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    // Reserve one column for the list highlight symbol.
+    let content_width = inner.width.saturating_sub(1) as usize;
     let items: Vec<ListItem<'_>> = menu
         .active_entries()
         .iter()
-        .map(|entry| ListItem::new(format!(" {}", entry.label)))
+        .map(|entry| {
+            if !entry.selectable && entry.label.is_empty() {
+                let line = "-".repeat(content_width.max(1));
+                return ListItem::new(line);
+            }
+
+            let shortcut = state.menu_entry_shortcut_label(entry);
+            if shortcut.is_empty() {
+                return ListItem::new(entry.label);
+            }
+
+            let label_width = entry.label.chars().count();
+            let shortcut_width = shortcut.chars().count();
+            let spacing = content_width
+                .saturating_sub(label_width.saturating_add(shortcut_width))
+                .max(1);
+            ListItem::new(format!(
+                "{}{}{}",
+                entry.label,
+                " ".repeat(spacing),
+                shortcut
+            ))
+        })
         .collect();
     let list = List::new(items)
         .style(skin.style("menu", "_default_"))
@@ -1156,8 +1386,53 @@ fn render_menu_overlay(frame: &mut Frame, menu: &MenuState, skin: &UiSkin) {
     frame.render_stateful_widget(list, inner, &mut state);
 }
 
-fn render_help_screen(frame: &mut Frame, help: &HelpState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 116, 36);
+fn render_settings_screen(frame: &mut Frame, settings: &SettingsScreenState, skin: &UiSkin) {
+    let area = centered_rect(frame.area(), 82, 20);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!("Options - {}", settings.title))
+        .borders(Borders::ALL)
+        .border_set(skin.dialog_border_set())
+        .border_style(skin.style("dialog", "_default_"))
+        .style(skin.style("dialog", "_default_"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem<'_>> = if settings.entries.is_empty() {
+        vec![ListItem::new("<empty>")]
+    } else {
+        settings
+            .entries
+            .iter()
+            .map(|item| ListItem::new(item.text()))
+            .collect()
+    };
+    let list = List::new(items)
+        .style(skin.style("dialog", "_default_"))
+        .highlight_style(skin.style("dialog", "dfocus"))
+        .highlight_symbol(">> ");
+    let mut state = ListState::default();
+    if !settings.entries.is_empty() {
+        state.select(Some(settings.selected_entry));
+    }
+    frame.render_stateful_widget(list, layout[0], &mut state);
+
+    frame.render_widget(
+        Paragraph::new("Up/Down move | Enter apply | Esc close")
+            .style(skin.style("core", "disabled")),
+        layout[1],
+    );
+}
+
+fn render_help_screen(frame: &mut Frame, app: &AppState, help: &HelpState, skin: &UiSkin) {
+    let (width, height) = app.help_dialog_size();
+    let area = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, area);
 
     let title = format!("Help - {}", help.current_title());
@@ -1209,9 +1484,34 @@ fn render_help_screen(frame: &mut Frame, help: &HelpState, skin: &UiSkin) {
         layout[0],
     );
 
+    let link_cycle = keybinding_joined_or(
+        app,
+        KeyContext::Help,
+        AppCommand::HelpLinkNext,
+        "Tab/Shift-Tab",
+        2,
+    );
+    let follow = keybinding_joined_or(
+        app,
+        KeyContext::Help,
+        AppCommand::HelpFollowLink,
+        "Enter",
+        2,
+    );
+    let index = keybinding_joined_or(app, KeyContext::Help, AppCommand::HelpIndex, "F2/c", 2);
+    let back = keybinding_joined_or(app, KeyContext::Help, AppCommand::HelpBack, "F3/Left", 3);
+    let node_cycle = format!(
+        "{}/{}",
+        keybinding_primary_or(app, KeyContext::Help, AppCommand::HelpNodeNext, "n"),
+        keybinding_primary_or(app, KeyContext::Help, AppCommand::HelpNodePrev, "p")
+    );
+    let close = keybinding_joined_or(app, KeyContext::Help, AppCommand::CloseHelp, "Esc/F10", 2);
+
     frame.render_widget(
-        Paragraph::new("Tab/Shift-Tab link | Enter follow | F2/c index | F3/Left back | n/p node | Esc/F10 close")
-            .style(skin.style("core", "disabled")),
+        Paragraph::new(format!(
+            "{link_cycle} link | {follow} follow | {index} index | {back} back | {node_cycle} node | {close} close"
+        ))
+        .style(skin.style("core", "disabled")),
         layout[1],
     );
 }
@@ -1242,22 +1542,24 @@ fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
     (count, size)
 }
 
-fn panel_disk_summary(panel: &PanelState) -> String {
+fn panel_disk_summary(panel: &PanelState, app: &AppState) -> String {
     let now = Instant::now();
+    let cache_ttl = app.disk_usage_cache_ttl();
+    let cache_max_entries = app.disk_usage_cache_max_entries();
     let cache = DISK_USAGE_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut cache) = cache.lock() {
         if let Some((captured_at, cached)) = cache.get(panel.cwd.as_path())
-            && now.saturating_duration_since(*captured_at) <= DISK_USAGE_CACHE_TTL
+            && now.saturating_duration_since(*captured_at) <= cache_ttl
         {
             return cached.clone();
         }
 
         let summary = compute_disk_summary(panel.cwd.as_path());
-        if cache.len() >= DISK_USAGE_CACHE_MAX_ENTRIES {
+        if cache.len() >= cache_max_entries {
             cache.retain(|_, (captured_at, _)| {
-                now.saturating_duration_since(*captured_at) <= DISK_USAGE_CACHE_TTL
+                now.saturating_duration_since(*captured_at) <= cache_ttl
             });
-            if cache.len() >= DISK_USAGE_CACHE_MAX_ENTRIES
+            if cache.len() >= cache_max_entries
                 && let Some(path) = cache.keys().next().cloned()
             {
                 cache.remove(path.as_path());
@@ -1667,9 +1969,22 @@ mod tests {
             frame.contains("File"),
             "frame should include active menu title"
         );
+        assert_eq!(
+            frame.matches("File").count(),
+            2,
+            "menu title should appear in top menu and status, not be repeated in popup title"
+        );
         assert!(
             frame.contains("Copy"),
             "frame should include menu entry labels"
+        );
+        assert!(
+            frame.contains("F10"),
+            "function-key shortcuts should keep all digits\n{frame}"
+        );
+        assert!(
+            frame.contains("M-c"),
+            "meta-key shortcuts should keep trailing characters\n{frame}"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

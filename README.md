@@ -3,7 +3,8 @@
 `rc` is an in-progress Rust TUI file manager inspired by GNU Midnight Commander.
 
 The goal is MC-compatible behavior and keymaps, with a modern internal architecture
-that keeps the UI responsive while long operations run.
+that keeps the UI responsive while long operations run, without requiring a strict
+1:1 reimplementation of every MC subsystem.
 
 ## Current status
 
@@ -16,9 +17,12 @@ Implemented milestones:
 - Milestone 2: copy/move/mkdir/delete with background jobs and cancel
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
 - Milestone 4 (partial): find dialog/results, tree, and hotlist
+- Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup persistence
+- Product direction update: external-editor-first workflow, command-based diff output, optional FTP/SFTP support
 
-Planned next major milestones include `mc.ext.ini`, user menu, editor, diff viewer,
-remote VFS, and subshell integration. See [doc/roadmap.md](doc/roadmap.md).
+Planned next major milestones include `mc.ext.ini`, user menu, external editor
+workflow hardening, command-based diff integration (`difftastic`/`diff`),
+optional remote VFS, and subshell integration. See [doc/roadmap.md](doc/roadmap.md).
 
 ## Quick start
 
@@ -57,13 +61,26 @@ cargo run -p rc -- --skin julia256 --skin-dir /path/to/mc/skins
 `rc` looks up skins in `crates/ui/assets/skins` (bundled originals) and standard
 system locations like `/usr/share/mc/skins` and Homebrew paths.
 
+## Settings and setup
+
+- Options menu now follows MC categories:
+  `Configuration`, `Layout`, `Panel options`, `Confirmation`, `Appearance`,
+  `Display bits`, `Learn keys`, `Virtual FS`, and `Save setup`.
+- Settings are loaded with deterministic precedence:
+  built-in defaults -> persisted config -> environment overrides -> CLI flags.
+- `Save setup` persists to:
+  - `~/.config/rc/settings.ini` for rc-owned settings.
+  - `~/.config/mc/ini` for MC-compatible skin key.
+- Skin discovery uses ordered search roots:
+  custom configured dirs, then bundled/system MC skin directories.
+
 ## Key controls (current defaults)
 
 Main file manager:
 
 - `Tab`: switch active panel
 - `Enter` / `F3`: open directory or open file in viewer
-- `F4`: edit file using `$EDITOR`, then `$VISUAL`, with internal fallback
+- `F4`: edit file using configured editor / `$EDITOR` / `$VISUAL` (current build falls back to internal viewer)
 - `Backspace`: go to parent directory
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
 - `Ctrl-J`: open jobs screen
