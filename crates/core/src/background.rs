@@ -25,9 +25,6 @@ pub enum BackgroundCommand {
         request_id: u64,
         cancel_flag: Arc<AtomicBool>,
     },
-    LoadViewer {
-        path: PathBuf,
-    },
     BuildTree {
         root: PathBuf,
         max_depth: usize,
@@ -103,12 +100,6 @@ pub fn run_background_command_sync(
                 })
                 .is_ok()
         }
-        BackgroundCommand::LoadViewer { path } => event_tx
-            .send(BackgroundEvent::ViewerLoaded {
-                path: path.clone(),
-                result: ViewerState::open(path).map_err(|error| error.to_string()),
-            })
-            .is_ok(),
         BackgroundCommand::BuildTree {
             root,
             max_depth,

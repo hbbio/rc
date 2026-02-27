@@ -37,6 +37,7 @@ pub enum JobKind {
     Rename,
     PersistSettings,
     Find,
+    LoadViewer,
 }
 
 impl JobKind {
@@ -49,6 +50,7 @@ impl JobKind {
             Self::Rename => "rename",
             Self::PersistSettings => "persist-settings",
             Self::Find => "find",
+            Self::LoadViewer => "load-viewer",
         }
     }
 }
@@ -102,6 +104,9 @@ pub enum JobRequest {
         base_dir: PathBuf,
         max_results: usize,
     },
+    LoadViewer {
+        path: PathBuf,
+    },
 }
 
 impl JobRequest {
@@ -114,6 +119,7 @@ impl JobRequest {
             Self::Rename { .. } => JobKind::Rename,
             Self::PersistSettings { .. } => JobKind::PersistSettings,
             Self::Find { .. } => JobKind::Find,
+            Self::LoadViewer { .. } => JobKind::LoadViewer,
         }
     }
 
@@ -126,6 +132,7 @@ impl JobRequest {
             Self::Rename { .. } => 1,
             Self::PersistSettings { .. } => 1,
             Self::Find { .. } => 1,
+            Self::LoadViewer { .. } => 1,
         }
     }
 
@@ -175,6 +182,7 @@ impl JobRequest {
             } => {
                 format!("find '{}' under {}", query, base_dir.to_string_lossy())
             }
+            Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
         }
     }
 }
@@ -688,7 +696,11 @@ fn execute_job(
         }
         JobRequest::Find { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "find jobs are executed by the background worker",
+            "find jobs are executed by the runtime adapter",
+        )),
+        JobRequest::LoadViewer { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "viewer jobs are executed by the runtime adapter",
         )),
     }
 }
@@ -1069,7 +1081,8 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
         JobRequest::Mkdir { .. }
         | JobRequest::Rename { .. }
-        | JobRequest::PersistSettings { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
+        | JobRequest::PersistSettings { .. }
+        | JobRequest::LoadViewer { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
 }

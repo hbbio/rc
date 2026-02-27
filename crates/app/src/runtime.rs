@@ -283,6 +283,9 @@ async fn run_runtime_loop(
                             | JobKind::Mkdir
                             | JobKind::Rename => (Arc::clone(&fs_mutation_limit), "fs_mutation"),
                             JobKind::Find => (Arc::clone(&background_scan_limit), "scan"),
+                            JobKind::LoadViewer => {
+                                (Arc::clone(&background_process_limit), "process")
+                            }
                         };
                         let job_cancel = shutdown.child_token();
                         worker_cancellations.insert(job_id, job_cancel.clone());
@@ -340,9 +343,6 @@ async fn run_runtime_loop(
                     }
                     RuntimeCommand::Background { command, queued_at } => {
                         let (limit, scheduler_class) = match &command {
-                            BackgroundCommand::LoadViewer { .. } => {
-                                (Arc::clone(&background_process_limit), "process")
-                            }
                             BackgroundCommand::RefreshPanel {
                                 source: PanelListingSource::Panelize { .. },
                                 ..
@@ -463,32 +463,24 @@ fn execute_runtime_worker_job(
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
-    let (query, base_dir, max_results) = match &worker_job.request {
+    match worker_job.request.clone() {
         JobRequest::Find {
             query,
             base_dir,
             max_results,
-        } => (
-            Some(query.clone()),
-            Some(base_dir.clone()),
-            Some(*max_results),
+        } => execute_find_worker_job(
+            worker_job,
+            worker_event_tx,
+            background_event_tx,
+            query,
+            base_dir,
+            max_results,
         ),
-        _ => (None, None, None),
-    };
-    let Some(query) = query else {
-        execute_worker_job(worker_job, worker_event_tx);
-        return;
-    };
-    let base_dir = base_dir.expect("find jobs must include a base directory");
-    let max_results = max_results.expect("find jobs must include max results");
-    execute_find_worker_job(
-        worker_job,
-        worker_event_tx,
-        background_event_tx,
-        query,
-        base_dir,
-        max_results,
-    );
+        JobRequest::LoadViewer { path } => {
+            execute_viewer_worker_job(worker_job.id, path, worker_event_tx, background_event_tx)
+        }
+        _ => execute_worker_job(worker_job, worker_event_tx),
+    }
 }
 
 fn execute_find_worker_job(
@@ -518,6 +510,22 @@ fn execute_find_worker_job(
         },
     )
     .map_err(JobError::from_message);
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
+fn execute_viewer_worker_job(
+    job_id: JobId,
+    path: std::path::PathBuf,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let viewer_result = rc_core::ViewerState::open(path.clone()).map_err(|error| error.to_string());
+    let _ = background_event_tx.send(BackgroundEvent::ViewerLoaded {
+        path,
+        result: viewer_result.clone(),
+    });
+    let result = viewer_result.map(|_| ()).map_err(JobError::from_message);
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
@@ -602,7 +610,6 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
 fn background_command_name(command: &BackgroundCommand) -> &'static str {
     match command {
         BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
-        BackgroundCommand::LoadViewer { .. } => "load-viewer",
         BackgroundCommand::BuildTree { .. } => "build-tree",
         BackgroundCommand::Shutdown => "shutdown",
     }

@@ -1893,7 +1893,7 @@ impl AppState {
             return EditSelectionResult::OpenedExternal;
         }
 
-        self.queue_background_command(BackgroundCommand::LoadViewer { path });
+        self.queue_worker_job_request(JobRequest::LoadViewer { path });
         EditSelectionResult::OpenedInternal
     }
 
@@ -1905,7 +1905,7 @@ impl AppState {
             return false;
         }
 
-        self.queue_background_command(BackgroundCommand::LoadViewer {
+        self.queue_worker_job_request(JobRequest::LoadViewer {
             path: entry.path.clone(),
         });
         true
@@ -2641,7 +2641,6 @@ impl AppState {
     fn queue_background_command(&mut self, command: BackgroundCommand) {
         let command_name = match &command {
             BackgroundCommand::RefreshPanel { .. } => "refresh-panel",
-            BackgroundCommand::LoadViewer { .. } => "load-viewer",
             BackgroundCommand::BuildTree { .. } => "build-tree",
             BackgroundCommand::Shutdown => "shutdown",
         };
@@ -5979,6 +5978,18 @@ mod tests {
                                 }
                                 let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                             }
+                            JobRequest::LoadViewer { path } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let viewer_result = ViewerState::open(path.clone())
+                                    .map_err(|error| error.to_string());
+                                app.handle_background_event(BackgroundEvent::ViewerLoaded {
+                                    path: path.clone(),
+                                    result: viewer_result.clone(),
+                                });
+                                let result =
+                                    viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
                             _ => {
                                 execute_worker_job(job, &event_tx);
                             }
@@ -7273,13 +7284,14 @@ OpenJobs = f6
             "no external editor request should be queued"
         );
 
-        let pending_background = app.take_pending_background_commands();
-        assert_eq!(pending_background.len(), 1, "viewer load should be queued");
-        match &pending_background[0] {
-            BackgroundCommand::LoadViewer { path } => {
-                assert_eq!(path, &file_path);
-            }
-            other => panic!("expected viewer load command, got {other:?}"),
+        let pending_worker = app.take_pending_worker_commands();
+        assert_eq!(pending_worker.len(), 1, "viewer load should be queued");
+        match &pending_worker[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::LoadViewer { path } => assert_eq!(path, &file_path),
+                other => panic!("expected load-viewer request, got {other:?}"),
+            },
+            other => panic!("expected worker run command, got {other:?}"),
         }
 
         fs::remove_dir_all(&root).expect("must remove temp root");

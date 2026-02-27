@@ -1761,7 +1761,10 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use rc_core::{AppCommand, AppState, BackgroundCommand, run_background_worker};
+    use rc_core::{
+        AppCommand, AppState, BackgroundCommand, BackgroundEvent, JobError, JobEvent, JobRequest,
+        WorkerCommand, execute_worker_job, run_background_worker,
+    };
     use std::env;
     use std::fs;
     use std::sync::mpsc;
@@ -1788,16 +1791,52 @@ mod tests {
 
     fn drain_background(state: &mut AppState) {
         loop {
-            let commands = state.take_pending_background_commands();
-            if commands.is_empty() {
-                break;
+            let mut progressed = false;
+
+            let worker_commands = state.take_pending_worker_commands();
+            if !worker_commands.is_empty() {
+                progressed = true;
+            }
+            for command in worker_commands {
+                match command {
+                    WorkerCommand::Run(job) => {
+                        let job = *job;
+                        let job_id = job.id;
+                        let (event_tx, event_rx) = mpsc::channel();
+                        match &job.request {
+                            JobRequest::LoadViewer { path } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let viewer_result = rc_core::ViewerState::open(path.clone())
+                                    .map_err(|error| error.to_string());
+                                state.handle_background_event(BackgroundEvent::ViewerLoaded {
+                                    path: path.clone(),
+                                    result: viewer_result.clone(),
+                                });
+                                let result =
+                                    viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            _ => {
+                                execute_worker_job(job, &event_tx);
+                            }
+                        }
+                        for event in event_rx.try_iter() {
+                            state.handle_job_event(event);
+                        }
+                    }
+                    WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {}
+                }
             }
 
-            let (command_tx, command_rx) = mpsc::channel();
-            let (event_tx, event_rx) = mpsc::channel();
-            let handle = thread::spawn(move || run_background_worker(command_rx, event_tx));
-
+            let commands = state.take_pending_background_commands();
+            if !commands.is_empty() {
+                progressed = true;
+            }
             for command in commands {
+                let (command_tx, command_rx) = mpsc::channel();
+                let (event_tx, event_rx) = mpsc::channel();
+                let handle = thread::spawn(move || run_background_worker(command_rx, event_tx));
+
                 command_tx
                     .send(command)
                     .expect("background command should send");
@@ -1805,13 +1844,17 @@ mod tests {
                     .recv_timeout(Duration::from_secs(1))
                     .expect("background event should arrive");
                 state.handle_background_event(event);
+                command_tx
+                    .send(BackgroundCommand::Shutdown)
+                    .expect("background shutdown should send");
+                handle
+                    .join()
+                    .expect("background worker should shut down cleanly");
             }
-            command_tx
-                .send(BackgroundCommand::Shutdown)
-                .expect("background shutdown should send");
-            handle
-                .join()
-                .expect("background worker should shut down cleanly");
+
+            if !progressed {
+                break;
+            }
         }
     }
 

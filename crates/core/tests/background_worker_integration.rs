@@ -23,17 +23,18 @@ fn make_temp_dir(label: &str) -> PathBuf {
 fn shutdown_stops_background_worker_loop() {
     let root = make_temp_dir("shutdown");
     fs::write(root.join("needle.txt"), "needle").expect("fixture file should be writable");
-    let viewer_path = root.join("needle.txt");
 
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, _event_rx) = mpsc::channel();
     let worker = thread::spawn(move || run_background_worker(command_rx, event_tx));
 
     command_tx
-        .send(BackgroundCommand::LoadViewer {
-            path: viewer_path.clone(),
+        .send(BackgroundCommand::BuildTree {
+            root: root.clone(),
+            max_depth: 2,
+            max_entries: 64,
         })
-        .expect("viewer command should send");
+        .expect("tree command should send");
 
     command_tx
         .send(BackgroundCommand::Shutdown)
