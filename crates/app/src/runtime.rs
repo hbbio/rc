@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Instant;
@@ -41,6 +41,11 @@ pub(crate) enum RuntimeCommand {
 
 enum TaskCompletion {
     Worker { job_id: JobId },
+}
+
+struct WorkerCancellation {
+    token: CancellationToken,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 struct WorkerTaskSpec {
@@ -206,7 +211,7 @@ async fn run_runtime_loop(
     let background_scan_limit = Arc::new(Semaphore::new(SCAN_CONCURRENCY_LIMIT));
     let background_process_limit = Arc::new(Semaphore::new(PROCESS_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
-    let mut worker_cancellations = HashMap::<JobId, CancellationToken>::new();
+    let mut worker_cancellations = HashMap::<JobId, WorkerCancellation>::new();
     let mut tasks = JoinSet::new();
 
     loop {
@@ -236,6 +241,7 @@ async fn run_runtime_loop(
                     } => {
                         let worker_job = *job;
                         let job_id = worker_job.id;
+                        let cancel_flag = worker_job.cancel_flag();
                         let (limit, worker_class) = match &worker_job.request {
                             JobRequest::PersistSettings { .. } => {
                                 (Arc::clone(&settings_limit), "settings")
@@ -262,7 +268,13 @@ async fn run_runtime_loop(
                             }
                         };
                         let job_cancel = shutdown.child_token();
-                        worker_cancellations.insert(job_id, job_cancel.clone());
+                        worker_cancellations.insert(
+                            job_id,
+                            WorkerCancellation {
+                                token: job_cancel.clone(),
+                                cancel_flag,
+                            },
+                        );
                         spawn_worker_task(
                             &mut tasks,
                             WorkerTaskSpec {
@@ -282,7 +294,8 @@ async fn run_runtime_loop(
                         queued_at,
                     } => {
                         if let Some(cancel) = worker_cancellations.get(&job_id) {
-                            cancel.cancel();
+                            cancel.cancel_flag.store(true, AtomicOrdering::Relaxed);
+                            cancel.token.cancel();
                             tracing::debug!(
                                 runtime_event = "canceled",
                                 command_class = "worker",
@@ -317,6 +330,10 @@ async fn run_runtime_loop(
     }
 
     shutdown.cancel();
+    for cancel in worker_cancellations.values() {
+        cancel.cancel_flag.store(true, AtomicOrdering::Relaxed);
+        cancel.token.cancel();
+    }
     worker_cancellations.clear();
     while let Some(join_result) = tasks.join_next().await {
         if let Err(error) = join_result {
@@ -624,5 +641,251 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
         WorkerCommand::Run(_) => "run",
         WorkerCommand::Cancel(_) => "cancel",
         WorkerCommand::Shutdown => "shutdown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rc_core::{JobErrorCode, JobManager, JobRequest};
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    const TEST_RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 64;
+
+    fn make_temp_dir(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-tests-{label}-{stamp}"));
+        fs::create_dir_all(&root).expect("temp root should be creatable");
+        root
+    }
+
+    fn spawn_runtime_loop_thread() -> (
+        tokio_mpsc::Sender<RuntimeCommand>,
+        Receiver<JobEvent>,
+        Receiver<BackgroundEvent>,
+        thread::JoinHandle<()>,
+    ) {
+        let (command_tx, command_rx) = tokio_mpsc::channel(TEST_RUNTIME_COMMAND_QUEUE_CAPACITY);
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(run_runtime_loop(
+                command_rx,
+                worker_event_tx,
+                background_event_tx,
+            ));
+        });
+        (command_tx, worker_event_rx, background_event_rx, handle)
+    }
+
+    fn enqueue_paused_find_job(
+        manager: &mut JobManager,
+        root: &std::path::Path,
+        pause_flag: Arc<AtomicBool>,
+    ) -> rc_core::WorkerJob {
+        let mut job = manager.enqueue(JobRequest::Find {
+            query: String::from("entry"),
+            base_dir: root.to_path_buf(),
+            max_results: 1024,
+        });
+        job.set_find_pause_flag(pause_flag);
+        job
+    }
+
+    fn send_run(command_tx: &tokio_mpsc::Sender<RuntimeCommand>, job: rc_core::WorkerJob) {
+        command_tx
+            .blocking_send(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(Box::new(job)),
+                queued_at: Instant::now(),
+            })
+            .expect("worker run command should send");
+    }
+
+    fn send_cancel(command_tx: &tokio_mpsc::Sender<RuntimeCommand>, job_id: JobId) {
+        command_tx
+            .blocking_send(RuntimeCommand::Worker {
+                command: WorkerCommand::Cancel(job_id),
+                queued_at: Instant::now(),
+            })
+            .expect("worker cancel command should send");
+    }
+
+    fn recv_event(event_rx: &Receiver<JobEvent>, timeout: Duration) -> JobEvent {
+        event_rx.recv_timeout(timeout).unwrap_or_else(|error| {
+            panic!("worker event should arrive within {timeout:?}: {error}")
+        })
+    }
+
+    #[test]
+    fn shutdown_cancels_running_and_queued_find_jobs() {
+        let root = make_temp_dir("shutdown-race");
+        fs::write(root.join("entry.txt"), "entry").expect("fixture file should be writable");
+        let pause_flag = Arc::new(AtomicBool::new(true));
+
+        let (command_tx, worker_event_rx, _background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let mut job_ids = Vec::new();
+        for _ in 0..5 {
+            let job = enqueue_paused_find_job(&mut manager, &root, Arc::clone(&pause_flag));
+            job_ids.push(job.id);
+            send_run(&command_tx, job);
+        }
+
+        let mut started = Vec::new();
+        while started.len() < 4 {
+            let event = recv_event(&worker_event_rx, Duration::from_secs(2));
+            if let JobEvent::Started { id } = event {
+                started.push(id);
+            }
+        }
+
+        command_tx
+            .blocking_send(RuntimeCommand::Shutdown)
+            .expect("runtime shutdown should send");
+
+        let mut finished = HashMap::<JobId, JobErrorCode>::new();
+        while finished.len() < job_ids.len() {
+            match recv_event(&worker_event_rx, Duration::from_secs(3)) {
+                JobEvent::Finished { id, result } => {
+                    let error = result.expect_err("shutdown should cancel queued and running jobs");
+                    finished.insert(id, error.code);
+                }
+                JobEvent::Started { .. } | JobEvent::Progress { .. } => {}
+            }
+        }
+        for job_id in &job_ids {
+            assert_eq!(
+                finished.get(job_id),
+                Some(&JobErrorCode::Canceled),
+                "job {job_id} should finish as canceled during shutdown",
+            );
+        }
+
+        runtime_handle
+            .join()
+            .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn cancel_before_start_finishes_job_as_canceled() {
+        let root = make_temp_dir("cancel-before-start");
+        fs::write(root.join("entry.txt"), "entry").expect("fixture file should be writable");
+        let pause_flag = Arc::new(AtomicBool::new(true));
+
+        let (command_tx, worker_event_rx, _background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let mut jobs = Vec::new();
+        for _ in 0..5 {
+            jobs.push(enqueue_paused_find_job(
+                &mut manager,
+                &root,
+                Arc::clone(&pause_flag),
+            ));
+        }
+        let canceled_job_id = jobs.last().expect("there should be a fifth queued job").id;
+        for job in jobs {
+            send_run(&command_tx, job);
+        }
+
+        let mut started = Vec::new();
+        while started.len() < 4 {
+            let event = recv_event(&worker_event_rx, Duration::from_secs(2));
+            if let JobEvent::Started { id } = event {
+                started.push(id);
+            }
+        }
+        send_cancel(&command_tx, canceled_job_id);
+
+        command_tx
+            .blocking_send(RuntimeCommand::Shutdown)
+            .expect("runtime shutdown should send");
+
+        let canceled_error = loop {
+            match worker_event_rx.recv_timeout(Duration::from_secs(3)) {
+                Ok(JobEvent::Finished { id, result }) if id == canceled_job_id => {
+                    break result.expect_err("canceled queued job should fail");
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("canceled queued job should finish before timeout");
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("worker event channel should remain connected until runtime stops");
+                }
+            }
+        };
+        assert_eq!(
+            canceled_error.code,
+            JobErrorCode::Canceled,
+            "queued job canceled before start should use canceled error code"
+        );
+        assert!(
+            !started.contains(&canceled_job_id),
+            "queued job canceled before start should not emit a started event"
+        );
+
+        runtime_handle
+            .join()
+            .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn cancel_during_run_finishes_job_as_canceled() {
+        let root = make_temp_dir("cancel-during-run");
+        fs::write(root.join("entry.txt"), "entry").expect("fixture file should be writable");
+        let pause_flag = Arc::new(AtomicBool::new(true));
+
+        let (command_tx, worker_event_rx, _background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let running_job = enqueue_paused_find_job(&mut manager, &root, Arc::clone(&pause_flag));
+        let running_job_id = running_job.id;
+        send_run(&command_tx, running_job);
+
+        loop {
+            let event = recv_event(&worker_event_rx, Duration::from_secs(2));
+            if matches!(event, JobEvent::Started { id } if id == running_job_id) {
+                break;
+            }
+        }
+        send_cancel(&command_tx, running_job_id);
+
+        let canceled_error = loop {
+            let event = recv_event(&worker_event_rx, Duration::from_secs(3));
+            if let JobEvent::Finished { id, result } = event
+                && id == running_job_id
+            {
+                break result.expect_err("running canceled job should finish with an error");
+            }
+        };
+        assert_eq!(
+            canceled_error.code,
+            JobErrorCode::Canceled,
+            "running job canceled in-flight should use canceled error code"
+        );
+
+        command_tx
+            .blocking_send(RuntimeCommand::Shutdown)
+            .expect("runtime shutdown should send");
+        runtime_handle
+            .join()
+            .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 }
