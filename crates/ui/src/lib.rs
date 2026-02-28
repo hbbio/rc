@@ -123,6 +123,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         state.status_line.clone()
     };
+    let status = fit_single_line(status, root[2].width as usize);
     frame.render_widget(Paragraph::new(status), root[2]);
     if state.show_button_bar() {
         render_button_bar(frame, root[3], skin.as_ref(), state);
@@ -361,6 +362,34 @@ fn panel_title(panel: &PanelState) -> String {
     )
 }
 
+fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let sanitized = sanitize_single_line(text.as_ref());
+    let visible_len = sanitized.chars().count();
+    if visible_len <= width {
+        return sanitized;
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let prefix_len = width - 3;
+    let mut truncated = String::with_capacity(width);
+    truncated.extend(sanitized.chars().take(prefix_len));
+    truncated.push_str("...");
+    truncated
+}
+
+fn sanitize_single_line(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+        .collect()
+}
+
 fn render_panel(
     frame: &mut Frame,
     area: Rect,
@@ -369,7 +398,7 @@ fn render_panel(
     skin: &UiSkin,
     app: &AppState,
 ) {
-    let title = panel_title(panel);
+    let title = fit_single_line(panel_title(panel), area.width.saturating_sub(2) as usize);
     let selected_tagged = panel
         .selected_entry()
         .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
@@ -513,13 +542,16 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(2) as usize;
-    let title = format!(
-        "{} | {} {}/{} | wrap:{}",
-        viewer.path.to_string_lossy(),
-        if viewer.hex_mode { "row" } else { "line" },
-        viewer.current_line_number(),
-        viewer.line_count(),
-        if viewer.wrap { "on" } else { "off" }
+    let title = fit_single_line(
+        format!(
+            "{} | {} {}/{} | wrap:{}",
+            viewer.path.to_string_lossy(),
+            if viewer.hex_mode { "row" } else { "line" },
+            viewer.current_line_number(),
+            viewer.line_count(),
+            if viewer.wrap { "on" } else { "off" }
+        ),
+        area.width.saturating_sub(2) as usize,
     );
     let content = if viewer.hex_mode {
         hex_viewer_window(viewer, visible_lines, content_width)
@@ -1894,6 +1926,36 @@ mod tests {
             frame.contains("entry.txt"),
             "frame should include panel entry names"
         );
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn fit_single_line_sanitizes_and_truncates() {
+        assert_eq!(fit_single_line("abc\ndef", 20), "abc def");
+        assert_eq!(fit_single_line("abcdefg", 6), "abc...");
+        assert_eq!(fit_single_line("abcdefg", 2), "..");
+    }
+
+    #[test]
+    fn render_status_line_sanitizes_newlines_and_clips_width() {
+        let root = temp_root("status-clamp");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings_mut().layout.show_debug_status = false;
+        app.set_status(format!("line1\nline2 {}", "x".repeat(200)));
+
+        let frame = render_to_text(&app, 40, 12);
+        let lines: Vec<&str> = frame.lines().collect();
+        let status_line = lines[lines.len().saturating_sub(2)];
+
+        assert!(
+            status_line.contains("line1 line2"),
+            "status should replace newlines with spaces"
+        );
+        assert!(
+            status_line.trim_end().ends_with("..."),
+            "long status should be clipped to one line with ellipsis"
+        );
+
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
