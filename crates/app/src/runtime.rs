@@ -463,9 +463,13 @@ fn execute_runtime_worker_job(
             base_dir,
             max_results,
         ),
-        JobRequest::LoadViewer { path } => {
-            execute_viewer_worker_job(worker_job.id, path, worker_event_tx, background_event_tx)
-        }
+        JobRequest::LoadViewer { path } => execute_viewer_worker_job(
+            worker_job.id,
+            path,
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
         JobRequest::BuildTree {
             root,
             max_depth,
@@ -475,6 +479,7 @@ fn execute_runtime_worker_job(
             root,
             max_depth,
             max_entries,
+            cancel_flag,
             worker_event_tx,
             background_event_tx,
         ),
@@ -496,19 +501,37 @@ fn execute_refresh_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let delivered = background_event_tx
-        .send(refresh_panel_event(
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
-            cancel_flag.as_ref(),
-        ))
-        .is_ok();
+    let event = refresh_panel_event(
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        show_hidden_files,
+        request_id,
+        cancel_flag.as_ref(),
+    );
+    let result = match &event {
+        BackgroundEvent::PanelRefreshed { result: Ok(_), .. } => {
+            if is_canceled(cancel_flag.as_ref()) {
+                Err(JobError::canceled())
+            } else {
+                Ok(())
+            }
+        }
+        BackgroundEvent::PanelRefreshed {
+            result: Err(error), ..
+        } => {
+            if is_canceled(cancel_flag.as_ref()) {
+                Err(JobError::canceled())
+            } else {
+                Err(JobError::from_message(error.clone()))
+            }
+        }
+        _ => Err(JobError::from_message("invalid refresh event payload")),
+    };
+    let delivered = background_event_tx.send(event).is_ok();
     let result = if delivered {
-        Ok(())
+        result
     } else {
         Err(JobError::from_message(
             "background event channel disconnected",
@@ -550,11 +573,26 @@ fn execute_find_worker_job(
 fn execute_viewer_worker_job(
     job_id: JobId,
     path: std::path::PathBuf,
+    cancel_flag: Arc<AtomicBool>,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    if is_canceled(cancel_flag.as_ref()) {
+        let _ = worker_event_tx.send(JobEvent::Finished {
+            id: job_id,
+            result: Err(JobError::canceled()),
+        });
+        return;
+    }
     let viewer_result = rc_core::ViewerState::open(path.clone()).map_err(|error| error.to_string());
+    if is_canceled(cancel_flag.as_ref()) {
+        let _ = worker_event_tx.send(JobEvent::Finished {
+            id: job_id,
+            result: Err(JobError::canceled()),
+        });
+        return;
+    }
     let _ = background_event_tx.send(BackgroundEvent::ViewerLoaded {
         path,
         result: viewer_result.clone(),
@@ -568,13 +606,27 @@ fn execute_tree_worker_job(
     root: std::path::PathBuf,
     max_depth: usize,
     max_entries: usize,
+    cancel_flag: Arc<AtomicBool>,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let delivered = background_event_tx
-        .send(build_tree_ready_event(root, max_depth, max_entries))
-        .is_ok();
+    if is_canceled(cancel_flag.as_ref()) {
+        let _ = worker_event_tx.send(JobEvent::Finished {
+            id: job_id,
+            result: Err(JobError::canceled()),
+        });
+        return;
+    }
+    let event = build_tree_ready_event(root, max_depth, max_entries);
+    if is_canceled(cancel_flag.as_ref()) {
+        let _ = worker_event_tx.send(JobEvent::Finished {
+            id: job_id,
+            result: Err(JobError::canceled()),
+        });
+        return;
+    }
+    let delivered = background_event_tx.send(event).is_ok();
     let result = if delivered {
         Ok(())
     } else {
@@ -636,6 +688,10 @@ fn handle_worker_unavailable(state: &mut AppState, command: WorkerCommand) {
     }
 }
 
+fn is_canceled(cancel_flag: &AtomicBool) -> bool {
+    cancel_flag.load(AtomicOrdering::Relaxed)
+}
+
 fn worker_command_name(command: &WorkerCommand) -> &'static str {
     match command {
         WorkerCommand::Run(_) => "run",
@@ -647,7 +703,9 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rc_core::{JobErrorCode, JobManager, JobRequest};
+    use rc_core::{
+        ActivePanel, JobErrorCode, JobManager, JobRequest, PanelListingSource, SortMode,
+    };
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -886,6 +944,125 @@ mod tests {
         runtime_handle
             .join()
             .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn viewer_worker_reports_canceled_when_flag_is_set() {
+        let root = make_temp_dir("viewer-canceled");
+        let viewer_file = root.join("viewer.txt");
+        fs::write(&viewer_file, "viewer").expect("viewer file should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_viewer_worker_job(
+            JobId(1),
+            viewer_file,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let started = recv_event(&worker_event_rx, Duration::from_secs(1));
+        assert!(matches!(started, JobEvent::Started { id: JobId(1) }));
+        let finished = recv_event(&worker_event_rx, Duration::from_secs(1));
+        match finished {
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Err(error),
+            } => {
+                assert_eq!(error.code, JobErrorCode::Canceled);
+            }
+            other => panic!("expected canceled viewer finish event, got {other:?}"),
+        }
+        assert!(
+            background_event_rx.try_recv().is_err(),
+            "canceled viewer should not emit a background event"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn tree_worker_reports_canceled_when_flag_is_set() {
+        let root = make_temp_dir("tree-canceled");
+        fs::write(root.join("entry.txt"), "entry").expect("tree fixture should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_tree_worker_job(
+            JobId(1),
+            root.clone(),
+            2,
+            64,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let started = recv_event(&worker_event_rx, Duration::from_secs(1));
+        assert!(matches!(started, JobEvent::Started { id: JobId(1) }));
+        let finished = recv_event(&worker_event_rx, Duration::from_secs(1));
+        match finished {
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Err(error),
+            } => {
+                assert_eq!(error.code, JobErrorCode::Canceled);
+            }
+            other => panic!("expected canceled tree finish event, got {other:?}"),
+        }
+        assert!(
+            background_event_rx.try_recv().is_err(),
+            "canceled tree build should not emit a background event"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn refresh_worker_reports_canceled_when_flag_is_set() {
+        let root = make_temp_dir("refresh-canceled");
+        fs::write(root.join("entry.txt"), "entry").expect("refresh fixture should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_refresh_worker_job(
+            JobId(1),
+            ActivePanel::Left,
+            root.clone(),
+            PanelListingSource::Directory,
+            SortMode::default(),
+            true,
+            1,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let started = recv_event(&worker_event_rx, Duration::from_secs(1));
+        assert!(matches!(started, JobEvent::Started { id: JobId(1) }));
+        let finished = recv_event(&worker_event_rx, Duration::from_secs(1));
+        match finished {
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Err(error),
+            } => {
+                assert_eq!(error.code, JobErrorCode::Canceled);
+            }
+            other => panic!("expected canceled refresh finish event, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                background_event_rx.try_recv(),
+                Ok(BackgroundEvent::PanelRefreshed { .. })
+            ),
+            "refresh path should still emit the background panel event"
+        );
+
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 }
