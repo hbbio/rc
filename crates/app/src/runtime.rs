@@ -404,8 +404,47 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
     let job_id = worker_job.id;
     let job_kind = worker_job.request.kind().label();
     tasks.spawn(async move {
-        let Ok(permit) = limit.acquire_owned().await else {
-            return TaskCompletion::Worker { job_id };
+        let permit = tokio::select! {
+            _ = runtime_shutdown.cancelled() => {
+                tracing::debug!(
+                    runtime_event = "canceled",
+                    command_class = "worker",
+                    scheduler_class = worker_class,
+                    job_id = %job_id,
+                    job_kind,
+                    queue_wait_ms = queued_at.elapsed().as_millis(),
+                    reason = "runtime shutdown",
+                    "runtime worker task canceled while waiting for scheduler permit"
+                );
+                let _ = worker_event_tx.send(JobEvent::Finished {
+                    id: job_id,
+                    result: Err(JobError::canceled()),
+                });
+                return TaskCompletion::Worker { job_id };
+            }
+            _ = job_cancel.cancelled() => {
+                tracing::debug!(
+                    runtime_event = "canceled",
+                    command_class = "worker",
+                    scheduler_class = worker_class,
+                    job_id = %job_id,
+                    job_kind,
+                    queue_wait_ms = queued_at.elapsed().as_millis(),
+                    reason = "job cancellation token",
+                    "runtime worker task canceled while waiting for scheduler permit"
+                );
+                let _ = worker_event_tx.send(JobEvent::Finished {
+                    id: job_id,
+                    result: Err(JobError::canceled()),
+                });
+                return TaskCompletion::Worker { job_id };
+            }
+            permit = limit.acquire_owned() => {
+                let Ok(permit) = permit else {
+                    return TaskCompletion::Worker { job_id };
+                };
+                permit
+            }
         };
         let queue_wait_ms = queued_at.elapsed().as_millis();
         if runtime_shutdown.is_cancelled() || job_cancel.is_cancelled() {
@@ -1099,6 +1138,71 @@ mod tests {
             "queued job canceled before start should not emit a started event"
         );
 
+        runtime_handle
+            .join()
+            .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn cancel_queued_job_waiting_for_permit_finishes_promptly() {
+        let root = make_temp_dir("cancel-queued-permit-wait");
+        fs::write(root.join("entry.txt"), "entry").expect("fixture file should be writable");
+        let pause_flag = Arc::new(AtomicBool::new(true));
+
+        let (command_tx, worker_event_rx, _background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let mut jobs = Vec::new();
+        for _ in 0..5 {
+            jobs.push(enqueue_paused_find_job(
+                &mut manager,
+                &root,
+                Arc::clone(&pause_flag),
+            ));
+        }
+        let all_job_ids: Vec<JobId> = jobs.iter().map(|job| job.id).collect();
+        for job in jobs {
+            send_run(&command_tx, job);
+        }
+
+        let mut started = HashMap::<JobId, ()>::new();
+        while started.len() < 4 {
+            let event = recv_event(&worker_event_rx, Duration::from_secs(2));
+            if let JobEvent::Started { id } = event {
+                started.insert(id, ());
+            }
+        }
+        let queued_job_id = all_job_ids
+            .into_iter()
+            .find(|job_id| !started.contains_key(job_id))
+            .expect("one job should still be queued while semaphore permits are saturated");
+
+        send_cancel(&command_tx, queued_job_id);
+
+        let canceled_error = loop {
+            match worker_event_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(JobEvent::Finished { id, result }) if id == queued_job_id => {
+                    break result.expect_err("canceled queued job should finish with an error");
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("canceled queued job should finish promptly while waiting for permit");
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("worker event channel should remain connected until runtime stops");
+                }
+            }
+        };
+        assert_eq!(
+            canceled_error.code,
+            JobErrorCode::Canceled,
+            "queued job canceled during permit wait should use canceled error code"
+        );
+
+        command_tx
+            .blocking_send(RuntimeCommand::Shutdown)
+            .expect("runtime shutdown should send");
         runtime_handle
             .join()
             .expect("runtime loop thread should terminate cleanly");
