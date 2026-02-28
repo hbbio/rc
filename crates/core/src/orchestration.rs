@@ -560,7 +560,10 @@ impl AppState {
             .jobs
             .jobs()
             .iter()
-            .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+            .filter(|job| {
+                matches!(job.status, JobStatus::Queued | JobStatus::Running)
+                    && !matches!(job.kind, JobKind::PersistSettings)
+            })
             .map(|job| job.id)
             .collect();
         for job_id in cancelable_job_ids {

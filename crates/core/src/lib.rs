@@ -7224,6 +7224,54 @@ OpenJobs = f6
     }
 
     #[test]
+    fn quit_cancels_find_but_keeps_persist_settings_job() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-quit-keep-persist-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let persist_job_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(app.persisted_settings_snapshot()),
+        });
+        let find_job_id = app.enqueue_worker_job_request(JobRequest::Find {
+            query: String::from("*.jpg"),
+            base_dir: root.clone(),
+            max_results: 64,
+        });
+
+        assert_eq!(
+            app.apply(AppCommand::Quit).expect("quit should succeed"),
+            ApplyResult::Quit
+        );
+
+        let pending_commands = app.take_pending_worker_commands();
+        assert!(
+            pending_commands.iter().any(|command| matches!(
+                command,
+                WorkerCommand::Cancel(job_id) if *job_id == find_job_id
+            )),
+            "quit should request cancellation for find jobs"
+        );
+        assert!(
+            !pending_commands.iter().any(|command| matches!(
+                command,
+                WorkerCommand::Cancel(job_id) if *job_id == persist_job_id
+            )),
+            "quit should not request cancellation for persist-settings jobs"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn stream_find_entries_supports_glob_patterns_and_chunking() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
