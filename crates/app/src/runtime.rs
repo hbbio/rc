@@ -87,7 +87,8 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn dispatch_pending_commands(&self, state: &mut AppState) {
-        for command in state.take_pending_worker_commands() {
+        let mut pending_commands = state.take_pending_worker_commands().into_iter();
+        while let Some(command) = pending_commands.next() {
             let command_name = worker_command_name(&command);
             let run_job_id = match &command {
                 WorkerCommand::Run(job) => Some(job.id),
@@ -114,25 +115,19 @@ impl RuntimeBridge {
                         "runtime command enqueued"
                     );
                 }
-                Err(tokio_mpsc::error::TrySendError::Full(_)) => {
-                    if let Some(job_id) = run_job_id {
-                        state.handle_job_dispatch_failure(
-                            job_id,
-                            JobError::dispatch("runtime queue is full"),
-                        );
-                    } else {
-                        state.set_status("runtime queue is full");
+                Err(tokio_mpsc::error::TrySendError::Full(runtime_command)) => {
+                    let mut unsent = Vec::new();
+                    if let Some(command) = handle_runtime_queue_full(state, runtime_command) {
+                        unsent.push(command);
                     }
+                    unsent.extend(pending_commands);
+                    state.restore_pending_worker_commands(unsent);
                     break;
                 }
-                Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
-                    if let Some(job_id) = run_job_id {
-                        state.handle_job_dispatch_failure(
-                            job_id,
-                            JobError::dispatch("runtime is unavailable"),
-                        );
-                    } else {
-                        state.set_status("runtime is unavailable");
+                Err(tokio_mpsc::error::TrySendError::Closed(runtime_command)) => {
+                    handle_runtime_unavailable(state, runtime_command);
+                    for command in pending_commands {
+                        handle_worker_unavailable(state, command);
                     }
                     break;
                 }
@@ -577,6 +572,51 @@ fn runtime_queue_depth(command_tx: &tokio_mpsc::Sender<RuntimeCommand>) -> usize
     command_tx
         .max_capacity()
         .saturating_sub(command_tx.capacity())
+}
+
+fn handle_runtime_queue_full(
+    state: &mut AppState,
+    command: RuntimeCommand,
+) -> Option<WorkerCommand> {
+    match command {
+        RuntimeCommand::Worker { command, .. } => match command {
+            WorkerCommand::Run(job) => {
+                state.handle_job_dispatch_failure(
+                    job.id,
+                    JobError::dispatch("runtime queue is full"),
+                );
+                None
+            }
+            WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {
+                state.set_status("runtime queue is full");
+                Some(command)
+            }
+        },
+        RuntimeCommand::Shutdown => {
+            state.set_status("runtime queue is full");
+            None
+        }
+    }
+}
+
+fn handle_runtime_unavailable(state: &mut AppState, command: RuntimeCommand) {
+    match command {
+        RuntimeCommand::Worker { command, .. } => handle_worker_unavailable(state, command),
+        RuntimeCommand::Shutdown => {
+            state.set_status("runtime is unavailable");
+        }
+    }
+}
+
+fn handle_worker_unavailable(state: &mut AppState, command: WorkerCommand) {
+    match command {
+        WorkerCommand::Run(job) => {
+            state.handle_job_dispatch_failure(job.id, JobError::dispatch("runtime is unavailable"));
+        }
+        WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {
+            state.set_status("runtime is unavailable");
+        }
+    }
 }
 
 fn worker_command_name(command: &WorkerCommand) -> &'static str {

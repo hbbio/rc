@@ -2637,6 +2637,14 @@ impl AppState {
         std::mem::take(&mut self.pending_worker_commands)
     }
 
+    pub fn restore_pending_worker_commands(&mut self, mut commands: Vec<WorkerCommand>) {
+        if commands.is_empty() {
+            return;
+        }
+        commands.append(&mut self.pending_worker_commands);
+        self.pending_worker_commands = commands;
+    }
+
     pub fn take_pending_external_edit_requests(&mut self) -> Vec<ExternalEditRequest> {
         std::mem::take(&mut self.pending_external_edit_requests)
     }

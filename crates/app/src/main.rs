@@ -1146,4 +1146,95 @@ mod tests {
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
+
+    #[test]
+    fn bounded_runtime_queue_preserves_unsent_commands_after_overflow() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-overflow-preserve-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        let overflowed_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("overflow"),
+        });
+        let retained_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("retained"),
+        });
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        let pending = state.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "commands after an overflowed send should remain pending"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => {
+                assert_eq!(
+                    job.id, retained_id,
+                    "latest unsent command should be preserved"
+                );
+            }
+            other => panic!("expected retained run command, got {other:?}"),
+        }
+
+        let counts = state.jobs_status_counts();
+        assert_eq!(
+            counts.queued, 2,
+            "queued and retained jobs should stay queued"
+        );
+        assert_eq!(counts.failed, 1, "overflowed job should be marked failed");
+        assert_eq!(
+            state
+                .jobs
+                .job(overflowed_id)
+                .expect("overflowed job should still have a record")
+                .status,
+            rc_core::JobStatus::Failed
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn bounded_runtime_queue_requeues_cancel_command_when_full() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-overflow-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        let job_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        state
+            .apply(AppCommand::CancelJob)
+            .expect("cancel should enqueue a cancel command");
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        let pending = state.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "cancel should stay pending under backpressure"
+        );
+        assert!(
+            matches!(pending.first(), Some(WorkerCommand::Cancel(id)) if *id == job_id),
+            "pending command should keep the original cancel request"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
 }
