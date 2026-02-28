@@ -46,6 +46,7 @@ enum TaskCompletion {
 struct WorkerCancellation {
     token: CancellationToken,
     cancel_flag: Arc<AtomicBool>,
+    cancel_on_runtime_shutdown: bool,
 }
 
 struct WorkerTaskSpec {
@@ -271,44 +272,55 @@ async fn run_runtime_loop(
                         let worker_job = *job;
                         let job_id = worker_job.id;
                         let cancel_flag = worker_job.cancel_flag();
-                        let (limit, worker_class) = match &worker_job.request {
+                        let (limit, worker_class, cancel_on_runtime_shutdown) =
+                            match &worker_job.request {
                             JobRequest::PersistSettings { .. } => {
-                                (Arc::clone(&settings_limit), "settings")
+                                (Arc::clone(&settings_limit), "settings", false)
                             }
                             JobRequest::Copy { .. }
                             | JobRequest::Move { .. }
                             | JobRequest::Delete { .. }
                             | JobRequest::Mkdir { .. }
                             | JobRequest::Rename { .. } => {
-                                (Arc::clone(&fs_mutation_limit), "fs_mutation")
+                                (Arc::clone(&fs_mutation_limit), "fs_mutation", true)
                             }
                             JobRequest::Find { .. } | JobRequest::BuildTree { .. } => {
-                                (Arc::clone(&background_scan_limit), "scan")
+                                (Arc::clone(&background_scan_limit), "scan", true)
                             }
                             JobRequest::LoadViewer { .. } => {
-                                (Arc::clone(&background_process_limit), "process")
+                                (Arc::clone(&background_process_limit), "process", true)
                             }
                             JobRequest::RefreshPanel {
                                 source: PanelListingSource::Panelize { .. },
                                 ..
-                            } => (Arc::clone(&background_process_limit), "process"),
+                            } => (Arc::clone(&background_process_limit), "process", true),
                             JobRequest::RefreshPanel { .. } => {
-                                (Arc::clone(&background_scan_limit), "scan")
+                                (Arc::clone(&background_scan_limit), "scan", true)
                             }
                         };
-                        let job_cancel = shutdown.child_token();
+                        let runtime_shutdown = if cancel_on_runtime_shutdown {
+                            shutdown.child_token()
+                        } else {
+                            CancellationToken::new()
+                        };
+                        let job_cancel = if cancel_on_runtime_shutdown {
+                            shutdown.child_token()
+                        } else {
+                            CancellationToken::new()
+                        };
                         worker_cancellations.insert(
                             job_id,
                             WorkerCancellation {
                                 token: job_cancel.clone(),
                                 cancel_flag,
+                                cancel_on_runtime_shutdown,
                             },
                         );
                         spawn_worker_task(
                             &mut tasks,
                             WorkerTaskSpec {
                                 limit,
-                                runtime_shutdown: shutdown.child_token(),
+                                runtime_shutdown,
                                 job_cancel,
                                 worker_class,
                                 worker_job,
@@ -360,6 +372,9 @@ async fn run_runtime_loop(
 
     shutdown.cancel();
     for cancel in worker_cancellations.values() {
+        if !cancel.cancel_on_runtime_shutdown {
+            continue;
+        }
         cancel.cancel_flag.store(true, AtomicOrdering::Relaxed);
         cancel.token.cancel();
     }
@@ -951,6 +966,73 @@ mod tests {
         runtime_handle
             .join()
             .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn shutdown_allows_persist_settings_jobs_to_finish() {
+        let root = make_temp_dir("shutdown-persist-settings");
+        let rc_ini_path = root.join("settings.ini");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: None,
+            rc_ini_path: Some(rc_ini_path.clone()),
+        };
+
+        let state = AppState::new(root.clone()).expect("app should initialize");
+        let mut first_snapshot = state.persisted_settings_snapshot();
+        first_snapshot.appearance.skin = "persist-shutdown-slow-".repeat(800_000);
+        let mut second_snapshot = state.persisted_settings_snapshot();
+        second_snapshot.appearance.skin = String::from("persist-shutdown-final");
+
+        let (command_tx, worker_event_rx, _background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let first_job = manager.enqueue(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(first_snapshot),
+        });
+        let first_job_id = first_job.id;
+        let second_job = manager.enqueue(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(second_snapshot.clone()),
+        });
+        let second_job_id = second_job.id;
+        send_run(&command_tx, first_job);
+        send_run(&command_tx, second_job);
+
+        loop {
+            let event = recv_event(&worker_event_rx, Duration::from_secs(2));
+            if matches!(event, JobEvent::Started { id } if id == first_job_id) {
+                break;
+            }
+        }
+
+        command_tx
+            .blocking_send(RuntimeCommand::Shutdown)
+            .expect("runtime shutdown should send");
+
+        let mut finished = HashMap::<JobId, Result<(), JobError>>::new();
+        while finished.len() < 2 {
+            match recv_event(&worker_event_rx, Duration::from_secs(20)) {
+                JobEvent::Finished { id, result } => {
+                    finished.insert(id, result);
+                }
+                JobEvent::Started { .. } | JobEvent::Progress { .. } => {}
+            }
+        }
+        assert!(
+            matches!(finished.get(&first_job_id), Some(Ok(()))),
+            "first persist settings job should finish successfully during shutdown"
+        );
+        assert!(
+            matches!(finished.get(&second_job_id), Some(Ok(()))),
+            "queued persist settings job should finish successfully during shutdown"
+        );
+
+        runtime_handle
+            .join()
+            .expect("runtime loop thread should terminate cleanly");
+        assert!(rc_ini_path.exists(), "persisted settings file should exist");
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 
