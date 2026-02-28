@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::thread;
@@ -45,7 +46,8 @@ pub fn refresh_panel_event(
     request_id: u64,
     cancel_flag: &AtomicBool,
 ) -> BackgroundEvent {
-    let result = refresh_panel_entries(&cwd, &source, sort_mode, show_hidden_files, cancel_flag);
+    let result = refresh_panel_entries(&cwd, &source, sort_mode, show_hidden_files, cancel_flag)
+        .map_err(|error| error.to_string());
     BackgroundEvent::PanelRefreshed {
         panel,
         cwd,
@@ -65,29 +67,26 @@ pub fn build_tree_ready_event(
     BackgroundEvent::TreeReady { root, entries }
 }
 
-fn refresh_panel_entries(
+pub fn refresh_panel_entries(
     cwd: &Path,
     source: &PanelListingSource,
     sort_mode: SortMode,
     show_hidden_files: bool,
     cancel_flag: &AtomicBool,
-) -> Result<Vec<FileEntry>, String> {
+) -> io::Result<Vec<FileEntry>> {
     match source {
         PanelListingSource::Directory => read_entries_with_visibility_cancel(
             cwd,
             sort_mode,
             show_hidden_files,
             Some(cancel_flag),
-        )
-        .map_err(|error| error.to_string()),
+        ),
         PanelListingSource::Panelize { command } => {
             read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
-                .map_err(|error| error.to_string())
         }
         PanelListingSource::FindResults {
             base_dir, paths, ..
-        } => read_panelized_paths(base_dir, paths, sort_mode, Some(cancel_flag))
-            .map_err(|error| error.to_string()),
+        } => read_panelized_paths(base_dir, paths, sort_mode, Some(cancel_flag)),
     }
 }
 

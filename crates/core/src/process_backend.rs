@@ -1,16 +1,41 @@
 use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-pub fn run_shell_command(
+pub trait ProcessBackend {
+    fn run_shell_command(
+        &self,
+        cwd: &Path,
+        command: &str,
+        cancel_flag: Option<&AtomicBool>,
+        canceled_message: &str,
+    ) -> io::Result<Output>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LocalProcessBackend;
+
+impl ProcessBackend for LocalProcessBackend {
+    fn run_shell_command(
+        &self,
+        cwd: &Path,
+        command: &str,
+        cancel_flag: Option<&AtomicBool>,
+        canceled_message: &str,
+    ) -> io::Result<Output> {
+        run_shell_command_impl(cwd, command, cancel_flag, canceled_message)
+    }
+}
+
+fn run_shell_command_impl(
     cwd: &Path,
     command: &str,
     cancel_flag: Option<&AtomicBool>,
     canceled_message: &str,
-) -> io::Result<std::process::Output> {
+) -> io::Result<Output> {
     let mut child = spawn_shell_command(cwd, command)?;
     let stdout = child
         .stdout
@@ -46,7 +71,7 @@ pub fn run_shell_command(
         if let Some(status) = child.try_wait()? {
             let stdout = join_command_output_reader(stdout_handle, "stdout")?;
             let stderr = join_command_output_reader(stderr_handle, "stderr")?;
-            return Ok(std::process::Output {
+            return Ok(Output {
                 status,
                 stdout,
                 stderr,

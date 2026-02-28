@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use rc_core::{
     AppState, BackgroundEvent, JobError, JobEvent, JobId, JobRequest, PanelListingSource,
-    WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_event,
+    WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_entries,
     run_find_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
@@ -501,33 +501,21 @@ fn execute_refresh_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let event = refresh_panel_event(
+    let refresh_result = refresh_panel_entries(
+        &cwd,
+        &source,
+        sort_mode,
+        show_hidden_files,
+        cancel_flag.as_ref(),
+    );
+    let (event_result, result) = refresh_outcomes(refresh_result, cancel_flag.as_ref());
+    let event = BackgroundEvent::PanelRefreshed {
         panel,
         cwd,
         source,
         sort_mode,
-        show_hidden_files,
         request_id,
-        cancel_flag.as_ref(),
-    );
-    let result = match &event {
-        BackgroundEvent::PanelRefreshed { result: Ok(_), .. } => {
-            if is_canceled(cancel_flag.as_ref()) {
-                Err(JobError::canceled())
-            } else {
-                Ok(())
-            }
-        }
-        BackgroundEvent::PanelRefreshed {
-            result: Err(error), ..
-        } => {
-            if is_canceled(cancel_flag.as_ref()) {
-                Err(JobError::canceled())
-            } else {
-                Err(JobError::from_message(error.clone()))
-            }
-        }
-        _ => Err(JobError::from_message("invalid refresh event payload")),
+        result: event_result,
     };
     let delivered = background_event_tx.send(event).is_ok();
     let result = if delivered {
@@ -538,6 +526,32 @@ fn execute_refresh_worker_job(
         ))
     };
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
+fn refresh_outcomes(
+    refresh_result: std::io::Result<Vec<rc_core::FileEntry>>,
+    cancel_flag: &AtomicBool,
+) -> (
+    Result<Vec<rc_core::FileEntry>, String>,
+    Result<(), JobError>,
+) {
+    match refresh_result {
+        Ok(entries) => {
+            if is_canceled(cancel_flag) {
+                (Ok(entries), Err(JobError::canceled()))
+            } else {
+                (Ok(entries), Ok(()))
+            }
+        }
+        Err(error) => {
+            let event_error = error.to_string();
+            if is_canceled(cancel_flag) || error.kind() == std::io::ErrorKind::Interrupted {
+                (Err(event_error), Err(JobError::canceled()))
+            } else {
+                (Err(event_error), Err(JobError::from_io(error)))
+            }
+        }
+    }
 }
 
 fn execute_find_worker_job(
@@ -704,7 +718,8 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
 mod tests {
     use super::*;
     use rc_core::{
-        ActivePanel, JobErrorCode, JobManager, JobRequest, PanelListingSource, SortMode,
+        ActivePanel, JobErrorCode, JobManager, JobRequest, JobRetryHint, PanelListingSource,
+        SortMode,
     };
     use std::env;
     use std::fs;
@@ -848,25 +863,29 @@ mod tests {
             spawn_runtime_loop_thread();
         let mut manager = JobManager::new();
         let mut jobs = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..4 {
             jobs.push(enqueue_paused_find_job(
                 &mut manager,
                 &root,
                 Arc::clone(&pause_flag),
             ));
         }
-        let canceled_job_id = jobs.last().expect("there should be a fifth queued job").id;
+        let canceled_job = enqueue_paused_find_job(&mut manager, &root, Arc::clone(&pause_flag));
+        let canceled_job_id = canceled_job.id;
+        let started_job_ids: Vec<JobId> = jobs.iter().map(|job| job.id).collect();
         for job in jobs {
             send_run(&command_tx, job);
         }
 
-        let mut started = Vec::new();
-        while started.len() < 4 {
+        let mut started = HashMap::<JobId, ()>::new();
+        while started.len() < started_job_ids.len() {
             let event = recv_event(&worker_event_rx, Duration::from_secs(2));
             if let JobEvent::Started { id } = event {
-                started.push(id);
+                started.insert(id, ());
             }
         }
+
+        send_run(&command_tx, canceled_job);
         send_cancel(&command_tx, canceled_job_id);
 
         command_tx
@@ -893,7 +912,7 @@ mod tests {
             "queued job canceled before start should use canceled error code"
         );
         assert!(
-            !started.contains(&canceled_job_id),
+            !started.contains_key(&canceled_job_id),
             "queued job canceled before start should not emit a started event"
         );
 
@@ -1064,5 +1083,24 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn refresh_outcomes_map_permission_denied_to_elevated_retry_hint() {
+        let cancel_flag = AtomicBool::new(false);
+        let (event_result, result) = refresh_outcomes(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            )),
+            &cancel_flag,
+        );
+        assert!(
+            matches!(event_result, Err(message) if message.contains("permission denied")),
+            "background error payload should preserve process backend error context"
+        );
+        let error = result.expect_err("permission denied refresh should fail");
+        assert_eq!(error.code, JobErrorCode::PermissionDenied);
+        assert_eq!(error.retry_hint, JobRetryHint::Elevated);
     }
 }

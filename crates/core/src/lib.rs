@@ -24,7 +24,8 @@ use std::time::SystemTime;
 #[cfg(test)]
 use background::stream_find_entries;
 pub use background::{
-    BackgroundEvent, build_tree_ready_event, refresh_panel_event, run_find_entries,
+    BackgroundEvent, build_tree_ready_event, refresh_panel_entries, refresh_panel_event,
+    run_find_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
@@ -33,6 +34,7 @@ pub use jobs::{
     JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
     WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
+pub use process_backend::{LocalProcessBackend, ProcessBackend};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
@@ -5675,8 +5677,25 @@ pub(crate) fn read_panelized_entries_with_cancel(
     sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
+    let process_backend = LocalProcessBackend;
+    read_panelized_entries_with_process_backend(
+        base_dir,
+        command,
+        sort_mode,
+        cancel_flag,
+        &process_backend,
+    )
+}
+
+pub(crate) fn read_panelized_entries_with_process_backend(
+    base_dir: &Path,
+    command: &str,
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+    process_backend: &dyn ProcessBackend,
+) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
-    let output = process_backend::run_shell_command(
+    let output = process_backend.run_shell_command(
         base_dir,
         command,
         cancel_flag,
@@ -5926,6 +5945,7 @@ mod tests {
     use super::*;
     use crate::keymap::KeyModifiers;
     use std::path::Path;
+    use std::process::Output;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::thread;
@@ -5940,6 +5960,23 @@ mod tests {
             is_parent: false,
             size: 0,
             modified: None,
+        }
+    }
+
+    struct PermissionDeniedProcessBackend;
+
+    impl ProcessBackend for PermissionDeniedProcessBackend {
+        fn run_shell_command(
+            &self,
+            _cwd: &Path,
+            _command: &str,
+            _cancel_flag: Option<&AtomicBool>,
+            _canceled_message: &str,
+        ) -> io::Result<Output> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
         }
     }
 
@@ -6061,6 +6098,29 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn panelized_entries_allow_process_backend_injection() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-backend-injection-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let backend = PermissionDeniedProcessBackend;
+        let error = read_panelized_entries_with_process_backend(
+            &root,
+            "ignored",
+            SortMode::default(),
+            None,
+            &backend,
+        )
+        .expect_err("injected process backend should drive panelize execution");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     fn move_menu_selection_to_label(app: &mut AppState, label: &str) {
