@@ -273,6 +273,7 @@ fn run_app(
         &mut runtime,
         skin_runtime,
     );
+    queue_deferred_save_before_shutdown(state, &runtime);
     let shutdown_result = runtime.shutdown();
     let restore_result = restore_terminal(&mut terminal);
 
@@ -280,6 +281,12 @@ fn run_app(
     shutdown_result?;
     restore_result?;
     Ok(())
+}
+
+fn queue_deferred_save_before_shutdown(state: &mut AppState, runtime: &RuntimeBridge) {
+    if state.promote_deferred_persist_settings_request().is_some() {
+        runtime.dispatch_pending_commands(state);
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -1110,6 +1117,76 @@ mod tests {
             },
             Ok(other) => panic!("unexpected runtime command: {other:?}"),
             Err(error) => panic!("runtime queue should contain a save-setup job: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn shutdown_preparation_queues_deferred_save_setup_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-shutdown-deferred-save-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let first_snapshot = state.persisted_settings_snapshot();
+        let mut deferred_snapshot = state.persisted_settings_snapshot();
+        deferred_snapshot.appearance.skin = String::from("deferred-shutdown-skin");
+
+        let first_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(first_snapshot),
+        });
+        runtime.dispatch_pending_commands(&mut state);
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => {
+                assert_eq!(job.id, first_id, "first save setup should dispatch");
+            }
+            Ok(other) => panic!("unexpected runtime command for first save setup: {other:?}"),
+            Err(error) => panic!("first save setup should dispatch: {error}"),
+        }
+
+        let deferred_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(deferred_snapshot.clone()),
+        });
+        assert_eq!(
+            deferred_id, first_id,
+            "deferred save should attach to the active save request"
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "deferred save should not dispatch before shutdown preparation"
+        );
+
+        queue_deferred_save_before_shutdown(&mut state, &runtime);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => match &job.request {
+                JobRequest::PersistSettings { snapshot, .. } => {
+                    assert_eq!(
+                        snapshot.appearance.skin, deferred_snapshot.appearance.skin,
+                        "shutdown preparation should dispatch the deferred save snapshot",
+                    );
+                }
+                other => panic!("expected deferred persist settings request, got {other:?}"),
+            },
+            Ok(other) => panic!("unexpected runtime command for deferred save setup: {other:?}"),
+            Err(error) => panic!("deferred save should dispatch during shutdown prep: {error}"),
         }
 
         fs::remove_dir_all(&root).expect("must remove temp root");

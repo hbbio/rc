@@ -470,6 +470,12 @@ impl AppState {
         self.queue_worker_job(worker_job)
     }
 
+    pub fn promote_deferred_persist_settings_request(&mut self) -> Option<JobId> {
+        let request = self.deferred_persist_settings_request.take()?;
+        let worker_job = self.jobs.enqueue(request);
+        Some(self.queue_worker_job(worker_job))
+    }
+
     pub(crate) fn queue_worker_job(&mut self, worker_job: WorkerJob) -> JobId {
         let job_id = worker_job.id;
         let job_kind = worker_job.request.kind().label();
