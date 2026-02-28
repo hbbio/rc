@@ -168,6 +168,8 @@ impl RuntimeBridge {
                 }
             }
         }
+
+        self.dispatch_pending_commands(state);
     }
 
     pub(crate) fn shutdown(mut self) -> Result<()> {
@@ -198,6 +200,33 @@ pub(crate) fn test_runtime_bridge_with_capacity(
             background_disconnected: false,
         },
         command_rx,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_runtime_bridge_with_channels(
+    capacity: usize,
+) -> (
+    RuntimeBridge,
+    tokio_mpsc::Receiver<RuntimeCommand>,
+    Sender<JobEvent>,
+    Sender<BackgroundEvent>,
+) {
+    let (command_tx, command_rx) = tokio_mpsc::channel(capacity);
+    let (worker_event_tx, worker_event_rx) = mpsc::channel();
+    let (background_event_tx, background_event_rx) = mpsc::channel();
+    (
+        RuntimeBridge {
+            command_tx,
+            worker_event_rx,
+            background_event_rx,
+            runtime_handle: None,
+            worker_disconnected: false,
+            background_disconnected: false,
+        },
+        command_rx,
+        worker_event_tx,
+        background_event_tx,
     )
 }
 
@@ -718,8 +747,8 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
 mod tests {
     use super::*;
     use rc_core::{
-        ActivePanel, JobErrorCode, JobManager, JobRequest, JobRetryHint, PanelListingSource,
-        SortMode,
+        ActivePanel, AppState, JobErrorCode, JobManager, JobRequest, JobRetryHint,
+        PanelListingSource, SortMode, settings_io,
     };
     use std::env;
     use std::fs;
@@ -799,6 +828,78 @@ mod tests {
         event_rx.recv_timeout(timeout).unwrap_or_else(|error| {
             panic!("worker event should arrive within {timeout:?}: {error}")
         })
+    }
+
+    #[test]
+    fn drain_events_dispatches_deferred_persist_settings_without_input() {
+        let root = make_temp_dir("deferred-save-dispatch");
+        let (mut runtime, mut command_rx, worker_event_tx, _background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app state should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let first_snapshot = state.persisted_settings_snapshot();
+        let mut deferred_snapshot = state.persisted_settings_snapshot();
+        deferred_snapshot.appearance.skin = String::from("deferred-save-dispatch-skin");
+
+        let first_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(first_snapshot),
+        });
+        runtime.dispatch_pending_commands(&mut state);
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => {
+                assert_eq!(job.id, first_id, "first persist request should dispatch");
+            }
+            Ok(other) => panic!("unexpected runtime command for first save: {other:?}"),
+            Err(error) => panic!("first save request should dispatch: {error}"),
+        }
+
+        state.handle_job_event(JobEvent::Started { id: first_id });
+        let deferred_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(deferred_snapshot.clone()),
+        });
+        assert_eq!(
+            deferred_id, first_id,
+            "deferred save should attach to active persist job id"
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "deferred save should stay pending until first save finishes"
+        );
+
+        worker_event_tx
+            .send(JobEvent::Finished {
+                id: first_id,
+                result: Ok(()),
+            })
+            .expect("worker event injection should succeed");
+        runtime.drain_events(&mut state);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => match &job.request {
+                JobRequest::PersistSettings { snapshot, .. } => {
+                    assert_eq!(
+                        snapshot.appearance.skin, deferred_snapshot.appearance.skin,
+                        "deferred snapshot should dispatch after finish without extra input",
+                    );
+                }
+                other => panic!("expected deferred persist request, got {other:?}"),
+            },
+            Ok(other) => panic!("unexpected runtime command for deferred save: {other:?}"),
+            Err(error) => panic!("deferred save should dispatch from drain_events: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 
     #[test]
