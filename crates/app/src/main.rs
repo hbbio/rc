@@ -313,6 +313,7 @@ fn run_event_loop(
 
     loop {
         runtime.drain_events(state);
+        state.expire_status_line();
         dispatch_pending_external_edit_requests(terminal, state);
 
         terminal

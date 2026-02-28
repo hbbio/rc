@@ -281,6 +281,11 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.layout.show_panel_totals = parsed;
                 }
             }
+            ("layout", "status_message_timeout_seconds") => {
+                if let Ok(parsed) = value.parse::<u64>() {
+                    settings.layout.status_message_timeout_seconds = parsed;
+                }
+            }
             ("layout", "jobs_dialog_width") => {
                 if let Ok(parsed) = value.parse::<u16>() {
                     settings.layout.jobs_dialog_width = parsed;
@@ -464,6 +469,10 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     lines.push(format!(
         "show_panel_totals={}",
         settings.layout.show_panel_totals
+    ));
+    lines.push(format!(
+        "status_message_timeout_seconds={}",
+        settings.layout.status_message_timeout_seconds
     ));
     lines.push(format!(
         "jobs_dialog_width={}",
@@ -667,6 +676,7 @@ skin=default
             vec![String::from("find . -type f"), String::from("git ls-files")];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
         settings.panel_options.sort_field = SettingsSortField::Modified;
+        settings.layout.status_message_timeout_seconds = 42;
 
         let source = render_rc_settings_ini(&settings);
         let mut parsed = Settings::default();
@@ -682,6 +692,7 @@ skin=default
             OverwritePolicy::Rename
         );
         assert_eq!(parsed.panel_options.sort_field, SettingsSortField::Modified);
+        assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
     }
 
     #[test]

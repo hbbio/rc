@@ -20,7 +20,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
 use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 #[cfg(test)]
 use background::stream_find_entries;
@@ -1464,6 +1464,7 @@ enum SettingsEntryAction {
     ToggleLayoutShowButtonBar,
     ToggleLayoutShowDebugStatus,
     ToggleLayoutShowPanelTotals,
+    CycleLayoutStatusMessageTimeout,
     TogglePanelShowHiddenFiles,
     CyclePanelSortField,
     TogglePanelSortReverse,
@@ -1647,6 +1648,7 @@ pub struct AppState {
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     pub status_line: String,
+    status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
     pub overwrite_policy: OverwritePolicy,
@@ -1691,6 +1693,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from("Press F1 for help"),
+            status_expires_at: None,
             last_dialog_result: None,
             jobs: JobManager::new(),
             overwrite_policy: settings.configuration.default_overwrite_policy,
@@ -1766,6 +1769,15 @@ impl AppState {
         self.settings.layout.show_panel_totals
     }
 
+    fn status_message_timeout(&self) -> Option<Duration> {
+        let seconds = self.settings.layout.status_message_timeout_seconds;
+        if seconds == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(seconds))
+        }
+    }
+
     pub fn jobs_dialog_size(&self) -> (u16, u16) {
         (
             self.settings.layout.jobs_dialog_width,
@@ -1797,6 +1809,10 @@ impl AppState {
             .min(self.hotlist.len().saturating_sub(1));
         self.panelize_presets = self.settings.configuration.panelize_presets.clone();
         self.active_skin_name = self.settings.appearance.skin.clone();
+        self.status_expires_at = self
+            .status_message_timeout()
+            .and_then(|timeout| Instant::now().checked_add(timeout))
+            .filter(|_| !self.status_line.is_empty());
 
         let sort_mode = self.default_panel_sort_mode();
         let show_hidden_files = self.settings.panel_options.show_hidden_files;
@@ -1982,6 +1998,25 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
+        self.status_expires_at = self
+            .status_message_timeout()
+            .and_then(|timeout| Instant::now().checked_add(timeout))
+            .filter(|_| !self.status_line.is_empty());
+    }
+
+    pub fn expire_status_line(&mut self) {
+        self.expire_status_line_at(Instant::now());
+    }
+
+    fn expire_status_line_at(&mut self, now: Instant) {
+        let Some(expires_at) = self.status_expires_at else {
+            return;
+        };
+        if now < expires_at {
+            return;
+        }
+        self.status_line.clear();
+        self.status_expires_at = None;
     }
 
     pub fn set_available_skins(&mut self, mut skins: Vec<String>) {
@@ -2743,6 +2778,13 @@ impl AppState {
                     bool_label(self.settings.layout.show_panel_totals),
                     SettingsEntryAction::ToggleLayoutShowPanelTotals,
                 ),
+                SettingsEntry::new(
+                    "Status message timeout",
+                    status_message_timeout_label(
+                        self.settings.layout.status_message_timeout_seconds,
+                    ),
+                    SettingsEntryAction::CycleLayoutStatusMessageTimeout,
+                ),
             ],
             SettingsCategory::PanelOptions => vec![
                 SettingsEntry::new(
@@ -2959,6 +3001,17 @@ impl AppState {
                 self.set_status(format!(
                     "Show panel totals: {}",
                     bool_label(self.settings.layout.show_panel_totals)
+                ));
+            }
+            SettingsEntryAction::CycleLayoutStatusMessageTimeout => {
+                let next = next_status_message_timeout_seconds(
+                    self.settings.layout.status_message_timeout_seconds,
+                );
+                self.settings.layout.status_message_timeout_seconds = next;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Status message timeout: {}",
+                    status_message_timeout_label(next)
                 ));
             }
             SettingsEntryAction::TogglePanelShowHiddenFiles => {
@@ -5055,6 +5108,24 @@ fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
+fn status_message_timeout_label(seconds: u64) -> String {
+    if seconds == 0 {
+        String::from("off")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn next_status_message_timeout_seconds(current: u64) -> u64 {
+    const PRESETS: [u64; 6] = [0, 5, 10, 15, 30, 60];
+    for preset in PRESETS {
+        if preset > current {
+            return preset;
+        }
+    }
+    PRESETS[0]
+}
+
 fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[String]) -> usize {
     preset_commands
         .iter()
@@ -6325,6 +6396,69 @@ OpenJobs = f6
         app.apply(AppCommand::SaveSetup)
             .expect("save setup command should succeed");
         assert!(app.take_pending_save_setup());
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn status_line_expires_after_configured_timeout() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-status-timeout-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings.layout.status_message_timeout_seconds = 10;
+        app.set_status("Loading selected directory...");
+        let expires_at = app
+            .status_expires_at
+            .expect("status timeout should schedule expiration");
+
+        let before = expires_at
+            .checked_sub(Duration::from_millis(1))
+            .expect("status expiration should support sub-millisecond offset");
+        app.expire_status_line_at(before);
+        assert_eq!(
+            app.status_line, "Loading selected directory...",
+            "status should remain visible before configured timeout"
+        );
+
+        app.expire_status_line_at(expires_at);
+        assert!(
+            app.status_line.is_empty(),
+            "status should clear once configured timeout elapses"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn status_line_timeout_zero_disables_auto_clear() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-status-timeout-off-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings.layout.status_message_timeout_seconds = 0;
+        app.set_status("Loading selected directory...");
+        assert!(
+            app.status_expires_at.is_none(),
+            "timeout value 0 should disable status auto-clear"
+        );
+
+        let much_later = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .expect("clock should support future offset");
+        app.expire_status_line_at(much_later);
+        assert_eq!(
+            app.status_line, "Loading selected directory...",
+            "status should remain until replaced when timeout is disabled"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
