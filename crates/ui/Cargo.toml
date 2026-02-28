@@ -9,6 +9,7 @@ chrono.workspace = true
 ratatui.workspace = true
 rc-core.workspace = true
 syntect.workspace = true
+unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["fs"] }

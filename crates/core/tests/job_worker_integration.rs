@@ -8,8 +8,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rc_core::{
-    JOB_CANCELED_MESSAGE, JobEvent, JobManager, JobRequest, JobStatus, OverwritePolicy,
-    WorkerCommand, run_worker,
+    JobEvent, JobManager, JobRequest, JobStatus, OverwritePolicy, WorkerCommand, run_worker,
 };
 
 fn make_temp_dir(label: &str) -> PathBuf {
@@ -76,7 +75,7 @@ fn recursive_copy_move_delete_round_trip() {
         overwrite: OverwritePolicy::Skip,
     });
     command_tx
-        .send(WorkerCommand::Run(copy_job))
+        .send(WorkerCommand::Run(Box::new(copy_job)))
         .expect("copy command should send");
     let copy_result = run_job(&event_rx, &mut manager);
     assert!(
@@ -97,7 +96,7 @@ fn recursive_copy_move_delete_round_trip() {
         overwrite: OverwritePolicy::Skip,
     });
     command_tx
-        .send(WorkerCommand::Run(move_job))
+        .send(WorkerCommand::Run(Box::new(move_job)))
         .expect("move command should send");
     let move_result = run_job(&event_rx, &mut manager);
     assert!(
@@ -115,7 +114,7 @@ fn recursive_copy_move_delete_round_trip() {
         targets: vec![moved_root.clone()],
     });
     command_tx
-        .send(WorkerCommand::Run(delete_job))
+        .send(WorkerCommand::Run(Box::new(delete_job)))
         .expect("delete command should send");
     let delete_result = run_job(&event_rx, &mut manager);
     assert!(
@@ -150,7 +149,7 @@ fn overwrite_policies_apply_end_to_end() {
         overwrite: OverwritePolicy::Skip,
     });
     command_tx
-        .send(WorkerCommand::Run(skip_job))
+        .send(WorkerCommand::Run(Box::new(skip_job)))
         .expect("skip copy should send");
     let skip_result = run_job(&event_rx, &mut manager);
     assert!(
@@ -169,7 +168,7 @@ fn overwrite_policies_apply_end_to_end() {
         overwrite: OverwritePolicy::Rename,
     });
     command_tx
-        .send(WorkerCommand::Run(rename_job))
+        .send(WorkerCommand::Run(Box::new(rename_job)))
         .expect("rename copy should send");
     let rename_result = run_job(&event_rx, &mut manager);
     assert!(
@@ -189,7 +188,7 @@ fn overwrite_policies_apply_end_to_end() {
         overwrite: OverwritePolicy::Overwrite,
     });
     command_tx
-        .send(WorkerCommand::Run(overwrite_job))
+        .send(WorkerCommand::Run(Box::new(overwrite_job)))
         .expect("overwrite copy should send");
     let overwrite_result = run_job(&event_rx, &mut manager);
     assert!(
@@ -230,13 +229,13 @@ fn canceled_copy_job_reports_canceled_status() {
     );
 
     command_tx
-        .send(WorkerCommand::Run(copy_job))
+        .send(WorkerCommand::Run(Box::new(copy_job)))
         .expect("copy command should send");
     let canceled_result = run_job(&event_rx, &mut manager);
     match canceled_result {
         JobEvent::Finished {
             result: Err(error), ..
-        } => assert_eq!(error, JOB_CANCELED_MESSAGE),
+        } => assert!(error.is_canceled()),
         _ => panic!("job should finish with cancellation"),
     }
     assert_eq!(

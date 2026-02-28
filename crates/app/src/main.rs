@@ -1,14 +1,10 @@
 #![forbid(unsafe_code)]
 
-mod settings_io;
-
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgAction, Parser};
@@ -23,11 +19,13 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
-use rc_core::{
-    AppCommand, AppState, ApplyResult, BackgroundCommand, BackgroundEvent, ExternalEditRequest,
-    JobEvent, Settings, WorkerCommand, run_background_worker, run_worker,
-};
+use rc_core::settings_io;
+use rc_core::{AppCommand, AppState, ApplyResult, ExternalEditRequest, JobRequest, Settings};
 use tracing_subscriber::EnvFilter;
+
+mod runtime;
+
+use runtime::RuntimeBridge;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Roadmap bootstrap for the rc file manager")]
@@ -111,8 +109,7 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("rc=info,warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -257,18 +254,7 @@ fn run_app(
     tick_rate: Duration,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<()> {
-    let (worker_tx, worker_rx) = mpsc::channel();
-    let (worker_event_tx, worker_event_rx) = mpsc::channel();
-    let worker_handle = thread::Builder::new()
-        .name(String::from("rc-worker"))
-        .spawn(move || run_worker(worker_rx, worker_event_tx))
-        .map_err(|error| anyhow!("failed to spawn worker thread: {error}"))?;
-    let (background_tx, background_rx) = mpsc::channel();
-    let (background_event_tx, background_event_rx) = mpsc::channel();
-    let background_handle = thread::Builder::new()
-        .name(String::from("rc-background"))
-        .spawn(move || run_background_worker(background_rx, background_event_tx))
-        .map_err(|error| anyhow!("failed to spawn background worker thread: {error}"))?;
+    let mut runtime = RuntimeBridge::spawn()?;
 
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
@@ -284,45 +270,23 @@ fn run_app(
         state,
         keymap,
         tick_rate,
-        RuntimeChannels {
-            worker_tx: &worker_tx,
-            worker_event_rx: &worker_event_rx,
-            background_tx: &background_tx,
-            background_event_rx: &background_event_rx,
-        },
+        &mut runtime,
         skin_runtime,
     );
-    let shutdown_result = shutdown_worker(worker_tx, worker_handle);
-    let shutdown_background_result = shutdown_background_worker(background_tx, background_handle);
+    queue_deferred_save_before_shutdown(state, &runtime);
+    let shutdown_result = runtime.shutdown();
     let restore_result = restore_terminal(&mut terminal);
 
     loop_result?;
     shutdown_result?;
-    shutdown_background_result?;
     restore_result?;
     Ok(())
 }
 
-fn shutdown_worker(
-    worker_tx: Sender<WorkerCommand>,
-    worker_handle: thread::JoinHandle<()>,
-) -> Result<()> {
-    let _ = worker_tx.send(WorkerCommand::Shutdown);
-    worker_handle
-        .join()
-        .map_err(|_| anyhow!("worker thread panicked"))?;
-    Ok(())
-}
-
-fn shutdown_background_worker(
-    background_tx: Sender<BackgroundCommand>,
-    background_handle: thread::JoinHandle<()>,
-) -> Result<()> {
-    let _ = background_tx.send(BackgroundCommand::Shutdown);
-    background_handle
-        .join()
-        .map_err(|_| anyhow!("background worker thread panicked"))?;
-    Ok(())
+fn queue_deferred_save_before_shutdown(state: &mut AppState, runtime: &RuntimeBridge) {
+    if state.promote_deferred_persist_settings_request().is_some() {
+        runtime.dispatch_pending_commands(state);
+    }
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -337,32 +301,19 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     Ok(())
 }
 
-struct RuntimeChannels<'a> {
-    worker_tx: &'a Sender<WorkerCommand>,
-    worker_event_rx: &'a Receiver<JobEvent>,
-    background_tx: &'a Sender<BackgroundCommand>,
-    background_event_rx: &'a Receiver<BackgroundEvent>,
-}
-
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
     keymap: &Keymap,
     tick_rate: Duration,
-    channels: RuntimeChannels<'_>,
+    runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
-    let mut worker_disconnected = false;
-    let mut background_disconnected = false;
 
     loop {
-        drain_worker_events(state, channels.worker_event_rx, &mut worker_disconnected);
-        drain_background_events(
-            state,
-            channels.background_event_rx,
-            &mut background_disconnected,
-        );
+        runtime.drain_events(state);
+        state.expire_status_line();
         dispatch_pending_external_edit_requests(terminal, state);
 
         terminal
@@ -378,8 +329,7 @@ fn run_event_loop(
                             state,
                             keymap,
                             key_event,
-                            channels.worker_tx,
-                            channels.background_tx,
+                            runtime,
                             skin_runtime,
                             InputCompatibility {
                                 macos_option_symbols: state
@@ -392,13 +342,7 @@ fn run_event_loop(
                     return Ok(());
                 }
                 Event::Mouse(mouse_event)
-                    if handle_mouse(
-                        state,
-                        mouse_event,
-                        channels.worker_tx,
-                        channels.background_tx,
-                        skin_runtime,
-                    )? =>
+                    if handle_mouse(state, mouse_event, runtime, skin_runtime)? =>
                 {
                     return Ok(());
                 }
@@ -416,8 +360,7 @@ fn handle_key(
     state: &mut AppState,
     keymap: &Keymap,
     key_event: KeyEvent,
-    worker_tx: &Sender<WorkerCommand>,
-    background_tx: &Sender<BackgroundCommand>,
+    runtime: &RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
     input_compatibility: InputCompatibility,
 ) -> Result<bool> {
@@ -426,10 +369,7 @@ fn handle_key(
     if context == KeyContext::Input
         && let Some(command) = input_char_command(&key_event)
     {
-        return Ok(
-            apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
-                == ApplyResult::Quit,
-        );
+        return Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit);
     }
 
     let Some(chord) = map_key_event_to_chord(key_event, input_compatibility) else {
@@ -461,17 +401,13 @@ fn handle_key(
         return Ok(false);
     };
 
-    Ok(
-        apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
-            == ApplyResult::Quit,
-    )
+    Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
 
 fn handle_mouse(
     state: &mut AppState,
     mouse_event: MouseEvent,
-    worker_tx: &Sender<WorkerCommand>,
-    background_tx: &Sender<BackgroundCommand>,
+    runtime: &RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
     if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -481,17 +417,13 @@ fn handle_mouse(
     let Some(command) = state.command_for_left_click(mouse_event.column, mouse_event.row) else {
         return Ok(false);
     };
-    Ok(
-        apply_and_dispatch(state, command, worker_tx, background_tx, skin_runtime)?
-            == ApplyResult::Quit,
-    )
+    Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
 
 fn apply_and_dispatch(
     state: &mut AppState,
     command: AppCommand,
-    worker_tx: &Sender<WorkerCommand>,
-    background_tx: &Sender<BackgroundCommand>,
+    runtime: &RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<ApplyResult> {
     let result = state.apply(command)?;
@@ -499,8 +431,7 @@ fn apply_and_dispatch(
     apply_pending_skin_change(state, skin_runtime);
     apply_pending_skin_revert(state, skin_runtime);
     persist_dirty_settings(state, skin_runtime);
-    dispatch_pending_worker_commands(state, worker_tx);
-    dispatch_pending_background_commands(state, background_tx);
+    runtime.dispatch_pending_commands(state);
     Ok(result)
 }
 
@@ -511,48 +442,10 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
     }
 
     let snapshot = state.persisted_settings_snapshot();
-    if let Err(error) = settings_io::save_settings(&skin_runtime.settings_paths, &snapshot) {
-        tracing::warn!("failed to persist settings: {error}");
-        state.set_status(format!("Settings save failed: {error}"));
-        return;
-    }
-
-    state.mark_settings_saved(SystemTime::now());
-    if save_requested {
-        state.set_status("Setup saved");
-    }
-}
-
-fn dispatch_pending_worker_commands(state: &mut AppState, worker_tx: &Sender<WorkerCommand>) {
-    for command in state.take_pending_worker_commands() {
-        let run_job_id = match &command {
-            WorkerCommand::Run(job) => Some(job.id),
-            _ => None,
-        };
-        if let Err(error) = worker_tx.send(command) {
-            if let Some(job_id) = run_job_id {
-                state.handle_job_dispatch_failure(
-                    job_id,
-                    format!("worker channel is unavailable: {error}"),
-                );
-            } else {
-                state.set_status(format!("worker channel is unavailable: {error}"));
-            }
-            break;
-        }
-    }
-}
-
-fn dispatch_pending_background_commands(
-    state: &mut AppState,
-    background_tx: &Sender<BackgroundCommand>,
-) {
-    for command in state.take_pending_background_commands() {
-        if let Err(error) = background_tx.send(command) {
-            state.set_status(format!("background worker channel is unavailable: {error}"));
-            break;
-        }
-    }
+    state.enqueue_worker_job_request(JobRequest::PersistSettings {
+        paths: skin_runtime.settings_paths.clone(),
+        snapshot: Box::new(snapshot),
+    });
 }
 
 fn dispatch_pending_external_edit_requests(
@@ -717,46 +610,6 @@ fn apply_pending_skin_revert(state: &mut AppState, skin_runtime: &SkinRuntimeCon
     }
 }
 
-fn drain_worker_events(
-    state: &mut AppState,
-    worker_event_rx: &Receiver<JobEvent>,
-    worker_disconnected: &mut bool,
-) {
-    loop {
-        match worker_event_rx.try_recv() {
-            Ok(event) => state.handle_job_event(event),
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => {
-                if !*worker_disconnected {
-                    state.set_status("Worker channel disconnected");
-                    *worker_disconnected = true;
-                }
-                break;
-            }
-        }
-    }
-}
-
-fn drain_background_events(
-    state: &mut AppState,
-    background_event_rx: &Receiver<BackgroundEvent>,
-    background_disconnected: &mut bool,
-) {
-    loop {
-        match background_event_rx.try_recv() {
-            Ok(event) => state.handle_background_event(event),
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => {
-                if !*background_disconnected {
-                    state.set_status("Background worker channel disconnected");
-                    *background_disconnected = true;
-                }
-                break;
-            }
-        }
-    }
-}
-
 fn input_char_command(key_event: &KeyEvent) -> Option<AppCommand> {
     let no_shortcut_modifiers = !key_event
         .modifiers
@@ -904,8 +757,9 @@ fn map_shifted_ascii_symbol(ch: char) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{self, RuntimeCommand};
     use crossterm::event::{KeyCode as CrosstermKeyCode, KeyEvent, KeyModifiers};
-    use std::sync::mpsc;
+    use rc_core::WorkerCommand;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
@@ -919,6 +773,10 @@ mod tests {
         InputCompatibility {
             macos_option_symbols: false,
         }
+    }
+
+    fn test_runtime_bridge() -> RuntimeBridge {
+        runtime::test_runtime_bridge_with_capacity(4).0
     }
 
     #[test]
@@ -1085,8 +943,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let (worker_tx, _worker_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
+        let runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1111,8 +968,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1136,8 +992,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let (worker_tx, _worker_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
+        let runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1150,8 +1005,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1160,8 +1014,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('!'), KeyModifiers::SHIFT),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1186,8 +1039,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let (worker_tx, _worker_rx) = mpsc::channel();
-        let (background_tx, _background_rx) = mpsc::channel();
+        let runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1200,8 +1052,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1210,8 +1061,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('1'), KeyModifiers::SHIFT),
-            &worker_tx,
-            &background_tx,
+            &runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1221,6 +1071,245 @@ mod tests {
         assert!(
             state.status_line.contains("External panelize"),
             "status line should acknowledge external panelize dialog"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn save_setup_queues_persist_settings_job_without_sync_write() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-save-setup-job-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let mc_ini = root.join("mc.ini");
+        let rc_ini = root.join("settings.ini");
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: Some(mc_ini.clone()),
+                rc_ini_path: Some(rc_ini.clone()),
+            },
+        };
+
+        apply_and_dispatch(&mut state, AppCommand::SaveSetup, &runtime, &skin_runtime)
+            .expect("save setup dispatch should succeed");
+
+        assert!(
+            !mc_ini.exists() && !rc_ini.exists(),
+            "save setup should enqueue persistence instead of writing inline"
+        );
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => match &job.request {
+                JobRequest::PersistSettings { paths, .. } => {
+                    assert_eq!(paths.mc_ini_path.as_deref(), Some(mc_ini.as_path()));
+                    assert_eq!(paths.rc_ini_path.as_deref(), Some(rc_ini.as_path()));
+                }
+                _ => panic!("save setup should enqueue persist settings request"),
+            },
+            Ok(other) => panic!("unexpected runtime command: {other:?}"),
+            Err(error) => panic!("runtime queue should contain a save-setup job: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn shutdown_preparation_queues_deferred_save_setup_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-shutdown-deferred-save-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let first_snapshot = state.persisted_settings_snapshot();
+        let mut deferred_snapshot = state.persisted_settings_snapshot();
+        deferred_snapshot.appearance.skin = String::from("deferred-shutdown-skin");
+
+        let first_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(first_snapshot),
+        });
+        runtime.dispatch_pending_commands(&mut state);
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => {
+                assert_eq!(job.id, first_id, "first save setup should dispatch");
+            }
+            Ok(other) => panic!("unexpected runtime command for first save setup: {other:?}"),
+            Err(error) => panic!("first save setup should dispatch: {error}"),
+        }
+
+        let deferred_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(deferred_snapshot.clone()),
+        });
+        assert_eq!(
+            deferred_id, first_id,
+            "deferred save should attach to the active save request"
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "deferred save should not dispatch before shutdown preparation"
+        );
+
+        queue_deferred_save_before_shutdown(&mut state, &runtime);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => match &job.request {
+                JobRequest::PersistSettings { snapshot, .. } => {
+                    assert_eq!(
+                        snapshot.appearance.skin, deferred_snapshot.appearance.skin,
+                        "shutdown preparation should dispatch the deferred save snapshot",
+                    );
+                }
+                other => panic!("expected deferred persist settings request, got {other:?}"),
+            },
+            Ok(other) => panic!("unexpected runtime command for deferred save setup: {other:?}"),
+            Err(error) => panic!("deferred save should dispatch during shutdown prep: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn bounded_runtime_queue_marks_overflowed_job_failed() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-overflow-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("overflow"),
+        });
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        let counts = state.jobs_status_counts();
+        assert_eq!(counts.queued, 1, "first job should remain queued");
+        assert_eq!(counts.failed, 1, "overflowed job should be marked failed");
+        assert!(
+            state.status_line.contains("runtime queue is full"),
+            "status should report queue backpressure"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn bounded_runtime_queue_preserves_unsent_commands_after_overflow() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-overflow-preserve-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        let overflowed_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("overflow"),
+        });
+        let retained_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("retained"),
+        });
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        let pending = state.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "commands after an overflowed send should remain pending"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => {
+                assert_eq!(
+                    job.id, retained_id,
+                    "latest unsent command should be preserved"
+                );
+            }
+            other => panic!("expected retained run command, got {other:?}"),
+        }
+
+        let counts = state.jobs_status_counts();
+        assert_eq!(
+            counts.queued, 2,
+            "queued and retained jobs should stay queued"
+        );
+        assert_eq!(counts.failed, 1, "overflowed job should be marked failed");
+        assert_eq!(
+            state
+                .jobs
+                .job(overflowed_id)
+                .expect("overflowed job should still have a record")
+                .status,
+            rc_core::JobStatus::Failed
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn bounded_runtime_queue_requeues_cancel_command_when_full() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-runtime-overflow-cancel-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        let job_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        state
+            .apply(AppCommand::CancelJob)
+            .expect("cancel should enqueue a cancel command");
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        let pending = state.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "cancel should stay pending under backpressure"
+        );
+        assert!(
+            matches!(pending.first(), Some(WorkerCommand::Cancel(id)) if *id == job_id),
+            "pending command should keep the original cancel request"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

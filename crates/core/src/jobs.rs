@@ -13,6 +13,10 @@ use nix::errno::Errno;
 #[cfg(unix)]
 use nix::unistd::{Gid, Uid, chown};
 
+use crate::settings::Settings;
+use crate::settings_io::{SettingsPaths, save_settings};
+use crate::{ActivePanel, PanelListingSource, SortMode};
+
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
@@ -30,7 +34,13 @@ pub enum JobKind {
     Copy,
     Move,
     Delete,
+    Mkdir,
+    Rename,
+    PersistSettings,
+    RefreshPanel,
     Find,
+    LoadViewer,
+    BuildTree,
 }
 
 impl JobKind {
@@ -39,7 +49,13 @@ impl JobKind {
             Self::Copy => "copy",
             Self::Move => "move",
             Self::Delete => "delete",
+            Self::Mkdir => "mkdir",
+            Self::Rename => "rename",
+            Self::PersistSettings => "persist-settings",
+            Self::RefreshPanel => "refresh-panel",
             Self::Find => "find",
+            Self::LoadViewer => "load-viewer",
+            Self::BuildTree => "build-tree",
         }
     }
 }
@@ -77,9 +93,37 @@ pub enum JobRequest {
     Delete {
         targets: Vec<PathBuf>,
     },
+    Mkdir {
+        path: PathBuf,
+    },
+    Rename {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    PersistSettings {
+        paths: SettingsPaths,
+        snapshot: Box<Settings>,
+    },
+    RefreshPanel {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+        show_hidden_files: bool,
+        request_id: u64,
+    },
     Find {
         query: String,
         base_dir: PathBuf,
+        max_results: usize,
+    },
+    LoadViewer {
+        path: PathBuf,
+    },
+    BuildTree {
+        root: PathBuf,
+        max_depth: usize,
+        max_entries: usize,
     },
 }
 
@@ -89,7 +133,13 @@ impl JobRequest {
             Self::Copy { .. } => JobKind::Copy,
             Self::Move { .. } => JobKind::Move,
             Self::Delete { .. } => JobKind::Delete,
+            Self::Mkdir { .. } => JobKind::Mkdir,
+            Self::Rename { .. } => JobKind::Rename,
+            Self::PersistSettings { .. } => JobKind::PersistSettings,
+            Self::RefreshPanel { .. } => JobKind::RefreshPanel,
             Self::Find { .. } => JobKind::Find,
+            Self::LoadViewer { .. } => JobKind::LoadViewer,
+            Self::BuildTree { .. } => JobKind::BuildTree,
         }
     }
 
@@ -98,7 +148,13 @@ impl JobRequest {
             Self::Copy { sources, .. } => sources.len(),
             Self::Move { sources, .. } => sources.len(),
             Self::Delete { targets } => targets.len(),
+            Self::Mkdir { .. } => 1,
+            Self::Rename { .. } => 1,
+            Self::PersistSettings { .. } => 1,
+            Self::RefreshPanel { .. } => 1,
             Self::Find { .. } => 1,
+            Self::LoadViewer { .. } => 1,
+            Self::BuildTree { .. } => 1,
         }
     }
 
@@ -125,8 +181,60 @@ impl JobRequest {
                 overwrite.label(),
             ),
             Self::Delete { targets } => format!("delete {} item(s)", targets.len()),
-            Self::Find { query, base_dir } => {
+            Self::Mkdir { path } => format!("mkdir {}", path.to_string_lossy()),
+            Self::Rename {
+                source,
+                destination,
+            } => format!(
+                "rename {} -> {}",
+                source.to_string_lossy(),
+                destination.to_string_lossy()
+            ),
+            Self::PersistSettings { paths, .. } => {
+                let target = paths
+                    .rc_ini_path
+                    .as_ref()
+                    .or(paths.mc_ini_path.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| String::from("<none>"));
+                format!("save setup -> {target}")
+            }
+            Self::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                request_id,
+                ..
+            } => {
+                let source_label = match source {
+                    PanelListingSource::Directory => "directory",
+                    PanelListingSource::Panelize { .. } => "panelize",
+                    PanelListingSource::FindResults { .. } => "find-results",
+                };
+                format!(
+                    "refresh {:?} panel at {} [{}] (request #{request_id})",
+                    panel,
+                    cwd.to_string_lossy(),
+                    source_label
+                )
+            }
+            Self::Find {
+                query, base_dir, ..
+            } => {
                 format!("find '{}' under {}", query, base_dir.to_string_lossy())
+            }
+            Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
+            Self::BuildTree {
+                root,
+                max_depth,
+                max_entries,
+            } => {
+                format!(
+                    "build tree for {} [depth={}, entries={}]",
+                    root.to_string_lossy(),
+                    max_depth,
+                    max_entries
+                )
             }
         }
     }
@@ -171,6 +279,118 @@ pub enum JobStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobRetryHint {
+    None,
+    Retry,
+    Elevated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobErrorCode {
+    Canceled,
+    PermissionDenied,
+    AlreadyExists,
+    NotFound,
+    InvalidInput,
+    Interrupted,
+    Unsupported,
+    Dispatch,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobError {
+    pub code: JobErrorCode,
+    pub message: String,
+    pub retry_hint: JobRetryHint,
+}
+
+pub type JobResult = Result<(), JobError>;
+
+impl JobError {
+    pub fn canceled() -> Self {
+        Self {
+            code: JobErrorCode::Canceled,
+            message: String::from(JOB_CANCELED_MESSAGE),
+            retry_hint: JobRetryHint::None,
+        }
+    }
+
+    pub fn dispatch(message: impl Into<String>) -> Self {
+        Self {
+            code: JobErrorCode::Dispatch,
+            message: message.into(),
+            retry_hint: JobRetryHint::Retry,
+        }
+    }
+
+    pub fn from_io(error: io::Error) -> Self {
+        let kind = error.kind();
+        let message = error.to_string();
+        match kind {
+            io::ErrorKind::PermissionDenied => Self {
+                code: JobErrorCode::PermissionDenied,
+                message,
+                retry_hint: JobRetryHint::Elevated,
+            },
+            io::ErrorKind::AlreadyExists => Self {
+                code: JobErrorCode::AlreadyExists,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::NotFound => Self {
+                code: JobErrorCode::NotFound,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::InvalidInput => Self {
+                code: JobErrorCode::InvalidInput,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::Unsupported => Self {
+                code: JobErrorCode::Unsupported,
+                message,
+                retry_hint: JobRetryHint::None,
+            },
+            io::ErrorKind::Interrupted => {
+                if is_canceled_message(&message) {
+                    Self::canceled()
+                } else {
+                    Self {
+                        code: JobErrorCode::Interrupted,
+                        message,
+                        retry_hint: JobRetryHint::Retry,
+                    }
+                }
+            }
+            _ => Self {
+                code: JobErrorCode::Other,
+                message,
+                retry_hint: JobRetryHint::Retry,
+            },
+        }
+    }
+
+    pub fn from_message(message: impl Into<String>) -> Self {
+        let message = message.into();
+        if is_canceled_message(&message) {
+            Self::canceled()
+        } else {
+            Self {
+                code: JobErrorCode::Other,
+                message,
+                retry_hint: JobRetryHint::Retry,
+            }
+        }
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        matches!(self.code, JobErrorCode::Canceled)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobRecord {
     pub id: JobId,
@@ -186,34 +406,35 @@ pub struct WorkerJob {
     pub id: JobId,
     pub request: JobRequest,
     cancel_flag: Arc<AtomicBool>,
+    find_pause_flag: Option<Arc<AtomicBool>>,
 }
 
 impl WorkerJob {
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel_flag)
     }
+
+    pub fn set_find_pause_flag(&mut self, pause_flag: Arc<AtomicBool>) {
+        self.find_pause_flag = Some(pause_flag);
+    }
+
+    pub fn find_pause_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.find_pause_flag.as_ref().map(Arc::clone)
+    }
 }
 
 #[derive(Debug)]
 pub enum WorkerCommand {
-    Run(WorkerJob),
+    Run(Box<WorkerJob>),
     Cancel(JobId),
     Shutdown,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobEvent {
-    Started {
-        id: JobId,
-    },
-    Progress {
-        id: JobId,
-        progress: JobProgress,
-    },
-    Finished {
-        id: JobId,
-        result: Result<(), String>,
-    },
+    Started { id: JobId },
+    Progress { id: JobId, progress: JobProgress },
+    Finished { id: JobId, result: JobResult },
 }
 
 #[derive(Debug)]
@@ -265,6 +486,7 @@ impl JobManager {
                 .get(&id)
                 .expect("job cancellation flag should exist")
                 .clone(),
+            find_pause_flag: None,
         }
     }
 
@@ -294,13 +516,13 @@ impl JobManager {
                             }
                             job.last_error = None;
                         }
-                        Err(message) => {
-                            if is_canceled_message(message) {
+                        Err(error) => {
+                            if error.is_canceled() {
                                 job.status = JobStatus::Canceled;
                                 job.last_error = None;
                             } else {
                                 job.status = JobStatus::Failed;
-                                job.last_error = Some(message.clone());
+                                job.last_error = Some(error.message.clone());
                             }
                         }
                     }
@@ -381,15 +603,40 @@ pub struct JobStatusCounts {
     pub failed: usize,
 }
 
+pub trait FsBackend {
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()>;
+    fn persist_settings(&self, paths: &SettingsPaths, snapshot: &Settings) -> io::Result<()>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LocalFsBackend;
+
+impl FsBackend for LocalFsBackend {
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir(path)
+    }
+
+    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        fs::rename(source, destination)
+    }
+
+    fn persist_settings(&self, paths: &SettingsPaths, snapshot: &Settings) -> io::Result<()> {
+        save_settings(paths, snapshot)
+    }
+}
+
 pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent>) {
+    let fs_backend = LocalFsBackend;
     let mut queued_cancellations = HashSet::new();
     while let Ok(command) = command_rx.recv() {
         match command {
             WorkerCommand::Run(job) => {
+                let job = *job;
                 if queued_cancellations.remove(&job.id) {
                     job.cancel_flag.store(true, Ordering::Relaxed);
                 }
-                run_single_job(job, &event_tx);
+                run_single_job(job, &event_tx, &fs_backend);
             }
             WorkerCommand::Cancel(id) => {
                 queued_cancellations.insert(id);
@@ -399,18 +646,33 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
     }
 }
 
-fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
+pub fn execute_worker_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
+    let fs_backend = LocalFsBackend;
+    run_single_job(job, event_tx, &fs_backend);
+}
+
+#[cfg(test)]
+fn execute_worker_job_with_backend(
+    job: WorkerJob,
+    event_tx: &Sender<JobEvent>,
+    fs_backend: &dyn FsBackend,
+) {
+    run_single_job(job, event_tx, fs_backend);
+}
+
+fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>, fs_backend: &dyn FsBackend) {
     let WorkerJob {
         id,
         request,
         cancel_flag,
+        ..
     } = job;
     let _ = event_tx.send(JobEvent::Started { id });
 
     if let Err(error) = ensure_not_canceled(cancel_flag.as_ref()) {
         let _ = event_tx.send(JobEvent::Finished {
             id,
-            result: Err(error.to_string()),
+            result: Err(JobError::from_io(error)),
         });
         return;
     }
@@ -420,7 +682,7 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
         Err(error) => {
             let _ = event_tx.send(JobEvent::Finished {
                 id,
-                result: Err(error.to_string()),
+                result: Err(JobError::from_io(error)),
             });
             return;
         }
@@ -431,18 +693,22 @@ fn run_single_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     if let Err(error) = progress.ensure_not_canceled() {
         let _ = event_tx.send(JobEvent::Finished {
             id,
-            result: Err(error.to_string()),
+            result: Err(JobError::from_io(error)),
         });
         return;
     }
-    let result = execute_job(request, &mut progress).map_err(|error| error.to_string());
+    let result = execute_job(request, &mut progress, fs_backend).map_err(JobError::from_io);
     if result.is_ok() {
         progress.mark_done();
     }
     let _ = event_tx.send(JobEvent::Finished { id, result });
 }
 
-fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
+fn execute_job(
+    request: JobRequest,
+    progress: &mut ProgressTracker<'_>,
+    fs_backend: &dyn FsBackend,
+) -> io::Result<()> {
     match request {
         JobRequest::Copy {
             sources,
@@ -455,9 +721,47 @@ fn execute_job(request: JobRequest, progress: &mut ProgressTracker<'_>) -> io::R
             overwrite,
         } => move_paths(&sources, &destination_dir, overwrite, progress),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
+        JobRequest::Mkdir { path } => {
+            progress.set_current_path(&path);
+            fs_backend.create_dir(&path)?;
+            progress.complete_item(&path);
+            Ok(())
+        }
+        JobRequest::Rename {
+            source,
+            destination,
+        } => {
+            progress.set_current_path(&source);
+            fs_backend.rename(&source, &destination)?;
+            progress.complete_item(&destination);
+            Ok(())
+        }
+        JobRequest::PersistSettings { paths, snapshot } => {
+            let marker = paths
+                .rc_ini_path
+                .as_deref()
+                .or(paths.mc_ini_path.as_deref())
+                .unwrap_or_else(|| Path::new("."));
+            progress.set_current_path(marker);
+            fs_backend.persist_settings(&paths, snapshot.as_ref())?;
+            progress.complete_item(marker);
+            Ok(())
+        }
+        JobRequest::RefreshPanel { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "panel refresh jobs are executed by the runtime adapter",
+        )),
         JobRequest::Find { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "find jobs are executed by the background worker",
+            "find jobs are executed by the runtime adapter",
+        )),
+        JobRequest::LoadViewer { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "viewer jobs are executed by the runtime adapter",
+        )),
+        JobRequest::BuildTree { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "tree jobs are executed by the runtime adapter",
         )),
     }
 }
@@ -836,6 +1140,12 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
+        JobRequest::Mkdir { .. }
+        | JobRequest::Rename { .. }
+        | JobRequest::PersistSettings { .. }
+        | JobRequest::RefreshPanel { .. }
+        | JobRequest::LoadViewer { .. }
+        | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
 }
@@ -973,6 +1283,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{self, Receiver};
     use std::thread;
@@ -1018,6 +1329,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingFsBackend {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingFsBackend {
+        fn push_call(&self, call: &str) {
+            self.calls
+                .lock()
+                .expect("fs backend call log should not be poisoned")
+                .push(String::from(call));
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .expect("fs backend call log should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl FsBackend for RecordingFsBackend {
+        fn create_dir(&self, _path: &Path) -> io::Result<()> {
+            self.push_call("mkdir");
+            Ok(())
+        }
+
+        fn rename(&self, _source: &Path, _destination: &Path) -> io::Result<()> {
+            self.push_call("rename");
+            Ok(())
+        }
+
+        fn persist_settings(&self, _paths: &SettingsPaths, _snapshot: &Settings) -> io::Result<()> {
+            self.push_call("persist-settings");
+            Ok(())
+        }
+    }
+
+    fn execute_request_with_backend(
+        request: JobRequest,
+        fs_backend: &dyn FsBackend,
+    ) -> (JobEvent, JobStatusCounts) {
+        let mut manager = JobManager::new();
+        let worker_job = manager.enqueue(request);
+        let (event_tx, event_rx) = mpsc::channel();
+        execute_worker_job_with_backend(worker_job, &event_tx, fs_backend);
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        (finished, manager.status_counts())
+    }
+
     #[test]
     fn job_manager_tracks_status_and_progress() {
         let mut manager = JobManager::new();
@@ -1055,6 +1416,92 @@ mod tests {
     }
 
     #[test]
+    fn mkdir_request_uses_fs_backend() {
+        let root = make_temp_dir("mkdir-backend");
+        let target = root.join("created");
+        let fs_backend = RecordingFsBackend::default();
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Mkdir {
+                path: target.clone(),
+            },
+            &fs_backend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "mkdir request should succeed through backend"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert!(
+            !target.exists(),
+            "test backend should avoid touching the filesystem directly"
+        );
+        assert_eq!(fs_backend.calls(), vec![String::from("mkdir")]);
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn rename_request_uses_fs_backend() {
+        let root = make_temp_dir("rename-backend");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "source").expect("source payload should be writable");
+        let fs_backend = RecordingFsBackend::default();
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Rename {
+                source: source.clone(),
+                destination: destination.clone(),
+            },
+            &fs_backend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "rename request should succeed through backend"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert!(
+            source.exists() && !destination.exists(),
+            "test backend should keep source in place without filesystem rename"
+        );
+        assert_eq!(fs_backend.calls(), vec![String::from("rename")]);
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn persist_settings_request_uses_fs_backend() {
+        let root = make_temp_dir("persist-backend");
+        let rc_ini = root.join("rc.ini");
+        let mc_ini = root.join("mc.ini");
+        let fs_backend = RecordingFsBackend::default();
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::PersistSettings {
+                paths: SettingsPaths {
+                    mc_ini_path: Some(mc_ini.clone()),
+                    rc_ini_path: Some(rc_ini.clone()),
+                },
+                snapshot: Box::new(Settings::default()),
+            },
+            &fs_backend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "persist-settings request should succeed through backend"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert!(
+            !rc_ini.exists() && !mc_ini.exists(),
+            "test backend should avoid inline settings writes"
+        );
+        assert_eq!(fs_backend.calls(), vec![String::from("persist-settings")]);
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
     fn worker_honors_cancel_flag() {
         let root = make_temp_dir("cancel");
         let source_dir = root.join("source");
@@ -1082,7 +1529,7 @@ mod tests {
             "cancel request should succeed for queued job"
         );
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         command_tx
             .send(WorkerCommand::Cancel(copy_id))
@@ -1092,10 +1539,7 @@ mod tests {
         match finished {
             JobEvent::Finished {
                 result: Err(error), ..
-            } => assert!(
-                is_canceled_message(&error),
-                "finished error should be a cancellation marker"
-            ),
+            } => assert!(error.is_canceled(), "finished error should be cancellation"),
             _ => panic!("job should finish with a cancellation error"),
         }
         assert_eq!(manager.status_counts().canceled, 1);
@@ -1136,17 +1580,14 @@ mod tests {
             .send(WorkerCommand::Cancel(copy_id))
             .expect("cancel command should send");
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
 
         let finished = recv_until_finished(&event_rx, &mut manager);
         match finished {
             JobEvent::Finished {
                 result: Err(error), ..
-            } => assert!(
-                is_canceled_message(&error),
-                "finished error should be a cancellation marker"
-            ),
+            } => assert!(error.is_canceled(), "finished error should be cancellation"),
             _ => panic!("job should finish with a cancellation error"),
         }
         assert_eq!(manager.status_counts().canceled, 1);
@@ -1203,7 +1644,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1252,7 +1693,7 @@ mod tests {
             overwrite: OverwritePolicy::Overwrite,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1298,7 +1739,7 @@ mod tests {
             overwrite: OverwritePolicy::Rename,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1351,7 +1792,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1401,7 +1842,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1452,7 +1893,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1495,14 +1936,14 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(move_job))
+            .send(WorkerCommand::Run(Box::new(move_job)))
             .expect("move command should send");
         let finished = recv_until_finished(&event_rx, &mut manager);
         match finished {
             JobEvent::Finished {
                 result: Err(error), ..
             } => assert!(
-                error.contains("cannot move directory into itself"),
+                error.message.contains("cannot move directory into itself"),
                 "move should reject recursive destination"
             ),
             _ => panic!("move should fail for recursive destination"),
@@ -1541,7 +1982,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
         let copy_done = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1559,7 +2000,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(move_job))
+            .send(WorkerCommand::Run(Box::new(move_job)))
             .expect("move command should send");
         let move_done = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1580,7 +2021,7 @@ mod tests {
             targets: vec![moved_file.clone()],
         });
         command_tx
-            .send(WorkerCommand::Run(delete_job))
+            .send(WorkerCommand::Run(Box::new(delete_job)))
             .expect("delete command should send");
         let delete_done = recv_until_finished(&event_rx, &mut manager);
         assert!(
@@ -1621,7 +2062,7 @@ mod tests {
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
-            .send(WorkerCommand::Run(copy_job))
+            .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
 
         let mut saw_progress = false;
@@ -1658,5 +2099,15 @@ mod tests {
             .join()
             .expect("worker thread should terminate cleanly");
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn permission_denied_maps_to_elevated_retry_hint() {
+        let error = JobError::from_io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert_eq!(error.code, JobErrorCode::PermissionDenied);
+        assert_eq!(error.retry_hint, JobRetryHint::Elevated);
     }
 }

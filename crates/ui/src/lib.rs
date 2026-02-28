@@ -23,6 +23,7 @@ use std::time::{Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+use unicode_width::UnicodeWidthStr;
 
 #[cfg(unix)]
 use nix::sys::statvfs::statvfs;
@@ -123,6 +124,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         state.status_line.clone()
     };
+    let status = fit_single_line(status, root[2].width as usize);
     frame.render_widget(Paragraph::new(status), root[2]);
     if state.show_button_bar() {
         render_button_bar(frame, root[3], skin.as_ref(), state);
@@ -361,6 +363,40 @@ fn panel_title(panel: &PanelState) -> String {
     )
 }
 
+fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let sanitized = sanitize_single_line(text.as_ref());
+    if UnicodeWidthStr::width(sanitized.as_str()) <= width {
+        return sanitized;
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let prefix_width = width - 3;
+    let mut truncated = String::new();
+    for ch in sanitized.chars() {
+        truncated.push(ch);
+        if UnicodeWidthStr::width(truncated.as_str()) > prefix_width {
+            truncated.pop();
+            break;
+        }
+    }
+    truncated.push_str("...");
+    debug_assert!(UnicodeWidthStr::width(truncated.as_str()) <= width);
+    truncated
+}
+
+fn sanitize_single_line(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+        .collect()
+}
+
 fn render_panel(
     frame: &mut Frame,
     area: Rect,
@@ -369,7 +405,7 @@ fn render_panel(
     skin: &UiSkin,
     app: &AppState,
 ) {
-    let title = panel_title(panel);
+    let title = fit_single_line(panel_title(panel), area.width.saturating_sub(2) as usize);
     let selected_tagged = panel
         .selected_entry()
         .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
@@ -513,13 +549,16 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(2) as usize;
-    let title = format!(
-        "{} | {} {}/{} | wrap:{}",
-        viewer.path.to_string_lossy(),
-        if viewer.hex_mode { "row" } else { "line" },
-        viewer.current_line_number(),
-        viewer.line_count(),
-        if viewer.wrap { "on" } else { "off" }
+    let title = fit_single_line(
+        format!(
+            "{} | {} {}/{} | wrap:{}",
+            viewer.path.to_string_lossy(),
+            if viewer.hex_mode { "row" } else { "line" },
+            viewer.current_line_number(),
+            viewer.line_count(),
+            if viewer.wrap { "on" } else { "off" }
+        ),
+        area.width.saturating_sub(2) as usize,
     );
     let content = if viewer.hex_mode {
         hex_viewer_window(viewer, visible_lines, content_width)
@@ -1761,11 +1800,13 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use rc_core::{AppCommand, AppState, BackgroundCommand, run_background_worker};
+    use rc_core::{
+        AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
+        execute_worker_job,
+    };
     use std::env;
     use std::fs;
     use std::sync::mpsc;
-    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
@@ -1788,30 +1829,46 @@ mod tests {
 
     fn drain_background(state: &mut AppState) {
         loop {
-            let commands = state.take_pending_background_commands();
-            if commands.is_empty() {
+            let mut progressed = false;
+
+            let worker_commands = state.take_pending_worker_commands();
+            if !worker_commands.is_empty() {
+                progressed = true;
+            }
+            for command in worker_commands {
+                match command {
+                    WorkerCommand::Run(job) => {
+                        let job = *job;
+                        let job_id = job.id;
+                        let (event_tx, event_rx) = mpsc::channel();
+                        match &job.request {
+                            JobRequest::LoadViewer { path } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let viewer_result = rc_core::ViewerState::open(path.clone())
+                                    .map_err(|error| error.to_string());
+                                state.handle_background_event(BackgroundEvent::ViewerLoaded {
+                                    path: path.clone(),
+                                    result: viewer_result.clone(),
+                                });
+                                let result =
+                                    viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            _ => {
+                                execute_worker_job(job, &event_tx);
+                            }
+                        }
+                        for event in event_rx.try_iter() {
+                            state.handle_job_event(event);
+                        }
+                    }
+                    WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {}
+                }
+            }
+
+            if !progressed {
                 break;
             }
-
-            let (command_tx, command_rx) = mpsc::channel();
-            let (event_tx, event_rx) = mpsc::channel();
-            let handle = thread::spawn(move || run_background_worker(command_rx, event_tx));
-
-            for command in commands {
-                command_tx
-                    .send(command)
-                    .expect("background command should send");
-                let event = event_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .expect("background event should arrive");
-                state.handle_background_event(event);
-            }
-            command_tx
-                .send(BackgroundCommand::Shutdown)
-                .expect("background shutdown should send");
-            handle
-                .join()
-                .expect("background worker should shut down cleanly");
         }
     }
 
@@ -1876,6 +1933,45 @@ mod tests {
             frame.contains("entry.txt"),
             "frame should include panel entry names"
         );
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn fit_single_line_sanitizes_and_truncates() {
+        assert_eq!(fit_single_line("abc\ndef", 20), "abc def");
+        assert_eq!(fit_single_line("abcdefg", 6), "abc...");
+        assert_eq!(fit_single_line("abcdefg", 2), "..");
+        assert_eq!(fit_single_line("你好世界", 5), "你...");
+        assert_eq!(
+            fit_single_line("e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}", 5),
+            "e\u{301}e\u{301}..."
+        );
+        assert!(
+            unicode_width::UnicodeWidthStr::width(fit_single_line("你好世界", 5).as_str()) <= 5,
+            "truncated output should fit requested terminal width"
+        );
+    }
+
+    #[test]
+    fn render_status_line_sanitizes_newlines_and_clips_width() {
+        let root = temp_root("status-clamp");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings_mut().layout.show_debug_status = false;
+        app.set_status(format!("line1\nline2 {}", "x".repeat(200)));
+
+        let frame = render_to_text(&app, 40, 12);
+        let lines: Vec<&str> = frame.lines().collect();
+        let status_line = lines[lines.len().saturating_sub(2)];
+
+        assert!(
+            status_line.contains("line1 line2"),
+            "status should replace newlines with spaces"
+        );
+        assert!(
+            status_line.trim_end().ends_with("..."),
+            "long status should be clipped to one line with ellipsis"
+        );
+
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 

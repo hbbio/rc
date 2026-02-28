@@ -1,32 +1,41 @@
 #![forbid(unsafe_code)]
 
+mod background;
 pub mod dialog;
 pub mod help;
 pub mod jobs;
 pub mod keymap;
+mod orchestration;
+mod process_backend;
 pub mod settings;
+pub mod settings_io;
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
-use std::thread;
 use std::time::Duration;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
+#[cfg(test)]
+use background::stream_find_entries;
+pub use background::{
+    BackgroundEvent, build_tree_ready_event, refresh_panel_entries, refresh_panel_event,
+    run_find_entries,
+};
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
 pub use jobs::{
-    JOB_CANCELED_MESSAGE, JobEvent, JobId, JobKind, JobManager, JobProgress, JobRecord, JobRequest,
-    JobStatus, JobStatusCounts, OverwritePolicy, WorkerCommand, WorkerJob, run_worker,
+    JOB_CANCELED_MESSAGE, JobError, JobErrorCode, JobEvent, JobId, JobKind, JobManager,
+    JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
+    WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
+pub use process_backend::{LocalProcessBackend, ProcessBackend};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
@@ -562,8 +571,7 @@ pub enum ApplyResult {
     Quit,
 }
 
-const FIND_EVENT_CHUNK_SIZE: usize = 64;
-const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
+pub(crate) const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
 const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1456,6 +1464,7 @@ enum SettingsEntryAction {
     ToggleLayoutShowButtonBar,
     ToggleLayoutShowDebugStatus,
     ToggleLayoutShowPanelTotals,
+    CycleLayoutStatusMessageTimeout,
     TogglePanelShowHiddenFiles,
     CyclePanelSortField,
     TogglePanelSortReverse,
@@ -1541,67 +1550,6 @@ enum PendingDialogAction {
         initial_command: String,
         preset_commands: Vec<String>,
         preset_index: usize,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub enum BackgroundCommand {
-    RefreshPanel {
-        panel: ActivePanel,
-        cwd: PathBuf,
-        source: PanelListingSource,
-        sort_mode: SortMode,
-        show_hidden_files: bool,
-        request_id: u64,
-        cancel_flag: Arc<AtomicBool>,
-    },
-    LoadViewer {
-        path: PathBuf,
-    },
-    FindEntries {
-        job_id: JobId,
-        query: String,
-        base_dir: PathBuf,
-        max_results: usize,
-        cancel_flag: Arc<AtomicBool>,
-        pause_flag: Arc<AtomicBool>,
-    },
-    BuildTree {
-        root: PathBuf,
-        max_depth: usize,
-        max_entries: usize,
-    },
-    Shutdown,
-}
-
-#[derive(Clone, Debug)]
-pub enum BackgroundEvent {
-    PanelRefreshed {
-        panel: ActivePanel,
-        cwd: PathBuf,
-        source: PanelListingSource,
-        sort_mode: SortMode,
-        request_id: u64,
-        result: Result<Vec<FileEntry>, String>,
-    },
-    ViewerLoaded {
-        path: PathBuf,
-        result: Result<ViewerState, String>,
-    },
-    FindEntriesStarted {
-        job_id: JobId,
-    },
-    FindEntriesChunk {
-        job_id: JobId,
-        entries: Vec<FindResultEntry>,
-    },
-    FindEntriesFinished {
-        job_id: JobId,
-        result: Result<(), String>,
-    },
-    TreeReady {
-        root: PathBuf,
-        entries: Vec<TreeEntry>,
     },
 }
 
@@ -1694,527 +1642,13 @@ impl KeybindingHints {
     }
 }
 
-pub fn run_background_worker(
-    command_rx: Receiver<BackgroundCommand>,
-    event_tx: Sender<BackgroundEvent>,
-) {
-    let mut running_find_tasks = Vec::new();
-    #[cfg(not(test))]
-    let mut running_panel_refresh_tasks = Vec::new();
-    #[cfg(not(test))]
-    let mut running_tree_tasks = Vec::new();
-    while let Ok(command) = command_rx.recv() {
-        reap_finished_find_tasks(&mut running_find_tasks);
-        #[cfg(not(test))]
-        reap_finished_panel_refresh_tasks(&mut running_panel_refresh_tasks);
-        #[cfg(not(test))]
-        reap_finished_tree_tasks(&mut running_tree_tasks);
-        match execute_background_command(command, &event_tx) {
-            BackgroundExecution::Continue => {}
-            #[cfg(not(test))]
-            BackgroundExecution::SpawnFind(task) => running_find_tasks.push(task),
-            #[cfg(not(test))]
-            BackgroundExecution::SpawnPanelRefresh(task) => running_panel_refresh_tasks.push(task),
-            #[cfg(not(test))]
-            BackgroundExecution::SpawnTree(task) => running_tree_tasks.push(task),
-            BackgroundExecution::Stop => break,
-        }
-    }
-
-    for task in &running_find_tasks {
-        task.cancel_flag.store(true, AtomicOrdering::Relaxed);
-    }
-    #[cfg(not(test))]
-    for task in &running_panel_refresh_tasks {
-        task.cancel_flag.store(true, AtomicOrdering::Relaxed);
-    }
-    for task in running_find_tasks {
-        let _ = task.handle.join();
-    }
-    #[cfg(not(test))]
-    for task in running_panel_refresh_tasks {
-        let _ = task.handle.join();
-    }
-    #[cfg(not(test))]
-    for task in running_tree_tasks {
-        let _ = task.handle.join();
-    }
-}
-
-#[derive(Debug)]
-struct RunningFindTask {
-    handle: thread::JoinHandle<()>,
-    cancel_flag: Arc<AtomicBool>,
-}
-
-#[cfg(not(test))]
-#[derive(Debug)]
-struct RunningPanelRefreshTask {
-    handle: thread::JoinHandle<()>,
-    cancel_flag: Arc<AtomicBool>,
-}
-
-#[cfg(not(test))]
-#[derive(Debug)]
-struct RunningTreeTask {
-    handle: thread::JoinHandle<()>,
-}
-
-#[derive(Debug)]
-enum BackgroundExecution {
-    Continue,
-    #[cfg(not(test))]
-    SpawnFind(RunningFindTask),
-    #[cfg(not(test))]
-    SpawnPanelRefresh(RunningPanelRefreshTask),
-    #[cfg(not(test))]
-    SpawnTree(RunningTreeTask),
-    Stop,
-}
-
-fn reap_finished_find_tasks(tasks: &mut Vec<RunningFindTask>) {
-    let mut index = 0usize;
-    while index < tasks.len() {
-        if tasks[index].handle.is_finished() {
-            let task = tasks.swap_remove(index);
-            let _ = task.handle.join();
-        } else {
-            index += 1;
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn reap_finished_panel_refresh_tasks(tasks: &mut Vec<RunningPanelRefreshTask>) {
-    let mut index = 0usize;
-    while index < tasks.len() {
-        if tasks[index].handle.is_finished() {
-            let task = tasks.swap_remove(index);
-            let _ = task.handle.join();
-        } else {
-            index += 1;
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn reap_finished_tree_tasks(tasks: &mut Vec<RunningTreeTask>) {
-    let mut index = 0usize;
-    while index < tasks.len() {
-        if tasks[index].handle.is_finished() {
-            let task = tasks.swap_remove(index);
-            let _ = task.handle.join();
-        } else {
-            index += 1;
-        }
-    }
-}
-
-fn refresh_panel_entries(
-    cwd: &Path,
-    source: &PanelListingSource,
-    sort_mode: SortMode,
-    show_hidden_files: bool,
-    cancel_flag: &AtomicBool,
-) -> Result<Vec<FileEntry>, String> {
-    match source {
-        PanelListingSource::Directory => read_entries_with_visibility_cancel(
-            cwd,
-            sort_mode,
-            show_hidden_files,
-            Some(cancel_flag),
-        )
-        .map_err(|error| error.to_string()),
-        PanelListingSource::Panelize { command } => {
-            read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
-                .map_err(|error| error.to_string())
-        }
-        PanelListingSource::FindResults {
-            base_dir, paths, ..
-        } => read_panelized_paths(base_dir, paths, sort_mode, Some(cancel_flag))
-            .map_err(|error| error.to_string()),
-    }
-}
-
-fn execute_background_command(
-    command: BackgroundCommand,
-    event_tx: &Sender<BackgroundEvent>,
-) -> BackgroundExecution {
-    match command {
-        BackgroundCommand::RefreshPanel {
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
-            cancel_flag,
-        } => {
-            #[cfg(test)]
-            {
-                let result = refresh_panel_entries(
-                    &cwd,
-                    &source,
-                    sort_mode,
-                    show_hidden_files,
-                    cancel_flag.as_ref(),
-                );
-                if event_tx
-                    .send(BackgroundEvent::PanelRefreshed {
-                        panel,
-                        cwd,
-                        source,
-                        sort_mode,
-                        request_id,
-                        result,
-                    })
-                    .is_ok()
-                {
-                    BackgroundExecution::Continue
-                } else {
-                    BackgroundExecution::Stop
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let worker_event_tx = event_tx.clone();
-                let worker_cancel_flag = cancel_flag.clone();
-                let worker_cwd = cwd.clone();
-                let worker_source = source.clone();
-                match thread::Builder::new()
-                    .name(format!("rc-refresh-{}-{request_id}", panel.index()))
-                    .spawn(move || {
-                        let result = refresh_panel_entries(
-                            &worker_cwd,
-                            &worker_source,
-                            sort_mode,
-                            show_hidden_files,
-                            worker_cancel_flag.as_ref(),
-                        );
-                        let _ = worker_event_tx.send(BackgroundEvent::PanelRefreshed {
-                            panel,
-                            cwd: worker_cwd,
-                            source: worker_source,
-                            sort_mode,
-                            request_id,
-                            result,
-                        });
-                    }) {
-                    Ok(handle) => BackgroundExecution::SpawnPanelRefresh(RunningPanelRefreshTask {
-                        handle,
-                        cancel_flag,
-                    }),
-                    Err(error) => {
-                        let _ = event_tx.send(BackgroundEvent::PanelRefreshed {
-                            panel,
-                            cwd,
-                            source,
-                            sort_mode,
-                            request_id,
-                            result: Err(format!("failed to spawn panel refresh worker: {error}")),
-                        });
-                        BackgroundExecution::Continue
-                    }
-                }
-            }
-        }
-        BackgroundCommand::LoadViewer { path } => {
-            if event_tx
-                .send(BackgroundEvent::ViewerLoaded {
-                    path: path.clone(),
-                    result: ViewerState::open(path).map_err(|error| error.to_string()),
-                })
-                .is_ok()
-            {
-                BackgroundExecution::Continue
-            } else {
-                BackgroundExecution::Stop
-            }
-        }
-        BackgroundCommand::FindEntries {
-            job_id,
-            query,
-            base_dir,
-            max_results,
-            cancel_flag,
-            pause_flag,
-        } => {
-            #[cfg(test)]
-            {
-                if run_find_search(
-                    event_tx,
-                    job_id,
-                    query,
-                    base_dir,
-                    max_results,
-                    cancel_flag.as_ref(),
-                    pause_flag.as_ref(),
-                ) {
-                    BackgroundExecution::Continue
-                } else {
-                    BackgroundExecution::Stop
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let worker_event_tx = event_tx.clone();
-                let worker_cancel_flag = cancel_flag.clone();
-                let worker_pause_flag = pause_flag.clone();
-                match thread::Builder::new()
-                    .name(format!("rc-find-{job_id}"))
-                    .spawn(move || {
-                        let _ = run_find_search(
-                            &worker_event_tx,
-                            job_id,
-                            query,
-                            base_dir,
-                            max_results,
-                            worker_cancel_flag.as_ref(),
-                            worker_pause_flag.as_ref(),
-                        );
-                    }) {
-                    Ok(handle) => BackgroundExecution::SpawnFind(RunningFindTask {
-                        handle,
-                        cancel_flag,
-                    }),
-                    Err(error) => {
-                        let _ = event_tx.send(BackgroundEvent::FindEntriesFinished {
-                            job_id,
-                            result: Err(format!("failed to spawn find worker: {error}")),
-                        });
-                        BackgroundExecution::Continue
-                    }
-                }
-            }
-        }
-        BackgroundCommand::BuildTree {
-            root,
-            max_depth,
-            max_entries,
-        } => {
-            #[cfg(test)]
-            {
-                let entries = build_tree_entries(&root, max_depth, max_entries);
-                if event_tx
-                    .send(BackgroundEvent::TreeReady { root, entries })
-                    .is_ok()
-                {
-                    BackgroundExecution::Continue
-                } else {
-                    BackgroundExecution::Stop
-                }
-            }
-            #[cfg(not(test))]
-            {
-                let worker_event_tx = event_tx.clone();
-                let worker_root = root.clone();
-                match thread::Builder::new()
-                    .name(String::from("rc-tree"))
-                    .spawn(move || {
-                        let entries = build_tree_entries(&worker_root, max_depth, max_entries);
-                        let _ = worker_event_tx.send(BackgroundEvent::TreeReady {
-                            root: worker_root,
-                            entries,
-                        });
-                    }) {
-                    Ok(handle) => BackgroundExecution::SpawnTree(RunningTreeTask { handle }),
-                    Err(_error) => {
-                        let entries = build_tree_entries(&root, max_depth, max_entries);
-                        if event_tx
-                            .send(BackgroundEvent::TreeReady { root, entries })
-                            .is_ok()
-                        {
-                            BackgroundExecution::Continue
-                        } else {
-                            BackgroundExecution::Stop
-                        }
-                    }
-                }
-            }
-        }
-        BackgroundCommand::Shutdown => BackgroundExecution::Stop,
-    }
-}
-
-fn run_find_search(
-    event_tx: &Sender<BackgroundEvent>,
-    job_id: JobId,
-    query: String,
-    base_dir: PathBuf,
-    max_results: usize,
-    cancel_flag: &AtomicBool,
-    pause_flag: &AtomicBool,
-) -> bool {
-    if event_tx
-        .send(BackgroundEvent::FindEntriesStarted { job_id })
-        .is_err()
-    {
-        return false;
-    }
-
-    let result = stream_find_entries(
-        &base_dir,
-        &query,
-        max_results,
-        cancel_flag,
-        pause_flag,
-        FIND_EVENT_CHUNK_SIZE,
-        |entries| {
-            event_tx
-                .send(BackgroundEvent::FindEntriesChunk { job_id, entries })
-                .is_ok()
-        },
-    );
-
-    event_tx
-        .send(BackgroundEvent::FindEntriesFinished { job_id, result })
-        .is_ok()
-}
-
-fn stream_find_entries<F>(
-    base_dir: &Path,
-    query: &str,
-    max_results: usize,
-    cancel_flag: &AtomicBool,
-    pause_flag: &AtomicBool,
-    chunk_size: usize,
-    mut emit_chunk: F,
-) -> Result<(), String>
-where
-    F: FnMut(Vec<FindResultEntry>) -> bool,
-{
-    if max_results == 0 {
-        return Ok(());
-    }
-
-    let normalized_query = query.trim().to_lowercase();
-    if normalized_query.is_empty() {
-        return Ok(());
-    }
-
-    let wildcard_query = normalized_query.contains('*') || normalized_query.contains('?');
-    let chunk_size = chunk_size.max(1);
-    let mut emitted = Vec::new();
-    let mut matched = 0usize;
-    let mut stack = vec![base_dir.to_path_buf()];
-
-    while let Some(dir) = stack.pop() {
-        wait_for_find_resume(cancel_flag, pause_flag)?;
-
-        let read_dir = match fs::read_dir(&dir) {
-            Ok(read_dir) => read_dir,
-            Err(_) => continue,
-        };
-        let mut child_dirs = Vec::new();
-
-        for entry in read_dir.flatten() {
-            wait_for_find_resume(cancel_flag, pause_flag)?;
-
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = file_type.is_dir();
-
-            if query_matches_entry(&name, &normalized_query, wildcard_query) {
-                emitted.push(FindResultEntry {
-                    path: path.clone(),
-                    is_dir,
-                });
-                matched = matched.saturating_add(1);
-
-                if emitted.len() >= chunk_size && !emit_chunk(std::mem::take(&mut emitted)) {
-                    return Err(String::from("background event channel disconnected"));
-                }
-
-                if matched >= max_results {
-                    if !emitted.is_empty() && !emit_chunk(std::mem::take(&mut emitted)) {
-                        return Err(String::from("background event channel disconnected"));
-                    }
-                    return Ok(());
-                }
-            }
-
-            if is_dir {
-                child_dirs.push(path);
-            }
-        }
-
-        child_dirs.sort_by_cached_key(|left| path_sort_key(left));
-        for child_dir in child_dirs.into_iter().rev() {
-            stack.push(child_dir);
-        }
-    }
-
-    if !emitted.is_empty() && !emit_chunk(emitted) {
-        return Err(String::from("background event channel disconnected"));
-    }
-    Ok(())
-}
-
-fn wait_for_find_resume(cancel_flag: &AtomicBool, pause_flag: &AtomicBool) -> Result<(), String> {
-    loop {
-        if cancel_flag.load(AtomicOrdering::Relaxed) {
-            return Err(String::from(JOB_CANCELED_MESSAGE));
-        }
-        if !pause_flag.load(AtomicOrdering::Relaxed) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn query_matches_entry(name: &str, normalized_query: &str, wildcard_query: bool) -> bool {
-    let normalized_name = name.to_lowercase();
-    if wildcard_query {
-        wildcard_match(&normalized_name, normalized_query)
-    } else {
-        normalized_name.contains(normalized_query)
-    }
-}
-
-fn wildcard_match(text: &str, pattern: &str) -> bool {
-    let text: Vec<char> = text.chars().collect();
-    let pattern: Vec<char> = pattern.chars().collect();
-    let mut text_index = 0usize;
-    let mut pattern_index = 0usize;
-    let mut star_index: Option<usize> = None;
-    let mut match_index = 0usize;
-
-    while text_index < text.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == '?' || pattern[pattern_index] == text[text_index])
-        {
-            text_index += 1;
-            pattern_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == '*' {
-            star_index = Some(pattern_index);
-            pattern_index += 1;
-            match_index = text_index;
-        } else if let Some(star) = star_index {
-            pattern_index = star + 1;
-            match_index += 1;
-            text_index = match_index;
-        } else {
-            return false;
-        }
-    }
-
-    while pattern_index < pattern.len() && pattern[pattern_index] == '*' {
-        pattern_index += 1;
-    }
-
-    pattern_index == pattern.len()
-}
-
 #[derive(Debug)]
 pub struct AppState {
     settings: Settings,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     pub status_line: String,
+    status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
     pub overwrite_policy: OverwritePolicy,
@@ -2230,14 +1664,14 @@ pub struct AppState {
     paused_find_results: Option<FindResultsState>,
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
-    pending_background_commands: Vec<BackgroundCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
-    panel_refresh_cancel_flags: [Option<Arc<AtomicBool>>; 2],
+    panel_refresh_job_ids: [Option<JobId>; 2],
     panel_refresh_request_ids: [u64; 2],
     next_panel_refresh_request_id: u64,
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
+    deferred_persist_settings_request: Option<JobRequest>,
     panelize_presets: Vec<String>,
     keybinding_hints: KeybindingHints,
     keymap_unknown_actions: usize,
@@ -2259,6 +1693,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             status_line: String::from("Press F1 for help"),
+            status_expires_at: None,
             last_dialog_result: None,
             jobs: JobManager::new(),
             overwrite_policy: settings.configuration.default_overwrite_policy,
@@ -2274,14 +1709,14 @@ impl AppState {
             paused_find_results: None,
             pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
-            pending_background_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
-            panel_refresh_cancel_flags: std::array::from_fn(|_| None),
+            panel_refresh_job_ids: [None; 2],
             panel_refresh_request_ids: [0; 2],
             next_panel_refresh_request_id: 1,
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
             pending_panelize_revert: None,
+            deferred_persist_settings_request: None,
             panelize_presets: settings.configuration.panelize_presets.clone(),
             keybinding_hints: KeybindingHints::default(),
             keymap_unknown_actions: 0,
@@ -2334,6 +1769,15 @@ impl AppState {
         self.settings.layout.show_panel_totals
     }
 
+    fn status_message_timeout(&self) -> Option<Duration> {
+        let seconds = self.settings.layout.status_message_timeout_seconds;
+        if seconds == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(seconds))
+        }
+    }
+
     pub fn jobs_dialog_size(&self) -> (u16, u16) {
         (
             self.settings.layout.jobs_dialog_width,
@@ -2365,6 +1809,10 @@ impl AppState {
             .min(self.hotlist.len().saturating_sub(1));
         self.panelize_presets = self.settings.configuration.panelize_presets.clone();
         self.active_skin_name = self.settings.appearance.skin.clone();
+        self.status_expires_at = self
+            .status_message_timeout()
+            .and_then(|timeout| Instant::now().checked_add(timeout))
+            .filter(|_| !self.status_line.is_empty());
 
         let sort_mode = self.default_panel_sort_mode();
         let show_hidden_files = self.settings.panel_options.show_hidden_files;
@@ -2461,8 +1909,7 @@ impl AppState {
             return EditSelectionResult::OpenedExternal;
         }
 
-        self.pending_background_commands
-            .push(BackgroundCommand::LoadViewer { path });
+        self.queue_worker_job_request(JobRequest::LoadViewer { path });
         EditSelectionResult::OpenedInternal
     }
 
@@ -2474,10 +1921,9 @@ impl AppState {
             return false;
         }
 
-        self.pending_background_commands
-            .push(BackgroundCommand::LoadViewer {
-                path: entry.path.clone(),
-            });
+        self.queue_worker_job_request(JobRequest::LoadViewer {
+            path: entry.path.clone(),
+        });
         true
     }
 
@@ -2552,6 +1998,25 @@ impl AppState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = message.into();
+        self.status_expires_at = self
+            .status_message_timeout()
+            .and_then(|timeout| Instant::now().checked_add(timeout))
+            .filter(|_| !self.status_line.is_empty());
+    }
+
+    pub fn expire_status_line(&mut self) {
+        self.expire_status_line_at(Instant::now());
+    }
+
+    fn expire_status_line_at(&mut self, now: Instant) {
+        let Some(expires_at) = self.status_expires_at else {
+            return;
+        };
+        if now < expires_at {
+            return;
+        }
+        self.status_line.clear();
+        self.status_expires_at = None;
     }
 
     pub fn set_available_skins(&mut self, mut skins: Vec<String>) {
@@ -3176,275 +2641,6 @@ impl AppState {
         replacements
     }
 
-    fn queue_panel_refresh(&mut self, panel: ActivePanel) {
-        let panel_index = panel.index();
-        if let Some(cancel_flag) = self.panel_refresh_cancel_flags[panel_index].as_ref() {
-            cancel_flag.store(true, AtomicOrdering::Relaxed);
-        }
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        self.panel_refresh_cancel_flags[panel_index] = Some(cancel_flag.clone());
-        let request_id = self.next_panel_refresh_request_id;
-        self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
-        self.panel_refresh_request_ids[panel_index] = request_id;
-
-        let panel_state = &mut self.panels[panel.index()];
-        panel_state.loading = true;
-        self.pending_background_commands
-            .push(BackgroundCommand::RefreshPanel {
-                panel,
-                cwd: panel_state.cwd.clone(),
-                source: panel_state.source.clone(),
-                sort_mode: panel_state.sort_mode,
-                show_hidden_files: panel_state.show_hidden_files,
-                request_id,
-                cancel_flag,
-            });
-    }
-
-    pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
-        std::mem::take(&mut self.pending_worker_commands)
-    }
-
-    pub fn take_pending_background_commands(&mut self) -> Vec<BackgroundCommand> {
-        std::mem::take(&mut self.pending_background_commands)
-    }
-
-    pub fn take_pending_external_edit_requests(&mut self) -> Vec<ExternalEditRequest> {
-        std::mem::take(&mut self.pending_external_edit_requests)
-    }
-
-    pub fn handle_job_event(&mut self, event: JobEvent) {
-        if let JobEvent::Finished { id, .. } = &event {
-            self.find_pause_flags.remove(id);
-        }
-        self.jobs.handle_event(&event);
-        self.clamp_jobs_cursor();
-        match event {
-            JobEvent::Started { id } => {
-                if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
-                    self.set_status(format!("Job #{id} started: {}", job.summary));
-                } else {
-                    self.set_status(format!("Job #{id} started"));
-                }
-            }
-            JobEvent::Progress { id, progress } => {
-                let percent = progress.percent();
-                let path_label = progress
-                    .current_path
-                    .as_deref()
-                    .and_then(Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| String::from("-"));
-                self.set_status(format!(
-                    "Job #{id} {percent}% | items {}/{} | bytes {}/{} | {path_label}",
-                    progress.items_done,
-                    progress.items_total,
-                    progress.bytes_done,
-                    progress.bytes_total
-                ));
-            }
-            JobEvent::Finished { id, result } => match result {
-                Ok(()) => {
-                    let should_refresh = self.jobs.job(id).is_some_and(|job| {
-                        matches!(job.kind, JobKind::Copy | JobKind::Move | JobKind::Delete)
-                    });
-                    if should_refresh {
-                        self.refresh_panels();
-                    }
-                    if let Some(job) = self.jobs.job(id) {
-                        self.set_status(format!("Job #{id} finished: {}", job.summary));
-                    } else {
-                        self.set_status(format!("Job #{id} finished"));
-                    }
-                }
-                Err(error) => {
-                    if error == JOB_CANCELED_MESSAGE {
-                        self.set_status(format!("Job #{id} canceled"));
-                    } else {
-                        self.set_status(format!("Job #{id} failed: {error}"));
-                    }
-                }
-            },
-        }
-    }
-
-    pub fn handle_background_event(&mut self, event: BackgroundEvent) {
-        match event {
-            BackgroundEvent::PanelRefreshed {
-                panel,
-                cwd,
-                source,
-                sort_mode,
-                request_id,
-                result,
-            } => {
-                if self.panel_refresh_request_ids[panel.index()] != request_id {
-                    return;
-                }
-                let panel_state = &self.panels[panel.index()];
-                let still_current = panel_state.cwd == cwd
-                    && panel_state.source == source
-                    && panel_state.sort_mode == sort_mode;
-                if !still_current {
-                    return;
-                }
-
-                let focus_target =
-                    self.pending_panel_focus
-                        .as_ref()
-                        .and_then(|(pending_panel, path)| {
-                            (*pending_panel == panel).then(|| path.clone())
-                        });
-                let mut clear_focus_target = false;
-                let mut focus_status = None;
-                {
-                    let panel_state = &mut self.panels[panel.index()];
-                    panel_state.loading = false;
-                    match result {
-                        Ok(entries) => {
-                            panel_state.apply_entries(entries);
-                            if self
-                                .pending_panelize_revert
-                                .as_ref()
-                                .is_some_and(|(pending_panel, _)| *pending_panel == panel)
-                            {
-                                self.pending_panelize_revert = None;
-                            }
-                            if let Some(target_path) = focus_target {
-                                clear_focus_target = true;
-                                if let Some(index) = panel_state
-                                    .entries
-                                    .iter()
-                                    .position(|entry| entry.path == target_path)
-                                {
-                                    panel_state.cursor = index;
-                                    focus_status =
-                                        Some(format!("Located {}", target_path.to_string_lossy()));
-                                } else {
-                                    focus_status = Some(format!(
-                                        "Opened {} (target not found in listing)",
-                                        panel_state.cwd.to_string_lossy()
-                                    ));
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let is_panelize = source.is_panelized();
-                            if let Some((pending_panel, revert_source)) =
-                                self.pending_panelize_revert.take()
-                            {
-                                if pending_panel == panel {
-                                    panel_state.source = revert_source;
-                                } else {
-                                    self.pending_panelize_revert =
-                                        Some((pending_panel, revert_source));
-                                }
-                            }
-                            if error != PANEL_REFRESH_CANCELED_MESSAGE {
-                                if is_panelize {
-                                    self.set_status(format!("Panelize failed: {error}"));
-                                } else {
-                                    self.set_status(format!("Panel refresh failed: {error}"));
-                                }
-                            }
-                        }
-                    }
-                }
-                self.panel_refresh_cancel_flags[panel.index()] = None;
-                if clear_focus_target {
-                    self.pending_panel_focus = None;
-                }
-                if let Some(focus_status) = focus_status {
-                    self.set_status(focus_status);
-                }
-            }
-            BackgroundEvent::ViewerLoaded { path, result } => match result {
-                Ok(viewer) => {
-                    self.routes.push(Route::Viewer(viewer));
-                    self.set_status(format!("Opened viewer {}", path.to_string_lossy()));
-                }
-                Err(error) => {
-                    self.set_status(format!("Viewer open failed: {error}"));
-                }
-            },
-            BackgroundEvent::FindEntriesStarted { job_id } => {
-                self.handle_job_event(JobEvent::Started { id: job_id });
-                if let Some(results) = self.find_results_by_job_id_mut(job_id) {
-                    results.loading = true;
-                }
-            }
-            BackgroundEvent::FindEntriesChunk { job_id, entries } => {
-                let status_message = if let Some(results) = self.find_results_by_job_id_mut(job_id)
-                {
-                    let was_empty = results.entries.is_empty();
-                    results.entries.extend(entries);
-                    if was_empty && !results.entries.is_empty() {
-                        results.cursor = 0;
-                    }
-                    Some(format!(
-                        "Finding '{}': {} result(s)...",
-                        results.query,
-                        results.entries.len()
-                    ))
-                } else {
-                    None
-                };
-                if let Some(status_message) = status_message {
-                    self.set_status(status_message);
-                }
-            }
-            BackgroundEvent::FindEntriesFinished { job_id, result } => {
-                if let Some(results) = self.find_results_by_job_id_mut(job_id) {
-                    results.loading = false;
-                }
-                let completed_successfully = result.is_ok();
-                self.handle_job_event(JobEvent::Finished { id: job_id, result });
-                let status_message = if completed_successfully {
-                    self.find_results_by_job_id(job_id).map(|results| {
-                        format!(
-                            "Find '{}': {} result(s)",
-                            results.query,
-                            results.entries.len()
-                        )
-                    })
-                } else {
-                    None
-                };
-                if let Some(status_message) = status_message {
-                    self.set_status(status_message);
-                }
-            }
-            BackgroundEvent::TreeReady { root, entries } => {
-                let mut replaced = false;
-                for route in self.routes.iter_mut().rev() {
-                    if let Route::Tree(tree) = route
-                        && tree.root == root
-                    {
-                        tree.entries = entries.clone();
-                        tree.cursor = 0;
-                        tree.loading = false;
-                        replaced = true;
-                        break;
-                    }
-                }
-                if replaced {
-                    self.set_status(format!("Opened directory tree ({})", entries.len()));
-                }
-            }
-        }
-    }
-
-    pub fn handle_job_dispatch_failure(&mut self, id: JobId, error: String) {
-        self.handle_job_event(JobEvent::Finished {
-            id,
-            result: Err(error),
-        });
-    }
-
-    pub fn jobs_status_counts(&self) -> JobStatusCounts {
-        self.jobs.status_counts()
-    }
-
     fn open_help_screen(&mut self) {
         let context = self.key_context();
         if let Some(Route::Help(help)) = self.routes.last_mut() {
@@ -3581,6 +2777,13 @@ impl AppState {
                     "Show panel totals",
                     bool_label(self.settings.layout.show_panel_totals),
                     SettingsEntryAction::ToggleLayoutShowPanelTotals,
+                ),
+                SettingsEntry::new(
+                    "Status message timeout",
+                    status_message_timeout_label(
+                        self.settings.layout.status_message_timeout_seconds,
+                    ),
+                    SettingsEntryAction::CycleLayoutStatusMessageTimeout,
                 ),
             ],
             SettingsCategory::PanelOptions => vec![
@@ -3798,6 +3001,17 @@ impl AppState {
                 self.set_status(format!(
                     "Show panel totals: {}",
                     bool_label(self.settings.layout.show_panel_totals)
+                ));
+            }
+            SettingsEntryAction::CycleLayoutStatusMessageTimeout => {
+                let next = next_status_message_timeout_seconds(
+                    self.settings.layout.status_message_timeout_seconds,
+                );
+                self.settings.layout.status_message_timeout_seconds = next;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Status message timeout: {}",
+                    status_message_timeout_label(next)
                 ));
             }
             SettingsEntryAction::TogglePanelShowHiddenFiles => {
@@ -4355,12 +3569,11 @@ impl AppState {
         let root = self.active_panel().cwd.clone();
         self.routes
             .push(Route::Tree(TreeState::loading(root.clone())));
-        self.pending_background_commands
-            .push(BackgroundCommand::BuildTree {
-                root,
-                max_depth: self.settings.advanced.tree_max_depth,
-                max_entries: self.settings.advanced.tree_max_entries,
-            });
+        self.queue_worker_job_request(JobRequest::BuildTree {
+            root,
+            max_depth: self.settings.advanced.tree_max_depth,
+            max_entries: self.settings.advanced.tree_max_entries,
+        });
         self.set_status("Loading directory tree...");
     }
 
@@ -5273,89 +4486,6 @@ impl AppState {
         self.set_status("Choose skin");
     }
 
-    fn queue_copy_or_move_job(
-        &mut self,
-        kind: TransferKind,
-        sources: Vec<PathBuf>,
-        destination_dir: PathBuf,
-        overwrite: OverwritePolicy,
-    ) {
-        let request = match kind {
-            TransferKind::Copy => JobRequest::Copy {
-                sources,
-                destination_dir,
-                overwrite,
-            },
-            TransferKind::Move => JobRequest::Move {
-                sources,
-                destination_dir,
-                overwrite,
-            },
-        };
-        let summary = request.summary();
-        let worker_job = self.jobs.enqueue(request);
-        let job_id = worker_job.id;
-        self.pending_worker_commands
-            .push(WorkerCommand::Run(worker_job));
-        self.set_status(format!("Queued job #{job_id}: {summary}"));
-    }
-
-    fn cancel_latest_job(&mut self) {
-        let selected_id = if matches!(self.top_route(), Route::Jobs) {
-            self.selected_job_record().map(|job| job.id)
-        } else {
-            None
-        };
-        let Some(job_id) = selected_id.or_else(|| self.jobs.newest_cancelable_job_id()) else {
-            self.set_status("No active job to cancel");
-            return;
-        };
-
-        if self.request_cancel_for_job(job_id) {
-            self.set_status(format!("Cancellation requested for job #{job_id}"));
-        } else {
-            self.set_status(format!("Job #{job_id} cannot be canceled"));
-        }
-    }
-
-    fn request_cancel_for_job(&mut self, job_id: JobId) -> bool {
-        if !self.jobs.request_cancel(job_id) {
-            return false;
-        }
-        let is_worker_job = self
-            .jobs
-            .job(job_id)
-            .is_some_and(|job| !matches!(job.kind, JobKind::Find));
-        if is_worker_job {
-            self.pending_worker_commands
-                .push(WorkerCommand::Cancel(job_id));
-        }
-        true
-    }
-
-    fn request_cancel_for_all_jobs(&mut self) {
-        let cancelable_job_ids: Vec<JobId> = self
-            .jobs
-            .jobs()
-            .iter()
-            .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
-            .map(|job| job.id)
-            .collect();
-        for job_id in cancelable_job_ids {
-            let _ = self.request_cancel_for_job(job_id);
-        }
-    }
-
-    fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
-        let request = JobRequest::Delete { targets };
-        let summary = request.summary();
-        let worker_job = self.jobs.enqueue(request);
-        let job_id = worker_job.id;
-        self.pending_worker_commands
-            .push(WorkerCommand::Run(worker_job));
-        self.set_status(format!("Queued job #{job_id}: {summary}"));
-    }
-
     fn finish_dialog(&mut self, result: DialogResult) {
         let pending = self.pending_dialog_action.take();
         match (pending, result) {
@@ -5394,18 +4524,7 @@ impl AppState {
                 } else {
                     base_dir.join(input_path)
                 };
-                match fs::create_dir(&destination) {
-                    Ok(()) => {
-                        self.refresh_active_panel();
-                        self.set_status(format!(
-                            "Created directory {}",
-                            destination.to_string_lossy()
-                        ));
-                    }
-                    Err(error) => {
-                        self.set_status(format!("Mkdir failed: {error}"));
-                    }
-                }
+                self.queue_worker_job_request(JobRequest::Mkdir { path: destination });
             }
             (Some(PendingDialogAction::Mkdir { .. }), DialogResult::Canceled) => {
                 self.set_status("Mkdir canceled");
@@ -5428,15 +4547,10 @@ impl AppState {
                     self.set_status("Rename skipped: name unchanged");
                     return;
                 }
-                match fs::rename(&source, &destination) {
-                    Ok(()) => {
-                        self.refresh_panels();
-                        self.set_status(format!("Renamed to {}", destination.to_string_lossy()));
-                    }
-                    Err(error) => {
-                        self.set_status(format!("Rename failed: {error}"));
-                    }
-                }
+                self.queue_worker_job_request(JobRequest::Rename {
+                    source,
+                    destination,
+                });
             }
             (Some(PendingDialogAction::RenameEntry { .. }), DialogResult::Canceled) => {
                 self.set_status("Rename canceled");
@@ -5556,28 +4670,20 @@ impl AppState {
                 let request = JobRequest::Find {
                     query: query.clone(),
                     base_dir: base_dir.clone(),
+                    max_results: self.settings.advanced.max_find_results,
                 };
-                let summary = request.summary();
-                let worker_job = self.jobs.enqueue(request);
+                let mut worker_job = self.jobs.enqueue(request);
                 let job_id = worker_job.id;
                 let pause_flag = Arc::new(AtomicBool::new(false));
                 self.find_pause_flags.insert(job_id, pause_flag.clone());
+                worker_job.set_find_pause_flag(pause_flag);
                 self.routes
                     .push(Route::FindResults(FindResultsState::loading(
                         job_id,
                         query.clone(),
                         base_dir.clone(),
                     )));
-                self.pending_background_commands
-                    .push(BackgroundCommand::FindEntries {
-                        job_id,
-                        query: query.clone(),
-                        base_dir,
-                        max_results: self.settings.advanced.max_find_results,
-                        cancel_flag: worker_job.cancel_flag(),
-                        pause_flag,
-                    });
-                self.set_status(format!("Queued job #{job_id}: {summary}"));
+                self.queue_worker_job(worker_job);
             }
             (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
@@ -5851,7 +4957,11 @@ fn find_backward_wrap(content: &str, query: &str, start: usize) -> Option<usize>
         .map(|relative| start + relative)
 }
 
-fn build_tree_entries(root: &Path, max_depth: usize, max_entries: usize) -> Vec<TreeEntry> {
+pub(crate) fn build_tree_entries(
+    root: &Path,
+    max_depth: usize,
+    max_entries: usize,
+) -> Vec<TreeEntry> {
     if max_entries == 0 {
         return Vec::new();
     }
@@ -5998,6 +5108,24 @@ fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
+fn status_message_timeout_label(seconds: u64) -> String {
+    if seconds == 0 {
+        String::from("off")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn next_status_message_timeout_seconds(current: u64) -> u64 {
+    const PRESETS: [u64; 6] = [0, 5, 10, 15, 30, 60];
+    for preset in PRESETS {
+        if preset > current {
+            return preset;
+        }
+    }
+    PRESETS[0]
+}
+
 fn panelize_preset_selected_index(initial_command: &str, preset_commands: &[String]) -> usize {
     preset_commands
         .iter()
@@ -6018,7 +5146,7 @@ fn read_entries_with_visibility(
     read_entries_with_visibility_cancel(dir, sort_mode, show_hidden_files, None)
 }
 
-fn read_entries_with_visibility_cancel(
+pub(crate) fn read_entries_with_visibility_cancel(
     dir: &Path,
     sort_mode: SortMode,
     show_hidden_files: bool,
@@ -6061,14 +5189,36 @@ fn read_panelized_entries(
     read_panelized_entries_with_cancel(base_dir, command, sort_mode, None)
 }
 
-fn read_panelized_entries_with_cancel(
+pub(crate) fn read_panelized_entries_with_cancel(
     base_dir: &Path,
     command: &str,
     sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
+    let process_backend = LocalProcessBackend;
+    read_panelized_entries_with_process_backend(
+        base_dir,
+        command,
+        sort_mode,
+        cancel_flag,
+        &process_backend,
+    )
+}
+
+pub(crate) fn read_panelized_entries_with_process_backend(
+    base_dir: &Path,
+    command: &str,
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+    process_backend: &dyn ProcessBackend,
+) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
-    let output = run_shell_command(base_dir, command, cancel_flag)?;
+    let output = process_backend.run_shell_command(
+        base_dir,
+        command,
+        cancel_flag,
+        PANEL_REFRESH_CANCELED_MESSAGE,
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
@@ -6104,7 +5254,7 @@ fn read_panelized_entries_with_cancel(
     Ok(entries)
 }
 
-fn read_panelized_paths(
+pub(crate) fn read_panelized_paths(
     base_dir: &Path,
     paths: &[PathBuf],
     sort_mode: SortMode,
@@ -6308,132 +5458,15 @@ fn non_empty_env_value(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-#[cfg(unix)]
-fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Child> {
-    use std::os::unix::process::CommandExt;
-
-    Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-}
-
-#[cfg(windows)]
-fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Child> {
-    Command::new("cmd")
-        .arg("/C")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-}
-
-#[cfg(unix)]
-fn terminate_shell_command(child: &mut std::process::Child) {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
-    let Ok(pid) = i32::try_from(child.id()) else {
-        let _ = child.kill();
-        return;
-    };
-
-    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
-}
-
-#[cfg(windows)]
-fn terminate_shell_command(child: &mut std::process::Child) {
-    let pid = child.id().to_string();
-    let status = Command::new("taskkill")
-        .arg("/PID")
-        .arg(&pid)
-        .arg("/T")
-        .arg("/F")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    if !matches!(status, Ok(exit_status) if exit_status.success()) {
-        let _ = child.kill();
-    }
-}
-
-fn run_shell_command(
-    cwd: &Path,
-    command: &str,
-    cancel_flag: Option<&AtomicBool>,
-) -> io::Result<std::process::Output> {
-    let mut child = spawn_shell_command(cwd, command)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture command stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture command stderr"))?;
-
-    let stdout_handle = thread::spawn(move || {
-        let mut reader = stdout;
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer)?;
-        Ok(buffer)
-    });
-    let stderr_handle = thread::spawn(move || {
-        let mut reader = stderr;
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer)?;
-        Ok(buffer)
-    });
-
-    loop {
-        if cancel_flag.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed)) {
-            terminate_shell_command(&mut child);
-            let _ = child.wait();
-            let _ = stdout_handle.join();
-            let _ = stderr_handle.join();
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                PANEL_REFRESH_CANCELED_MESSAGE,
-            ));
-        }
-
-        if let Some(status) = child.try_wait()? {
-            let stdout = join_command_output_reader(stdout_handle, "stdout")?;
-            let stderr = join_command_output_reader(stderr_handle, "stderr")?;
-            return Ok(std::process::Output {
-                status,
-                stdout,
-                stderr,
-            });
-        }
-
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn join_command_output_reader(
-    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stream: &str,
-) -> io::Result<Vec<u8>> {
-    handle
-        .join()
-        .map_err(|_| io::Error::other(format!("command {stream} reader thread panicked")))?
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::keymap::KeyModifiers;
     use std::path::Path;
+    use std::process::Output;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::thread;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
@@ -6448,27 +5481,164 @@ mod tests {
         }
     }
 
+    struct PermissionDeniedProcessBackend;
+
+    impl ProcessBackend for PermissionDeniedProcessBackend {
+        fn run_shell_command(
+            &self,
+            _cwd: &Path,
+            _command: &str,
+            _cancel_flag: Option<&AtomicBool>,
+            _canceled_message: &str,
+        ) -> io::Result<Output> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        }
+    }
+
     fn drain_background(app: &mut AppState) {
         loop {
-            let commands = app.take_pending_background_commands();
-            if commands.is_empty() {
+            let mut progressed = false;
+
+            let worker_commands = app.take_pending_worker_commands();
+            if !worker_commands.is_empty() {
+                progressed = true;
+            }
+            for command in worker_commands {
+                match command {
+                    WorkerCommand::Run(job) => {
+                        let job = *job;
+                        let job_id = job.id;
+                        let (event_tx, event_rx) = std::sync::mpsc::channel();
+                        match &job.request {
+                            JobRequest::RefreshPanel {
+                                panel,
+                                cwd,
+                                source,
+                                sort_mode,
+                                show_hidden_files,
+                                request_id,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let cancel_flag = job.cancel_flag();
+                                app.handle_background_event(refresh_panel_event(
+                                    *panel,
+                                    cwd.clone(),
+                                    source.clone(),
+                                    *sort_mode,
+                                    *show_hidden_files,
+                                    *request_id,
+                                    cancel_flag.as_ref(),
+                                ));
+                                let _ = event_tx.send(JobEvent::Finished {
+                                    id: job_id,
+                                    result: Ok(()),
+                                });
+                            }
+                            JobRequest::Find {
+                                query,
+                                base_dir,
+                                max_results,
+                            } => {
+                                let query = query.clone();
+                                let base_dir = base_dir.clone();
+                                let max_results = *max_results;
+                                let cancel_flag = job.cancel_flag();
+                                let pause_flag = job
+                                    .find_pause_flag()
+                                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
+                                let result = run_find_entries(
+                                    &base_dir,
+                                    &query,
+                                    max_results,
+                                    cancel_flag.as_ref(),
+                                    pause_flag.as_ref(),
+                                    |entries| {
+                                        chunk_tx
+                                            .send(BackgroundEvent::FindEntriesChunk {
+                                                job_id,
+                                                entries,
+                                            })
+                                            .is_ok()
+                                    },
+                                )
+                                .map_err(JobError::from_message);
+                                for event in chunk_rx.try_iter() {
+                                    app.handle_background_event(event);
+                                }
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            JobRequest::LoadViewer { path } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let viewer_result = ViewerState::open(path.clone())
+                                    .map_err(|error| error.to_string());
+                                app.handle_background_event(BackgroundEvent::ViewerLoaded {
+                                    path: path.clone(),
+                                    result: viewer_result.clone(),
+                                });
+                                let result =
+                                    viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            JobRequest::BuildTree {
+                                root,
+                                max_depth,
+                                max_entries,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                app.handle_background_event(build_tree_ready_event(
+                                    root.clone(),
+                                    *max_depth,
+                                    *max_entries,
+                                ));
+                                let _ = event_tx.send(JobEvent::Finished {
+                                    id: job_id,
+                                    result: Ok(()),
+                                });
+                            }
+                            _ => {
+                                execute_worker_job(job, &event_tx);
+                            }
+                        }
+                        for event in event_rx.try_iter() {
+                            app.handle_job_event(event);
+                        }
+                    }
+                    WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {}
+                }
+            }
+
+            if !progressed {
                 break;
             }
-            for command in commands {
-                let (event_tx, event_rx) = std::sync::mpsc::channel();
-                match execute_background_command(command, &event_tx) {
-                    BackgroundExecution::Continue => {}
-                    #[cfg(not(test))]
-                    BackgroundExecution::SpawnFind(task) => {
-                        let _ = task.handle.join();
-                    }
-                    BackgroundExecution::Stop => return,
-                }
-                for event in event_rx.try_iter() {
-                    app.handle_background_event(event);
-                }
-            }
         }
+    }
+
+    #[test]
+    fn panelized_entries_allow_process_backend_injection() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panelize-backend-injection-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let backend = PermissionDeniedProcessBackend;
+        let error = read_panelized_entries_with_process_backend(
+            &root,
+            "ignored",
+            SortMode::default(),
+            None,
+            &backend,
+        )
+        .expect_err("injected process backend should drive panelize execution");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     fn move_menu_selection_to_label(app: &mut AppState, label: &str) {
@@ -6760,7 +5930,7 @@ mod tests {
     }
 
     #[test]
-    fn mkdir_dialog_creates_directory() {
+    fn mkdir_dialog_queues_mkdir_job() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -6778,10 +5948,69 @@ mod tests {
         app.apply(AppCommand::DialogAccept)
             .expect("mkdir dialog should submit");
 
-        assert!(
-            root.join("newdir").exists(),
-            "mkdir should create directory"
-        );
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "mkdir should enqueue one worker command");
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Mkdir { path } => {
+                    assert_eq!(path, &root.join("newdir"));
+                }
+                _ => panic!("expected mkdir request"),
+            },
+            _ => panic!("expected worker run command"),
+        }
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn rename_dialog_queues_rename_job() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-rename-dialog-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let source = root.join("before.txt");
+        fs::write(&source, "before").expect("must create source file");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let source_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == source)
+            .expect("source entry should be visible");
+        app.active_panel_mut().cursor = source_index;
+
+        app.apply(AppCommand::OpenConfirmDialog)
+            .expect("rename dialog should open");
+        for _ in 0.."before.txt".len() {
+            app.apply(AppCommand::DialogBackspace)
+                .expect("rename input should accept backspace");
+        }
+        for ch in "after.txt".chars() {
+            app.apply(AppCommand::DialogInputChar(ch))
+                .expect("rename input should accept typing");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("rename dialog should submit");
+
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "rename should enqueue one worker command");
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Rename {
+                    source,
+                    destination,
+                } => {
+                    assert_eq!(source, &root.join("before.txt"));
+                    assert_eq!(destination, &root.join("after.txt"));
+                }
+                _ => panic!("expected rename request"),
+            },
+            _ => panic!("expected worker run command"),
+        }
+
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
@@ -7172,6 +6401,178 @@ OpenJobs = f6
     }
 
     #[test]
+    fn status_line_expires_after_configured_timeout() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-status-timeout-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings.layout.status_message_timeout_seconds = 10;
+        app.set_status("Loading selected directory...");
+        let expires_at = app
+            .status_expires_at
+            .expect("status timeout should schedule expiration");
+
+        let before = expires_at
+            .checked_sub(Duration::from_millis(1))
+            .expect("status expiration should support sub-millisecond offset");
+        app.expire_status_line_at(before);
+        assert_eq!(
+            app.status_line, "Loading selected directory...",
+            "status should remain visible before configured timeout"
+        );
+
+        app.expire_status_line_at(expires_at);
+        assert!(
+            app.status_line.is_empty(),
+            "status should clear once configured timeout elapses"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn status_line_timeout_zero_disables_auto_clear() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-status-timeout-off-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings.layout.status_message_timeout_seconds = 0;
+        app.set_status("Loading selected directory...");
+        assert!(
+            app.status_expires_at.is_none(),
+            "timeout value 0 should disable status auto-clear"
+        );
+
+        let much_later = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .expect("clock should support future offset");
+        app.expire_status_line_at(much_later);
+        assert_eq!(
+            app.status_line, "Loading selected directory...",
+            "status should remain until replaced when timeout is disabled"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn persist_settings_job_coalesces_pending_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-persist-coalesce-pending-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let snapshot_one = app.persisted_settings_snapshot();
+        let mut snapshot_two = app.persisted_settings_snapshot();
+        snapshot_two.appearance.skin = String::from("coalesced-skin");
+
+        let first_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(snapshot_one),
+        });
+        let second_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(snapshot_two.clone()),
+        });
+        assert_eq!(first_id, second_id, "coalescing should reuse queued job id");
+
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "pending save setup should coalesce to one job"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::PersistSettings { paths, snapshot } => {
+                    assert_eq!(paths, &settings_paths);
+                    assert_eq!(snapshot.appearance.skin, snapshot_two.appearance.skin);
+                }
+                _ => panic!("expected persist settings request"),
+            },
+            _ => panic!("expected queued worker command"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn persist_settings_job_defers_latest_while_active() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-persist-coalesce-active-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let first_snapshot = app.persisted_settings_snapshot();
+        let mut second_snapshot = app.persisted_settings_snapshot();
+        second_snapshot.appearance.skin = String::from("deferred-skin");
+
+        let first_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths.clone(),
+            snapshot: Box::new(first_snapshot),
+        });
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "first save setup should be queued");
+
+        let deferred_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(second_snapshot.clone()),
+        });
+        assert_eq!(
+            deferred_id, first_id,
+            "deferred save should attach to active job"
+        );
+        assert!(
+            app.take_pending_worker_commands().is_empty(),
+            "deferred save should not enqueue until active job finishes"
+        );
+
+        app.handle_job_event(JobEvent::Finished {
+            id: first_id,
+            result: Ok(()),
+        });
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "latest deferred save should enqueue after finish"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::PersistSettings { snapshot, .. } => {
+                    assert_eq!(snapshot.appearance.skin, second_snapshot.appearance.skin);
+                }
+                _ => panic!("expected persist settings request"),
+            },
+            _ => panic!("expected queued worker command"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn learn_keys_capture_stores_chord_and_marks_settings_dirty() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7528,10 +6929,7 @@ OpenJobs = f6
         assert_eq!(request.editor_command, "nvim");
         assert_eq!(request.path, file_path);
         assert_eq!(request.cwd, root);
-        assert!(
-            app.take_pending_background_commands().is_empty(),
-            "external edit should not queue viewer load"
-        );
+        assert!(app.take_pending_worker_commands().is_empty());
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -7565,13 +6963,14 @@ OpenJobs = f6
             "no external editor request should be queued"
         );
 
-        let pending_background = app.take_pending_background_commands();
-        assert_eq!(pending_background.len(), 1, "viewer load should be queued");
-        match &pending_background[0] {
-            BackgroundCommand::LoadViewer { path } => {
-                assert_eq!(path, &file_path);
-            }
-            other => panic!("expected viewer load command, got {other:?}"),
+        let pending_worker = app.take_pending_worker_commands();
+        assert_eq!(pending_worker.len(), 1, "viewer load should be queued");
+        match &pending_worker[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::LoadViewer { path } => assert_eq!(path, &file_path),
+                other => panic!("expected load-viewer request, got {other:?}"),
+            },
+            other => panic!("expected worker run command, got {other:?}"),
         }
 
         fs::remove_dir_all(&root).expect("must remove temp root");
@@ -7879,7 +7278,7 @@ OpenJobs = f6
     }
 
     #[test]
-    fn find_cancel_uses_job_flag_without_worker_cancel_command() {
+    fn find_cancel_routes_through_worker_cancel_command() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -7898,17 +7297,23 @@ OpenJobs = f6
         }
         app.apply(AppCommand::DialogAccept)
             .expect("find dialog should submit");
-        assert!(
-            app.take_pending_worker_commands().is_empty(),
-            "find should not queue worker commands"
-        );
+        let queued_counts = app.jobs_status_counts();
+        assert_eq!(queued_counts.queued, 1, "find should enqueue a worker job");
 
         app.apply(AppCommand::CancelJob)
             .expect("cancel job should succeed");
+        let commands = app.take_pending_worker_commands();
         assert!(
-            app.take_pending_worker_commands().is_empty(),
-            "canceling find should not send worker cancel command"
+            commands
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::Cancel(_))),
+            "canceling find should enqueue worker cancel command"
         );
+        for command in commands {
+            if let WorkerCommand::Run(job) = command {
+                app.pending_worker_commands.push(WorkerCommand::Run(job));
+            }
+        }
 
         drain_background(&mut app);
         let find_job = app.jobs.last_job().expect("find job should be present");
@@ -7948,6 +7353,54 @@ OpenJobs = f6
         let find_job = app.jobs.last_job().expect("find job should be present");
         assert_eq!(find_job.kind, JobKind::Find);
         assert_eq!(find_job.status, JobStatus::Canceled);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn quit_cancels_find_but_keeps_persist_settings_job() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-quit-keep-persist-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let persist_job_id = app.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(app.persisted_settings_snapshot()),
+        });
+        let find_job_id = app.enqueue_worker_job_request(JobRequest::Find {
+            query: String::from("*.jpg"),
+            base_dir: root.clone(),
+            max_results: 64,
+        });
+
+        assert_eq!(
+            app.apply(AppCommand::Quit).expect("quit should succeed"),
+            ApplyResult::Quit
+        );
+
+        let pending_commands = app.take_pending_worker_commands();
+        assert!(
+            pending_commands.iter().any(|command| matches!(
+                command,
+                WorkerCommand::Cancel(job_id) if *job_id == find_job_id
+            )),
+            "quit should request cancellation for find jobs"
+        );
+        assert!(
+            !pending_commands.iter().any(|command| matches!(
+                command,
+                WorkerCommand::Cancel(job_id) if *job_id == persist_job_id
+            )),
+            "quit should not request cancellation for persist-settings jobs"
+        );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -8619,16 +8072,18 @@ OpenJobs = f6
 
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.refresh_active_panel();
-        assert_eq!(app.pending_background_commands.len(), 1);
+        assert_eq!(app.pending_worker_commands.len(), 1);
 
-        let (first_request_id, first_cancel_flag) = match &app.pending_background_commands[0] {
-            BackgroundCommand::RefreshPanel {
-                request_id,
-                cancel_flag,
-                ..
-            } => (*request_id, Arc::clone(cancel_flag)),
-            _ => panic!("expected panel refresh command"),
-        };
+        let (first_job_id, first_request_id, first_cancel_flag) =
+            match &app.pending_worker_commands[0] {
+                WorkerCommand::Run(job) => match &job.request {
+                    JobRequest::RefreshPanel { request_id, .. } => {
+                        (job.id, *request_id, job.cancel_flag())
+                    }
+                    _ => panic!("expected refresh-panel job request"),
+                },
+                _ => panic!("expected worker run command"),
+            };
         assert!(
             !first_cancel_flag.load(AtomicOrdering::Relaxed),
             "initial refresh should not be canceled"
@@ -8639,19 +8094,27 @@ OpenJobs = f6
             first_cancel_flag.load(AtomicOrdering::Relaxed),
             "second refresh should cancel the previous in-flight request"
         );
+        assert!(
+            app.pending_worker_commands.iter().any(
+                |command| matches!(command, WorkerCommand::Cancel(job_id) if *job_id == first_job_id)
+            ),
+            "second refresh should enqueue cancellation for the previous refresh job"
+        );
 
-        let (second_request_id, second_cancel_flag) = match app
-            .pending_background_commands
-            .last()
-            .expect("second refresh command should be queued")
-        {
-            BackgroundCommand::RefreshPanel {
-                request_id,
-                cancel_flag,
-                ..
-            } => (*request_id, Arc::clone(cancel_flag)),
-            _ => panic!("expected panel refresh command"),
-        };
+        let (second_request_id, second_cancel_flag) = app
+            .pending_worker_commands
+            .iter()
+            .rev()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                let JobRequest::RefreshPanel { request_id, .. } = &job.request else {
+                    return None;
+                };
+                Some((*request_id, job.cancel_flag()))
+            })
+            .expect("second refresh command should be queued");
         assert!(
             second_request_id > first_request_id,
             "request ids should advance for newer refresh commands"
@@ -8676,26 +8139,30 @@ OpenJobs = f6
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.refresh_active_panel();
         app.refresh_active_panel();
-        let commands = app.take_pending_background_commands();
-        assert_eq!(commands.len(), 2);
+        let commands = app.take_pending_worker_commands();
+        let refresh_requests: Vec<_> = commands
+            .into_iter()
+            .filter_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                match job.request {
+                    JobRequest::RefreshPanel {
+                        panel,
+                        cwd,
+                        source,
+                        sort_mode,
+                        request_id,
+                        ..
+                    } => Some((panel, cwd, source, sort_mode, request_id)),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(refresh_requests.len(), 2);
 
-        let first = commands[0].clone();
-        let second = commands[1].clone();
-        let (panel, cwd, source, sort_mode, first_request_id) = match first {
-            BackgroundCommand::RefreshPanel {
-                panel,
-                cwd,
-                source,
-                sort_mode,
-                request_id,
-                ..
-            } => (panel, cwd, source, sort_mode, request_id),
-            _ => panic!("expected panel refresh command"),
-        };
-        let second_request_id = match second {
-            BackgroundCommand::RefreshPanel { request_id, .. } => request_id,
-            _ => panic!("expected panel refresh command"),
-        };
+        let (panel, cwd, source, sort_mode, first_request_id) = refresh_requests[0].clone();
+        let second_request_id = refresh_requests[1].4;
 
         app.handle_background_event(BackgroundEvent::PanelRefreshed {
             panel,
@@ -8721,6 +8188,94 @@ OpenJobs = f6
         assert!(
             !app.panels[panel.index()].loading,
             "latest refresh result should clear loading state"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn refresh_dispatch_failure_clears_loading_state() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-refresh-dispatch-failure-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let panel_index = app.active_panel.index();
+        app.refresh_active_panel();
+        assert!(
+            app.panels[panel_index].loading,
+            "refresh should set panel loading before dispatch"
+        );
+
+        let refresh_job_id = app
+            .take_pending_worker_commands()
+            .into_iter()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+            })
+            .expect("refresh command should be queued");
+
+        app.handle_job_dispatch_failure(
+            refresh_job_id,
+            JobError::dispatch("runtime queue is full"),
+        );
+        assert!(
+            !app.panels[panel_index].loading,
+            "failed refresh dispatch should clear loading state"
+        );
+        assert_eq!(
+            app.panel_refresh_job_ids[panel_index], None,
+            "failed refresh dispatch should clear tracked refresh job id"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn refresh_cancel_before_start_clears_loading_state() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-refresh-cancel-before-start-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let panel_index = app.active_panel.index();
+        app.refresh_active_panel();
+        assert!(
+            app.panels[panel_index].loading,
+            "refresh should set panel loading before dispatch"
+        );
+
+        let refresh_job_id = app
+            .take_pending_worker_commands()
+            .into_iter()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+            })
+            .expect("refresh command should be queued");
+
+        app.handle_job_event(JobEvent::Finished {
+            id: refresh_job_id,
+            result: Err(JobError::canceled()),
+        });
+        assert!(
+            !app.panels[panel_index].loading,
+            "canceled refresh without background event should clear loading state"
+        );
+        assert_eq!(
+            app.panel_refresh_job_ids[panel_index], None,
+            "canceled refresh should clear tracked refresh job id"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
