@@ -2633,6 +2633,15 @@ impl AppState {
         self.panel_refresh_job_ids[panel_index] = Some(job_id);
     }
 
+    fn clear_panel_refresh_state_for_job(&mut self, id: JobId) {
+        for panel_index in 0..self.panel_refresh_job_ids.len() {
+            if self.panel_refresh_job_ids[panel_index].is_some_and(|job_id| job_id == id) {
+                self.panel_refresh_job_ids[panel_index] = None;
+                self.panels[panel_index].loading = false;
+            }
+        }
+    }
+
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
         std::mem::take(&mut self.pending_worker_commands)
     }
@@ -2793,6 +2802,9 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                    if is_refresh {
+                        self.clear_panel_refresh_state_for_job(id);
+                    }
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
                         results.loading = false;
                     }
@@ -8487,6 +8499,94 @@ OpenJobs = f6
         assert!(
             !app.panels[panel.index()].loading,
             "latest refresh result should clear loading state"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn refresh_dispatch_failure_clears_loading_state() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-refresh-dispatch-failure-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let panel_index = app.active_panel.index();
+        app.refresh_active_panel();
+        assert!(
+            app.panels[panel_index].loading,
+            "refresh should set panel loading before dispatch"
+        );
+
+        let refresh_job_id = app
+            .take_pending_worker_commands()
+            .into_iter()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+            })
+            .expect("refresh command should be queued");
+
+        app.handle_job_dispatch_failure(
+            refresh_job_id,
+            JobError::dispatch("runtime queue is full"),
+        );
+        assert!(
+            !app.panels[panel_index].loading,
+            "failed refresh dispatch should clear loading state"
+        );
+        assert_eq!(
+            app.panel_refresh_job_ids[panel_index], None,
+            "failed refresh dispatch should clear tracked refresh job id"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn refresh_cancel_before_start_clears_loading_state() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-refresh-cancel-before-start-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let panel_index = app.active_panel.index();
+        app.refresh_active_panel();
+        assert!(
+            app.panels[panel_index].loading,
+            "refresh should set panel loading before dispatch"
+        );
+
+        let refresh_job_id = app
+            .take_pending_worker_commands()
+            .into_iter()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+            })
+            .expect("refresh command should be queued");
+
+        app.handle_job_event(JobEvent::Finished {
+            id: refresh_job_id,
+            result: Err(JobError::canceled()),
+        });
+        assert!(
+            !app.panels[panel_index].loading,
+            "canceled refresh without background event should clear loading state"
+        );
+        assert_eq!(
+            app.panel_refresh_job_ids[panel_index], None,
+            "canceled refresh should clear tracked refresh job id"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
