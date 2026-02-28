@@ -815,6 +815,7 @@ dependencies = [
  "ratatui",
  "rc-core",
  "syntect",
+ "unicode-width",
 ]
 
 [[package]]

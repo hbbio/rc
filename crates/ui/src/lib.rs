@@ -23,6 +23,7 @@ use std::time::{Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+use unicode_width::UnicodeWidthStr;
 
 #[cfg(unix)]
 use nix::sys::statvfs::statvfs;
@@ -368,8 +369,7 @@ fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
     }
 
     let sanitized = sanitize_single_line(text.as_ref());
-    let visible_len = sanitized.chars().count();
-    if visible_len <= width {
+    if UnicodeWidthStr::width(sanitized.as_str()) <= width {
         return sanitized;
     }
 
@@ -377,10 +377,17 @@ fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
         return ".".repeat(width);
     }
 
-    let prefix_len = width - 3;
-    let mut truncated = String::with_capacity(width);
-    truncated.extend(sanitized.chars().take(prefix_len));
+    let prefix_width = width - 3;
+    let mut truncated = String::new();
+    for ch in sanitized.chars() {
+        truncated.push(ch);
+        if UnicodeWidthStr::width(truncated.as_str()) > prefix_width {
+            truncated.pop();
+            break;
+        }
+    }
     truncated.push_str("...");
+    debug_assert!(UnicodeWidthStr::width(truncated.as_str()) <= width);
     truncated
 }
 
@@ -1934,6 +1941,15 @@ mod tests {
         assert_eq!(fit_single_line("abc\ndef", 20), "abc def");
         assert_eq!(fit_single_line("abcdefg", 6), "abc...");
         assert_eq!(fit_single_line("abcdefg", 2), "..");
+        assert_eq!(fit_single_line("你好世界", 5), "你...");
+        assert_eq!(
+            fit_single_line("e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}", 5),
+            "e\u{301}e\u{301}..."
+        );
+        assert!(
+            unicode_width::UnicodeWidthStr::width(fit_single_line("你好世界", 5).as_str()) <= 5,
+            "truncated output should fit requested terminal width"
+        );
     }
 
     #[test]
