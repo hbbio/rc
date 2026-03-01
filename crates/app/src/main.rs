@@ -1194,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_runtime_queue_marks_overflowed_job_failed() {
+    fn bounded_runtime_queue_requeues_overflowed_job() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -1214,12 +1214,14 @@ mod tests {
         runtime.dispatch_pending_commands(&mut state);
 
         let counts = state.jobs_status_counts();
-        assert_eq!(counts.queued, 1, "first job should remain queued");
-        assert_eq!(counts.failed, 1, "overflowed job should be marked failed");
+        assert_eq!(counts.queued, 2, "overflowed jobs should remain queued");
+        assert_eq!(counts.failed, 0, "queue backpressure should not fail jobs");
         assert!(
             state.status_line.contains("runtime queue is full"),
             "status should report queue backpressure"
         );
+        let pending = state.take_pending_worker_commands();
+        assert_eq!(pending.len(), 1, "overflowed command should be requeued");
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -1250,10 +1252,19 @@ mod tests {
         let pending = state.take_pending_worker_commands();
         assert_eq!(
             pending.len(),
-            1,
-            "commands after an overflowed send should remain pending"
+            2,
+            "overflowed command and all subsequent commands should remain pending"
         );
         match &pending[0] {
+            WorkerCommand::Run(job) => {
+                assert_eq!(
+                    job.id, overflowed_id,
+                    "first pending command should be the overflowed job"
+                );
+            }
+            other => panic!("expected overflowed run command, got {other:?}"),
+        }
+        match &pending[1] {
             WorkerCommand::Run(job) => {
                 assert_eq!(
                     job.id, retained_id,
@@ -1265,17 +1276,17 @@ mod tests {
 
         let counts = state.jobs_status_counts();
         assert_eq!(
-            counts.queued, 2,
-            "queued and retained jobs should stay queued"
+            counts.queued, 3,
+            "queued, overflowed, and retained jobs should stay queued"
         );
-        assert_eq!(counts.failed, 1, "overflowed job should be marked failed");
+        assert_eq!(counts.failed, 0, "overflowed job should not be marked failed");
         assert_eq!(
             state
                 .jobs
                 .job(overflowed_id)
                 .expect("overflowed job should still have a record")
                 .status,
-            rc_core::JobStatus::Failed
+            rc_core::JobStatus::Queued
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

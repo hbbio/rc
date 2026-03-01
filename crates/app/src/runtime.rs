@@ -745,19 +745,10 @@ fn handle_runtime_queue_full(
     command: RuntimeCommand,
 ) -> Option<WorkerCommand> {
     match command {
-        RuntimeCommand::Worker { command, .. } => match command {
-            WorkerCommand::Run(job) => {
-                state.handle_job_dispatch_failure(
-                    job.id,
-                    JobError::dispatch("runtime queue is full"),
-                );
-                None
-            }
-            WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {
-                state.set_status("runtime queue is full");
-                Some(command)
-            }
-        },
+        RuntimeCommand::Worker { command, .. } => {
+            state.set_status("runtime queue is full; retrying");
+            Some(command)
+        }
         RuntimeCommand::Shutdown => {
             state.set_status("runtime queue is full");
             None
