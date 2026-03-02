@@ -810,20 +810,22 @@ fn move_paths(
         else {
             continue;
         };
-        validate_move_destination(source, &destination.path)?;
         progress.set_current_path(source);
-        let move_result = match fs::rename(source, &destination.path) {
-            Ok(()) => {
-                progress.advance_totals(source, source_totals);
-                Ok(())
+        let move_result = (|| -> io::Result<()> {
+            validate_move_destination(source, &destination.path)?;
+            match fs::rename(source, &destination.path) {
+                Ok(()) => {
+                    progress.advance_totals(source, source_totals);
+                    Ok(())
+                }
+                Err(error) if is_cross_device_error(&error) => {
+                    copy_path(source, &destination.path, progress)?;
+                    remove_path(source)?;
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
-            Err(error) if is_cross_device_error(&error) => {
-                copy_path(source, &destination.path, progress)?;
-                remove_path(source)?;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        };
+        })();
         destination.finish(move_result)?;
     }
     Ok(())
@@ -2152,6 +2154,80 @@ mod tests {
             ),
             _ => panic!("move should fail for recursive destination"),
         }
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn move_overwrite_restores_destination_when_validation_fails() {
+        let root = make_temp_dir("move-overwrite-rollback");
+        let source_root = root.join("source");
+        let preserved_destination = source_root.join("source");
+        fs::create_dir_all(source_root.join("child")).expect("source tree should exist");
+        fs::create_dir_all(&preserved_destination).expect("existing destination should exist");
+        fs::write(source_root.join("child/new.txt"), "new payload")
+            .expect("source payload should be writable");
+        fs::write(preserved_destination.join("old.txt"), "preserved payload")
+            .expect("existing destination payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let move_job = manager.enqueue(JobRequest::Move {
+            sources: vec![source_root.clone()],
+            destination_dir: source_root.clone(),
+            overwrite: OverwritePolicy::Overwrite,
+        });
+        command_tx
+            .send(WorkerCommand::Run(Box::new(move_job)))
+            .expect("move command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => {
+                assert_eq!(error.code, JobErrorCode::InvalidInput);
+                assert!(
+                    error.message.contains("cannot move directory into itself"),
+                    "move should fail with self-move validation"
+                );
+            }
+            _ => panic!("move should fail and restore destination"),
+        }
+
+        let preserved_content = fs::read_to_string(preserved_destination.join("old.txt"))
+            .expect("preserved destination payload should remain readable");
+        assert_eq!(
+            preserved_content, "preserved payload",
+            "failed overwrite move should restore original destination content"
+        );
+
+        let file_name = preserved_destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("destination file name should be valid");
+        let backup_prefix = format!(".{file_name}.rc-backup-");
+        let leaked_backup = fs::read_dir(&source_root)
+            .expect("source root should be readable")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&backup_prefix)
+            });
+        assert!(
+            !leaked_backup,
+            "failed overwrite move should clean up backup directories"
+        );
 
         command_tx
             .send(WorkerCommand::Shutdown)
