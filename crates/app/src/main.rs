@@ -508,14 +508,10 @@ fn resume_terminal_after_external_command(
     Ok(())
 }
 
-#[cfg(unix)]
 fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
-    let command = format!("{} \"$1\"", request.editor_command);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .arg("rc-editor")
-        .arg(&request.path)
+    let command = resolve_external_editor_process_command(request)?;
+    let status = Command::new(&command.program)
+        .args(&command.args)
         .current_dir(&request.cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -533,28 +529,42 @@ fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
-    let escaped_path = request.path.to_string_lossy().replace('"', "\"\"");
-    let command = format!("{} \"{}\"", request.editor_command, escaped_path);
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg(command)
-        .current_dir(&request.cwd)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to launch external editor command '{}'",
-                request.editor_command
-            )
-        })?;
-    if !status.success() {
-        return Err(anyhow!("external editor exited with {status}"));
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExternalProcessCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+fn resolve_external_editor_process_command(
+    request: &ExternalEditRequest,
+) -> Result<ExternalProcessCommand> {
+    let Some(mut parts) = shlex::split(&request.editor_command) else {
+        return Err(anyhow!(
+            "failed to parse external editor command '{}'",
+            request.editor_command
+        ));
+    };
+    if parts.is_empty() {
+        return Err(anyhow!("external editor command is empty"));
     }
-    Ok(())
+
+    let program = parts.remove(0);
+    let path = request.path.to_string_lossy();
+    let mut args = Vec::with_capacity(parts.len() + 1);
+    let mut inserted_path = false;
+    for part in parts {
+        if part.contains("{path}") {
+            args.push(part.replace("{path}", path.as_ref()));
+            inserted_path = true;
+        } else {
+            args.push(part);
+        }
+    }
+    if !inserted_path {
+        args.push(path.into_owned());
+    }
+
+    Ok(ExternalProcessCommand { program, args })
 }
 
 fn apply_pending_skin_change(state: &mut AppState, skin_runtime: &SkinRuntimeConfig) {
@@ -930,6 +940,57 @@ mod tests {
         apply_cli_overrides(&mut settings, &cli);
 
         assert!(!settings.configuration.macos_option_symbols);
+    }
+
+    #[test]
+    fn external_editor_command_parser_appends_path_by_default() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("nvim --clean"),
+            path: PathBuf::from("/tmp/note.txt"),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let command =
+            resolve_external_editor_process_command(&request).expect("command should parse");
+        assert_eq!(command.program, "nvim");
+        assert_eq!(
+            command.args,
+            vec![String::from("--clean"), String::from("/tmp/note.txt")]
+        );
+    }
+
+    #[test]
+    fn external_editor_command_parser_substitutes_path_placeholder() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("code --goto {path}:1"),
+            path: PathBuf::from("/tmp/note.txt"),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let command =
+            resolve_external_editor_process_command(&request).expect("command should parse");
+        assert_eq!(command.program, "code");
+        assert_eq!(
+            command.args,
+            vec![String::from("--goto"), String::from("/tmp/note.txt:1")]
+        );
+    }
+
+    #[test]
+    fn external_editor_command_parser_rejects_invalid_templates() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("\"unterminated"),
+            path: PathBuf::from("/tmp/note.txt"),
+            cwd: PathBuf::from("/tmp"),
+        };
+        let error =
+            resolve_external_editor_process_command(&request).expect_err("parse should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse external editor command"),
+            "invalid shell-like syntax should be rejected"
+        );
     }
 
     #[test]

@@ -791,6 +791,7 @@ dependencies = [
  "ratatui",
  "rc-core",
  "rc-ui",
+ "shlex",
  "tokio",
  "tokio-util",
  "tracing",
