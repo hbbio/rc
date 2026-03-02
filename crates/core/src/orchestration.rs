@@ -1,6 +1,56 @@
 use crate::*;
 
 impl AppState {
+    pub(crate) fn apply_shell_command(&mut self, command: AppCommand) -> Option<ApplyResult> {
+        match command {
+            AppCommand::MenuNoop => {}
+            AppCommand::MenuNotImplemented(label) => {
+                self.set_status(format!("{label} is not implemented yet"));
+            }
+            AppCommand::OpenMenu => self.open_menu(0),
+            AppCommand::OpenMenuAt(index) => self.open_menu(index),
+            AppCommand::CloseMenu => self.close_menu(),
+            AppCommand::OpenHelp => self.open_help_screen(),
+            AppCommand::CloseHelp => self.close_help_screen(),
+            AppCommand::Quit => {
+                if self.settings.confirmation.confirm_quit {
+                    self.start_quit_confirmation();
+                } else {
+                    self.request_cancel_for_all_jobs();
+                    return Some(ApplyResult::Quit);
+                }
+            }
+            AppCommand::CloseViewer => self.close_viewer(),
+            AppCommand::OpenFindDialog => self.open_find_dialog(),
+            AppCommand::CloseFindResults => self.close_find_results(),
+            AppCommand::OpenTree => self.open_tree_screen(),
+            AppCommand::CloseTree => self.close_tree_screen(),
+            AppCommand::OpenHotlist => self.open_hotlist_screen(),
+            AppCommand::CloseHotlist => self.close_hotlist_screen(),
+            AppCommand::OpenPanelizeDialog => self.open_panelize_dialog(),
+            AppCommand::PanelizePresetAdd => self.start_panelize_preset_add(),
+            AppCommand::PanelizePresetEdit => self.start_panelize_preset_edit(),
+            AppCommand::PanelizePresetRemove => self.remove_panelize_preset(),
+            AppCommand::EnterXMap => {
+                self.xmap_pending = true;
+                self.set_status("Extended keymap mode");
+            }
+            AppCommand::SwitchPanel => {
+                self.toggle_active_panel();
+                self.set_status(format!(
+                    "Active panel: {}",
+                    match self.active_panel {
+                        ActivePanel::Left => "left",
+                        ActivePanel::Right => "right",
+                    }
+                ));
+            }
+            _ => return None,
+        }
+
+        Some(ApplyResult::Continue)
+    }
+
     pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
         let panel_index = panel.index();
         let request_id = self.next_panel_refresh_request_id;
