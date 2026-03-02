@@ -3,7 +3,7 @@ use ratatui::symbols::border;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const BUNDLED_SKIN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/skins");
 const HOMEBREW_PREFIX_SKIN_DIR: &str = "/opt/homebrew/share/mc/skins";
@@ -11,6 +11,7 @@ const LOCAL_SKIN_DIR: &str = "/usr/local/share/mc/skins";
 const SYSTEM_SKIN_DIR: &str = "/usr/share/mc/skins";
 
 static ACTIVE_SKIN: OnceLock<RwLock<Arc<UiSkin>>> = OnceLock::new();
+static BORDER_SYMBOL_POOL: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct UiSkin {
@@ -505,9 +506,23 @@ fn line_symbol(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        Box::leak(value.to_string().into_boxed_str())
+        intern_border_symbol(value)
     } else {
         default_symbol
+    }
+}
+
+fn intern_border_symbol(value: &str) -> &'static str {
+    let pool = BORDER_SYMBOL_POOL.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut symbols) = pool.lock() {
+        if let Some(symbol) = symbols.get(value) {
+            return symbol;
+        }
+        let leaked = Box::leak(value.to_string().into_boxed_str());
+        symbols.insert(value.to_string(), leaked);
+        leaked
+    } else {
+        Box::leak(value.to_string().into_boxed_str())
     }
 }
 
@@ -543,5 +558,26 @@ mod tests {
         assert_eq!(skin.name(), "default");
         assert_eq!(skin.style("core", "_default_").bg, Some(Color::Blue));
         assert_eq!(skin.style("statusbar", "_default_").bg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn reuses_interned_border_symbols_across_skin_parses() {
+        let source = r#"
+[core]
+_default_=white;black
+
+[lines]
+lefttop=#
+"#;
+
+        let first = UiSkin::from_ini("first", source).expect("first parse should succeed");
+        let second = UiSkin::from_ini("second", source).expect("second parse should succeed");
+        assert_eq!(first.panel_border_set().top_left, "#");
+        assert_eq!(second.panel_border_set().top_left, "#");
+        assert_eq!(
+            first.panel_border_set().top_left.as_ptr(),
+            second.panel_border_set().top_left.as_ptr(),
+            "repeated parses should reuse the same interned border symbol allocation"
+        );
     }
 }
