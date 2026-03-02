@@ -49,6 +49,7 @@ use crate::dialog::DialogEvent;
 use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap, KeymapParseReport};
 
 const MAX_STATUS_LINE_CHARS: usize = 1024;
+const VIEWER_TEXT_PREVIEW_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
@@ -969,6 +970,7 @@ pub struct ViewerState {
     path: PathBuf,
     pub bytes: Vec<u8>,
     content: String,
+    text_is_preview: bool,
     content_fingerprint: u64,
     path_fingerprint: u64,
     pub scroll: usize,
@@ -984,15 +986,29 @@ impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
         let path_fingerprint = fingerprint(&path);
         let bytes = fs::read(&path)?;
-        let hex_mode = should_default_to_hex_mode(&bytes);
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-        let content_fingerprint = fingerprint(&content);
+        let text_limit = FOUNDATION_SLO
+            .viewer_memory_soft_limit_bytes
+            .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
+        let text_is_preview = bytes.len() > text_limit;
+        let content_bytes = if text_is_preview {
+            &bytes[..text_limit]
+        } else {
+            bytes.as_slice()
+        };
+        let content = String::from_utf8_lossy(content_bytes).into_owned();
+        let hex_mode = should_default_to_hex_mode(&bytes) || text_is_preview;
+        let content_fingerprint = if text_is_preview {
+            fingerprint(&(bytes.len(), content.as_str()))
+        } else {
+            fingerprint(&content)
+        };
         let line_offsets = compute_line_offsets(&content);
 
         Ok(Self {
             path,
             bytes,
             content,
+            text_is_preview,
             content_fingerprint,
             path_fingerprint,
             scroll: 0,
@@ -1019,6 +1035,10 @@ impl ViewerState {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    pub fn text_is_preview(&self) -> bool {
+        self.text_is_preview
     }
 
     pub fn content_fingerprint(&self) -> u64 {
@@ -7354,6 +7374,105 @@ OpenJobs = f6
             first.content_fingerprint(),
             third.content_fingerprint(),
             "different content with the same length should produce distinct fingerprints"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn viewer_state_uses_preview_mode_for_large_text_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-preview-large-text-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("large.txt");
+        let total_bytes = VIEWER_TEXT_PREVIEW_LIMIT_BYTES + 1024;
+        fs::write(&file_path, vec![b'a'; total_bytes]).expect("large fixture should be writable");
+
+        let viewer = ViewerState::open(file_path).expect("large viewer fixture should open");
+        assert!(
+            viewer.text_is_preview(),
+            "large text file should be previewed"
+        );
+        assert_eq!(
+            viewer.content().len(),
+            VIEWER_TEXT_PREVIEW_LIMIT_BYTES,
+            "viewer content should be capped at preview limit"
+        );
+        assert!(
+            viewer.hex_mode,
+            "preview mode should default to hex context"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn viewer_state_preview_fingerprint_includes_total_size() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-preview-fingerprint-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let first_path = root.join("first.txt");
+        let second_path = root.join("second.txt");
+
+        let mut first_bytes = vec![b'x'; VIEWER_TEXT_PREVIEW_LIMIT_BYTES + 1];
+        let second_bytes = vec![b'x'; VIEWER_TEXT_PREVIEW_LIMIT_BYTES + 32];
+        first_bytes[VIEWER_TEXT_PREVIEW_LIMIT_BYTES] = b'y';
+        fs::write(&first_path, first_bytes).expect("first fixture should be writable");
+        fs::write(&second_path, second_bytes).expect("second fixture should be writable");
+
+        let first = ViewerState::open(first_path).expect("first preview fixture should open");
+        let second = ViewerState::open(second_path).expect("second preview fixture should open");
+
+        assert!(first.text_is_preview());
+        assert!(second.text_is_preview());
+        assert_eq!(
+            first.content(),
+            second.content(),
+            "previewed text should match when prefixes are identical"
+        );
+        assert_ne!(
+            first.content_fingerprint(),
+            second.content_fingerprint(),
+            "preview fingerprints should diverge when total file size differs"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn opening_large_text_file_reports_preview_mode_status() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-preview-status-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let file_path = root.join("large.txt");
+        let total_bytes = VIEWER_TEXT_PREVIEW_LIMIT_BYTES + 1;
+        fs::write(&file_path, vec![b'a'; total_bytes]).expect("large fixture should be writable");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let file_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == file_path)
+            .expect("large file should be visible");
+        app.active_panel_mut().cursor = file_index;
+        app.apply(AppCommand::OpenEntry)
+            .expect("open entry should queue viewer");
+        drain_background(&mut app);
+
+        assert_eq!(app.key_context(), KeyContext::ViewerHex);
+        assert!(
+            app.status_line.contains("(text preview mode)"),
+            "status should communicate preview mode for large files"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

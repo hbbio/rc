@@ -152,8 +152,12 @@ impl AppState {
                     .jobs
                     .job(id)
                     .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                let is_viewer_load = self
+                    .jobs
+                    .job(id)
+                    .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
                 tracing::debug!(job_event = "started", job_kind, job_id = %id, "job started");
-                if !is_refresh {
+                if !is_refresh && !is_viewer_load {
                     if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
                         self.set_status(format!("Job #{id} started: {}", job.summary));
                     } else {
@@ -219,6 +223,10 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                    let is_viewer_load = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
@@ -249,10 +257,10 @@ impl AppState {
                             self.set_status(format!("Job #{id} finished"));
                         }
                     } else if let Some(job) = self.jobs.job(id) {
-                        if !is_refresh {
+                        if !is_refresh && !is_viewer_load {
                             self.set_status(format!("Job #{id} finished: {}", job.summary));
                         }
-                    } else if !is_refresh {
+                    } else if !is_refresh && !is_viewer_load {
                         self.set_status(format!("Job #{id} finished"));
                     }
                     if is_persist_settings
@@ -279,6 +287,10 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                    let is_viewer_load = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
                     if is_refresh {
                         self.clear_panel_refresh_state_for_job(id);
                     }
@@ -295,7 +307,7 @@ impl AppState {
                             retry_hint = ?error.retry_hint,
                             "job canceled"
                         );
-                        if !is_refresh {
+                        if !is_refresh && !is_viewer_load {
                             self.set_status(format!("Job #{id} canceled"));
                         }
                     } else {
@@ -309,7 +321,7 @@ impl AppState {
                             error_message = %error.message,
                             "job failed"
                         );
-                        if !is_refresh {
+                        if !is_refresh && !is_viewer_load {
                             self.set_status(format!("Job #{id} failed: {}", error.user_message()));
                         }
                     }
@@ -452,8 +464,16 @@ impl AppState {
             }
             BackgroundEvent::ViewerLoaded { path, result } => match result {
                 Ok(viewer) => {
+                    let is_preview = viewer.text_is_preview();
                     self.routes.push(Route::Viewer(viewer));
-                    self.set_status(format!("Opened viewer {}", path.to_string_lossy()));
+                    if is_preview {
+                        self.set_status(format!(
+                            "Opened viewer {} (text preview mode)",
+                            path.to_string_lossy()
+                        ));
+                    } else {
+                        self.set_status(format!("Opened viewer {}", path.to_string_lossy()));
+                    }
                 }
                 Err(error) => {
                     self.set_status(format!("Viewer open failed: {error}"));
