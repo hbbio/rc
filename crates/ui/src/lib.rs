@@ -20,9 +20,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::highlighting::{
+    Color as SyntectColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
+    Style as SyntectStyle, Theme,
+};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use unicode_width::UnicodeWidthStr;
 
 #[cfg(unix)]
@@ -60,7 +62,10 @@ struct ViewerHighlightKey {
 
 struct CachedViewerHighlight {
     key: ViewerHighlightKey,
+    raw_lines: Vec<String>,
     highlighted_lines: Vec<Line<'static>>,
+    parse_state: ParseState,
+    highlight_state: HighlightState,
 }
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -600,13 +605,16 @@ fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Opti
         *cache_guard = Some(CachedViewerHighlight::new(viewer, resources.as_ref())?);
     }
     let cache = cache_guard.as_mut()?;
-    let total_lines = cache.highlighted_lines.len();
+    let total_lines = cache.raw_lines.len();
     if total_lines == 0 {
         return Some(Text::raw(String::new()));
     }
 
     let start = viewer.scroll.min(total_lines.saturating_sub(1));
     let end = start.saturating_add(visible_lines.max(1)).min(total_lines);
+    cache
+        .ensure_highlighted_up_to(end, resources.as_ref())
+        .ok()?;
 
     Some(Text::from(cache.highlighted_lines[start..end].to_vec()))
 }
@@ -705,23 +713,43 @@ impl CachedViewerHighlight {
             raw_lines.push(String::new());
         }
 
-        let mut highlighter = HighlightLines::new(syntax, &resources.theme);
-        let mut highlighted_lines = Vec::with_capacity(raw_lines.len());
-        for raw_line in raw_lines {
-            let ranges = highlighter
-                .highlight_line(raw_line.as_str(), syntax_set)
-                .ok()?;
-            let spans: Vec<Span<'static>> = ranges
-                .into_iter()
-                .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
-                .collect();
-            highlighted_lines.push(Line::from(spans));
-        }
+        let highlighter = Highlighter::new(&resources.theme);
+        let highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
 
         Some(Self {
             key: viewer_highlight_key(viewer),
-            highlighted_lines,
+            raw_lines,
+            highlighted_lines: Vec::new(),
+            parse_state: ParseState::new(syntax),
+            highlight_state,
         })
+    }
+
+    fn ensure_highlighted_up_to(
+        &mut self,
+        end: usize,
+        resources: &HighlightResources,
+    ) -> Result<(), ()> {
+        let syntax_set = highlight_syntax_set();
+        let highlighter = Highlighter::new(&resources.theme);
+        while self.highlighted_lines.len() < end {
+            let index = self.highlighted_lines.len();
+            let raw_line = self.raw_lines.get(index).ok_or(())?;
+            let operations = self
+                .parse_state
+                .parse_line(raw_line.as_str(), syntax_set)
+                .map_err(|_| ())?;
+            let spans: Vec<Span<'static>> = HighlightIterator::new(
+                &mut self.highlight_state,
+                &operations[..],
+                raw_line.as_str(),
+                &highlighter,
+            )
+            .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+            .collect();
+            self.highlighted_lines.push(Line::from(spans));
+        }
+        Ok(())
     }
 }
 
@@ -2080,6 +2108,55 @@ mod tests {
         assert_ne!(
             first_key, third_key,
             "cache key should differ for different content with the same byte length"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn viewer_highlight_cache_populates_lines_incrementally() {
+        let root = temp_root("viewer-highlight-incremental");
+        let file_path = root.join("viewer.rs");
+        let content = (0..200)
+            .map(|index| format!("fn line_{index}() {{}}\n"))
+            .collect::<String>();
+        fs::write(&file_path, content).expect("viewer fixture should be writable");
+
+        let viewer = rc_core::ViewerState::open(file_path).expect("viewer fixture should open");
+        let resources = build_highlight_resources_for_skin(current_skin().as_ref())
+            .expect("highlight resources should initialize");
+        let mut cache = CachedViewerHighlight::new(&viewer, &resources)
+            .expect("highlight cache should initialize");
+        assert_eq!(
+            cache.highlighted_lines.len(),
+            0,
+            "cache should start without precomputed highlighted lines"
+        );
+        assert!(
+            cache.raw_lines.len() >= 200,
+            "cache should preserve all source lines for deferred highlighting"
+        );
+
+        cache
+            .ensure_highlighted_up_to(5, &resources)
+            .expect("highlighting first visible range should succeed");
+        assert_eq!(
+            cache.highlighted_lines.len(),
+            5,
+            "highlighting should compute only the first requested window"
+        );
+        assert!(
+            cache.highlighted_lines.len() < cache.raw_lines.len(),
+            "first window highlight should not eagerly process the entire file"
+        );
+
+        cache
+            .ensure_highlighted_up_to(9, &resources)
+            .expect("highlighting larger range should succeed");
+        assert_eq!(
+            cache.highlighted_lines.len(),
+            9,
+            "expanding the window should append only newly visible highlights"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
