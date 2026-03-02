@@ -16,6 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 const RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 256;
+const RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK: usize = 256;
 const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
 const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
 const SCAN_CONCURRENCY_LIMIT: usize = 4;
@@ -201,32 +202,66 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn drain_events(&mut self, state: &mut AppState) {
-        loop {
-            match self.worker_event_rx.try_recv() {
-                Ok(event) => state.handle_job_event(event),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.worker_disconnected {
+        let drain_started = Instant::now();
+        let mut drained_events = 0_usize;
+        while drained_events < RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+            && drain_started.elapsed() < FOUNDATION_SLO.ui_frame_budget
+        {
+            let mut progressed = false;
+
+            if !self.worker_disconnected {
+                match self.worker_event_rx.try_recv() {
+                    Ok(event) => {
+                        state.handle_job_event(event);
+                        drained_events = drained_events.saturating_add(1);
+                        progressed = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
                         state.set_status("Worker channel disconnected");
                         self.worker_disconnected = true;
                     }
-                    break;
                 }
             }
-        }
 
-        loop {
-            match self.background_event_rx.try_recv() {
-                Ok(event) => state.handle_background_event(event),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.background_disconnected {
+            if drained_events >= RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+                || drain_started.elapsed() >= FOUNDATION_SLO.ui_frame_budget
+            {
+                break;
+            }
+
+            if !self.background_disconnected {
+                match self.background_event_rx.try_recv() {
+                    Ok(event) => {
+                        state.handle_background_event(event);
+                        drained_events = drained_events.saturating_add(1);
+                        progressed = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
                         state.set_status("Background worker channel disconnected");
                         self.background_disconnected = true;
                     }
-                    break;
                 }
             }
+
+            if !progressed {
+                break;
+            }
+        }
+
+        let elapsed = drain_started.elapsed();
+        if drained_events >= RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+            || elapsed >= FOUNDATION_SLO.ui_frame_budget
+        {
+            tracing::debug!(
+                runtime_event = "drain_budget_exhausted",
+                drained_events,
+                elapsed_ms = elapsed.as_millis(),
+                event_limit = RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK,
+                frame_budget_ms = FOUNDATION_SLO.ui_frame_budget.as_millis(),
+                "runtime event draining stopped at per-tick budget"
+            );
         }
 
         self.dispatch_pending_commands(state);
@@ -957,7 +992,7 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
 mod tests {
     use super::*;
     use rc_core::{
-        ActivePanel, AppState, JobErrorCode, JobManager, JobRequest, JobRetryHint,
+        ActivePanel, AppState, JobErrorCode, JobId, JobManager, JobRequest, JobRetryHint,
         PanelListingSource, SortMode, settings_io,
     };
     use std::env;
@@ -1155,6 +1190,47 @@ mod tests {
             pending.len(),
             1,
             "overflowed command should remain pending for retry"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn drain_events_limits_burst_to_per_tick_budget() {
+        let root = make_temp_dir("drain-event-budget");
+        let (mut runtime, _command_rx, worker_event_tx, _background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let total_events = RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK + 32;
+        for id in 1..=total_events {
+            worker_event_tx
+                .send(JobEvent::Started {
+                    id: JobId(id as u64),
+                })
+                .expect("worker event injection should succeed");
+        }
+
+        runtime.drain_events(&mut state);
+        assert!(
+            state.status_line.contains(&format!(
+                "Job #{} started",
+                RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+            )),
+            "first drain should stop at configured per-tick event budget"
+        );
+        assert!(
+            !state
+                .status_line
+                .contains(&format!("Job #{} started", total_events)),
+            "first drain should not consume the full burst"
+        );
+
+        runtime.drain_events(&mut state);
+        assert!(
+            state
+                .status_line
+                .contains(&format!("Job #{} started", total_events)),
+            "second drain should consume the remaining events"
         );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
