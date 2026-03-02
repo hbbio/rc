@@ -17,8 +17,6 @@ use rc_core::{
     SettingsScreenState, TreeState, ViewerState, top_menus,
 };
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
@@ -687,17 +685,10 @@ fn viewer_theme_surface_style() -> Option<Style> {
 }
 
 fn viewer_highlight_key(viewer: &ViewerState) -> ViewerHighlightKey {
-    let mut content_hasher = DefaultHasher::new();
-    viewer.content.hash(&mut content_hasher);
-    let content_hash = content_hasher.finish();
-    let mut path_hasher = DefaultHasher::new();
-    viewer.path.hash(&mut path_hasher);
-    let path_hash = path_hasher.finish();
-
     ViewerHighlightKey {
-        content_hash,
+        content_hash: viewer.content_fingerprint(),
         content_len: viewer.content.len(),
-        path_hash,
+        path_hash: viewer.path_fingerprint(),
     }
 }
 
@@ -2064,29 +2055,31 @@ mod tests {
     }
 
     #[test]
-    fn viewer_highlight_key_tracks_path_and_content_hashes() {
+    fn viewer_highlight_key_tracks_path_and_content_fingerprints() {
         let root = temp_root("viewer-highlight-key");
         let first_path = root.join("first.txt");
         let second_path = root.join("second.txt");
+        let third_path = root.join("third.txt");
         fs::write(&first_path, "abc").expect("first fixture should be writable");
         fs::write(&second_path, "abc").expect("second fixture should be writable");
+        fs::write(&third_path, "xyz").expect("third fixture should be writable");
 
-        let mut first_viewer = rc_core::ViewerState::open(first_path.clone())
+        let first_viewer = rc_core::ViewerState::open(first_path.clone())
             .expect("first viewer fixture should open");
         let second_viewer = rc_core::ViewerState::open(second_path.clone())
             .expect("second viewer fixture should open");
+        let third_viewer = rc_core::ViewerState::open(third_path.clone())
+            .expect("third viewer fixture should open");
         let first_key = viewer_highlight_key(&first_viewer);
         let second_key = viewer_highlight_key(&second_viewer);
+        let third_key = viewer_highlight_key(&third_viewer);
         assert_ne!(
             first_key, second_key,
             "cache key should differ for identical content at different paths"
         );
-
-        first_viewer.content = String::from("xyz");
-        let changed_content_key = viewer_highlight_key(&first_viewer);
         assert_ne!(
-            first_key, changed_content_key,
-            "cache key should differ when content changes with the same length"
+            first_key, third_key,
+            "cache key should differ for different content with the same byte length"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

@@ -13,6 +13,7 @@ pub mod settings_io;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -961,6 +962,8 @@ pub struct ViewerState {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
     pub content: String,
+    content_fingerprint: u64,
+    path_fingerprint: u64,
     pub scroll: usize,
     pub wrap: bool,
     pub hex_mode: bool,
@@ -972,15 +975,19 @@ pub struct ViewerState {
 
 impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
+        let path_fingerprint = fingerprint(&path);
         let bytes = fs::read(&path)?;
         let hex_mode = should_default_to_hex_mode(&bytes);
         let content = String::from_utf8_lossy(&bytes).into_owned();
+        let content_fingerprint = fingerprint(&content);
         let line_offsets = compute_line_offsets(&content);
 
         Ok(Self {
             path,
             bytes,
             content,
+            content_fingerprint,
+            path_fingerprint,
             scroll: 0,
             wrap: false,
             hex_mode,
@@ -997,6 +1004,14 @@ impl ViewerState {
         } else {
             self.line_offsets.len()
         }
+    }
+
+    pub fn content_fingerprint(&self) -> u64 {
+        self.content_fingerprint
+    }
+
+    pub fn path_fingerprint(&self) -> u64 {
+        self.path_fingerprint
     }
 
     pub fn current_line_number(&self) -> usize {
@@ -4900,6 +4915,12 @@ fn compute_line_offsets(content: &str) -> Vec<usize> {
     offsets
 }
 
+fn fingerprint(value: &(impl Hash + ?Sized)) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn should_default_to_hex_mode(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
@@ -7124,6 +7145,44 @@ OpenJobs = f6
             app.key_context(),
             KeyContext::ViewerHex,
             "binary files should open in hex mode"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn viewer_state_fingerprints_track_path_and_content() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-viewer-fingerprints-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let first_path = root.join("first.txt");
+        let second_path = root.join("second.txt");
+        let third_path = root.join("third.txt");
+        fs::write(&first_path, "abc").expect("first fixture should be writable");
+        fs::write(&second_path, "abc").expect("second fixture should be writable");
+        fs::write(&third_path, "xyz").expect("third fixture should be writable");
+
+        let first = ViewerState::open(first_path).expect("first viewer fixture should open");
+        let second = ViewerState::open(second_path).expect("second viewer fixture should open");
+        let third = ViewerState::open(third_path).expect("third viewer fixture should open");
+
+        assert_eq!(
+            first.content_fingerprint(),
+            second.content_fingerprint(),
+            "matching content should reuse the same content fingerprint"
+        );
+        assert_ne!(
+            first.path_fingerprint(),
+            second.path_fingerprint(),
+            "different file paths should produce distinct path fingerprints"
+        );
+        assert_ne!(
+            first.content_fingerprint(),
+            third.content_fingerprint(),
+            "different content with the same length should produce distinct fingerprints"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
