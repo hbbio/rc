@@ -1,6 +1,6 @@
-use rc_core::{OverwritePolicy, Settings, SettingsSortField};
+use crate::{OverwritePolicy, Settings, SettingsSortField};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const MC_CONFIG_SECTION: &str = "Midnight-Commander";
@@ -118,22 +118,38 @@ fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
         .and_then(|name| name.to_str())
         .unwrap_or("settings");
     let tmp = path.with_file_name(format!("{stem}.tmp-{}", std::process::id()));
-    fs::write(&tmp, content)?;
+    {
+        let mut tmp_file = fs::File::create(&tmp)?;
+        tmp_file.write_all(content.as_bytes())?;
+        tmp_file.sync_all()?;
+    }
     #[cfg(windows)]
     {
         match fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 fs::remove_file(path)?;
-                fs::rename(tmp, path)
+                fs::rename(&tmp, path)?;
             }
-            Err(error) => Err(error),
+            Err(error) => return Err(error),
         }
     }
     #[cfg(not(windows))]
     {
-        fs::rename(tmp, path)
+        fs::rename(&tmp, path)?;
     }
+    sync_parent_dir(path)
+}
+
+#[cfg(windows)]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::File::open(parent)?.sync_all()
 }
 
 pub fn upsert_skin_in_mc_ini(source: &str, skin: &str) -> String {
@@ -279,6 +295,11 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             ("layout", "show_panel_totals") => {
                 if let Some(parsed) = parse_bool(value) {
                     settings.layout.show_panel_totals = parsed;
+                }
+            }
+            ("layout", "status_message_timeout_seconds") => {
+                if let Ok(parsed) = value.parse::<u64>() {
+                    settings.layout.status_message_timeout_seconds = parsed;
                 }
             }
             ("layout", "jobs_dialog_width") => {
@@ -464,6 +485,10 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     lines.push(format!(
         "show_panel_totals={}",
         settings.layout.show_panel_totals
+    ));
+    lines.push(format!(
+        "status_message_timeout_seconds={}",
+        settings.layout.status_message_timeout_seconds
     ));
     lines.push(format!(
         "jobs_dialog_width={}",
@@ -667,6 +692,7 @@ skin=default
             vec![String::from("find . -type f"), String::from("git ls-files")];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
         settings.panel_options.sort_field = SettingsSortField::Modified;
+        settings.layout.status_message_timeout_seconds = 42;
 
         let source = render_rc_settings_ini(&settings);
         let mut parsed = Settings::default();
@@ -682,6 +708,7 @@ skin=default
             OverwritePolicy::Rename
         );
         assert_eq!(parsed.panel_options.sort_field, SettingsSortField::Modified);
+        assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
     }
 
     #[test]
@@ -799,6 +826,39 @@ skin=mc-skin
         let rc_ini = fs::read_to_string(&rc_ini_path).expect("rc ini should exist");
         assert!(mc_ini.contains("skin=second-skin"));
         assert!(rc_ini.contains("overwrite_policy=skip"));
+
+        fs::remove_dir_all(&root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn save_settings_cleans_up_atomic_temp_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-save-settings-temp-cleanup-{stamp}"));
+        fs::create_dir_all(&root).expect("test directory should be created");
+
+        let mc_ini_path = root.join("mc.ini");
+        let rc_ini_path = root.join("settings.ini");
+        let paths = SettingsPaths {
+            mc_ini_path: Some(mc_ini_path.clone()),
+            rc_ini_path: Some(rc_ini_path.clone()),
+        };
+        let mut settings = Settings::default();
+        settings.appearance.skin = String::from("temp-cleanup");
+        save_settings(&paths, &settings).expect("settings should save");
+
+        let leftovers = fs::read_dir(&root)
+            .expect("settings directory should be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("mc.ini.tmp-") || name.starts_with("settings.ini.tmp-"))
+            .collect::<Vec<_>>();
+        assert!(
+            leftovers.is_empty(),
+            "atomic settings writes should not leave temp files behind: {leftovers:?}"
+        );
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
     }

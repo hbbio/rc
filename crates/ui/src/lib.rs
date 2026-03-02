@@ -18,11 +18,14 @@ use rc_core::{
 };
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::highlighting::{
+    Color as SyntectColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
+    Style as SyntectStyle, Theme,
+};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use unicode_width::UnicodeWidthStr;
 
 #[cfg(unix)]
 use nix::sys::statvfs::statvfs;
@@ -34,11 +37,16 @@ pub use skin::{
 };
 
 struct HighlightResources {
-    syntax_set: SyntaxSet,
     theme: Theme,
 }
 
-static HIGHLIGHT_RESOURCES: OnceLock<Option<HighlightResources>> = OnceLock::new();
+struct CachedHighlightResources {
+    skin_name: String,
+    resources: Arc<HighlightResources>,
+}
+
+static HIGHLIGHT_RESOURCES: OnceLock<Mutex<Option<CachedHighlightResources>>> = OnceLock::new();
+static HIGHLIGHT_SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static VIEWER_HIGHLIGHT_CACHE: OnceLock<Mutex<Option<CachedViewerHighlight>>> = OnceLock::new();
 static DISK_USAGE_SUMMARY_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, String)>>> =
     OnceLock::new();
@@ -47,15 +55,17 @@ const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ViewerHighlightKey {
-    content_ptr: usize,
+    content_hash: u64,
     content_len: usize,
+    path_hash: u64,
 }
 
 struct CachedViewerHighlight {
     key: ViewerHighlightKey,
     raw_lines: Vec<String>,
     highlighted_lines: Vec<Line<'static>>,
-    highlighter: HighlightLines<'static>,
+    parse_state: ParseState,
+    highlight_state: HighlightState,
 }
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -123,6 +133,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     } else {
         state.status_line.clone()
     };
+    let status = fit_single_line(status, root[2].width as usize);
     frame.render_widget(Paragraph::new(status), root[2]);
     if state.show_button_bar() {
         render_button_bar(frame, root[3], skin.as_ref(), state);
@@ -361,6 +372,40 @@ fn panel_title(panel: &PanelState) -> String {
     )
 }
 
+fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let sanitized = sanitize_single_line(text.as_ref());
+    if UnicodeWidthStr::width(sanitized.as_str()) <= width {
+        return sanitized;
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let prefix_width = width - 3;
+    let mut truncated = String::new();
+    for ch in sanitized.chars() {
+        truncated.push(ch);
+        if UnicodeWidthStr::width(truncated.as_str()) > prefix_width {
+            truncated.pop();
+            break;
+        }
+    }
+    truncated.push_str("...");
+    debug_assert!(UnicodeWidthStr::width(truncated.as_str()) <= width);
+    truncated
+}
+
+fn sanitize_single_line(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+        .collect()
+}
+
 fn render_panel(
     frame: &mut Frame,
     area: Rect,
@@ -369,7 +414,7 @@ fn render_panel(
     skin: &UiSkin,
     app: &AppState,
 ) {
-    let title = panel_title(panel);
+    let title = fit_single_line(panel_title(panel), area.width.saturating_sub(2) as usize);
     let selected_tagged = panel
         .selected_entry()
         .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
@@ -513,13 +558,16 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(2) as usize;
-    let title = format!(
-        "{} | {} {}/{} | wrap:{}",
-        viewer.path.to_string_lossy(),
-        if viewer.hex_mode { "row" } else { "line" },
-        viewer.current_line_number(),
-        viewer.line_count(),
-        if viewer.wrap { "on" } else { "off" }
+    let title = fit_single_line(
+        format!(
+            "{} | {} {}/{} | wrap:{}",
+            viewer.path().to_string_lossy(),
+            if viewer.hex_mode { "row" } else { "line" },
+            viewer.current_line_number(),
+            viewer.line_count(),
+            if viewer.wrap { "on" } else { "off" }
+        ),
+        area.width.saturating_sub(2) as usize,
     );
     let content = if viewer.hex_mode {
         hex_viewer_window(viewer, visible_lines, content_width)
@@ -548,14 +596,13 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
 }
 
 fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Option<Text<'static>> {
-    let resources = HIGHLIGHT_RESOURCES.get_or_init(build_highlight_resources);
-    let resources: &'static HighlightResources = resources.as_ref()?;
+    let resources = highlight_resources()?;
     let cache_lock = viewer_highlight_cache();
     let mut cache_guard = cache_lock.lock().ok()?;
     let key = viewer_highlight_key(viewer);
 
     if cache_guard.as_ref().is_none_or(|cached| cached.key != key) {
-        *cache_guard = Some(CachedViewerHighlight::new(viewer, resources));
+        *cache_guard = Some(CachedViewerHighlight::new(viewer, resources.as_ref())?);
     }
     let cache = cache_guard.as_mut()?;
     let total_lines = cache.raw_lines.len();
@@ -566,14 +613,37 @@ fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Opti
     let start = viewer.scroll.min(total_lines.saturating_sub(1));
     let end = start.saturating_add(visible_lines.max(1)).min(total_lines);
     cache
-        .ensure_highlighted_up_to(end, &resources.syntax_set)
+        .ensure_highlighted_up_to(end, resources.as_ref())
         .ok()?;
 
     Some(Text::from(cache.highlighted_lines[start..end].to_vec()))
 }
 
-fn build_highlight_resources() -> Option<HighlightResources> {
-    let syntax_set = SyntaxSet::load_defaults_newlines();
+fn highlight_resources() -> Option<Arc<HighlightResources>> {
+    let skin = current_skin();
+    let skin_name = skin.name().to_string();
+    let cache = HIGHLIGHT_RESOURCES.get_or_init(|| Mutex::new(None));
+    let mut cache_guard = cache.lock().ok()?;
+    if cache_guard
+        .as_ref()
+        .is_none_or(|cached| cached.skin_name != skin_name)
+    {
+        let resources = Arc::new(build_highlight_resources_for_skin(skin.as_ref())?);
+        *cache_guard = Some(CachedHighlightResources {
+            skin_name,
+            resources: Arc::clone(&resources),
+        });
+        if let Ok(mut viewer_cache) = viewer_highlight_cache().lock() {
+            *viewer_cache = None;
+        }
+        return Some(resources);
+    }
+    cache_guard
+        .as_ref()
+        .map(|cached| Arc::clone(&cached.resources))
+}
+
+fn build_highlight_resources_for_skin(skin: &UiSkin) -> Option<HighlightResources> {
     let themes = syntect::highlighting::ThemeSet::load_defaults();
     let mut theme = themes
         .themes
@@ -581,7 +651,6 @@ fn build_highlight_resources() -> Option<HighlightResources> {
         .cloned()
         .or_else(|| themes.themes.values().next().cloned())?;
 
-    let skin = current_skin();
     let viewer_style = skin.style("viewer", "_default_");
     if let Some(foreground) = viewer_style.fg.and_then(syntect_color_from_ratatui) {
         theme.settings.foreground = Some(foreground);
@@ -594,20 +663,23 @@ fn build_highlight_resources() -> Option<HighlightResources> {
         scope.style.background = None;
     }
 
-    Some(HighlightResources { syntax_set, theme })
+    Some(HighlightResources { theme })
+}
+
+fn highlight_syntax_set() -> &'static SyntaxSet {
+    HIGHLIGHT_SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn viewer_syntax<'a>(syntax_set: &'a SyntaxSet, viewer: &ViewerState) -> &'a SyntaxReference {
     syntax_set
-        .find_syntax_for_file(&viewer.path)
+        .find_syntax_for_file(viewer.path())
         .ok()
         .flatten()
         .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
 }
 
 fn viewer_theme_surface_style() -> Option<Style> {
-    let resources = HIGHLIGHT_RESOURCES.get_or_init(build_highlight_resources);
-    let resources = resources.as_ref()?;
+    let resources = highlight_resources()?;
     let mut style = Style::default();
 
     if let Some(background) = resources.theme.settings.background {
@@ -622,8 +694,9 @@ fn viewer_theme_surface_style() -> Option<Style> {
 
 fn viewer_highlight_key(viewer: &ViewerState) -> ViewerHighlightKey {
     ViewerHighlightKey {
-        content_ptr: viewer.content.as_ptr() as usize,
-        content_len: viewer.content.len(),
+        content_hash: viewer.content_fingerprint(),
+        content_len: viewer.content().len(),
+        path_hash: viewer.path_fingerprint(),
     }
 }
 
@@ -632,33 +705,48 @@ fn viewer_highlight_cache() -> &'static Mutex<Option<CachedViewerHighlight>> {
 }
 
 impl CachedViewerHighlight {
-    fn new(viewer: &ViewerState, resources: &'static HighlightResources) -> Self {
-        let syntax = viewer_syntax(&resources.syntax_set, viewer);
-        let mut raw_lines: Vec<String> = viewer.content.lines().map(sanitize_text_line).collect();
+    fn new(viewer: &ViewerState, resources: &HighlightResources) -> Option<Self> {
+        let syntax_set = highlight_syntax_set();
+        let syntax = viewer_syntax(syntax_set, viewer);
+        let mut raw_lines: Vec<String> = viewer.content().lines().map(sanitize_text_line).collect();
         if raw_lines.is_empty() {
             raw_lines.push(String::new());
         }
 
-        Self {
+        let highlighter = Highlighter::new(&resources.theme);
+        let highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
+
+        Some(Self {
             key: viewer_highlight_key(viewer),
             raw_lines,
             highlighted_lines: Vec::new(),
-            highlighter: HighlightLines::new(syntax, &resources.theme),
-        }
+            parse_state: ParseState::new(syntax),
+            highlight_state,
+        })
     }
 
-    fn ensure_highlighted_up_to(&mut self, end: usize, syntax_set: &SyntaxSet) -> Result<(), ()> {
+    fn ensure_highlighted_up_to(
+        &mut self,
+        end: usize,
+        resources: &HighlightResources,
+    ) -> Result<(), ()> {
+        let syntax_set = highlight_syntax_set();
+        let highlighter = Highlighter::new(&resources.theme);
         while self.highlighted_lines.len() < end {
             let index = self.highlighted_lines.len();
             let raw_line = self.raw_lines.get(index).ok_or(())?;
-            let ranges = self
-                .highlighter
-                .highlight_line(raw_line.as_str(), syntax_set)
+            let operations = self
+                .parse_state
+                .parse_line(raw_line.as_str(), syntax_set)
                 .map_err(|_| ())?;
-            let spans: Vec<Span<'static>> = ranges
-                .into_iter()
-                .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
-                .collect();
+            let spans: Vec<Span<'static>> = HighlightIterator::new(
+                &mut self.highlight_state,
+                &operations[..],
+                raw_line.as_str(),
+                &highlighter,
+            )
+            .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+            .collect();
             self.highlighted_lines.push(Line::from(spans));
         }
         Ok(())
@@ -666,7 +754,7 @@ impl CachedViewerHighlight {
 }
 
 fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize) -> Text<'static> {
-    let mut raw_lines: Vec<&str> = viewer.content.lines().collect();
+    let mut raw_lines: Vec<&str> = viewer.content().lines().collect();
     if raw_lines.is_empty() {
         raw_lines.push("");
     }
@@ -1761,11 +1849,13 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use rc_core::{AppCommand, AppState, BackgroundCommand, run_background_worker};
+    use rc_core::{
+        AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
+        execute_worker_job,
+    };
     use std::env;
     use std::fs;
     use std::sync::mpsc;
-    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
@@ -1788,30 +1878,46 @@ mod tests {
 
     fn drain_background(state: &mut AppState) {
         loop {
-            let commands = state.take_pending_background_commands();
-            if commands.is_empty() {
+            let mut progressed = false;
+
+            let worker_commands = state.take_pending_worker_commands();
+            if !worker_commands.is_empty() {
+                progressed = true;
+            }
+            for command in worker_commands {
+                match command {
+                    WorkerCommand::Run(job) => {
+                        let job = *job;
+                        let job_id = job.id;
+                        let (event_tx, event_rx) = mpsc::channel();
+                        match &job.request {
+                            JobRequest::LoadViewer { path } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let viewer_result = rc_core::ViewerState::open(path.clone())
+                                    .map_err(|error| error.to_string());
+                                state.handle_background_event(BackgroundEvent::ViewerLoaded {
+                                    path: path.clone(),
+                                    result: viewer_result.clone(),
+                                });
+                                let result =
+                                    viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            _ => {
+                                execute_worker_job(job, &event_tx);
+                            }
+                        }
+                        for event in event_rx.try_iter() {
+                            state.handle_job_event(event);
+                        }
+                    }
+                    WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {}
+                }
+            }
+
+            if !progressed {
                 break;
             }
-
-            let (command_tx, command_rx) = mpsc::channel();
-            let (event_tx, event_rx) = mpsc::channel();
-            let handle = thread::spawn(move || run_background_worker(command_rx, event_tx));
-
-            for command in commands {
-                command_tx
-                    .send(command)
-                    .expect("background command should send");
-                let event = event_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .expect("background event should arrive");
-                state.handle_background_event(event);
-            }
-            command_tx
-                .send(BackgroundCommand::Shutdown)
-                .expect("background shutdown should send");
-            handle
-                .join()
-                .expect("background worker should shut down cleanly");
         }
     }
 
@@ -1879,6 +1985,45 @@ mod tests {
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
+    #[test]
+    fn fit_single_line_sanitizes_and_truncates() {
+        assert_eq!(fit_single_line("abc\ndef", 20), "abc def");
+        assert_eq!(fit_single_line("abcdefg", 6), "abc...");
+        assert_eq!(fit_single_line("abcdefg", 2), "..");
+        assert_eq!(fit_single_line("你好世界", 5), "你...");
+        assert_eq!(
+            fit_single_line("e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}", 5),
+            "e\u{301}e\u{301}..."
+        );
+        assert!(
+            unicode_width::UnicodeWidthStr::width(fit_single_line("你好世界", 5).as_str()) <= 5,
+            "truncated output should fit requested terminal width"
+        );
+    }
+
+    #[test]
+    fn render_status_line_sanitizes_newlines_and_clips_width() {
+        let root = temp_root("status-clamp");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.settings_mut().layout.show_debug_status = false;
+        app.set_status(format!("line1\nline2 {}", "x".repeat(200)));
+
+        let frame = render_to_text(&app, 40, 12);
+        let lines: Vec<&str> = frame.lines().collect();
+        let status_line = lines[lines.len().saturating_sub(2)];
+
+        assert!(
+            status_line.contains("line1 line2"),
+            "status should replace newlines with spaces"
+        );
+        assert!(
+            status_line.trim_end().ends_with("..."),
+            "long status should be clipped to one line with ellipsis"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
     #[cfg(unix)]
     #[test]
     fn panel_title_marks_panelize_panels() {
@@ -1932,6 +2077,86 @@ mod tests {
         assert!(
             frame.contains("00000000"),
             "frame should render hex offsets"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn viewer_highlight_key_tracks_path_and_content_fingerprints() {
+        let root = temp_root("viewer-highlight-key");
+        let first_path = root.join("first.txt");
+        let second_path = root.join("second.txt");
+        let third_path = root.join("third.txt");
+        fs::write(&first_path, "abc").expect("first fixture should be writable");
+        fs::write(&second_path, "abc").expect("second fixture should be writable");
+        fs::write(&third_path, "xyz").expect("third fixture should be writable");
+
+        let first_viewer = rc_core::ViewerState::open(first_path.clone())
+            .expect("first viewer fixture should open");
+        let second_viewer = rc_core::ViewerState::open(second_path.clone())
+            .expect("second viewer fixture should open");
+        let third_viewer = rc_core::ViewerState::open(third_path.clone())
+            .expect("third viewer fixture should open");
+        let first_key = viewer_highlight_key(&first_viewer);
+        let second_key = viewer_highlight_key(&second_viewer);
+        let third_key = viewer_highlight_key(&third_viewer);
+        assert_ne!(
+            first_key, second_key,
+            "cache key should differ for identical content at different paths"
+        );
+        assert_ne!(
+            first_key, third_key,
+            "cache key should differ for different content with the same byte length"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn viewer_highlight_cache_populates_lines_incrementally() {
+        let root = temp_root("viewer-highlight-incremental");
+        let file_path = root.join("viewer.rs");
+        let content = (0..200)
+            .map(|index| format!("fn line_{index}() {{}}\n"))
+            .collect::<String>();
+        fs::write(&file_path, content).expect("viewer fixture should be writable");
+
+        let viewer = rc_core::ViewerState::open(file_path).expect("viewer fixture should open");
+        let resources = build_highlight_resources_for_skin(current_skin().as_ref())
+            .expect("highlight resources should initialize");
+        let mut cache = CachedViewerHighlight::new(&viewer, &resources)
+            .expect("highlight cache should initialize");
+        assert_eq!(
+            cache.highlighted_lines.len(),
+            0,
+            "cache should start without precomputed highlighted lines"
+        );
+        assert!(
+            cache.raw_lines.len() >= 200,
+            "cache should preserve all source lines for deferred highlighting"
+        );
+
+        cache
+            .ensure_highlighted_up_to(5, &resources)
+            .expect("highlighting first visible range should succeed");
+        assert_eq!(
+            cache.highlighted_lines.len(),
+            5,
+            "highlighting should compute only the first requested window"
+        );
+        assert!(
+            cache.highlighted_lines.len() < cache.raw_lines.len(),
+            "first window highlight should not eagerly process the entire file"
+        );
+
+        cache
+            .ensure_highlighted_up_to(9, &resources)
+            .expect("highlighting larger range should succeed");
+        assert_eq!(
+            cache.highlighted_lines.len(),
+            9,
+            "expanding the window should append only newly visible highlights"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
