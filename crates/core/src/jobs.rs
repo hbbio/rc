@@ -915,21 +915,55 @@ fn copy_file(
     destination: &Path,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
-    let mut source_file = fs::File::open(source)?;
-    let mut destination_file = fs::File::create(destination)?;
-    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    let staged_destination = destination_staging_path(destination);
+    let write_result = (|| -> io::Result<()> {
+        let mut source_file = fs::File::open(source)?;
+        let mut destination_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged_destination)?;
+        let mut buffer = [0_u8; COPY_BUFFER_SIZE];
 
-    loop {
-        progress.ensure_not_canceled()?;
-        let bytes_read = source_file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
+        loop {
+            progress.ensure_not_canceled()?;
+            let bytes_read = source_file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            destination_file.write_all(&buffer[..bytes_read])?;
+            progress.advance_bytes(bytes_read as u64);
         }
-        destination_file.write_all(&buffer[..bytes_read])?;
-        progress.advance_bytes(bytes_read as u64);
+        destination_file.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&staged_destination);
+        return Err(error);
     }
-    destination_file.flush()?;
+
+    if let Err(error) = fs::rename(&staged_destination, destination) {
+        let _ = fs::remove_file(&staged_destination);
+        return Err(error);
+    }
+
     Ok(())
+}
+
+fn destination_staging_path(destination: &Path) -> PathBuf {
+    let parent = destination.parent().unwrap_or(Path::new("."));
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("item");
+
+    for index in 1_usize.. {
+        let candidate = parent.join(format!(".{file_name}.rc-stage-{index}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("staging candidate generator should always return");
 }
 
 fn delete_path(path: &Path, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
@@ -1828,6 +1862,59 @@ mod tests {
         worker
             .join()
             .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_file_canceled_does_not_leave_partial_destination() {
+        let root = make_temp_dir("copy-file-cancel-cleanup");
+        let source_file = root.join("source.bin");
+        let destination_dir = root.join("destination");
+        let destination_file = destination_dir.join("source.bin");
+        fs::create_dir_all(&destination_dir).expect("destination directory should exist");
+        fs::write(&source_file, vec![9_u8; 256 * 1024]).expect("source payload should be writable");
+
+        let (event_tx, _event_rx) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals {
+                items: 1,
+                bytes: 256 * 1024,
+            },
+            &event_tx,
+            cancel_flag,
+        );
+        let error = copy_file(&source_file, &destination_file, &mut progress)
+            .expect_err("canceled copy should fail");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
+        assert!(
+            !destination_file.exists(),
+            "canceled copy should not materialize destination file"
+        );
+
+        let stage_prefix = format!(
+            ".{}.rc-stage-",
+            destination_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("destination file name should be valid")
+        );
+        let leaked_stage_file = fs::read_dir(&destination_dir)
+            .expect("destination directory should be readable")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&stage_prefix)
+            });
+        assert!(
+            !leaked_stage_file,
+            "canceled copy should clean up staged temp files"
+        );
+
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
