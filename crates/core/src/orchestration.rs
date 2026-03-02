@@ -310,7 +310,7 @@ impl AppState {
                             "job failed"
                         );
                         if !is_refresh {
-                            self.set_status(format!("Job #{id} failed: {}", error.message));
+                            self.set_status(format!("Job #{id} failed: {}", error.user_message()));
                         }
                     }
                     if is_persist_settings
