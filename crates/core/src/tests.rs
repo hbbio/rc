@@ -1,5 +1,5 @@
 use super::*;
-use crate::keymap::KeyModifiers;
+use crate::keymap::{KeyCommand, KeyModifiers};
 use std::path::Path;
 use std::process::Output;
 use std::sync::Arc;
