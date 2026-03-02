@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundEvent, JobError, JobEvent, JobId, JobRequest, PanelListingSource,
-    WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_entries,
-    run_find_entries,
+    AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
+    PanelListingSource, WorkerCommand, build_tree_ready_event, execute_worker_job,
+    refresh_panel_entries, run_find_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
@@ -20,7 +20,6 @@ const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
 const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
 const SCAN_CONCURRENCY_LIMIT: usize = 4;
 const PROCESS_CONCURRENCY_LIMIT: usize = 2;
-const STALE_PENDING_WARN_AFTER: Duration = Duration::from_secs(10);
 
 pub(crate) struct RuntimeBridge {
     command_tx: tokio_mpsc::Sender<RuntimeCommand>,
@@ -239,7 +238,10 @@ impl RuntimeBridge {
         self.consecutive_full_count = self.consecutive_full_count.saturating_add(1);
         let now = Instant::now();
         let oldest_pending_age_ms = self.oldest_pending_age_ms(now).unwrap_or(0);
-        let stale_threshold_ms = STALE_PENDING_WARN_AFTER.as_millis();
+        let stale_threshold_ms = FOUNDATION_SLO.queue_stale_warn_after.as_millis();
+        let is_stale = FOUNDATION_SLO.is_queue_stale(Duration::from_millis(
+            oldest_pending_age_ms.min(u64::MAX as u128) as u64,
+        ));
         tracing::debug!(
             runtime_event = "queue_full",
             consecutive_full_count = self.consecutive_full_count,
@@ -247,7 +249,7 @@ impl RuntimeBridge {
             stale_threshold_ms,
             "runtime command queue is full"
         );
-        if oldest_pending_age_ms >= stale_threshold_ms {
+        if is_stale {
             if !self.stale_pending_warned {
                 tracing::warn!(
                     runtime_event = "queue_stale",
@@ -1051,7 +1053,7 @@ mod tests {
             path: root.join("second"),
         });
 
-        let stale_age = STALE_PENDING_WARN_AFTER + Duration::from_secs(1);
+        let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
         let stale_seen = Instant::now()
             .checked_sub(stale_age)
             .unwrap_or_else(Instant::now);
@@ -1069,7 +1071,7 @@ mod tests {
             .oldest_pending_age_ms(Instant::now())
             .expect("overflowed command should remain pending");
         assert!(
-            oldest_pending_age_ms >= STALE_PENDING_WARN_AFTER.as_millis(),
+            oldest_pending_age_ms >= FOUNDATION_SLO.queue_stale_warn_after.as_millis(),
             "oldest pending age should reflect stale queue pressure"
         );
         assert!(

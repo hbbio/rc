@@ -9,6 +9,7 @@ mod orchestration;
 mod process_backend;
 pub mod settings;
 pub mod settings_io;
+pub mod slo;
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +44,7 @@ pub use settings::{
     PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, SettingsSortField,
     VirtualFsSettings,
 };
+pub use slo::{FOUNDATION_SLO, SloBudgets};
 
 use crate::dialog::DialogEvent;
 use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap, KeymapParseReport};
