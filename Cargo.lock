@@ -803,7 +803,15 @@ version = "0.1.0"
 dependencies = [
  "filetime",
  "nix",
+ "rc-shell",
  "tracing",
+]
+
+[[package]]
+name = "rc-shell"
+version = "0.1.0"
+dependencies = [
+ "nix",
 ]
 
 [[package]]

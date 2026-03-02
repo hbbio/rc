@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};

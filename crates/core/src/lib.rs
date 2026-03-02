@@ -6,7 +6,6 @@ pub mod help;
 pub mod jobs;
 pub mod keymap;
 mod orchestration;
-mod process_backend;
 pub mod settings;
 pub mod settings_io;
 pub mod slo;
@@ -37,7 +36,7 @@ pub use jobs::{
     JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
     WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
-pub use process_backend::{LocalProcessBackend, ProcessBackend};
+pub use rc_shell::{LocalProcessBackend, ProcessBackend};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,

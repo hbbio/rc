@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/core", "crates/ui"]
+members = ["crates/app", "crates/core", "crates/shell", "crates/ui"]
 resolver = "2"
 
 [workspace.package]
@@ -21,4 +21,5 @@ tokio-util = "0.7"
 unicode-width = "0.1.14"
 
 rc-core = { path = "crates/core" }
+rc-shell = { path = "crates/shell" }
 rc-ui = { path = "crates/ui" }

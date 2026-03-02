@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 filetime = "0.2"
+rc-shell.workspace = true
 tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
