@@ -965,9 +965,9 @@ enum ViewerGotoTarget {
 
 #[derive(Clone, Debug)]
 pub struct ViewerState {
-    pub path: PathBuf,
+    path: PathBuf,
     pub bytes: Vec<u8>,
-    pub content: String,
+    content: String,
     content_fingerprint: u64,
     path_fingerprint: u64,
     pub scroll: usize,
@@ -1010,6 +1010,14 @@ impl ViewerState {
         } else {
             self.line_offsets.len()
         }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
     }
 
     pub fn content_fingerprint(&self) -> u64 {
@@ -6994,7 +7002,7 @@ OpenJobs = f6
         let Route::Viewer(viewer) = app.top_route() else {
             panic!("top route should be viewer");
         };
-        assert_eq!(viewer.path, file_path);
+        assert_eq!(viewer.path(), &file_path);
         assert_eq!(viewer.line_count(), 3);
 
         fs::remove_dir_all(&root).expect("must remove temp root");

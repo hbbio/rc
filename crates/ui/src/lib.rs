@@ -561,7 +561,7 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     let title = fit_single_line(
         format!(
             "{} | {} {}/{} | wrap:{}",
-            viewer.path.to_string_lossy(),
+            viewer.path().to_string_lossy(),
             if viewer.hex_mode { "row" } else { "line" },
             viewer.current_line_number(),
             viewer.line_count(),
@@ -672,7 +672,7 @@ fn highlight_syntax_set() -> &'static SyntaxSet {
 
 fn viewer_syntax<'a>(syntax_set: &'a SyntaxSet, viewer: &ViewerState) -> &'a SyntaxReference {
     syntax_set
-        .find_syntax_for_file(&viewer.path)
+        .find_syntax_for_file(viewer.path())
         .ok()
         .flatten()
         .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
@@ -695,7 +695,7 @@ fn viewer_theme_surface_style() -> Option<Style> {
 fn viewer_highlight_key(viewer: &ViewerState) -> ViewerHighlightKey {
     ViewerHighlightKey {
         content_hash: viewer.content_fingerprint(),
-        content_len: viewer.content.len(),
+        content_len: viewer.content().len(),
         path_hash: viewer.path_fingerprint(),
     }
 }
@@ -708,7 +708,7 @@ impl CachedViewerHighlight {
     fn new(viewer: &ViewerState, resources: &HighlightResources) -> Option<Self> {
         let syntax_set = highlight_syntax_set();
         let syntax = viewer_syntax(syntax_set, viewer);
-        let mut raw_lines: Vec<String> = viewer.content.lines().map(sanitize_text_line).collect();
+        let mut raw_lines: Vec<String> = viewer.content().lines().map(sanitize_text_line).collect();
         if raw_lines.is_empty() {
             raw_lines.push(String::new());
         }
@@ -754,7 +754,7 @@ impl CachedViewerHighlight {
 }
 
 fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize) -> Text<'static> {
-    let mut raw_lines: Vec<&str> = viewer.content.lines().collect();
+    let mut raw_lines: Vec<&str> = viewer.content().lines().collect();
     if raw_lines.is_empty() {
         raw_lines.push("");
     }
