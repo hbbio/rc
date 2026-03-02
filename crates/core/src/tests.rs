@@ -5,6 +5,7 @@ use std::process::Output;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::thread;
+use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
