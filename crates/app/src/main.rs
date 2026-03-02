@@ -284,9 +284,8 @@ fn run_app(
 }
 
 fn queue_deferred_save_before_shutdown(state: &mut AppState, runtime: &mut RuntimeBridge) {
-    if state.promote_deferred_persist_settings_request().is_some() {
-        runtime.dispatch_pending_commands(state);
-    }
+    let _ = state.promote_deferred_persist_settings_request();
+    runtime.dispatch_pending_commands(state);
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -1193,6 +1192,56 @@ mod tests {
             },
             Ok(other) => panic!("unexpected runtime command for deferred save setup: {other:?}"),
             Err(error) => panic!("deferred save should dispatch during shutdown prep: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn shutdown_preparation_dispatches_already_pending_save_setup_request() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-shutdown-pending-save-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: Some(root.join("mc.ini")),
+            rc_ini_path: Some(root.join("settings.ini")),
+        };
+        let snapshot = state.persisted_settings_snapshot();
+        let queued_id = state.enqueue_worker_job_request(JobRequest::PersistSettings {
+            paths: settings_paths,
+            snapshot: Box::new(snapshot),
+        });
+        assert!(
+            command_rx.try_recv().is_err(),
+            "pending save setup job should not dispatch before shutdown preparation"
+        );
+
+        queue_deferred_save_before_shutdown(&mut state, &mut runtime);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => {
+                assert_eq!(
+                    job.id, queued_id,
+                    "shutdown preparation should dispatch already pending save setup job"
+                );
+                assert!(
+                    matches!(job.request, JobRequest::PersistSettings { .. }),
+                    "dispatched pending job should be persist settings"
+                );
+            }
+            Ok(other) => panic!("unexpected runtime command for pending save setup: {other:?}"),
+            Err(error) => {
+                panic!("pending save setup should dispatch during shutdown prep: {error}")
+            }
         }
 
         fs::remove_dir_all(&root).expect("must remove temp root");
