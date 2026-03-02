@@ -789,7 +789,8 @@ fn copy_paths(
         else {
             continue;
         };
-        copy_path(source, &destination, progress)?;
+        let copy_result = copy_path(source, &destination.path, progress);
+        destination.finish(copy_result)?;
     }
     Ok(())
 }
@@ -809,18 +810,21 @@ fn move_paths(
         else {
             continue;
         };
-        validate_move_destination(source, &destination)?;
+        validate_move_destination(source, &destination.path)?;
         progress.set_current_path(source);
-        match fs::rename(source, &destination) {
+        let move_result = match fs::rename(source, &destination.path) {
             Ok(()) => {
                 progress.advance_totals(source, source_totals);
+                Ok(())
             }
             Err(error) if is_cross_device_error(&error) => {
-                copy_path(source, &destination, progress)?;
+                copy_path(source, &destination.path, progress)?;
                 remove_path(source)?;
+                Ok(())
             }
-            Err(error) => return Err(error),
-        }
+            Err(error) => Err(error),
+        };
+        destination.finish(move_result)?;
     }
     Ok(())
 }
@@ -972,7 +976,7 @@ fn resolve_destination(
     overwrite: OverwritePolicy,
     source_totals: JobTotals,
     progress: &mut ProgressTracker<'_>,
-) -> io::Result<Option<PathBuf>> {
+) -> io::Result<Option<ResolvedDestination>> {
     if source == destination {
         match overwrite {
             OverwritePolicy::Rename => {
@@ -988,7 +992,12 @@ fn resolve_destination(
     if destination.exists() {
         match overwrite {
             OverwritePolicy::Overwrite => {
-                remove_path(&destination)?;
+                let backup = destination_backup_path(&destination);
+                fs::rename(&destination, &backup)?;
+                return Ok(Some(ResolvedDestination {
+                    path: destination,
+                    overwrite_backup: Some(backup),
+                }));
             }
             OverwritePolicy::Skip => {
                 progress.advance_totals(source, source_totals);
@@ -1000,7 +1009,10 @@ fn resolve_destination(
         }
     }
 
-    Ok(Some(destination))
+    Ok(Some(ResolvedDestination {
+        path: destination,
+        overwrite_backup: None,
+    }))
 }
 
 fn renamed_destination(destination: &Path) -> PathBuf {
@@ -1116,6 +1128,48 @@ fn remove_path(path: &Path) -> io::Result<()> {
     } else {
         fs::remove_file(path)
     }
+}
+
+#[derive(Debug)]
+struct ResolvedDestination {
+    path: PathBuf,
+    overwrite_backup: Option<PathBuf>,
+}
+
+impl ResolvedDestination {
+    fn finish(self, operation_result: io::Result<()>) -> io::Result<()> {
+        let Some(backup) = self.overwrite_backup else {
+            return operation_result;
+        };
+
+        match operation_result {
+            Ok(()) => remove_path(&backup),
+            Err(operation_error) => {
+                if self.path.exists() {
+                    remove_path(&self.path)?;
+                }
+                fs::rename(&backup, &self.path)?;
+                Err(operation_error)
+            }
+        }
+    }
+}
+
+fn destination_backup_path(destination: &Path) -> PathBuf {
+    let parent = destination.parent().unwrap_or(Path::new("."));
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("item");
+
+    for index in 1_usize.. {
+        let candidate = parent.join(format!(".{file_name}.rc-backup-{index}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("backup candidate generator should always return");
 }
 
 fn is_cross_device_error(error: &io::Error) -> bool {
@@ -1712,6 +1766,61 @@ mod tests {
         let content =
             fs::read_to_string(&destination_file).expect("destination should be readable");
         assert_eq!(content, "source", "existing destination should be replaced");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_overwrite_restores_destination_when_copy_fails() {
+        let root = make_temp_dir("overwrite-rollback");
+        let source_root = root.join("source");
+        let preserved_destination = source_root.join("source");
+        fs::create_dir_all(&source_root).expect("source root should exist");
+        fs::create_dir_all(&preserved_destination).expect("existing destination should exist");
+        fs::write(source_root.join("new.txt"), "new payload")
+            .expect("source payload should be writable");
+        fs::write(preserved_destination.join("old.txt"), "preserved payload")
+            .expect("existing destination payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_root.clone()],
+            destination_dir: source_root.clone(),
+            overwrite: OverwritePolicy::Overwrite,
+        });
+        command_tx
+            .send(WorkerCommand::Run(Box::new(copy_job)))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => {
+                assert_eq!(error.code, JobErrorCode::InvalidInput);
+                assert!(
+                    error.message.contains("cannot copy directory into itself"),
+                    "copy should fail with self-copy validation"
+                );
+            }
+            _ => panic!("copy should fail and restore destination"),
+        }
+
+        let preserved_content = fs::read_to_string(preserved_destination.join("old.txt"))
+            .expect("preserved destination payload should remain readable");
+        assert_eq!(
+            preserved_content, "preserved payload",
+            "failed overwrite should restore original destination content"
+        );
 
         command_tx
             .send(WorkerCommand::Shutdown)
