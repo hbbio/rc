@@ -547,6 +547,14 @@ impl JobManager {
         true
     }
 
+    pub fn clear_cancel_request(&mut self, id: JobId) -> bool {
+        let Some(flag) = self.cancel_flags.get(&id) else {
+            return false;
+        };
+        flag.store(false, Ordering::Relaxed);
+        true
+    }
+
     pub fn newest_cancelable_job_id(&self) -> Option<JobId> {
         self.jobs
             .iter()

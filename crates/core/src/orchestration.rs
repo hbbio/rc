@@ -3,9 +3,6 @@ use crate::*;
 impl AppState {
     pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
         let panel_index = panel.index();
-        if let Some(previous_job_id) = self.panel_refresh_job_ids[panel_index].take() {
-            let _ = self.request_cancel_for_job(previous_job_id);
-        }
         let request_id = self.next_panel_refresh_request_id;
         self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
         self.panel_refresh_request_ids[panel_index] = request_id;
@@ -20,14 +17,31 @@ impl AppState {
                 panel_state.show_hidden_files,
             )
         };
-        let job_id = self.queue_worker_job_request(JobRequest::RefreshPanel {
+        let request = JobRequest::RefreshPanel {
             panel,
             cwd,
             source,
             sort_mode,
             show_hidden_files,
             request_id,
-        });
+        };
+        if let Some(previous_job_id) = self.panel_refresh_job_ids[panel_index].take() {
+            if self.replace_pending_panel_refresh_request(previous_job_id, &request) {
+                self.panel_refresh_job_ids[panel_index] = Some(previous_job_id);
+                tracing::debug!(
+                    job_event = "coalesced",
+                    job_kind = JobKind::RefreshPanel.label(),
+                    job_id = %previous_job_id,
+                    panel_index,
+                    request_id,
+                    "coalesced pending panel refresh request"
+                );
+                return;
+            }
+            let _ = self.request_cancel_for_job(previous_job_id);
+        }
+
+        let job_id = self.queue_worker_job_request(request);
         self.panel_refresh_job_ids[panel_index] = Some(job_id);
     }
 
@@ -520,6 +534,46 @@ impl AppState {
             }
         }
         None
+    }
+
+    pub(crate) fn replace_pending_panel_refresh_request(
+        &mut self,
+        job_id: JobId,
+        request: &JobRequest,
+    ) -> bool {
+        if !matches!(request, JobRequest::RefreshPanel { .. }) {
+            return false;
+        }
+        if !self.jobs.job(job_id).is_some_and(|job| {
+            matches!(job.kind, JobKind::RefreshPanel) && matches!(job.status, JobStatus::Queued)
+        }) {
+            return false;
+        }
+
+        let run_index = self.pending_worker_commands.iter().rposition(|command| {
+            matches!(
+                command,
+                WorkerCommand::Run(job)
+                    if job.id == job_id
+                        && matches!(job.request, JobRequest::RefreshPanel { .. })
+            )
+        });
+        let Some(run_index) = run_index else {
+            return false;
+        };
+
+        if let WorkerCommand::Run(job) = &mut self.pending_worker_commands[run_index] {
+            job.request = request.clone();
+        }
+
+        self.remove_pending_cancel_for_job(job_id);
+        let _ = self.jobs.clear_cancel_request(job_id);
+        true
+    }
+
+    fn remove_pending_cancel_for_job(&mut self, job_id: JobId) {
+        self.pending_worker_commands
+            .retain(|command| !matches!(command, WorkerCommand::Cancel(id) if *id == job_id));
     }
 
     pub(crate) fn cancel_latest_job(&mut self) {

@@ -273,7 +273,7 @@ fn run_app(
         &mut runtime,
         skin_runtime,
     );
-    queue_deferred_save_before_shutdown(state, &runtime);
+    queue_deferred_save_before_shutdown(state, &mut runtime);
     let shutdown_result = runtime.shutdown();
     let restore_result = restore_terminal(&mut terminal);
 
@@ -283,7 +283,7 @@ fn run_app(
     Ok(())
 }
 
-fn queue_deferred_save_before_shutdown(state: &mut AppState, runtime: &RuntimeBridge) {
+fn queue_deferred_save_before_shutdown(state: &mut AppState, runtime: &mut RuntimeBridge) {
     if state.promote_deferred_persist_settings_request().is_some() {
         runtime.dispatch_pending_commands(state);
     }
@@ -360,7 +360,7 @@ fn handle_key(
     state: &mut AppState,
     keymap: &Keymap,
     key_event: KeyEvent,
-    runtime: &RuntimeBridge,
+    runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
     input_compatibility: InputCompatibility,
 ) -> Result<bool> {
@@ -407,7 +407,7 @@ fn handle_key(
 fn handle_mouse(
     state: &mut AppState,
     mouse_event: MouseEvent,
-    runtime: &RuntimeBridge,
+    runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
     if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -423,7 +423,7 @@ fn handle_mouse(
 fn apply_and_dispatch(
     state: &mut AppState,
     command: AppCommand,
-    runtime: &RuntimeBridge,
+    runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<ApplyResult> {
     let result = state.apply(command)?;
@@ -943,7 +943,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let runtime = test_runtime_bridge();
+        let mut runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -968,7 +968,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &runtime,
+            &mut runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -992,7 +992,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let runtime = test_runtime_bridge();
+        let mut runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1005,7 +1005,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &runtime,
+            &mut runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1014,7 +1014,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('!'), KeyModifiers::SHIFT),
-            &runtime,
+            &mut runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1039,7 +1039,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
-        let runtime = test_runtime_bridge();
+        let mut runtime = test_runtime_bridge();
         let skin_runtime = SkinRuntimeConfig {
             skin_dirs: Vec::new(),
             settings_paths: settings_io::SettingsPaths {
@@ -1052,7 +1052,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
-            &runtime,
+            &mut runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1061,7 +1061,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('1'), KeyModifiers::SHIFT),
-            &runtime,
+            &mut runtime,
             &skin_runtime,
             compat_enabled(),
         )
@@ -1086,7 +1086,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
 
         let mut state = AppState::new(root.clone()).expect("app should initialize");
-        let (runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
         let mc_ini = root.join("mc.ini");
         let rc_ini = root.join("settings.ini");
         let skin_runtime = SkinRuntimeConfig {
@@ -1097,8 +1097,13 @@ mod tests {
             },
         };
 
-        apply_and_dispatch(&mut state, AppCommand::SaveSetup, &runtime, &skin_runtime)
-            .expect("save setup dispatch should succeed");
+        apply_and_dispatch(
+            &mut state,
+            AppCommand::SaveSetup,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("save setup dispatch should succeed");
 
         assert!(
             !mc_ini.exists() && !rc_ini.exists(),
@@ -1133,7 +1138,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
 
         let mut state = AppState::new(root.clone()).expect("app should initialize");
-        let (runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
         let settings_paths = settings_io::SettingsPaths {
             mc_ini_path: Some(root.join("mc.ini")),
             rc_ini_path: Some(root.join("settings.ini")),
@@ -1171,7 +1176,7 @@ mod tests {
             "deferred save should not dispatch before shutdown preparation"
         );
 
-        queue_deferred_save_before_shutdown(&mut state, &runtime);
+        queue_deferred_save_before_shutdown(&mut state, &mut runtime);
 
         match command_rx.try_recv() {
             Ok(RuntimeCommand::Worker {
@@ -1203,7 +1208,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
 
         let mut state = AppState::new(root.clone()).expect("app should initialize");
-        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        let (mut runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
         state.enqueue_worker_job_request(JobRequest::Mkdir {
             path: root.join("queued"),
         });
@@ -1236,7 +1241,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
 
         let mut state = AppState::new(root.clone()).expect("app should initialize");
-        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        let (mut runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
         state.enqueue_worker_job_request(JobRequest::Mkdir {
             path: root.join("queued"),
         });
@@ -1279,7 +1284,10 @@ mod tests {
             counts.queued, 3,
             "queued, overflowed, and retained jobs should stay queued"
         );
-        assert_eq!(counts.failed, 0, "overflowed job should not be marked failed");
+        assert_eq!(
+            counts.failed, 0,
+            "overflowed job should not be marked failed"
+        );
         assert_eq!(
             state
                 .jobs
@@ -1302,7 +1310,7 @@ mod tests {
         fs::create_dir_all(&root).expect("must create temp root");
 
         let mut state = AppState::new(root.clone()).expect("app should initialize");
-        let (runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
+        let (mut runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(1);
         let job_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
             path: root.join("queued"),
         });

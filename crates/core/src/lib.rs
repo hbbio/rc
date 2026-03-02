@@ -8059,7 +8059,7 @@ OpenJobs = f6
     }
 
     #[test]
-    fn reread_cancels_previous_refresh_for_same_panel() {
+    fn reread_coalesces_previous_refresh_for_same_panel() {
         use std::sync::atomic::Ordering as AtomicOrdering;
 
         let stamp = SystemTime::now()
@@ -8091,17 +8091,17 @@ OpenJobs = f6
 
         app.refresh_active_panel();
         assert!(
-            first_cancel_flag.load(AtomicOrdering::Relaxed),
-            "second refresh should cancel the previous in-flight request"
+            !first_cancel_flag.load(AtomicOrdering::Relaxed),
+            "coalesced refresh should keep the existing queued request active"
         );
         assert!(
-            app.pending_worker_commands.iter().any(
+            !app.pending_worker_commands.iter().any(
                 |command| matches!(command, WorkerCommand::Cancel(job_id) if *job_id == first_job_id)
             ),
-            "second refresh should enqueue cancellation for the previous refresh job"
+            "coalesced refresh should not enqueue an explicit cancellation"
         );
 
-        let (second_request_id, second_cancel_flag) = app
+        let (coalesced_job_id, second_request_id, second_cancel_flag) = app
             .pending_worker_commands
             .iter()
             .rev()
@@ -8112,16 +8112,20 @@ OpenJobs = f6
                 let JobRequest::RefreshPanel { request_id, .. } = &job.request else {
                     return None;
                 };
-                Some((*request_id, job.cancel_flag()))
+                Some((job.id, *request_id, job.cancel_flag()))
             })
             .expect("second refresh command should be queued");
+        assert_eq!(
+            coalesced_job_id, first_job_id,
+            "coalescing should reuse the existing queued refresh job id"
+        );
         assert!(
             second_request_id > first_request_id,
-            "request ids should advance for newer refresh commands"
+            "request ids should advance when a refresh request supersedes the queued one"
         );
         assert!(
             !second_cancel_flag.load(AtomicOrdering::Relaxed),
-            "newest refresh should remain active"
+            "coalesced refresh should remain active"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
@@ -8159,17 +8163,25 @@ OpenJobs = f6
                 }
             })
             .collect();
-        assert_eq!(refresh_requests.len(), 2);
+        assert_eq!(
+            refresh_requests.len(),
+            1,
+            "superseded refreshes should coalesce while still queued"
+        );
 
-        let (panel, cwd, source, sort_mode, first_request_id) = refresh_requests[0].clone();
-        let second_request_id = refresh_requests[1].4;
+        let (panel, cwd, source, sort_mode, latest_request_id) = refresh_requests[0].clone();
+        let stale_request_id = latest_request_id.saturating_sub(1);
+        assert!(
+            stale_request_id < latest_request_id,
+            "stale request id should be older than the latest one"
+        );
 
         app.handle_background_event(BackgroundEvent::PanelRefreshed {
             panel,
             cwd: cwd.clone(),
             source: source.clone(),
             sort_mode,
-            request_id: first_request_id,
+            request_id: stale_request_id,
             result: Ok(Vec::new()),
         });
         assert!(
@@ -8182,7 +8194,7 @@ OpenJobs = f6
             cwd,
             source,
             sort_mode,
-            request_id: second_request_id,
+            request_id: latest_request_id,
             result: Ok(Vec::new()),
         });
         assert!(

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use rc_core::{
@@ -20,6 +20,7 @@ const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
 const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
 const SCAN_CONCURRENCY_LIMIT: usize = 4;
 const PROCESS_CONCURRENCY_LIMIT: usize = 2;
+const STALE_PENDING_WARN_AFTER: Duration = Duration::from_secs(10);
 
 pub(crate) struct RuntimeBridge {
     command_tx: tokio_mpsc::Sender<RuntimeCommand>,
@@ -28,6 +29,9 @@ pub(crate) struct RuntimeBridge {
     runtime_handle: Option<thread::JoinHandle<Result<()>>>,
     worker_disconnected: bool,
     background_disconnected: bool,
+    pending_first_seen: HashMap<PendingCommandKey, Instant>,
+    consecutive_full_count: u64,
+    stale_pending_warned: bool,
 }
 
 #[derive(Debug)]
@@ -36,6 +40,13 @@ pub(crate) enum RuntimeCommand {
         command: WorkerCommand,
         queued_at: Instant,
     },
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum PendingCommandKey {
+    Run(JobId),
+    Cancel(JobId),
     Shutdown,
 }
 
@@ -89,11 +100,20 @@ impl RuntimeBridge {
             runtime_handle: Some(runtime_handle),
             worker_disconnected: false,
             background_disconnected: false,
+            pending_first_seen: HashMap::new(),
+            consecutive_full_count: 0,
+            stale_pending_warned: false,
         })
     }
 
-    pub(crate) fn dispatch_pending_commands(&self, state: &mut AppState) {
-        let mut pending_commands = state.take_pending_worker_commands().into_iter();
+    pub(crate) fn dispatch_pending_commands(&mut self, state: &mut AppState) {
+        let pending_commands = state.take_pending_worker_commands();
+        if pending_commands.is_empty() {
+            self.clear_pending_dispatch_metrics();
+            return;
+        }
+
+        let mut pending_commands = pending_commands.into_iter();
         while let Some(command) = pending_commands.next() {
             let command_name = worker_command_name(&command);
             let run_job_id = match &command {
@@ -104,12 +124,15 @@ impl RuntimeBridge {
                 WorkerCommand::Run(job) => Some(job.request.kind().label()),
                 _ => None,
             };
-            let queued_at = Instant::now();
+            let pending_key = Self::command_key(&command);
+            let queued_at = self.record_pending_command(&command, Instant::now());
             match self
                 .command_tx
                 .try_send(RuntimeCommand::Worker { command, queued_at })
             {
                 Ok(()) => {
+                    self.mark_command_dispatched(pending_key);
+                    self.consecutive_full_count = 0;
                     tracing::debug!(
                         runtime_event = "enqueued",
                         command_class = "worker",
@@ -127,6 +150,7 @@ impl RuntimeBridge {
                         unsent.push(command);
                     }
                     unsent.extend(pending_commands);
+                    self.record_queue_full_metrics();
                     state.restore_pending_worker_commands(unsent);
                     break;
                 }
@@ -135,6 +159,7 @@ impl RuntimeBridge {
                     for command in pending_commands {
                         handle_worker_unavailable(state, command);
                     }
+                    self.clear_pending_dispatch_metrics();
                     break;
                 }
             }
@@ -182,6 +207,67 @@ impl RuntimeBridge {
         }
         Ok(())
     }
+
+    fn command_key(command: &WorkerCommand) -> PendingCommandKey {
+        match command {
+            WorkerCommand::Run(job) => PendingCommandKey::Run(job.id),
+            WorkerCommand::Cancel(id) => PendingCommandKey::Cancel(*id),
+            WorkerCommand::Shutdown => PendingCommandKey::Shutdown,
+        }
+    }
+
+    fn record_pending_command(&mut self, command: &WorkerCommand, now: Instant) -> Instant {
+        let key = Self::command_key(command);
+        *self.pending_first_seen.entry(key).or_insert(now)
+    }
+
+    fn mark_command_dispatched(&mut self, key: PendingCommandKey) {
+        self.pending_first_seen.remove(&key);
+        if self.pending_first_seen.is_empty() {
+            self.stale_pending_warned = false;
+        }
+    }
+
+    fn oldest_pending_age_ms(&self, now: Instant) -> Option<u128> {
+        self.pending_first_seen
+            .values()
+            .map(|first_seen| now.saturating_duration_since(*first_seen).as_millis())
+            .max()
+    }
+
+    fn record_queue_full_metrics(&mut self) {
+        self.consecutive_full_count = self.consecutive_full_count.saturating_add(1);
+        let now = Instant::now();
+        let oldest_pending_age_ms = self.oldest_pending_age_ms(now).unwrap_or(0);
+        let stale_threshold_ms = STALE_PENDING_WARN_AFTER.as_millis();
+        tracing::debug!(
+            runtime_event = "queue_full",
+            consecutive_full_count = self.consecutive_full_count,
+            oldest_pending_age_ms,
+            stale_threshold_ms,
+            "runtime command queue is full"
+        );
+        if oldest_pending_age_ms >= stale_threshold_ms {
+            if !self.stale_pending_warned {
+                tracing::warn!(
+                    runtime_event = "queue_stale",
+                    consecutive_full_count = self.consecutive_full_count,
+                    oldest_pending_age_ms,
+                    stale_threshold_ms,
+                    "runtime pending queue has become stale"
+                );
+                self.stale_pending_warned = true;
+            }
+        } else {
+            self.stale_pending_warned = false;
+        }
+    }
+
+    fn clear_pending_dispatch_metrics(&mut self) {
+        self.pending_first_seen.clear();
+        self.consecutive_full_count = 0;
+        self.stale_pending_warned = false;
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +285,9 @@ pub(crate) fn test_runtime_bridge_with_capacity(
             runtime_handle: None,
             worker_disconnected: false,
             background_disconnected: false,
+            pending_first_seen: HashMap::new(),
+            consecutive_full_count: 0,
+            stale_pending_warned: false,
         },
         command_rx,
     )
@@ -224,6 +313,9 @@ pub(crate) fn test_runtime_bridge_with_channels(
             runtime_handle: None,
             worker_disconnected: false,
             background_disconnected: false,
+            pending_first_seen: HashMap::new(),
+            consecutive_full_count: 0,
+            stale_pending_warned: false,
         },
         command_rx,
         worker_event_tx,
@@ -943,6 +1035,54 @@ mod tests {
             Ok(other) => panic!("unexpected runtime command for deferred save: {other:?}"),
             Err(error) => panic!("deferred save should dispatch from drain_events: {error}"),
         }
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn queue_full_tracks_pending_age_and_flags_stale_queue() {
+        let root = make_temp_dir("queue-full-metrics");
+        let (mut runtime, _command_rx) = test_runtime_bridge_with_capacity(1);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let _first_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("first"),
+        });
+        let second_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("second"),
+        });
+
+        let stale_age = STALE_PENDING_WARN_AFTER + Duration::from_secs(1);
+        let stale_seen = Instant::now()
+            .checked_sub(stale_age)
+            .unwrap_or_else(Instant::now);
+        runtime
+            .pending_first_seen
+            .insert(PendingCommandKey::Run(second_id), stale_seen);
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        assert!(
+            runtime.consecutive_full_count >= 1,
+            "queue-full dispatch should increment consecutive-full metric"
+        );
+        let oldest_pending_age_ms = runtime
+            .oldest_pending_age_ms(Instant::now())
+            .expect("overflowed command should remain pending");
+        assert!(
+            oldest_pending_age_ms >= STALE_PENDING_WARN_AFTER.as_millis(),
+            "oldest pending age should reflect stale queue pressure"
+        );
+        assert!(
+            runtime.stale_pending_warned,
+            "stale queue pressure should trigger warning guardrail"
+        );
+
+        let pending = state.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "overflowed command should remain pending for retry"
+        );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
