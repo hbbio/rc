@@ -1373,11 +1373,15 @@ mod tests {
         assert_eq!(
             pending.len(),
             1,
-            "cancel should stay pending under backpressure"
+            "one command should stay pending under backpressure"
         );
         assert!(
-            matches!(pending.first(), Some(WorkerCommand::Cancel(id)) if *id == job_id),
-            "pending command should keep the original cancel request"
+            matches!(
+                pending.first(),
+                Some(WorkerCommand::Run(job))
+                    if job.id == job_id && matches!(job.request, JobRequest::Mkdir { .. })
+            ),
+            "pending command should keep the original work item after cancel dispatches first"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

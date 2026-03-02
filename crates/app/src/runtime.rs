@@ -49,6 +49,13 @@ enum PendingCommandKey {
     Shutdown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandPriority {
+    High,
+    Medium,
+    Low,
+}
+
 enum TaskCompletion {
     Worker { job_id: JobId },
 }
@@ -106,7 +113,7 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn dispatch_pending_commands(&mut self, state: &mut AppState) {
-        let pending_commands = state.take_pending_worker_commands();
+        let pending_commands = prioritize_worker_commands(state.take_pending_worker_commands());
         if pending_commands.is_empty() {
             self.clear_pending_dispatch_metrics();
             return;
@@ -145,11 +152,39 @@ impl RuntimeBridge {
                 }
                 Err(tokio_mpsc::error::TrySendError::Full(runtime_command)) => {
                     let mut unsent = Vec::new();
-                    if let Some(command) = handle_runtime_queue_full(state, runtime_command) {
-                        unsent.push(command);
+                    self.record_queue_full_metrics();
+                    match runtime_command {
+                        RuntimeCommand::Worker { command, .. } => {
+                            let oldest_pending_age_ms =
+                                self.oldest_pending_age_ms(Instant::now()).unwrap_or(0);
+                            if should_drop_for_backpressure(
+                                &command,
+                                self.consecutive_full_count,
+                                oldest_pending_age_ms,
+                            ) {
+                                self.mark_command_dispatched(pending_key);
+                                state.set_status(
+                                    "runtime queue saturated; dropped low-priority refresh",
+                                );
+                                tracing::warn!(
+                                    runtime_event = "queue_drop",
+                                    command = command_name,
+                                    job_id = ?run_job_id,
+                                    job_kind = ?run_job_kind,
+                                    consecutive_full_count = self.consecutive_full_count,
+                                    oldest_pending_age_ms,
+                                    "dropped low-priority runtime command under backpressure"
+                                );
+                            } else {
+                                state.set_status("runtime queue is full; retrying");
+                                unsent.push(command);
+                            }
+                        }
+                        RuntimeCommand::Shutdown => {
+                            state.set_status("runtime queue is full");
+                        }
                     }
                     unsent.extend(pending_commands);
-                    self.record_queue_full_metrics();
                     state.restore_pending_worker_commands(unsent);
                     break;
                 }
@@ -839,20 +874,51 @@ fn runtime_queue_depth(command_tx: &tokio_mpsc::Sender<RuntimeCommand>) -> usize
         .saturating_sub(command_tx.capacity())
 }
 
-fn handle_runtime_queue_full(
-    state: &mut AppState,
-    command: RuntimeCommand,
-) -> Option<WorkerCommand> {
+fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
     match command {
-        RuntimeCommand::Worker { command, .. } => {
-            state.set_status("runtime queue is full; retrying");
-            Some(command)
-        }
-        RuntimeCommand::Shutdown => {
-            state.set_status("runtime queue is full");
-            None
+        WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => CommandPriority::High,
+        WorkerCommand::Run(job) => match job.request {
+            JobRequest::LoadViewer { .. } => CommandPriority::High,
+            JobRequest::RefreshPanel { .. } => CommandPriority::Low,
+            _ => CommandPriority::Medium,
+        },
+    }
+}
+
+fn prioritize_worker_commands(commands: Vec<WorkerCommand>) -> Vec<WorkerCommand> {
+    let mut high = Vec::new();
+    let mut medium = Vec::new();
+    let mut low = Vec::new();
+
+    for command in commands {
+        match worker_command_priority(&command) {
+            CommandPriority::High => high.push(command),
+            CommandPriority::Medium => medium.push(command),
+            CommandPriority::Low => low.push(command),
         }
     }
+
+    let mut prioritized = Vec::with_capacity(high.len() + medium.len() + low.len());
+    prioritized.extend(high);
+    prioritized.extend(medium);
+    prioritized.extend(low);
+    prioritized
+}
+
+fn should_drop_for_backpressure(
+    command: &WorkerCommand,
+    consecutive_full_count: u64,
+    oldest_pending_age_ms: u128,
+) -> bool {
+    if !matches!(worker_command_priority(command), CommandPriority::Low) {
+        return false;
+    }
+    if consecutive_full_count >= 3 {
+        return true;
+    }
+    FOUNDATION_SLO.is_queue_stale(Duration::from_millis(
+        oldest_pending_age_ms.min(u64::MAX as u128) as u64,
+    ))
 }
 
 fn handle_runtime_unavailable(state: &mut AppState, command: RuntimeCommand) {
@@ -1089,6 +1155,112 @@ mod tests {
             pending.len(),
             1,
             "overflowed command should remain pending for retry"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn priority_sorting_dispatches_high_before_medium_before_low() {
+        let mut manager = JobManager::new();
+        let medium_job = manager.enqueue(JobRequest::Mkdir {
+            path: PathBuf::from("/tmp/medium"),
+        });
+        let low_job = manager.enqueue(JobRequest::RefreshPanel {
+            panel: ActivePanel::Left,
+            cwd: PathBuf::from("/tmp"),
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            show_hidden_files: true,
+            request_id: 99,
+        });
+        let high_job = manager.enqueue(JobRequest::LoadViewer {
+            path: PathBuf::from("/tmp/high.txt"),
+        });
+        let high_cancel = WorkerCommand::Cancel(medium_job.id);
+
+        let prioritized = prioritize_worker_commands(vec![
+            WorkerCommand::Run(Box::new(low_job)),
+            WorkerCommand::Run(Box::new(medium_job)),
+            high_cancel,
+            WorkerCommand::Run(Box::new(high_job)),
+        ]);
+
+        assert!(
+            matches!(prioritized[0], WorkerCommand::Cancel(_)),
+            "cancel commands should have highest dispatch priority"
+        );
+        assert!(
+            matches!(
+                prioritized[1],
+                WorkerCommand::Run(ref job) if matches!(job.request, JobRequest::LoadViewer { .. })
+            ),
+            "interactive viewer loads should dispatch before medium jobs"
+        );
+        assert!(
+            matches!(
+                prioritized[2],
+                WorkerCommand::Run(ref job) if matches!(job.request, JobRequest::Mkdir { .. })
+            ),
+            "medium jobs should dispatch before refresh jobs"
+        );
+        assert!(
+            matches!(
+                prioritized[3],
+                WorkerCommand::Run(ref job) if matches!(job.request, JobRequest::RefreshPanel { .. })
+            ),
+            "refresh jobs should be treated as low-priority traffic"
+        );
+    }
+
+    #[test]
+    fn saturated_queue_drops_low_priority_refresh_after_repeated_pressure() {
+        let root = make_temp_dir("queue-drop-low-priority");
+        let (mut runtime, mut command_rx) = test_runtime_bridge_with_capacity(1);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let medium_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("first"),
+        });
+        let low_id = state.enqueue_worker_job_request(JobRequest::RefreshPanel {
+            panel: ActivePanel::Left,
+            cwd: root.clone(),
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            show_hidden_files: true,
+            request_id: 7,
+        });
+        let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
+        let stale_seen = Instant::now()
+            .checked_sub(stale_age)
+            .unwrap_or_else(Instant::now);
+        runtime
+            .pending_first_seen
+            .insert(PendingCommandKey::Run(low_id), stale_seen);
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => {
+                assert_eq!(job.id, medium_id, "medium command should stay queued");
+            }
+            other => panic!("expected medium run command in runtime queue, got {other:?}"),
+        }
+        assert!(
+            state.take_pending_worker_commands().is_empty(),
+            "low-priority refresh should be dropped instead of requeued"
+        );
+        assert!(
+            state.status_line.contains("dropped low-priority refresh"),
+            "status should explain backpressure drop behavior"
+        );
+        assert!(
+            !runtime
+                .pending_first_seen
+                .contains_key(&PendingCommandKey::Run(low_id)),
+            "dropped command should not remain tracked as pending"
         );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
