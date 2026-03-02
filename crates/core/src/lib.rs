@@ -47,6 +47,8 @@ pub use settings::{
 use crate::dialog::DialogEvent;
 use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, Keymap, KeymapParseReport};
 
+const MAX_STATUS_LINE_CHARS: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
     OpenHelp,
@@ -876,14 +878,18 @@ impl PanelState {
     }
 
     pub fn open_selected_directory(&mut self) -> bool {
-        let Some(entry) = self.selected_entry() else {
+        let Some((path, is_dir_hint)) = self
+            .selected_entry()
+            .map(|entry| (entry.path.clone(), entry.is_dir))
+        else {
             return false;
         };
-        if !entry.is_dir {
+        let is_dir = is_dir_hint || fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+        if !is_dir {
             return false;
         }
 
-        self.cwd = entry.path.clone();
+        self.cwd = path;
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
         self.tagged.clear();
@@ -2012,7 +2018,7 @@ impl AppState {
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
-        self.status_line = message.into();
+        self.status_line = normalize_status_message(message.into());
         self.status_expires_at = self
             .status_message_timeout()
             .and_then(|timeout| Instant::now().checked_add(timeout))
@@ -4921,6 +4927,31 @@ fn fingerprint(value: &(impl Hash + ?Sized)) -> u64 {
     hasher.finish()
 }
 
+fn normalize_status_message(message: String) -> String {
+    let mut normalized = String::new();
+    let mut count = 0_usize;
+    let mut truncated = false;
+
+    for ch in message.chars() {
+        if count >= MAX_STATUS_LINE_CHARS {
+            truncated = true;
+            break;
+        }
+        let normalized_ch = if ch == '\n' || ch == '\r' || ch == '\t' || ch.is_control() {
+            ' '
+        } else {
+            ch
+        };
+        normalized.push(normalized_ch);
+        count = count.saturating_add(1);
+    }
+
+    if truncated {
+        normalized.push_str("...");
+    }
+    normalized
+}
+
 fn should_default_to_hex_mode(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
@@ -5171,10 +5202,11 @@ pub(crate) fn read_entries_with_visibility_cancel(
             continue;
         }
         let file_type = entry.file_type()?;
-        let metadata = entry.metadata().ok();
+        let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
         let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
         let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
-        if file_type.is_dir() {
+        let is_dir = file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        if is_dir {
             entries.push(FileEntry::directory(name, path, size, modified));
         } else {
             entries.push(FileEntry::file(name, path, size, modified));
@@ -5729,6 +5761,34 @@ mod tests {
         assert_eq!(first.path, root);
 
         fs::remove_dir_all(&root).expect("must remove temp tree");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listing_marks_directory_symlinks_as_directories() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-dir-symlink-listing-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let target_dir = root.join("target-dir");
+        fs::create_dir_all(&target_dir).expect("must create target directory");
+        let symlink_path = root.join("tmp-like");
+        std::os::unix::fs::symlink(&target_dir, &symlink_path)
+            .expect("directory symlink should be creatable");
+
+        let entries = read_entries(&root, SortMode::default()).expect("listing should load");
+        let symlink_entry = entries
+            .iter()
+            .find(|entry| entry.path == symlink_path)
+            .expect("directory symlink should be listed");
+        assert!(
+            symlink_entry.is_dir,
+            "directory symlink should be classified as a directory"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]
@@ -6472,6 +6532,40 @@ OpenJobs = f6
     }
 
     #[test]
+    fn set_status_sanitizes_controls_and_truncates_very_long_messages() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-status-sanitize-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.set_status(format!(
+            "line1\nline2\t{}\r{}",
+            '\u{1b}',
+            "x".repeat(MAX_STATUS_LINE_CHARS.saturating_add(128))
+        ));
+        assert!(
+            !app.status_line.contains('\n')
+                && !app.status_line.contains('\r')
+                && !app.status_line.contains('\t')
+                && !app.status_line.contains('\u{1b}'),
+            "status text should strip control characters before render"
+        );
+        assert!(
+            app.status_line.ends_with("..."),
+            "very long status text should be truncated with an ellipsis"
+        );
+        assert!(
+            app.status_line.chars().count() <= MAX_STATUS_LINE_CHARS.saturating_add(3),
+            "status text should be bounded to avoid pathological render costs"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn persist_settings_job_coalesces_pending_request() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6902,6 +6996,72 @@ OpenJobs = f6
         };
         assert_eq!(viewer.path, file_path);
         assert_eq!(viewer.line_count(), 3);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_entry_on_directory_symlink_descends_into_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-open-dir-symlink-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).expect("must create target directory");
+        fs::write(target_dir.join("entry.txt"), "payload").expect("must create target file");
+        let symlink_path = root.join("tmp-like");
+        std::os::unix::fs::symlink(&target_dir, &symlink_path)
+            .expect("directory symlink should be creatable");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let symlink_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == symlink_path)
+            .expect("directory symlink should be visible");
+        assert!(
+            app.active_panel().entries[symlink_index].is_dir,
+            "directory symlink should be treated as a directory entry"
+        );
+        app.active_panel_mut().cursor = symlink_index;
+
+        app.apply(AppCommand::OpenEntry)
+            .expect("open entry should descend into directory symlink");
+        assert_eq!(
+            app.active_panel().cwd,
+            symlink_path,
+            "open entry should switch into the symlink path"
+        );
+        assert!(
+            app.active_panel().loading,
+            "opening a directory symlink should queue a panel refresh"
+        );
+
+        let pending = app.take_pending_worker_commands();
+        assert_eq!(
+            pending.len(),
+            1,
+            "directory open should queue one refresh request"
+        );
+        match &pending[0] {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::RefreshPanel {
+                    cwd,
+                    source: PanelListingSource::Directory,
+                    ..
+                } => assert_eq!(
+                    cwd,
+                    &app.active_panel().cwd,
+                    "refresh request should target the opened symlink directory"
+                ),
+                other => panic!("expected refresh panel request, got {other:?}"),
+            },
+            other => panic!("expected queued worker run command, got {other:?}"),
+        }
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }

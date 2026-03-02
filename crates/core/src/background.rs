@@ -157,7 +157,9 @@ where
             };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = file_type.is_dir();
+            let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
+            let is_dir =
+                file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
 
             if query_matches_entry(&name, &normalized_query, wildcard_query) {
                 emitted.push(FindResultEntry {
@@ -178,7 +180,7 @@ where
                 }
             }
 
-            if is_dir {
+            if file_type.is_dir() {
                 child_dirs.push(path);
             }
         }
