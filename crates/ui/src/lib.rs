@@ -17,8 +17,10 @@ use rc_core::{
     SettingsScreenState, TreeState, ViewerState, top_menus,
 };
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme};
@@ -35,11 +37,16 @@ pub use skin::{
 };
 
 struct HighlightResources {
-    syntax_set: SyntaxSet,
     theme: Theme,
 }
 
-static HIGHLIGHT_RESOURCES: OnceLock<Option<HighlightResources>> = OnceLock::new();
+struct CachedHighlightResources {
+    skin_name: String,
+    resources: Arc<HighlightResources>,
+}
+
+static HIGHLIGHT_RESOURCES: OnceLock<Mutex<Option<CachedHighlightResources>>> = OnceLock::new();
+static HIGHLIGHT_SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static VIEWER_HIGHLIGHT_CACHE: OnceLock<Mutex<Option<CachedViewerHighlight>>> = OnceLock::new();
 static DISK_USAGE_SUMMARY_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, String)>>> =
     OnceLock::new();
@@ -48,15 +55,14 @@ const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ViewerHighlightKey {
-    content_ptr: usize,
+    content_hash: u64,
     content_len: usize,
+    path_hash: u64,
 }
 
 struct CachedViewerHighlight {
     key: ViewerHighlightKey,
-    raw_lines: Vec<String>,
     highlighted_lines: Vec<Line<'static>>,
-    highlighter: HighlightLines<'static>,
 }
 
 pub fn render(frame: &mut Frame, state: &AppState) {
@@ -587,32 +593,51 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
 }
 
 fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Option<Text<'static>> {
-    let resources = HIGHLIGHT_RESOURCES.get_or_init(build_highlight_resources);
-    let resources: &'static HighlightResources = resources.as_ref()?;
+    let resources = highlight_resources()?;
     let cache_lock = viewer_highlight_cache();
     let mut cache_guard = cache_lock.lock().ok()?;
     let key = viewer_highlight_key(viewer);
 
     if cache_guard.as_ref().is_none_or(|cached| cached.key != key) {
-        *cache_guard = Some(CachedViewerHighlight::new(viewer, resources));
+        *cache_guard = Some(CachedViewerHighlight::new(viewer, resources.as_ref())?);
     }
     let cache = cache_guard.as_mut()?;
-    let total_lines = cache.raw_lines.len();
+    let total_lines = cache.highlighted_lines.len();
     if total_lines == 0 {
         return Some(Text::raw(String::new()));
     }
 
     let start = viewer.scroll.min(total_lines.saturating_sub(1));
     let end = start.saturating_add(visible_lines.max(1)).min(total_lines);
-    cache
-        .ensure_highlighted_up_to(end, &resources.syntax_set)
-        .ok()?;
 
     Some(Text::from(cache.highlighted_lines[start..end].to_vec()))
 }
 
-fn build_highlight_resources() -> Option<HighlightResources> {
-    let syntax_set = SyntaxSet::load_defaults_newlines();
+fn highlight_resources() -> Option<Arc<HighlightResources>> {
+    let skin = current_skin();
+    let skin_name = skin.name().to_string();
+    let cache = HIGHLIGHT_RESOURCES.get_or_init(|| Mutex::new(None));
+    let mut cache_guard = cache.lock().ok()?;
+    if cache_guard
+        .as_ref()
+        .is_none_or(|cached| cached.skin_name != skin_name)
+    {
+        let resources = Arc::new(build_highlight_resources_for_skin(skin.as_ref())?);
+        *cache_guard = Some(CachedHighlightResources {
+            skin_name,
+            resources: Arc::clone(&resources),
+        });
+        if let Ok(mut viewer_cache) = viewer_highlight_cache().lock() {
+            *viewer_cache = None;
+        }
+        return Some(resources);
+    }
+    cache_guard
+        .as_ref()
+        .map(|cached| Arc::clone(&cached.resources))
+}
+
+fn build_highlight_resources_for_skin(skin: &UiSkin) -> Option<HighlightResources> {
     let themes = syntect::highlighting::ThemeSet::load_defaults();
     let mut theme = themes
         .themes
@@ -620,7 +645,6 @@ fn build_highlight_resources() -> Option<HighlightResources> {
         .cloned()
         .or_else(|| themes.themes.values().next().cloned())?;
 
-    let skin = current_skin();
     let viewer_style = skin.style("viewer", "_default_");
     if let Some(foreground) = viewer_style.fg.and_then(syntect_color_from_ratatui) {
         theme.settings.foreground = Some(foreground);
@@ -633,7 +657,11 @@ fn build_highlight_resources() -> Option<HighlightResources> {
         scope.style.background = None;
     }
 
-    Some(HighlightResources { syntax_set, theme })
+    Some(HighlightResources { theme })
+}
+
+fn highlight_syntax_set() -> &'static SyntaxSet {
+    HIGHLIGHT_SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn viewer_syntax<'a>(syntax_set: &'a SyntaxSet, viewer: &ViewerState) -> &'a SyntaxReference {
@@ -645,8 +673,7 @@ fn viewer_syntax<'a>(syntax_set: &'a SyntaxSet, viewer: &ViewerState) -> &'a Syn
 }
 
 fn viewer_theme_surface_style() -> Option<Style> {
-    let resources = HIGHLIGHT_RESOURCES.get_or_init(build_highlight_resources);
-    let resources = resources.as_ref()?;
+    let resources = highlight_resources()?;
     let mut style = Style::default();
 
     if let Some(background) = resources.theme.settings.background {
@@ -660,9 +687,17 @@ fn viewer_theme_surface_style() -> Option<Style> {
 }
 
 fn viewer_highlight_key(viewer: &ViewerState) -> ViewerHighlightKey {
+    let mut content_hasher = DefaultHasher::new();
+    viewer.content.hash(&mut content_hasher);
+    let content_hash = content_hasher.finish();
+    let mut path_hasher = DefaultHasher::new();
+    viewer.path.hash(&mut path_hasher);
+    let path_hash = path_hasher.finish();
+
     ViewerHighlightKey {
-        content_ptr: viewer.content.as_ptr() as usize,
+        content_hash,
         content_len: viewer.content.len(),
+        path_hash,
     }
 }
 
@@ -671,36 +706,31 @@ fn viewer_highlight_cache() -> &'static Mutex<Option<CachedViewerHighlight>> {
 }
 
 impl CachedViewerHighlight {
-    fn new(viewer: &ViewerState, resources: &'static HighlightResources) -> Self {
-        let syntax = viewer_syntax(&resources.syntax_set, viewer);
+    fn new(viewer: &ViewerState, resources: &HighlightResources) -> Option<Self> {
+        let syntax_set = highlight_syntax_set();
+        let syntax = viewer_syntax(syntax_set, viewer);
         let mut raw_lines: Vec<String> = viewer.content.lines().map(sanitize_text_line).collect();
         if raw_lines.is_empty() {
             raw_lines.push(String::new());
         }
 
-        Self {
-            key: viewer_highlight_key(viewer),
-            raw_lines,
-            highlighted_lines: Vec::new(),
-            highlighter: HighlightLines::new(syntax, &resources.theme),
-        }
-    }
-
-    fn ensure_highlighted_up_to(&mut self, end: usize, syntax_set: &SyntaxSet) -> Result<(), ()> {
-        while self.highlighted_lines.len() < end {
-            let index = self.highlighted_lines.len();
-            let raw_line = self.raw_lines.get(index).ok_or(())?;
-            let ranges = self
-                .highlighter
+        let mut highlighter = HighlightLines::new(syntax, &resources.theme);
+        let mut highlighted_lines = Vec::with_capacity(raw_lines.len());
+        for raw_line in raw_lines {
+            let ranges = highlighter
                 .highlight_line(raw_line.as_str(), syntax_set)
-                .map_err(|_| ())?;
+                .ok()?;
             let spans: Vec<Span<'static>> = ranges
                 .into_iter()
                 .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
                 .collect();
-            self.highlighted_lines.push(Line::from(spans));
+            highlighted_lines.push(Line::from(spans));
         }
-        Ok(())
+
+        Some(Self {
+            key: viewer_highlight_key(viewer),
+            highlighted_lines,
+        })
     }
 }
 
@@ -2028,6 +2058,35 @@ mod tests {
         assert!(
             frame.contains("00000000"),
             "frame should render hex offsets"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn viewer_highlight_key_tracks_path_and_content_hashes() {
+        let root = temp_root("viewer-highlight-key");
+        let first_path = root.join("first.txt");
+        let second_path = root.join("second.txt");
+        fs::write(&first_path, "abc").expect("first fixture should be writable");
+        fs::write(&second_path, "abc").expect("second fixture should be writable");
+
+        let mut first_viewer = rc_core::ViewerState::open(first_path.clone())
+            .expect("first viewer fixture should open");
+        let second_viewer = rc_core::ViewerState::open(second_path.clone())
+            .expect("second viewer fixture should open");
+        let first_key = viewer_highlight_key(&first_viewer);
+        let second_key = viewer_highlight_key(&second_viewer);
+        assert_ne!(
+            first_key, second_key,
+            "cache key should differ for identical content at different paths"
+        );
+
+        first_viewer.content = String::from("xyz");
+        let changed_content_key = viewer_highlight_key(&first_viewer);
+        assert_ne!(
+            first_key, changed_content_key,
+            "cache key should differ when content changes with the same length"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
