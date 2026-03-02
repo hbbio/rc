@@ -1237,6 +1237,54 @@ mod tests {
     }
 
     #[test]
+    fn drain_events_reports_worker_disconnect_once() {
+        let root = make_temp_dir("drain-worker-disconnect");
+        let (mut runtime, _command_rx, worker_event_tx, _background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+
+        drop(worker_event_tx);
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "Worker channel disconnected",
+            "first disconnect should be surfaced to status line"
+        );
+
+        state.set_status("status should remain unchanged");
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "status should remain unchanged",
+            "disconnect warning should not be repeated every tick"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn drain_events_reports_background_disconnect_once() {
+        let root = make_temp_dir("drain-background-disconnect");
+        let (mut runtime, _command_rx, _worker_event_tx, background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+
+        drop(background_event_tx);
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "Background worker channel disconnected",
+            "first disconnect should be surfaced to status line"
+        );
+
+        state.set_status("status should remain unchanged");
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "status should remain unchanged",
+            "disconnect warning should not be repeated every tick"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
     fn priority_sorting_dispatches_high_before_medium_before_low() {
         let mut manager = JobManager::new();
         let medium_job = manager.enqueue(JobRequest::Mkdir {
