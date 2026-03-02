@@ -26,8 +26,8 @@ use std::time::{Instant, SystemTime};
 #[cfg(test)]
 use background::stream_find_entries;
 pub use background::{
-    BackgroundEvent, build_tree_ready_event, refresh_panel_entries, refresh_panel_event,
-    run_find_entries,
+    BackgroundEvent, PanelRefreshStreamRequest, build_tree_ready_event, refresh_panel_entries,
+    refresh_panel_event, run_find_entries, stream_refresh_panel_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
@@ -1697,6 +1697,7 @@ pub struct AppState {
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh_job_ids: [Option<JobId>; 2],
     panel_refresh_request_ids: [u64; 2],
+    panel_refresh_partial_entries: [Vec<FileEntry>; 2],
     next_panel_refresh_request_id: u64,
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
@@ -1742,6 +1743,7 @@ impl AppState {
             pending_external_edit_requests: Vec::new(),
             panel_refresh_job_ids: [None; 2],
             panel_refresh_request_ids: [0; 2],
+            panel_refresh_partial_entries: std::array::from_fn(|_| Vec::new()),
             next_panel_refresh_request_id: 1,
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),

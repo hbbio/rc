@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use rc_core::{
     AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
-    PanelListingSource, WorkerCommand, build_tree_ready_event, execute_worker_job,
-    refresh_panel_entries, run_find_entries,
+    PanelListingSource, PanelRefreshStreamRequest, WorkerCommand, build_tree_ready_event,
+    execute_worker_job, run_find_entries, stream_refresh_panel_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
@@ -678,13 +678,18 @@ fn execute_refresh_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let refresh_result = refresh_panel_entries(
-        &cwd,
-        &source,
+    let stream_request = PanelRefreshStreamRequest {
+        panel,
+        cwd: cwd.clone(),
+        source: source.clone(),
         sort_mode,
         show_hidden_files,
-        cancel_flag.as_ref(),
-    );
+        request_id,
+    };
+    let refresh_result =
+        stream_refresh_panel_entries(&stream_request, cancel_flag.as_ref(), |event| {
+            background_event_tx.send(event).is_ok()
+        });
     let (event_result, result) = refresh_outcomes(refresh_result, cancel_flag.as_ref());
     let event = BackgroundEvent::PanelRefreshed {
         panel,
@@ -1502,6 +1507,63 @@ mod tests {
             "refresh path should still emit the background panel event"
         );
 
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn refresh_worker_streams_directory_entries_before_final_event() {
+        let root = make_temp_dir("refresh-streaming");
+        fs::write(root.join("alpha.txt"), "a").expect("first fixture should be writable");
+        fs::write(root.join("bravo.txt"), "b").expect("second fixture should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, _worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_refresh_worker_job(
+            JobId(7),
+            ActivePanel::Left,
+            root.clone(),
+            PanelListingSource::Directory,
+            SortMode::default(),
+            true,
+            11,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let mut saw_chunk = false;
+        let mut saw_final = false;
+        for event in background_event_rx.try_iter() {
+            match event {
+                BackgroundEvent::PanelEntriesChunk {
+                    request_id,
+                    entries,
+                    ..
+                } => {
+                    assert_eq!(request_id, 11);
+                    assert!(
+                        !entries.is_empty(),
+                        "chunk event should carry at least one discovered entry"
+                    );
+                    saw_chunk = true;
+                }
+                BackgroundEvent::PanelRefreshed { request_id, .. } => {
+                    assert_eq!(request_id, 11);
+                    saw_final = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_chunk,
+            "streaming refresh should emit at least one chunk"
+        );
+        assert!(
+            saw_final,
+            "streaming refresh should emit final completion event"
+        );
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 

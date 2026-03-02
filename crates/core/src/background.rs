@@ -7,14 +7,34 @@ use std::time::Duration;
 
 use crate::{
     ActivePanel, FileEntry, FindResultEntry, JOB_CANCELED_MESSAGE, JobId, PanelListingSource,
-    SortMode, TreeEntry, ViewerState, build_tree_entries, read_entries_with_visibility_cancel,
-    read_panelized_entries_with_cancel, read_panelized_paths,
+    SortMode, TreeEntry, ViewerState, build_tree_entries, ensure_panel_refresh_not_canceled,
+    read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
+    sort_file_entries,
 };
 
 const FIND_EVENT_CHUNK_SIZE: usize = 64;
+const PANEL_EVENT_CHUNK_SIZE: usize = 96;
+
+#[derive(Clone, Debug)]
+pub struct PanelRefreshStreamRequest {
+    pub panel: ActivePanel,
+    pub cwd: PathBuf,
+    pub source: PanelListingSource,
+    pub sort_mode: SortMode,
+    pub show_hidden_files: bool,
+    pub request_id: u64,
+}
 
 #[derive(Clone, Debug)]
 pub enum BackgroundEvent {
+    PanelEntriesChunk {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+        request_id: u64,
+        entries: Vec<FileEntry>,
+    },
     PanelRefreshed {
         panel: ActivePanel,
         cwd: PathBuf,
@@ -88,6 +108,104 @@ pub fn refresh_panel_entries(
             base_dir, paths, ..
         } => read_panelized_paths(base_dir, paths, sort_mode, Some(cancel_flag)),
     }
+}
+
+pub fn stream_refresh_panel_entries<F>(
+    request: &PanelRefreshStreamRequest,
+    cancel_flag: &AtomicBool,
+    mut emit_chunk: F,
+) -> io::Result<Vec<FileEntry>>
+where
+    F: FnMut(BackgroundEvent) -> bool,
+{
+    match &request.source {
+        PanelListingSource::Directory => {
+            stream_directory_entries(request, cancel_flag, &mut emit_chunk)
+        }
+        _ => refresh_panel_entries(
+            &request.cwd,
+            &request.source,
+            request.sort_mode,
+            request.show_hidden_files,
+            cancel_flag,
+        ),
+    }
+}
+
+fn stream_directory_entries<F>(
+    request: &PanelRefreshStreamRequest,
+    cancel_flag: &AtomicBool,
+    emit_chunk: &mut F,
+) -> io::Result<Vec<FileEntry>>
+where
+    F: FnMut(BackgroundEvent) -> bool,
+{
+    let cwd = request.cwd.as_path();
+    ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+    let mut entries = Vec::new();
+    let mut emitted = Vec::new();
+
+    for entry_result in fs::read_dir(cwd)? {
+        ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+        let entry = entry_result?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !request.show_hidden_files && name.starts_with('.') {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
+        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+        let is_dir = file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        let panel_entry = if is_dir {
+            FileEntry::directory(name, path, size, modified)
+        } else {
+            FileEntry::file(name, path, size, modified)
+        };
+        entries.push(panel_entry.clone());
+        emitted.push(panel_entry);
+
+        if emitted.len() >= PANEL_EVENT_CHUNK_SIZE {
+            let delivered = emit_chunk(BackgroundEvent::PanelEntriesChunk {
+                panel: request.panel,
+                cwd: request.cwd.clone(),
+                source: request.source.clone(),
+                sort_mode: request.sort_mode,
+                request_id: request.request_id,
+                entries: std::mem::take(&mut emitted),
+            });
+            if !delivered {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "background event channel disconnected",
+                ));
+            }
+        }
+    }
+
+    if !emitted.is_empty() {
+        let delivered = emit_chunk(BackgroundEvent::PanelEntriesChunk {
+            panel: request.panel,
+            cwd: request.cwd.clone(),
+            source: request.source.clone(),
+            sort_mode: request.sort_mode,
+            request_id: request.request_id,
+            entries: emitted,
+        });
+        if !delivered {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "background event channel disconnected",
+            ));
+        }
+    }
+
+    sort_file_entries(&mut entries, request.sort_mode);
+    if let Some(parent) = cwd.parent() {
+        entries.insert(0, FileEntry::parent(parent.to_path_buf()));
+    }
+    Ok(entries)
 }
 
 pub fn run_find_entries<F>(

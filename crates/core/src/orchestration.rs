@@ -67,6 +67,7 @@ impl AppState {
                 panel_state.show_hidden_files,
             )
         };
+        self.panel_refresh_partial_entries[panel_index].clear();
         let request = JobRequest::RefreshPanel {
             panel,
             cwd,
@@ -100,6 +101,7 @@ impl AppState {
             if self.panel_refresh_job_ids[panel_index].is_some_and(|job_id| job_id == id) {
                 self.panel_refresh_job_ids[panel_index] = None;
                 self.panels[panel_index].loading = false;
+                self.panel_refresh_partial_entries[panel_index].clear();
                 tracing::debug!(
                     job_event = "panel_refresh_state_cleared",
                     job_id = %id,
@@ -323,6 +325,42 @@ impl AppState {
 
     pub fn handle_background_event(&mut self, event: BackgroundEvent) {
         match event {
+            BackgroundEvent::PanelEntriesChunk {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                entries,
+            } => {
+                if self.panel_refresh_request_ids[panel.index()] != request_id {
+                    return;
+                }
+                let panel_state = &self.panels[panel.index()];
+                let still_current = panel_state.cwd == cwd
+                    && panel_state.source == source
+                    && panel_state.sort_mode == sort_mode;
+                if !still_current {
+                    return;
+                }
+                if entries.is_empty() {
+                    return;
+                }
+
+                let panel_index = panel.index();
+                self.panel_refresh_partial_entries[panel_index].extend(entries);
+                let mut preview_entries = self.panel_refresh_partial_entries[panel_index].clone();
+                if let Some(parent) = cwd.parent() {
+                    preview_entries.insert(0, FileEntry::parent(parent.to_path_buf()));
+                }
+                let panel_state = &mut self.panels[panel_index];
+                panel_state.apply_entries(preview_entries);
+                panel_state.loading = true;
+                self.set_status(format!(
+                    "Loading {} entries...",
+                    self.panel_refresh_partial_entries[panel_index].len()
+                ));
+            }
             BackgroundEvent::PanelRefreshed {
                 panel,
                 cwd,
@@ -404,6 +442,7 @@ impl AppState {
                     }
                 }
                 self.panel_refresh_job_ids[panel.index()] = None;
+                self.panel_refresh_partial_entries[panel.index()].clear();
                 if clear_focus_target {
                     self.pending_panel_focus = None;
                 }
