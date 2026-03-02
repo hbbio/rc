@@ -110,7 +110,10 @@ Notes:
 - `crates/app`: terminal app entrypoint, event loop, input normalization
 - `crates/core`: domain model, commands, routes, file operations, jobs, keymap parser
 - `crates/ui`: ratatui rendering layer
+- `crates/shell`: process backend primitives used by core/runtime
 - `doc/roadmap.md`: feature plan and milestone breakdown
+- `doc/architecture/`: bounded contexts, crate contracts, ownership map
+- `doc/adr/`: architecture decision records
 
 ## Development
 
