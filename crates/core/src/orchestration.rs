@@ -67,7 +67,7 @@ impl AppState {
                 panel_state.show_hidden_files,
             )
         };
-        self.panel_refresh_partial_entries[panel_index].clear();
+        self.panel_refresh_partial_entry_count[panel_index] = 0;
         let request = JobRequest::RefreshPanel {
             panel,
             cwd,
@@ -101,7 +101,7 @@ impl AppState {
             if self.panel_refresh_job_ids[panel_index].is_some_and(|job_id| job_id == id) {
                 self.panel_refresh_job_ids[panel_index] = None;
                 self.panels[panel_index].loading = false;
-                self.panel_refresh_partial_entries[panel_index].clear();
+                self.panel_refresh_partial_entry_count[panel_index] = 0;
                 tracing::debug!(
                     job_event = "panel_refresh_state_cleared",
                     job_id = %id,
@@ -360,17 +360,29 @@ impl AppState {
                 }
 
                 let panel_index = panel.index();
-                self.panel_refresh_partial_entries[panel_index].extend(entries);
-                let mut preview_entries = self.panel_refresh_partial_entries[panel_index].clone();
-                if let Some(parent) = cwd.parent() {
-                    preview_entries.insert(0, FileEntry::parent(parent.to_path_buf()));
-                }
+                let is_first_chunk = self.panel_refresh_partial_entry_count[panel_index] == 0;
+                self.panel_refresh_partial_entry_count[panel_index] = self
+                    .panel_refresh_partial_entry_count[panel_index]
+                    .saturating_add(entries.len());
                 let panel_state = &mut self.panels[panel_index];
-                panel_state.apply_entries(preview_entries);
+                if is_first_chunk {
+                    panel_state.entries.clear();
+                    if let Some(parent) = cwd.parent() {
+                        panel_state
+                            .entries
+                            .push(FileEntry::parent(parent.to_path_buf()));
+                    }
+                }
+                panel_state.entries.extend(entries);
+                if panel_state.entries.is_empty() {
+                    panel_state.cursor = 0;
+                } else if panel_state.cursor >= panel_state.entries.len() {
+                    panel_state.cursor = panel_state.entries.len().saturating_sub(1);
+                }
                 panel_state.loading = true;
                 self.set_status(format!(
                     "Loading {} entries...",
-                    self.panel_refresh_partial_entries[panel_index].len()
+                    self.panel_refresh_partial_entry_count[panel_index]
                 ));
             }
             BackgroundEvent::PanelRefreshed {
@@ -454,7 +466,7 @@ impl AppState {
                     }
                 }
                 self.panel_refresh_job_ids[panel.index()] = None;
-                self.panel_refresh_partial_entries[panel.index()].clear();
+                self.panel_refresh_partial_entry_count[panel.index()] = 0;
                 if clear_focus_target {
                     self.pending_panel_focus = None;
                 }

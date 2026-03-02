@@ -1717,7 +1717,7 @@ pub struct AppState {
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh_job_ids: [Option<JobId>; 2],
     panel_refresh_request_ids: [u64; 2],
-    panel_refresh_partial_entries: [Vec<FileEntry>; 2],
+    panel_refresh_partial_entry_count: [usize; 2],
     next_panel_refresh_request_id: u64,
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
@@ -1763,7 +1763,7 @@ impl AppState {
             pending_external_edit_requests: Vec::new(),
             panel_refresh_job_ids: [None; 2],
             panel_refresh_request_ids: [0; 2],
-            panel_refresh_partial_entries: std::array::from_fn(|_| Vec::new()),
+            panel_refresh_partial_entry_count: [0; 2],
             next_panel_refresh_request_id: 1,
             pending_panel_focus: None,
             find_pause_flags: HashMap::new(),
@@ -8536,6 +8536,93 @@ OpenJobs = f6
         assert!(
             !app.panels[panel.index()].loading,
             "latest refresh result should clear loading state"
+        );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-refresh-chunk-tags-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let alpha_path = root.join("alpha.txt");
+        let beta_path = root.join("beta.txt");
+        fs::write(&alpha_path, "alpha").expect("alpha fixture should be writable");
+        fs::write(&beta_path, "beta").expect("beta fixture should be writable");
+
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let alpha_index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == alpha_path)
+            .expect("alpha entry should be visible");
+        app.active_panel_mut().cursor = alpha_index;
+        app.apply(AppCommand::ToggleTag)
+            .expect("toggle tag should succeed");
+        assert!(
+            app.active_panel().is_tagged(&alpha_path),
+            "precondition: alpha entry should start tagged"
+        );
+
+        app.refresh_active_panel();
+        let (panel, cwd, source, sort_mode, request_id) = app
+            .take_pending_worker_commands()
+            .into_iter()
+            .find_map(|command| {
+                let WorkerCommand::Run(job) = command else {
+                    return None;
+                };
+                let JobRequest::RefreshPanel {
+                    panel,
+                    cwd,
+                    source,
+                    sort_mode,
+                    request_id,
+                    ..
+                } = job.request
+                else {
+                    return None;
+                };
+                Some((panel, cwd, source, sort_mode, request_id))
+            })
+            .expect("refresh command should be queued");
+
+        app.handle_background_event(BackgroundEvent::PanelEntriesChunk {
+            panel,
+            cwd: cwd.clone(),
+            source: source.clone(),
+            sort_mode,
+            request_id,
+            entries: vec![FileEntry::file(
+                String::from("beta.txt"),
+                beta_path.clone(),
+                4,
+                None,
+            )],
+        });
+        assert!(
+            app.active_panel().is_tagged(&alpha_path),
+            "chunk updates should not prune existing tags before final listing"
+        );
+
+        let final_entries =
+            read_entries_with_visibility(&cwd, sort_mode, true).expect("listing should build");
+        app.handle_background_event(BackgroundEvent::PanelRefreshed {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            request_id,
+            result: Ok(final_entries),
+        });
+        assert!(
+            app.active_panel().is_tagged(&alpha_path),
+            "tag should survive final listing when target is still present"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
