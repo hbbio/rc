@@ -117,15 +117,25 @@ Notes:
 
 ## Development
 
-Run all checks locally:
+Run baseline checks locally:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo --locked fmt --all --check
+cargo --locked clippy --all-targets --all-features -- -D warnings
+cargo --locked test --all-targets --all-features
 ```
 
-CI runs the same checks on pushes and pull requests via:
+Optional Phase 1 policy/perf checks (requires extra cargo tools):
+
+```bash
+cargo --locked nextest run --workspace --all-targets --all-features
+cargo deny check bans licenses advisories sources
+cargo +nightly udeps --workspace --all-targets --all-features --locked
+cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
+./scripts/coverage_trend.sh target/coverage/llvm-cov.json .github/coverage-baseline.json
+```
+
+CI runs all required gates on pushes and pull requests via:
 
 - `.github/workflows/ci.yml`
 
