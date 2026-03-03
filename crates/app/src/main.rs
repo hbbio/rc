@@ -536,10 +536,102 @@ struct ExternalProcessCommand {
     args: Vec<OsString>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalEditorParseStyle {
+    Posix,
+    Windows,
+}
+
+fn native_external_editor_parse_style() -> ExternalEditorParseStyle {
+    if cfg!(windows) {
+        ExternalEditorParseStyle::Windows
+    } else {
+        ExternalEditorParseStyle::Posix
+    }
+}
+
+fn split_external_editor_command(
+    command: &str,
+    style: ExternalEditorParseStyle,
+) -> Option<Vec<String>> {
+    match style {
+        ExternalEditorParseStyle::Posix => shlex::split(command),
+        ExternalEditorParseStyle::Windows => split_windows_command_line(command),
+    }
+}
+
+fn split_windows_command_line(command: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_quotes = false;
+    let mut token_started = false;
+
+    while let Some(ch) = chars.next() {
+        if !in_quotes && matches!(ch, ' ' | '\t') {
+            if token_started {
+                parts.push(std::mem::take(&mut current));
+                token_started = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            token_started = true;
+            continue;
+        }
+
+        if ch == '\\' {
+            let mut slash_count = 1_usize;
+            while matches!(chars.peek(), Some('\\')) {
+                chars.next();
+                slash_count += 1;
+            }
+
+            if matches!(chars.peek(), Some('"')) {
+                for _ in 0..(slash_count / 2) {
+                    current.push('\\');
+                }
+                if slash_count % 2 == 0 {
+                    chars.next();
+                    in_quotes = !in_quotes;
+                } else {
+                    chars.next();
+                    current.push('"');
+                }
+                token_started = true;
+                continue;
+            }
+
+            for _ in 0..slash_count {
+                current.push('\\');
+            }
+            token_started = true;
+            continue;
+        }
+
+        current.push(ch);
+        token_started = true;
+    }
+
+    if in_quotes {
+        return None;
+    }
+    if token_started {
+        parts.push(current);
+    }
+
+    Some(parts)
+}
+
 fn resolve_external_editor_process_command(
     request: &ExternalEditRequest,
 ) -> Result<ExternalProcessCommand> {
-    let Some(mut parts) = shlex::split(&request.editor_command) else {
+    let Some(mut parts) = split_external_editor_command(
+        &request.editor_command,
+        native_external_editor_parse_style(),
+    ) else {
         return Err(anyhow!(
             "failed to parse external editor command '{}'",
             request.editor_command
@@ -1040,6 +1132,45 @@ mod tests {
                 .to_string()
                 .contains("failed to parse external editor command"),
             "invalid shell-like syntax should be rejected"
+        );
+    }
+
+    #[test]
+    fn windows_command_splitter_preserves_drive_letter_paths() {
+        let parts = split_external_editor_command(
+            r#"C:\Windows\notepad.exe"#,
+            ExternalEditorParseStyle::Windows,
+        )
+        .expect("windows command should parse");
+        assert_eq!(parts, vec![String::from(r#"C:\Windows\notepad.exe"#)]);
+    }
+
+    #[test]
+    fn windows_command_splitter_handles_quoted_program_path() {
+        let parts = split_external_editor_command(
+            r#""C:\Program Files\Notepad++\notepad++.exe" --goto "{path}:1""#,
+            ExternalEditorParseStyle::Windows,
+        )
+        .expect("windows command should parse");
+        assert_eq!(
+            parts,
+            vec![
+                String::from(r#"C:\Program Files\Notepad++\notepad++.exe"#),
+                String::from("--goto"),
+                String::from("{path}:1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_command_splitter_rejects_unterminated_quotes() {
+        let parts = split_external_editor_command(
+            r#""C:\Program Files\Notepad++\notepad++.exe --goto"#,
+            ExternalEditorParseStyle::Windows,
+        );
+        assert!(
+            parts.is_none(),
+            "unterminated windows-style quoting should fail to parse"
         );
     }
 
