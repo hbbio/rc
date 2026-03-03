@@ -2,6 +2,87 @@ use crate::viewer::ViewerSearchDirection;
 use crate::*;
 
 impl AppState {
+    pub(super) fn apply_viewer_command(&mut self, command: AppCommand) -> bool {
+        match command {
+            AppCommand::ViewerMoveUp => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_lines(-1);
+                }
+            }
+            AppCommand::ViewerMoveDown => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_lines(1);
+                }
+            }
+            AppCommand::ViewerPageUp => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_pages(-1, viewer_page_step);
+                }
+            }
+            AppCommand::ViewerPageDown => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_pages(1, viewer_page_step);
+                }
+            }
+            AppCommand::ViewerHome => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_home();
+                }
+            }
+            AppCommand::ViewerEnd => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_end();
+                }
+            }
+            AppCommand::ViewerSearchForward => {
+                self.open_viewer_search_dialog(ViewerSearchDirection::Forward);
+            }
+            AppCommand::ViewerSearchBackward => {
+                self.open_viewer_search_dialog(ViewerSearchDirection::Backward);
+            }
+            AppCommand::ViewerSearchContinue => {
+                self.continue_viewer_search(None);
+            }
+            AppCommand::ViewerSearchContinueBackward => {
+                self.continue_viewer_search(Some(ViewerSearchDirection::Backward));
+            }
+            AppCommand::ViewerGoto => {
+                self.open_viewer_goto_dialog();
+            }
+            AppCommand::ViewerToggleWrap => {
+                let mut next = None;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.toggle_wrap();
+                    next = Some(viewer.wrap);
+                }
+                if let Some(wrap) = next {
+                    self.set_status(format!(
+                        "Viewer wrap {}",
+                        if wrap { "enabled" } else { "disabled" }
+                    ));
+                }
+            }
+            AppCommand::ViewerToggleHex => {
+                let mut next = None;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.toggle_hex_mode();
+                    next = Some(viewer.hex_mode);
+                }
+                if let Some(hex_mode) = next {
+                    self.set_status(format!(
+                        "Viewer mode {}",
+                        if hex_mode { "hex" } else { "text" }
+                    ));
+                }
+            }
+            _ => return false,
+        }
+
+        true
+    }
+
     pub(crate) fn open_selected_file_in_viewer(&mut self) -> bool {
         let Some(entry) = self.selected_non_parent_entry() else {
             return false;
