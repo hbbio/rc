@@ -151,6 +151,136 @@ impl AppState {
         self.panel_refresh.clear_panel(panel);
     }
 
+    pub(crate) fn handle_panel_entries_chunk(
+        &mut self,
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+        request_id: u64,
+        entries: Vec<FileEntry>,
+    ) {
+        if !self.panel_refresh_is_current_request(panel, request_id) {
+            return;
+        }
+        let panel_state = &self.panels[panel.index()];
+        let still_current = panel_state.cwd == cwd
+            && panel_state.source == source
+            && panel_state.sort_mode == sort_mode;
+        if !still_current {
+            return;
+        }
+        if entries.is_empty() {
+            return;
+        }
+
+        let panel_index = panel.index();
+        let is_first_chunk = self.panel_refresh_is_first_chunk(panel);
+        let partial_count = self.panel_refresh_add_partial_entries(panel, entries.len());
+        let panel_state = &mut self.panels[panel_index];
+        if is_first_chunk {
+            panel_state.entries.clear();
+            if let Some(parent) = cwd.parent() {
+                panel_state
+                    .entries
+                    .push(FileEntry::parent(parent.to_path_buf()));
+            }
+        }
+        panel_state.entries.extend(entries);
+        if panel_state.entries.is_empty() {
+            panel_state.cursor = 0;
+        }
+        panel_state.loading = true;
+        self.set_status(format!("Loading {} entries...", partial_count));
+    }
+
+    pub(crate) fn handle_panel_refreshed(
+        &mut self,
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        sort_mode: SortMode,
+        request_id: u64,
+        result: Result<Vec<FileEntry>, String>,
+    ) {
+        if !self.panel_refresh_is_current_request(panel, request_id) {
+            return;
+        }
+        let panel_state = &self.panels[panel.index()];
+        let still_current = panel_state.cwd == cwd
+            && panel_state.source == source
+            && panel_state.sort_mode == sort_mode;
+        if !still_current {
+            return;
+        }
+
+        let focus_target = self
+            .pending_panel_focus
+            .as_ref()
+            .and_then(|(pending_panel, path)| (*pending_panel == panel).then(|| path.clone()));
+        let mut clear_focus_target = false;
+        let mut focus_status = None;
+        {
+            let panel_state = &mut self.panels[panel.index()];
+            panel_state.loading = false;
+            match result {
+                Ok(entries) => {
+                    panel_state.apply_entries(entries);
+                    if self
+                        .pending_panelize_revert
+                        .as_ref()
+                        .is_some_and(|(pending_panel, _)| *pending_panel == panel)
+                    {
+                        self.pending_panelize_revert = None;
+                    }
+                    if let Some(target_path) = focus_target {
+                        clear_focus_target = true;
+                        if let Some(index) = panel_state
+                            .entries
+                            .iter()
+                            .position(|entry| entry.path == target_path)
+                        {
+                            panel_state.cursor = index;
+                            focus_status =
+                                Some(format!("Located {}", target_path.to_string_lossy()));
+                        } else {
+                            focus_status = Some(format!(
+                                "Opened {} (target not found in listing)",
+                                panel_state.cwd.to_string_lossy()
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    let is_panelize = source.is_panelized();
+                    if let Some((pending_panel, revert_source)) =
+                        self.pending_panelize_revert.take()
+                    {
+                        if pending_panel == panel {
+                            panel_state.source = revert_source;
+                        } else {
+                            self.pending_panelize_revert = Some((pending_panel, revert_source));
+                        }
+                    }
+                    if error != PANEL_REFRESH_CANCELED_MESSAGE {
+                        if is_panelize {
+                            self.set_status(format!("Panelize failed: {error}"));
+                        } else {
+                            self.set_status(format!("Panel refresh failed: {error}"));
+                        }
+                    }
+                }
+            }
+        }
+        self.panel_refresh_clear_panel(panel);
+        if clear_focus_target {
+            self.pending_panel_focus = None;
+        }
+        if let Some(focus_status) = focus_status {
+            self.set_status(focus_status);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn panel_refresh_job_id_at(&self, panel_index: usize) -> Option<JobId> {
         self.panel_refresh.job_id_at(panel_index)
