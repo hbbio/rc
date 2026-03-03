@@ -19,7 +19,7 @@ impl AppState {
             return Ok(result);
         }
 
-        if !self.apply_viewer_command(command) {
+        if !self.apply_viewer_command(command) && !self.apply_help_command(command) {
             match command {
                 AppCommand::MenuNoop
                 | AppCommand::MenuNotImplemented(_)
@@ -54,7 +54,22 @@ impl AppState {
                 | AppCommand::ViewerSearchContinueBackward
                 | AppCommand::ViewerGoto
                 | AppCommand::ViewerToggleWrap
-                | AppCommand::ViewerToggleHex => {
+                | AppCommand::ViewerToggleHex
+                | AppCommand::HelpMoveUp
+                | AppCommand::HelpMoveDown
+                | AppCommand::HelpPageUp
+                | AppCommand::HelpPageDown
+                | AppCommand::HelpHalfPageUp
+                | AppCommand::HelpHalfPageDown
+                | AppCommand::HelpHome
+                | AppCommand::HelpEnd
+                | AppCommand::HelpFollowLink
+                | AppCommand::HelpBack
+                | AppCommand::HelpIndex
+                | AppCommand::HelpLinkNext
+                | AppCommand::HelpLinkPrev
+                | AppCommand::HelpNodeNext
+                | AppCommand::HelpNodePrev => {
                     unreachable!("shell command should be handled before main apply dispatch")
                 }
                 AppCommand::MoveUp => self.move_cursor(-1),
@@ -256,85 +271,6 @@ impl AppState {
                 }
                 AppCommand::MenuSelectAt(index) => {
                     follow_up_command = self.accept_menu_selection_at(index);
-                }
-                AppCommand::HelpMoveUp => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_lines(-1);
-                    }
-                }
-                AppCommand::HelpMoveDown => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_lines(1);
-                    }
-                }
-                AppCommand::HelpPageUp => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_pages(-1);
-                    }
-                }
-                AppCommand::HelpPageDown => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_pages(1);
-                    }
-                }
-                AppCommand::HelpHalfPageUp => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_half_pages(-1);
-                    }
-                }
-                AppCommand::HelpHalfPageDown => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_half_pages(1);
-                    }
-                }
-                AppCommand::HelpHome => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_home();
-                    }
-                }
-                AppCommand::HelpEnd => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.move_end();
-                    }
-                }
-                AppCommand::HelpFollowLink => {
-                    if let Some(help) = self.help_state_mut()
-                        && !help.follow_selected_link()
-                    {
-                        self.set_status("No help link selected");
-                    }
-                }
-                AppCommand::HelpBack => {
-                    if let Some(help) = self.help_state_mut()
-                        && !help.back()
-                    {
-                        self.set_status("Help history is empty");
-                    }
-                }
-                AppCommand::HelpIndex => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.open_index();
-                    }
-                }
-                AppCommand::HelpLinkNext => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.select_next_link();
-                    }
-                }
-                AppCommand::HelpLinkPrev => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.select_prev_link();
-                    }
-                }
-                AppCommand::HelpNodeNext => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.open_next_node();
-                    }
-                }
-                AppCommand::HelpNodePrev => {
-                    if let Some(help) = self.help_state_mut() {
-                        help.open_prev_node();
-                    }
                 }
                 AppCommand::DialogAccept => {
                     if matches!(self.top_route(), Route::Settings(_)) {

@@ -1,6 +1,93 @@
 use crate::*;
 
 impl AppState {
+    pub(super) fn apply_help_command(&mut self, command: AppCommand) -> bool {
+        match command {
+            AppCommand::HelpMoveUp => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_lines(-1);
+                }
+            }
+            AppCommand::HelpMoveDown => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_lines(1);
+                }
+            }
+            AppCommand::HelpPageUp => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_pages(-1);
+                }
+            }
+            AppCommand::HelpPageDown => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_pages(1);
+                }
+            }
+            AppCommand::HelpHalfPageUp => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_half_pages(-1);
+                }
+            }
+            AppCommand::HelpHalfPageDown => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_half_pages(1);
+                }
+            }
+            AppCommand::HelpHome => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_home();
+                }
+            }
+            AppCommand::HelpEnd => {
+                if let Some(help) = self.help_state_mut() {
+                    help.move_end();
+                }
+            }
+            AppCommand::HelpFollowLink => {
+                if let Some(help) = self.help_state_mut()
+                    && !help.follow_selected_link()
+                {
+                    self.set_status("No help link selected");
+                }
+            }
+            AppCommand::HelpBack => {
+                if let Some(help) = self.help_state_mut()
+                    && !help.back()
+                {
+                    self.set_status("Help history is empty");
+                }
+            }
+            AppCommand::HelpIndex => {
+                if let Some(help) = self.help_state_mut() {
+                    help.open_index();
+                }
+            }
+            AppCommand::HelpLinkNext => {
+                if let Some(help) = self.help_state_mut() {
+                    help.select_next_link();
+                }
+            }
+            AppCommand::HelpLinkPrev => {
+                if let Some(help) = self.help_state_mut() {
+                    help.select_prev_link();
+                }
+            }
+            AppCommand::HelpNodeNext => {
+                if let Some(help) = self.help_state_mut() {
+                    help.open_next_node();
+                }
+            }
+            AppCommand::HelpNodePrev => {
+                if let Some(help) = self.help_state_mut() {
+                    help.open_prev_node();
+                }
+            }
+            _ => return false,
+        }
+
+        true
+    }
+
     pub(crate) fn open_help_screen(&mut self) {
         let context = self.key_context();
         if let Some(Route::Help(help)) = self.routes.last_mut() {
