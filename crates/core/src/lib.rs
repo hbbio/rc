@@ -200,6 +200,152 @@ pub enum AppCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommandDomain {
+    Route,
+    Navigation,
+    Viewer,
+    Dialog,
+    Settings,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommandOutcome {
+    Continue,
+    FollowUp(AppCommand),
+    Quit,
+}
+
+impl AppCommand {
+    pub(crate) const fn domain(self) -> CommandDomain {
+        match self {
+            Self::OpenHelp
+            | Self::CloseHelp
+            | Self::OpenMenu
+            | Self::OpenMenuAt(_)
+            | Self::CloseMenu
+            | Self::Quit
+            | Self::CloseViewer
+            | Self::OpenFindDialog
+            | Self::CloseFindResults
+            | Self::OpenTree
+            | Self::CloseTree
+            | Self::OpenHotlist
+            | Self::CloseHotlist
+            | Self::OpenPanelizeDialog
+            | Self::PanelizePresetAdd
+            | Self::PanelizePresetEdit
+            | Self::PanelizePresetRemove
+            | Self::EnterXMap
+            | Self::SwitchPanel
+            | Self::OpenJobsScreen
+            | Self::CloseJobsScreen
+            | Self::JobsMoveUp
+            | Self::JobsMoveDown
+            | Self::MenuMoveUp
+            | Self::MenuMoveDown
+            | Self::MenuMoveLeft
+            | Self::MenuMoveRight
+            | Self::MenuHome
+            | Self::MenuEnd
+            | Self::MenuAccept
+            | Self::MenuSelectAt(_)
+            | Self::HelpMoveUp
+            | Self::HelpMoveDown
+            | Self::HelpPageUp
+            | Self::HelpPageDown
+            | Self::HelpHalfPageUp
+            | Self::HelpHalfPageDown
+            | Self::HelpHome
+            | Self::HelpEnd
+            | Self::HelpFollowLink
+            | Self::HelpBack
+            | Self::HelpIndex
+            | Self::HelpLinkNext
+            | Self::HelpLinkPrev
+            | Self::HelpNodeNext
+            | Self::HelpNodePrev
+            | Self::MenuNoop
+            | Self::MenuNotImplemented(_) => CommandDomain::Route,
+            Self::MoveUp
+            | Self::MoveDown
+            | Self::PageUp
+            | Self::PageDown
+            | Self::MoveHome
+            | Self::MoveEnd
+            | Self::ToggleTag
+            | Self::InvertTags
+            | Self::SortNext
+            | Self::SortReverse
+            | Self::Copy
+            | Self::Move
+            | Self::Delete
+            | Self::CancelJob
+            | Self::OpenEntry
+            | Self::EditEntry
+            | Self::CdUp
+            | Self::Reread
+            | Self::FindResultsMoveUp
+            | Self::FindResultsMoveDown
+            | Self::FindResultsPageUp
+            | Self::FindResultsPageDown
+            | Self::FindResultsHome
+            | Self::FindResultsEnd
+            | Self::FindResultsOpenEntry
+            | Self::FindResultsPanelize
+            | Self::TreeMoveUp
+            | Self::TreeMoveDown
+            | Self::TreePageUp
+            | Self::TreePageDown
+            | Self::TreeHome
+            | Self::TreeEnd
+            | Self::TreeOpenEntry
+            | Self::HotlistMoveUp
+            | Self::HotlistMoveDown
+            | Self::HotlistPageUp
+            | Self::HotlistPageDown
+            | Self::HotlistHome
+            | Self::HotlistEnd
+            | Self::HotlistOpenEntry
+            | Self::HotlistAddCurrentDirectory
+            | Self::HotlistRemoveSelected => CommandDomain::Navigation,
+            Self::ViewerMoveUp
+            | Self::ViewerMoveDown
+            | Self::ViewerPageUp
+            | Self::ViewerPageDown
+            | Self::ViewerHome
+            | Self::ViewerEnd
+            | Self::ViewerSearchForward
+            | Self::ViewerSearchBackward
+            | Self::ViewerSearchContinue
+            | Self::ViewerSearchContinueBackward
+            | Self::ViewerGoto
+            | Self::ViewerToggleWrap
+            | Self::ViewerToggleHex => CommandDomain::Viewer,
+            Self::OpenConfirmDialog
+            | Self::OpenInputDialog
+            | Self::OpenListboxDialog
+            | Self::OpenSkinDialog
+            | Self::DialogAccept
+            | Self::DialogCancel
+            | Self::DialogFocusNext
+            | Self::DialogBackspace
+            | Self::DialogInputChar(_)
+            | Self::DialogListboxUp
+            | Self::DialogListboxDown => CommandDomain::Dialog,
+            Self::OpenOptionsConfiguration
+            | Self::OpenOptionsLayout
+            | Self::OpenOptionsPanelOptions
+            | Self::OpenOptionsConfirmation
+            | Self::OpenOptionsAppearance
+            | Self::OpenOptionsDisplayBits
+            | Self::OpenOptionsLearnKeys
+            | Self::OpenOptionsVirtualFs
+            | Self::SaveSetup => CommandDomain::Settings,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MenuEntry {
     pub label: &'static str,
     pub shortcut: &'static str,

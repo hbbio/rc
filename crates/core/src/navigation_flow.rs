@@ -6,6 +6,147 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use crate::*;
 
 impl AppState {
+    pub(super) fn apply_navigation_command(
+        &mut self,
+        command: AppCommand,
+    ) -> io::Result<CommandOutcome> {
+        match command {
+            AppCommand::MoveUp => self.move_cursor(-1),
+            AppCommand::MoveDown => self.move_cursor(1),
+            AppCommand::PageUp => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(-1, page_step);
+            }
+            AppCommand::PageDown => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(1, page_step);
+            }
+            AppCommand::MoveHome => self.active_panel_mut().move_cursor_home(),
+            AppCommand::MoveEnd => self.active_panel_mut().move_cursor_end(),
+            AppCommand::ToggleTag => {
+                let selected = self.active_panel().selected_entry();
+                if selected.is_none() {
+                    self.set_status("No entry selected");
+                } else if selected.is_some_and(|entry| entry.is_parent) {
+                    self.set_status("Parent entry cannot be tagged");
+                } else {
+                    let added = self.active_panel_mut().toggle_tag_on_cursor();
+                    self.active_panel_mut().move_cursor(1);
+                    let count = self.active_panel().tagged_count();
+                    self.set_status(if added {
+                        format!("Tagged entry ({count} total)")
+                    } else {
+                        format!("Untagged entry ({count} total)")
+                    });
+                }
+            }
+            AppCommand::InvertTags => {
+                self.active_panel_mut().invert_tags();
+                let count = self.active_panel().tagged_count();
+                self.set_status(format!("Inverted tags ({count} selected)"));
+            }
+            AppCommand::SortNext => {
+                self.active_panel_mut().cycle_sort_field();
+                self.refresh_active_panel();
+                let label = self.active_panel().sort_label();
+                self.set_status(format!("Sort: {label}"));
+            }
+            AppCommand::SortReverse => {
+                self.active_panel_mut().toggle_sort_direction();
+                self.refresh_active_panel();
+                let label = self.active_panel().sort_label();
+                self.set_status(format!("Sort: {label}"));
+            }
+            AppCommand::Copy => self.start_copy_dialog(),
+            AppCommand::Move => self.start_move_dialog(),
+            AppCommand::Delete => {
+                if self.settings.confirmation.confirm_delete {
+                    self.start_delete_confirmation();
+                } else {
+                    let targets = self.selected_operation_paths();
+                    if targets.is_empty() {
+                        self.set_status("Delete requires a selected or tagged entry");
+                    } else {
+                        self.queue_delete_job(targets);
+                    }
+                }
+            }
+            AppCommand::CancelJob => self.cancel_latest_job(),
+            AppCommand::OpenEntry => {
+                if self.open_selected_directory() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Loading selected directory...");
+                } else if self.open_selected_file_in_viewer() {
+                    self.set_status("Opening viewer...");
+                } else {
+                    self.set_status("No entry selected");
+                }
+            }
+            AppCommand::EditEntry => match self.open_selected_file_in_editor() {
+                EditSelectionResult::OpenedExternal => {
+                    self.set_status("Opening external editor...")
+                }
+                EditSelectionResult::OpenedInternal => {
+                    self.set_status("Opening internal editor...")
+                }
+                EditSelectionResult::NoEntrySelected => self.set_status("No entry selected"),
+                EditSelectionResult::SelectedEntryIsDirectory => {
+                    self.set_status("Directory cannot be edited");
+                }
+            },
+            AppCommand::CdUp => {
+                if self.exit_panelize_mode() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Leaving panelize mode...");
+                } else if self.go_parent_directory() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Loading parent directory...");
+                } else {
+                    self.set_status("Already at filesystem root");
+                }
+            }
+            AppCommand::Reread => {
+                self.refresh_active_panel();
+                self.set_status("Refreshing active panel...");
+            }
+            AppCommand::FindResultsMoveUp => self.move_find_results_cursor(-1),
+            AppCommand::FindResultsMoveDown => self.move_find_results_cursor(1),
+            AppCommand::FindResultsPageUp => self.move_find_results_page(-1),
+            AppCommand::FindResultsPageDown => self.move_find_results_page(1),
+            AppCommand::FindResultsHome => self.move_find_results_home(),
+            AppCommand::FindResultsEnd => self.move_find_results_end(),
+            AppCommand::FindResultsOpenEntry => {
+                self.open_selected_find_result()?;
+            }
+            AppCommand::FindResultsPanelize => self.panelize_find_results(),
+            AppCommand::TreeMoveUp => self.move_tree_cursor(-1),
+            AppCommand::TreeMoveDown => self.move_tree_cursor(1),
+            AppCommand::TreePageUp => self.move_tree_page(-1),
+            AppCommand::TreePageDown => self.move_tree_page(1),
+            AppCommand::TreeHome => self.move_tree_home(),
+            AppCommand::TreeEnd => self.move_tree_end(),
+            AppCommand::TreeOpenEntry => {
+                self.open_selected_tree_entry()?;
+            }
+            AppCommand::HotlistMoveUp => self.move_hotlist_cursor(-1),
+            AppCommand::HotlistMoveDown => self.move_hotlist_cursor(1),
+            AppCommand::HotlistPageUp => self.move_hotlist_page(-1),
+            AppCommand::HotlistPageDown => self.move_hotlist_page(1),
+            AppCommand::HotlistHome => self.move_hotlist_home(),
+            AppCommand::HotlistEnd => self.move_hotlist_end(),
+            AppCommand::HotlistOpenEntry => {
+                self.open_selected_hotlist_entry()?;
+            }
+            AppCommand::HotlistAddCurrentDirectory => self.add_current_directory_to_hotlist(),
+            AppCommand::HotlistRemoveSelected => self.remove_selected_hotlist_entry(),
+            _ => {
+                unreachable!("non-navigation command dispatched to navigation handler: {command:?}")
+            }
+        }
+
+        Ok(CommandOutcome::Continue)
+    }
+
     pub(crate) fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
         self.routes
             .iter()

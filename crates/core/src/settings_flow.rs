@@ -1,6 +1,40 @@
 use crate::*;
 
 impl AppState {
+    pub(super) fn apply_settings_command(&mut self, command: AppCommand) -> CommandOutcome {
+        match command {
+            AppCommand::OpenOptionsConfiguration => {
+                self.open_settings_screen(SettingsCategory::Configuration)
+            }
+            AppCommand::OpenOptionsLayout => self.open_settings_screen(SettingsCategory::Layout),
+            AppCommand::OpenOptionsPanelOptions => {
+                self.open_settings_screen(SettingsCategory::PanelOptions)
+            }
+            AppCommand::OpenOptionsConfirmation => {
+                self.open_settings_screen(SettingsCategory::Confirmation)
+            }
+            AppCommand::OpenOptionsAppearance => {
+                self.open_settings_screen(SettingsCategory::Appearance)
+            }
+            AppCommand::OpenOptionsDisplayBits => {
+                self.open_settings_screen(SettingsCategory::DisplayBits)
+            }
+            AppCommand::OpenOptionsLearnKeys => {
+                self.open_settings_screen(SettingsCategory::LearnKeys)
+            }
+            AppCommand::OpenOptionsVirtualFs => {
+                self.open_settings_screen(SettingsCategory::VirtualFs)
+            }
+            AppCommand::SaveSetup => {
+                self.pending_save_setup = true;
+                self.set_status("Save setup requested");
+            }
+            _ => unreachable!("non-settings command dispatched to settings handler: {command:?}"),
+        }
+
+        CommandOutcome::Continue
+    }
+
     pub(crate) fn open_settings_screen(&mut self, category: SettingsCategory) {
         self.pending_learn_keys_capture = false;
         let next = SettingsScreenState::new(category, self.settings_entries_for_category(category));

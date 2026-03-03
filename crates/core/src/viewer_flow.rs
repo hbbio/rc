@@ -2,7 +2,7 @@ use crate::viewer::ViewerSearchDirection;
 use crate::*;
 
 impl AppState {
-    pub(super) fn apply_viewer_command(&mut self, command: AppCommand) -> bool {
+    pub(super) fn apply_viewer_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
             AppCommand::ViewerMoveUp => {
                 if let Some(viewer) = self.active_viewer_mut() {
@@ -77,10 +77,10 @@ impl AppState {
                     ));
                 }
             }
-            _ => return false,
+            _ => unreachable!("non-viewer command dispatched to viewer handler: {command:?}"),
         }
 
-        true
+        CommandOutcome::Continue
     }
 
     pub(crate) fn open_selected_file_in_viewer(&mut self) -> bool {

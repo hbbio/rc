@@ -5,6 +5,55 @@ use crate::dialog::DialogEvent;
 use crate::*;
 
 impl AppState {
+    pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
+        match command {
+            AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
+            AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
+            AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
+            AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::DialogAccept => {
+                if matches!(self.top_route(), Route::Settings(_)) {
+                    self.apply_settings_entry();
+                } else {
+                    self.handle_dialog_event(DialogEvent::Accept);
+                }
+            }
+            AppCommand::DialogCancel => {
+                if matches!(self.top_route(), Route::Settings(_)) {
+                    self.close_settings_screen();
+                } else {
+                    self.handle_dialog_event(DialogEvent::Cancel);
+                }
+            }
+            AppCommand::DialogFocusNext => {
+                if !self.toggle_panelize_dialog_focus() {
+                    self.handle_dialog_event(DialogEvent::FocusNext);
+                }
+            }
+            AppCommand::DialogBackspace => self.handle_dialog_event(DialogEvent::Backspace),
+            AppCommand::DialogInputChar(ch) => {
+                self.handle_dialog_event(DialogEvent::InsertChar(ch))
+            }
+            AppCommand::DialogListboxUp => {
+                if let Some(settings) = self.settings_state_mut() {
+                    settings.move_up();
+                } else {
+                    self.handle_dialog_event(DialogEvent::MoveUp);
+                }
+            }
+            AppCommand::DialogListboxDown => {
+                if let Some(settings) = self.settings_state_mut() {
+                    settings.move_down();
+                } else {
+                    self.handle_dialog_event(DialogEvent::MoveDown);
+                }
+            }
+            _ => unreachable!("non-dialog command dispatched to dialog handler: {command:?}"),
+        }
+
+        CommandOutcome::Continue
+    }
+
     pub(crate) fn start_copy_dialog(&mut self) {
         self.start_transfer_dialog(TransferKind::Copy);
     }

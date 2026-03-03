@@ -1,7 +1,116 @@
 use crate::*;
 
 impl AppState {
-    pub(super) fn apply_help_command(&mut self, command: AppCommand) -> bool {
+    pub(super) fn apply_route_command(&mut self, command: AppCommand) -> CommandOutcome {
+        match command {
+            AppCommand::MenuNoop => {}
+            AppCommand::MenuNotImplemented(label) => {
+                self.set_status(format!("{label} is not implemented yet"));
+            }
+            AppCommand::OpenMenu => self.open_menu(0),
+            AppCommand::OpenMenuAt(index) => self.open_menu(index),
+            AppCommand::CloseMenu => self.close_menu(),
+            AppCommand::OpenHelp => self.open_help_screen(),
+            AppCommand::CloseHelp => self.close_help_screen(),
+            AppCommand::Quit => {
+                if self.settings.confirmation.confirm_quit {
+                    self.start_quit_confirmation();
+                } else {
+                    self.request_cancel_for_all_jobs();
+                    return CommandOutcome::Quit;
+                }
+            }
+            AppCommand::CloseViewer => self.close_viewer(),
+            AppCommand::OpenFindDialog => self.open_find_dialog(),
+            AppCommand::CloseFindResults => self.close_find_results(),
+            AppCommand::OpenTree => self.open_tree_screen(),
+            AppCommand::CloseTree => self.close_tree_screen(),
+            AppCommand::OpenHotlist => self.open_hotlist_screen(),
+            AppCommand::CloseHotlist => self.close_hotlist_screen(),
+            AppCommand::OpenPanelizeDialog => self.open_panelize_dialog(),
+            AppCommand::PanelizePresetAdd => self.start_panelize_preset_add(),
+            AppCommand::PanelizePresetEdit => self.start_panelize_preset_edit(),
+            AppCommand::PanelizePresetRemove => self.remove_panelize_preset(),
+            AppCommand::EnterXMap => {
+                self.xmap_pending = true;
+                self.set_status("Extended keymap mode");
+            }
+            AppCommand::SwitchPanel => {
+                self.toggle_active_panel();
+                self.set_status(format!(
+                    "Active panel: {}",
+                    match self.active_panel {
+                        ActivePanel::Left => "left",
+                        ActivePanel::Right => "right",
+                    }
+                ));
+            }
+            AppCommand::OpenJobsScreen => self.open_jobs_screen(),
+            AppCommand::CloseJobsScreen => self.close_jobs_screen(),
+            AppCommand::JobsMoveUp => self.move_jobs_cursor(-1),
+            AppCommand::JobsMoveDown => self.move_jobs_cursor(1),
+            AppCommand::MenuMoveUp => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_up();
+                }
+            }
+            AppCommand::MenuMoveDown => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_down();
+                }
+            }
+            AppCommand::MenuMoveLeft => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_left();
+                }
+            }
+            AppCommand::MenuMoveRight => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_right();
+                }
+            }
+            AppCommand::MenuHome => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_home();
+                }
+            }
+            AppCommand::MenuEnd => {
+                if let Some(menu) = self.menu_state_mut() {
+                    menu.move_end();
+                }
+            }
+            AppCommand::MenuAccept => {
+                if let Some(next_command) = self.accept_menu_selection() {
+                    return CommandOutcome::FollowUp(next_command);
+                }
+            }
+            AppCommand::MenuSelectAt(index) => {
+                if let Some(next_command) = self.accept_menu_selection_at(index) {
+                    return CommandOutcome::FollowUp(next_command);
+                }
+            }
+            AppCommand::HelpMoveUp
+            | AppCommand::HelpMoveDown
+            | AppCommand::HelpPageUp
+            | AppCommand::HelpPageDown
+            | AppCommand::HelpHalfPageUp
+            | AppCommand::HelpHalfPageDown
+            | AppCommand::HelpHome
+            | AppCommand::HelpEnd
+            | AppCommand::HelpFollowLink
+            | AppCommand::HelpBack
+            | AppCommand::HelpIndex
+            | AppCommand::HelpLinkNext
+            | AppCommand::HelpLinkPrev
+            | AppCommand::HelpNodeNext
+            | AppCommand::HelpNodePrev => self.apply_help_route_command(command),
+            _ => unreachable!("non-route command dispatched to route domain: {command:?}"),
+        }
+
+        CommandOutcome::Continue
+    }
+
+    fn apply_help_route_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::HelpMoveUp => {
                 if let Some(help) = self.help_state_mut() {
@@ -82,10 +191,8 @@ impl AppState {
                     help.open_prev_node();
                 }
             }
-            _ => return false,
+            _ => unreachable!("non-help command dispatched to help route handler: {command:?}"),
         }
-
-        true
     }
 
     pub(crate) fn open_help_screen(&mut self) {
