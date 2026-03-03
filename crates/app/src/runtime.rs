@@ -164,6 +164,7 @@ impl RuntimeBridge {
                                 oldest_pending_age_ms,
                             ) {
                                 self.mark_command_dispatched(pending_key);
+                                finalize_backpressure_drop(state, command);
                                 state.set_status(
                                     "runtime queue saturated; dropped low-priority refresh",
                                 );
@@ -976,6 +977,20 @@ fn handle_worker_unavailable(state: &mut AppState, command: WorkerCommand) {
     }
 }
 
+fn finalize_backpressure_drop(state: &mut AppState, command: WorkerCommand) {
+    match command {
+        WorkerCommand::Run(job) => {
+            state.handle_job_dispatch_failure(
+                job.id,
+                JobError::dispatch("runtime queue saturated; dropped low-priority refresh"),
+            );
+        }
+        WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {
+            state.set_status("runtime queue saturated; dropped runtime command");
+        }
+    }
+}
+
 fn is_canceled(cancel_flag: &AtomicBool) -> bool {
     cancel_flag.load(AtomicOrdering::Relaxed)
 }
@@ -993,7 +1008,7 @@ mod tests {
     use super::*;
     use rc_core::{
         ActivePanel, AppState, JobErrorCode, JobId, JobManager, JobRequest, JobRetryHint,
-        PanelListingSource, SortMode, settings_io,
+        JobStatus, PanelListingSource, SortMode, settings_io,
     };
     use std::env;
     use std::fs;
@@ -1385,6 +1400,77 @@ mod tests {
                 .pending_first_seen
                 .contains_key(&PendingCommandKey::Run(low_id)),
             "dropped command should not remain tracked as pending"
+        );
+        assert!(
+            state
+                .jobs
+                .job(low_id)
+                .is_some_and(|job| job.status == JobStatus::Failed),
+            "dropped refresh should be finalized as a failed dispatch"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn dropped_refresh_clears_panel_loading_state_under_backpressure() {
+        let root = make_temp_dir("queue-drop-clears-refresh-state");
+        let (mut runtime, mut command_rx) = test_runtime_bridge_with_capacity(1);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state.refresh_active_panel();
+        let refresh_job_id = {
+            let pending = state.take_pending_worker_commands();
+            let refresh_job_id = pending
+                .iter()
+                .find_map(|command| {
+                    let WorkerCommand::Run(job) = command else {
+                        return None;
+                    };
+                    matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+                })
+                .expect("refresh command should be queued");
+            state.restore_pending_worker_commands(pending);
+            refresh_job_id
+        };
+        let medium_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("medium"),
+        });
+        assert!(
+            state.active_panel().loading,
+            "refresh should set panel loading before dispatch"
+        );
+
+        let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
+        let stale_seen = Instant::now()
+            .checked_sub(stale_age)
+            .unwrap_or_else(Instant::now);
+        runtime
+            .pending_first_seen
+            .insert(PendingCommandKey::Run(refresh_job_id), stale_seen);
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => assert_eq!(job.id, medium_id, "medium job should dispatch first"),
+            other => panic!("expected medium job in runtime queue, got {other:?}"),
+        }
+        assert!(
+            state.take_pending_worker_commands().is_empty(),
+            "dropped refresh should not be requeued"
+        );
+        assert!(
+            !state.active_panel().loading,
+            "dropped refresh should clear panel loading state"
+        );
+        assert!(
+            state
+                .jobs
+                .job(refresh_job_id)
+                .is_some_and(|job| job.status == JobStatus::Failed),
+            "dropped refresh should not remain queued"
         );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
