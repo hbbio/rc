@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -532,7 +533,7 @@ fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ExternalProcessCommand {
     program: String,
-    args: Vec<String>,
+    args: Vec<OsString>,
 }
 
 fn resolve_external_editor_process_command(
@@ -549,19 +550,24 @@ fn resolve_external_editor_process_command(
     }
 
     let program = parts.remove(0);
-    let path = request.path.to_string_lossy();
     let mut args = Vec::with_capacity(parts.len() + 1);
     let mut inserted_path = false;
     for part in parts {
         if part.contains("{path}") {
-            args.push(part.replace("{path}", path.as_ref()));
+            let Some(path) = request.path.to_str() else {
+                return Err(anyhow!(
+                    "external editor command '{}' uses {{path}} placeholder but selected path is not valid UTF-8",
+                    request.editor_command
+                ));
+            };
+            args.push(OsString::from(part.replace("{path}", path)));
             inserted_path = true;
         } else {
-            args.push(part);
+            args.push(OsString::from(part));
         }
     }
     if !inserted_path {
-        args.push(path.into_owned());
+        args.push(request.path.as_os_str().to_os_string());
     }
 
     Ok(ExternalProcessCommand { program, args })
@@ -771,6 +777,11 @@ mod tests {
     use rc_core::WorkerCommand;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
+    #[cfg(unix)]
+    use std::{
+        ffi::OsString,
+        os::unix::ffi::{OsStrExt, OsStringExt},
+    };
 
     fn compat_enabled() -> InputCompatibility {
         InputCompatibility {
@@ -955,7 +966,7 @@ mod tests {
         assert_eq!(command.program, "nvim");
         assert_eq!(
             command.args,
-            vec![String::from("--clean"), String::from("/tmp/note.txt")]
+            vec![OsString::from("--clean"), OsString::from("/tmp/note.txt"),]
         );
     }
 
@@ -972,7 +983,46 @@ mod tests {
         assert_eq!(command.program, "code");
         assert_eq!(
             command.args,
-            vec![String::from("--goto"), String::from("/tmp/note.txt:1")]
+            vec![OsString::from("--goto"), OsString::from("/tmp/note.txt:1")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_editor_command_parser_preserves_non_utf8_path_without_placeholder() {
+        let non_utf8_name =
+            OsString::from_vec(vec![b'n', b'o', b't', b'e', 0x80, b'.', b't', b'x', b't']);
+        let request = ExternalEditRequest {
+            editor_command: String::from("nvim"),
+            path: PathBuf::from(&non_utf8_name),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let command =
+            resolve_external_editor_process_command(&request).expect("command should parse");
+        assert_eq!(command.program, "nvim");
+        assert_eq!(command.args.len(), 1);
+        assert_eq!(
+            command.args[0].as_os_str().as_bytes(),
+            non_utf8_name.as_os_str().as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_editor_command_parser_rejects_non_utf8_path_with_placeholder() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("code --goto {path}:1"),
+            path: PathBuf::from(OsString::from_vec(vec![b'n', b'o', b't', b'e', 0x80])),
+            cwd: PathBuf::from("/tmp"),
+        };
+        let error = resolve_external_editor_process_command(&request)
+            .expect_err("non-utf8 placeholder expansion should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("selected path is not valid UTF-8"),
+            "placeholder expansion should fail loudly for non-utf8 paths"
         );
     }
 
