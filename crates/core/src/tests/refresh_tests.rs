@@ -316,6 +316,91 @@ fn panel_refresh_chunks_preserve_cursor_until_final_listing() {
 }
 
 #[test]
+fn panelize_revert_policy_stays_scoped_to_its_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-panelize-revert-scope-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    fs::write(root.join("a.txt"), "a").expect("fixture should be writable");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.start_panelize_command(String::from("echo ignored"));
+    app.toggle_active_panel();
+    app.refresh_active_panel();
+
+    let mut left_request = None;
+    let mut right_request = None;
+    for command in app.take_pending_worker_commands() {
+        let WorkerCommand::Run(job) = command else {
+            continue;
+        };
+        let JobRequest::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            request_id,
+            ..
+        } = job.request
+        else {
+            continue;
+        };
+        let request = (cwd, source, sort_mode, request_id);
+        if panel == ActivePanel::Left {
+            left_request = Some(request);
+        } else {
+            right_request = Some(request);
+        }
+    }
+
+    let (left_cwd, left_source, left_sort_mode, left_request_id) =
+        left_request.expect("left panel refresh should be queued");
+    let (right_cwd, right_source, right_sort_mode, right_request_id) =
+        right_request.expect("right panel refresh should be queued");
+
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel: ActivePanel::Right,
+        cwd: right_cwd,
+        source: right_source,
+        sort_mode: right_sort_mode,
+        request_id: right_request_id,
+        result: Err(String::from("right refresh failed")),
+    });
+    assert!(
+        matches!(
+            app.panels[ActivePanel::Left.index()].source,
+            PanelListingSource::Panelize { .. }
+        ),
+        "other-panel refresh failure must not consume pending panelize revert state"
+    );
+
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel: ActivePanel::Left,
+        cwd: left_cwd,
+        source: left_source,
+        sort_mode: left_sort_mode,
+        request_id: left_request_id,
+        result: Err(String::from("left panelize failed")),
+    });
+    assert!(
+        matches!(
+            app.panels[ActivePanel::Left.index()].source,
+            PanelListingSource::Directory
+        ),
+        "target-panel panelize failure should restore the previous source"
+    );
+    assert!(
+        app.status_line
+            .contains("Panelize failed: left panelize failed"),
+        "panelize failure status should be emitted for the target panel"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn refresh_dispatch_failure_clears_loading_state() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -171,7 +171,7 @@ impl AppState {
             panel.tagged.clear();
             panel.loading = true;
         }
-        self.pending_panelize_revert = Some((active_panel, previous_source));
+        self.schedule_panelize_revert_for_panel_refresh(active_panel, previous_source);
         self.queue_panel_refresh(active_panel);
         self.set_status("Panelize running...");
     }

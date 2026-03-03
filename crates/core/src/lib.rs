@@ -69,7 +69,7 @@ pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
 use crate::panel::{read_entries_with_visibility, read_panelized_entries};
-use crate::refresh_flow::PanelRefreshWorkflow;
+use crate::refresh_flow::{PanelRefreshPostWorkflow, PanelRefreshWorkflow};
 use crate::viewer::ViewerSearchDirection;
 
 const MAX_STATUS_LINE_CHARS: usize = 1024;
@@ -1486,9 +1486,8 @@ pub struct AppState {
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh: PanelRefreshWorkflow,
-    pending_panel_focus: Option<(ActivePanel, PathBuf)>,
+    panel_refresh_post: PanelRefreshPostWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
-    pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,
     deferred_persist_settings_request: Option<JobRequest>,
     panelize_presets: Vec<String>,
     keybinding_hints: KeybindingHints,

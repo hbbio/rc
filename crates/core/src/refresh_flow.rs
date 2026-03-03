@@ -8,6 +8,12 @@ pub(crate) struct PanelRefreshWorkflow {
     next_request_id: u64,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct PanelRefreshPostWorkflow {
+    focus_target: Option<(ActivePanel, PathBuf)>,
+    panelize_revert: Option<(ActivePanel, PanelListingSource)>,
+}
+
 impl Default for PanelRefreshWorkflow {
     fn default() -> Self {
         Self {
@@ -67,6 +73,58 @@ impl PanelRefreshWorkflow {
     #[cfg(test)]
     fn job_id_at(&self, panel_index: usize) -> Option<JobId> {
         self.job_ids[panel_index]
+    }
+}
+
+impl PanelRefreshPostWorkflow {
+    fn clear_focus_target(&mut self) {
+        self.focus_target = None;
+    }
+
+    fn set_focus_target(&mut self, panel: ActivePanel, path: PathBuf) {
+        self.focus_target = Some((panel, path));
+    }
+
+    fn focus_target_for_panel(&self, panel: ActivePanel) -> Option<PathBuf> {
+        self.focus_target
+            .as_ref()
+            .and_then(|(pending_panel, path)| (*pending_panel == panel).then(|| path.clone()))
+    }
+
+    fn clear_focus_target_for_panel(&mut self, panel: ActivePanel) {
+        if self
+            .focus_target
+            .as_ref()
+            .is_some_and(|(pending_panel, _)| *pending_panel == panel)
+        {
+            self.focus_target = None;
+        }
+    }
+
+    fn schedule_panelize_revert(&mut self, panel: ActivePanel, source: PanelListingSource) {
+        self.panelize_revert = Some((panel, source));
+    }
+
+    fn clear_panelize_revert_for_panel(&mut self, panel: ActivePanel) {
+        if self
+            .panelize_revert
+            .as_ref()
+            .is_some_and(|(pending_panel, _)| *pending_panel == panel)
+        {
+            self.panelize_revert = None;
+        }
+    }
+
+    fn take_panelize_revert_source_for_panel(
+        &mut self,
+        panel: ActivePanel,
+    ) -> Option<PanelListingSource> {
+        let (pending_panel, revert_source) = self.panelize_revert.take()?;
+        if pending_panel == panel {
+            return Some(revert_source);
+        }
+        self.panelize_revert = Some((pending_panel, revert_source));
+        None
     }
 }
 
@@ -151,6 +209,23 @@ impl AppState {
         self.panel_refresh.clear_panel(panel);
     }
 
+    pub(crate) fn clear_pending_panel_focus_target(&mut self) {
+        self.panel_refresh_post.clear_focus_target();
+    }
+
+    pub(crate) fn set_pending_panel_focus_target(&mut self, panel: ActivePanel, path: PathBuf) {
+        self.panel_refresh_post.set_focus_target(panel, path);
+    }
+
+    pub(crate) fn schedule_panelize_revert_for_panel_refresh(
+        &mut self,
+        panel: ActivePanel,
+        source: PanelListingSource,
+    ) {
+        self.panel_refresh_post
+            .schedule_panelize_revert(panel, source);
+    }
+
     pub(crate) fn handle_panel_entries_chunk(
         &mut self,
         panel: ActivePanel,
@@ -214,10 +289,7 @@ impl AppState {
             return;
         }
 
-        let focus_target = self
-            .pending_panel_focus
-            .as_ref()
-            .and_then(|(pending_panel, path)| (*pending_panel == panel).then(|| path.clone()));
+        let focus_target = self.panel_refresh_post.focus_target_for_panel(panel);
         let mut clear_focus_target = false;
         let mut focus_status = None;
         {
@@ -226,13 +298,8 @@ impl AppState {
             match result {
                 Ok(entries) => {
                     panel_state.apply_entries(entries);
-                    if self
-                        .pending_panelize_revert
-                        .as_ref()
-                        .is_some_and(|(pending_panel, _)| *pending_panel == panel)
-                    {
-                        self.pending_panelize_revert = None;
-                    }
+                    self.panel_refresh_post
+                        .clear_panelize_revert_for_panel(panel);
                     if let Some(target_path) = focus_target {
                         clear_focus_target = true;
                         if let Some(index) = panel_state
@@ -253,14 +320,11 @@ impl AppState {
                 }
                 Err(error) => {
                     let is_panelize = source.is_panelized();
-                    if let Some((pending_panel, revert_source)) =
-                        self.pending_panelize_revert.take()
+                    if let Some(revert_source) = self
+                        .panel_refresh_post
+                        .take_panelize_revert_source_for_panel(panel)
                     {
-                        if pending_panel == panel {
-                            panel_state.source = revert_source;
-                        } else {
-                            self.pending_panelize_revert = Some((pending_panel, revert_source));
-                        }
+                        panel_state.source = revert_source;
                     }
                     if error != PANEL_REFRESH_CANCELED_MESSAGE {
                         if is_panelize {
@@ -274,7 +338,7 @@ impl AppState {
         }
         self.panel_refresh_clear_panel(panel);
         if clear_focus_target {
-            self.pending_panel_focus = None;
+            self.panel_refresh_post.clear_focus_target_for_panel(panel);
         }
         if let Some(focus_status) = focus_status {
             self.set_status(focus_status);

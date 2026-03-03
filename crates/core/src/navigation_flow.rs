@@ -265,7 +265,7 @@ impl AppState {
             self.set_status("No find result selected");
             return Ok(());
         };
-        self.pending_panel_focus = None;
+        self.clear_pending_panel_focus_target();
 
         if selected.is_dir {
             if self.set_active_panel_directory(selected.path.clone())? {
@@ -285,7 +285,7 @@ impl AppState {
             return Ok(());
         };
         if self.set_active_panel_directory(parent_dir.clone())? {
-            self.pending_panel_focus = Some((self.active_panel, selected.path.clone()));
+            self.set_pending_panel_focus_target(self.active_panel, selected.path.clone());
             self.pause_active_find_results();
             self.set_status(format!(
                 "Locating {} in {} (Alt-F back to find)",
@@ -338,7 +338,7 @@ impl AppState {
             panel.tagged.clear();
             panel.loading = true;
         }
-        self.pending_panelize_revert = Some((active_panel, previous_source));
+        self.schedule_panelize_revert_for_panel_refresh(active_panel, previous_source);
         self.pause_active_find_results();
         self.queue_panel_refresh(active_panel);
         self.set_status(format!("Panelizing {result_count} find result(s)..."));
