@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn find_entries_chunk_updates_results_through_background_handler() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-chunk-handler-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    for ch in "needle".chars() {
+        app.apply(AppCommand::DialogInputChar(ch))
+            .expect("typing find query should succeed");
+    }
+    app.apply(AppCommand::DialogAccept)
+        .expect("find dialog should submit");
+
+    let find_job = app.jobs.last_job().expect("find job should be recorded");
+    let entry = FindResultEntry {
+        path: root.join("needle.txt"),
+        is_dir: false,
+    };
+    app.handle_background_event(BackgroundEvent::FindEntriesChunk {
+        job_id: find_job.id,
+        entries: vec![entry.clone()],
+    });
+
+    let Route::FindResults(results) = app.top_route() else {
+        panic!("top route should be find results");
+    };
+    assert_eq!(results.entries, vec![entry]);
+    assert_eq!(results.cursor, 0);
+    assert_eq!(app.status_line, "Finding 'needle': 1 result(s)...");
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn find_dialog_locates_selected_entry_in_panel_and_supports_resume() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

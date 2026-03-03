@@ -5,6 +5,7 @@ mod command_dispatch;
 mod command_map;
 pub mod dialog;
 mod dialog_flow;
+mod find_flow;
 pub mod help;
 pub mod jobs;
 mod keybinding_help;
