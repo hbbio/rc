@@ -1,67 +1,6 @@
 use crate::*;
 
 impl AppState {
-    pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
-        let panel_index = panel.index();
-        let request_id = self.next_panel_refresh_request_id;
-        self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
-        self.panel_refresh_request_ids[panel_index] = request_id;
-
-        let (cwd, source, sort_mode, show_hidden_files) = {
-            let panel_state = &mut self.panels[panel.index()];
-            panel_state.loading = true;
-            (
-                panel_state.cwd.clone(),
-                panel_state.source.clone(),
-                panel_state.sort_mode,
-                panel_state.show_hidden_files,
-            )
-        };
-        self.panel_refresh_partial_entry_count[panel_index] = 0;
-        let request = JobRequest::RefreshPanel {
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
-        };
-        if let Some(previous_job_id) = self.panel_refresh_job_ids[panel_index].take() {
-            if self.replace_pending_panel_refresh_request(previous_job_id, &request) {
-                self.panel_refresh_job_ids[panel_index] = Some(previous_job_id);
-                tracing::debug!(
-                    job_event = "coalesced",
-                    job_kind = JobKind::RefreshPanel.label(),
-                    job_id = %previous_job_id,
-                    panel_index,
-                    request_id,
-                    "coalesced pending panel refresh request"
-                );
-                return;
-            }
-            let _ = self.request_cancel_for_job(previous_job_id);
-        }
-
-        let job_id = self.queue_worker_job_request(request);
-        self.panel_refresh_job_ids[panel_index] = Some(job_id);
-    }
-
-    pub(crate) fn clear_panel_refresh_state_for_job(&mut self, id: JobId) {
-        for panel_index in 0..self.panel_refresh_job_ids.len() {
-            if self.panel_refresh_job_ids[panel_index].is_some_and(|job_id| job_id == id) {
-                self.panel_refresh_job_ids[panel_index] = None;
-                self.panels[panel_index].loading = false;
-                self.panel_refresh_partial_entry_count[panel_index] = 0;
-                tracing::debug!(
-                    job_event = "panel_refresh_state_cleared",
-                    job_id = %id,
-                    panel_index,
-                    "cleared panel refresh loading state"
-                );
-            }
-        }
-    }
-
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
         std::mem::take(&mut self.pending_worker_commands)
     }
@@ -295,7 +234,7 @@ impl AppState {
                 request_id,
                 entries,
             } => {
-                if self.panel_refresh_request_ids[panel.index()] != request_id {
+                if !self.panel_refresh_is_current_request(panel, request_id) {
                     return;
                 }
                 let panel_state = &self.panels[panel.index()];
@@ -310,10 +249,8 @@ impl AppState {
                 }
 
                 let panel_index = panel.index();
-                let is_first_chunk = self.panel_refresh_partial_entry_count[panel_index] == 0;
-                self.panel_refresh_partial_entry_count[panel_index] = self
-                    .panel_refresh_partial_entry_count[panel_index]
-                    .saturating_add(entries.len());
+                let is_first_chunk = self.panel_refresh_is_first_chunk(panel);
+                let partial_count = self.panel_refresh_add_partial_entries(panel, entries.len());
                 let panel_state = &mut self.panels[panel_index];
                 if is_first_chunk {
                     panel_state.entries.clear();
@@ -328,10 +265,7 @@ impl AppState {
                     panel_state.cursor = 0;
                 }
                 panel_state.loading = true;
-                self.set_status(format!(
-                    "Loading {} entries...",
-                    self.panel_refresh_partial_entry_count[panel_index]
-                ));
+                self.set_status(format!("Loading {} entries...", partial_count));
             }
             BackgroundEvent::PanelRefreshed {
                 panel,
@@ -341,7 +275,7 @@ impl AppState {
                 request_id,
                 result,
             } => {
-                if self.panel_refresh_request_ids[panel.index()] != request_id {
+                if !self.panel_refresh_is_current_request(panel, request_id) {
                     return;
                 }
                 let panel_state = &self.panels[panel.index()];
@@ -413,8 +347,7 @@ impl AppState {
                         }
                     }
                 }
-                self.panel_refresh_job_ids[panel.index()] = None;
-                self.panel_refresh_partial_entry_count[panel.index()] = 0;
+                self.panel_refresh_clear_panel(panel);
                 if clear_focus_target {
                     self.pending_panel_focus = None;
                 }

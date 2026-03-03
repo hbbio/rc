@@ -13,6 +13,7 @@ mod navigation_flow;
 mod orchestration;
 mod panel;
 mod panelize_flow;
+mod refresh_flow;
 mod route_flow;
 pub mod settings;
 mod settings_flow;
@@ -67,6 +68,7 @@ pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
 use crate::panel::{read_entries_with_visibility, read_panelized_entries};
+use crate::refresh_flow::PanelRefreshWorkflow;
 use crate::viewer::ViewerSearchDirection;
 
 const MAX_STATUS_LINE_CHARS: usize = 1024;
@@ -1482,10 +1484,7 @@ pub struct AppState {
     pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
-    panel_refresh_job_ids: [Option<JobId>; 2],
-    panel_refresh_request_ids: [u64; 2],
-    panel_refresh_partial_entry_count: [usize; 2],
-    next_panel_refresh_request_id: u64,
+    panel_refresh: PanelRefreshWorkflow,
     pending_panel_focus: Option<(ActivePanel, PathBuf)>,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     pending_panelize_revert: Option<(ActivePanel, PanelListingSource)>,

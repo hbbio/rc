@@ -349,7 +349,8 @@ fn refresh_dispatch_failure_clears_loading_state() {
         "failed refresh dispatch should clear loading state"
     );
     assert_eq!(
-        app.panel_refresh_job_ids[panel_index], None,
+        app.panel_refresh_job_id_at(panel_index),
+        None,
         "failed refresh dispatch should clear tracked refresh job id"
     );
 
@@ -393,7 +394,8 @@ fn refresh_cancel_before_start_clears_loading_state() {
         "canceled refresh without background event should clear loading state"
     );
     assert_eq!(
-        app.panel_refresh_job_ids[panel_index], None,
+        app.panel_refresh_job_id_at(panel_index),
+        None,
         "canceled refresh should clear tracked refresh job id"
     );
 
