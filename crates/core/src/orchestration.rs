@@ -326,8 +326,6 @@ impl AppState {
                 panel_state.entries.extend(entries);
                 if panel_state.entries.is_empty() {
                     panel_state.cursor = 0;
-                } else if panel_state.cursor >= panel_state.entries.len() {
-                    panel_state.cursor = panel_state.entries.len().saturating_sub(1);
                 }
                 panel_state.loading = true;
                 self.set_status(format!(

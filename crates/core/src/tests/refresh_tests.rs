@@ -233,6 +233,89 @@ fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
 }
 
 #[test]
+fn panel_refresh_chunks_preserve_cursor_until_final_listing() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-chunk-cursor-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"] {
+        fs::write(root.join(name), name).expect("fixture should be writable");
+    }
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let target_path = root.join("f.txt");
+    let target_cursor = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == target_path)
+        .expect("target entry should be visible");
+    app.active_panel_mut().cursor = target_cursor;
+
+    app.refresh_active_panel();
+    let (panel, cwd, source, sort_mode, request_id) = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            let JobRequest::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } = job.request
+            else {
+                return None;
+            };
+            Some((panel, cwd, source, sort_mode, request_id))
+        })
+        .expect("refresh command should be queued");
+
+    app.handle_background_event(BackgroundEvent::PanelEntriesChunk {
+        panel,
+        cwd: cwd.clone(),
+        source: source.clone(),
+        sort_mode,
+        request_id,
+        entries: vec![FileEntry::file(
+            String::from("a.txt"),
+            root.join("a.txt"),
+            1,
+            None,
+        )],
+    });
+    assert_eq!(
+        app.active_panel().cursor,
+        target_cursor,
+        "chunk updates should not clamp cursor before final listing arrives"
+    );
+
+    let final_entries =
+        read_entries_with_visibility(&cwd, sort_mode, true).expect("listing should build");
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        result: Ok(final_entries),
+    });
+    assert_eq!(
+        app.active_panel().cursor,
+        target_cursor,
+        "final listing should preserve cursor when target index still exists"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn refresh_dispatch_failure_clears_loading_state() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
