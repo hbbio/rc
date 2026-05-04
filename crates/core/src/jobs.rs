@@ -1943,6 +1943,121 @@ mod tests {
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_worker_shutdown_finishes_active_and_queued_jobs_as_canceled() {
+        use nix::sys::stat::Mode;
+
+        let root = make_temp_dir("shutdown-active-and-queued-cancel");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let fifo_source = source_dir.join("blocked.pipe");
+        nix::unistd::mkfifo(&fifo_source, Mode::S_IRUSR | Mode::S_IWUSR)
+            .expect("fifo source should be creatable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let active_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![fifo_source.clone()],
+            destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
+        });
+        let active_id = active_job.id;
+        let queued_job = manager.enqueue(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        let queued_id = queued_job.id;
+
+        command_tx
+            .send(WorkerCommand::Run(Box::new(active_job)))
+            .expect("active job command should send");
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("active worker should emit a start event");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Started { id } if id == active_id => break,
+                JobEvent::Finished { .. } => panic!("active job finished before shutdown"),
+                _ => {}
+            }
+        }
+
+        command_tx
+            .send(WorkerCommand::Run(Box::new(queued_job)))
+            .expect("queued job command should send");
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown command should send");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("queued job should finish during shutdown");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Finished {
+                    id,
+                    result: Err(error),
+                } if id == queued_id => {
+                    assert!(error.is_canceled(), "queued job should be canceled");
+                    break;
+                }
+                JobEvent::Finished { id, .. } if id == active_id => {
+                    panic!("active job finished before queued shutdown cancellation")
+                }
+                _ => {}
+            }
+        }
+
+        let writer = thread::spawn({
+            let fifo_source = fifo_source.clone();
+            move || {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(fifo_source)
+                    .expect("fifo writer should unblock active copy");
+            }
+        });
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("active job should finish after fifo unblocks");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Finished {
+                    id,
+                    result: Err(error),
+                } if id == active_id => {
+                    assert!(error.is_canceled(), "active job should be canceled");
+                    break;
+                }
+                JobEvent::Finished { id, .. } if id == queued_id => {
+                    panic!("queued job finished more than once")
+                }
+                _ => {}
+            }
+        }
+
+        writer.join().expect("fifo writer should finish");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+
+        let counts = manager.status_counts();
+        assert_eq!(counts.canceled, 2);
+        assert_eq!(counts.queued, 0);
+        assert_eq!(counts.running, 0);
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
     #[test]
     fn worker_cancel_command_cancels_active_job() {
         let root = make_temp_dir("active-cancel-command");
