@@ -193,8 +193,11 @@ fn viewer_supports_scroll_search_goto_and_wrap() {
         .expect("open entry should open viewer");
     drain_background(&mut app);
 
-    app.apply(AppCommand::ViewerMoveDown)
-        .expect("viewer should move down");
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Viewer,
+        NavigationMotion::Down,
+    ))
+    .expect("viewer should move down");
     let Route::Viewer(viewer) = app.top_route() else {
         panic!("top route should be viewer");
     };
@@ -289,8 +292,11 @@ fn viewer_hex_mode_switches_context_and_navigation_model() {
         "48 bytes should render as 3 hex rows"
     );
 
-    app.apply(AppCommand::ViewerMoveDown)
-        .expect("viewer should move by hex row");
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Viewer,
+        NavigationMotion::Down,
+    ))
+    .expect("viewer should move by hex row");
     let Route::Viewer(viewer) = app.top_route() else {
         panic!("top route should be viewer");
     };

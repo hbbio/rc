@@ -91,8 +91,11 @@ fn xmap_mode_applies_to_next_file_manager_command_only() {
     app.apply(AppCommand::EnterXMap)
         .expect("xmap mode should activate");
     assert_eq!(app.key_context(), KeyContext::FileManagerXMap);
-    app.apply(AppCommand::MoveDown)
-        .expect("next command should execute");
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::FileManager,
+        NavigationMotion::Down,
+    ))
+    .expect("next command should execute");
     assert_eq!(app.key_context(), KeyContext::FileManager);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
@@ -184,19 +187,31 @@ fn app_command_mapping_is_context_aware() {
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorUp),
-        Some(AppCommand::MenuMoveUp)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Menu,
+            NavigationMotion::Up,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorDown),
-        Some(AppCommand::MenuMoveDown)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Menu,
+            NavigationMotion::Down,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorLeft),
-        Some(AppCommand::MenuMoveLeft)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Menu,
+            NavigationMotion::Left,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorRight),
-        Some(AppCommand::MenuMoveRight)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Menu,
+            NavigationMotion::Right,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::DialogAccept),
@@ -208,7 +223,10 @@ fn app_command_mapping_is_context_aware() {
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorUp),
-        Some(AppCommand::MoveUp)
+        Some(AppCommand::Navigate(
+            NavigationTarget::FileManager,
+            NavigationMotion::Up,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenEntry),
@@ -272,7 +290,10 @@ fn app_command_mapping_is_context_aware() {
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::CursorDown),
-        Some(AppCommand::FindResultsMoveDown)
+        Some(AppCommand::Navigate(
+            NavigationTarget::FindResults,
+            NavigationMotion::Down,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::OpenEntry),
@@ -296,7 +317,10 @@ fn app_command_mapping_is_context_aware() {
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::CursorUp),
-        Some(AppCommand::TreeMoveUp)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Tree,
+            NavigationMotion::Up,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::OpenEntry),
@@ -340,11 +364,17 @@ fn app_command_mapping_is_context_aware() {
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CursorUp),
-        Some(AppCommand::JobsMoveUp)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Jobs,
+            NavigationMotion::Up,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CursorDown),
-        Some(AppCommand::JobsMoveDown)
+        Some(AppCommand::Navigate(
+            NavigationTarget::Jobs,
+            NavigationMotion::Down,
+        ))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Jobs, &KeyCommand::CloseJobs),

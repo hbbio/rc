@@ -206,8 +206,11 @@ fn move_menu_selection_to_label(app: &mut AppState, label: &str) {
         if matches_target {
             return;
         }
-        app.apply(AppCommand::MenuMoveDown)
-            .expect("menu movement should succeed");
+        app.apply(AppCommand::Navigate(
+            NavigationTarget::Menu,
+            NavigationMotion::Down,
+        ))
+        .expect("menu movement should succeed");
     }
     panic!("menu entry '{label}' should exist");
 }

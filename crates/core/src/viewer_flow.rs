@@ -4,37 +4,8 @@ use crate::*;
 impl AppState {
     pub(super) fn apply_viewer_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
-            AppCommand::ViewerMoveUp => {
-                if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_lines(-1);
-                }
-            }
-            AppCommand::ViewerMoveDown => {
-                if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_lines(1);
-                }
-            }
-            AppCommand::ViewerPageUp => {
-                let viewer_page_step = self.settings.advanced.viewer_page_step;
-                if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_pages(-1, viewer_page_step);
-                }
-            }
-            AppCommand::ViewerPageDown => {
-                let viewer_page_step = self.settings.advanced.viewer_page_step;
-                if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_pages(1, viewer_page_step);
-                }
-            }
-            AppCommand::ViewerHome => {
-                if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_home();
-                }
-            }
-            AppCommand::ViewerEnd => {
-                if let Some(viewer) = self.active_viewer_mut() {
-                    viewer.move_end();
-                }
+            AppCommand::Navigate(NavigationTarget::Viewer, motion) => {
+                self.apply_viewer_navigation(motion);
             }
             AppCommand::ViewerSearchForward => {
                 self.open_viewer_search_dialog(ViewerSearchDirection::Forward);
@@ -81,6 +52,44 @@ impl AppState {
         }
 
         CommandOutcome::Continue
+    }
+
+    fn apply_viewer_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_lines(-1);
+                }
+            }
+            NavigationMotion::Down => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_lines(1);
+                }
+            }
+            NavigationMotion::PageUp => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_pages(-1, viewer_page_step);
+                }
+            }
+            NavigationMotion::PageDown => {
+                let viewer_page_step = self.settings.advanced.viewer_page_step;
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_pages(1, viewer_page_step);
+                }
+            }
+            NavigationMotion::Home => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_home();
+                }
+            }
+            NavigationMotion::End => {
+                if let Some(viewer) = self.active_viewer_mut() {
+                    viewer.move_end();
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn open_selected_file_in_viewer(&mut self) -> bool {

@@ -47,37 +47,11 @@ impl AppState {
             }
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
-            AppCommand::JobsMoveUp => self.move_jobs_cursor(-1),
-            AppCommand::JobsMoveDown => self.move_jobs_cursor(1),
-            AppCommand::MenuMoveUp => {
-                if let Some(menu) = self.menu_state_mut() {
-                    menu.move_up();
-                }
+            AppCommand::Navigate(NavigationTarget::Jobs, motion) => {
+                self.apply_jobs_navigation(motion);
             }
-            AppCommand::MenuMoveDown => {
-                if let Some(menu) = self.menu_state_mut() {
-                    menu.move_down();
-                }
-            }
-            AppCommand::MenuMoveLeft => {
-                if let Some(menu) = self.menu_state_mut() {
-                    menu.move_left();
-                }
-            }
-            AppCommand::MenuMoveRight => {
-                if let Some(menu) = self.menu_state_mut() {
-                    menu.move_right();
-                }
-            }
-            AppCommand::MenuHome => {
-                if let Some(menu) = self.menu_state_mut() {
-                    menu.move_home();
-                }
-            }
-            AppCommand::MenuEnd => {
-                if let Some(menu) = self.menu_state_mut() {
-                    menu.move_end();
-                }
+            AppCommand::Navigate(NavigationTarget::Menu, motion) => {
+                self.apply_menu_navigation(motion);
             }
             AppCommand::MenuAccept => {
                 if let Some(next_command) = self.accept_menu_selection() {
@@ -89,15 +63,10 @@ impl AppState {
                     return CommandOutcome::FollowUp(next_command);
                 }
             }
-            AppCommand::HelpMoveUp
-            | AppCommand::HelpMoveDown
-            | AppCommand::HelpPageUp
-            | AppCommand::HelpPageDown
-            | AppCommand::HelpHalfPageUp
-            | AppCommand::HelpHalfPageDown
-            | AppCommand::HelpHome
-            | AppCommand::HelpEnd
-            | AppCommand::HelpFollowLink
+            AppCommand::Navigate(NavigationTarget::Help, motion) => {
+                self.apply_help_navigation(motion);
+            }
+            AppCommand::HelpFollowLink
             | AppCommand::HelpBack
             | AppCommand::HelpIndex
             | AppCommand::HelpLinkNext
@@ -110,48 +79,48 @@ impl AppState {
         CommandOutcome::Continue
     }
 
+    fn apply_jobs_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_jobs_cursor(-1),
+            NavigationMotion::Down => self.move_jobs_cursor(1),
+            _ => {}
+        }
+    }
+
+    fn apply_menu_navigation(&mut self, motion: NavigationMotion) {
+        let Some(menu) = self.menu_state_mut() else {
+            return;
+        };
+        match motion {
+            NavigationMotion::Up => menu.move_up(),
+            NavigationMotion::Down => menu.move_down(),
+            NavigationMotion::Left => menu.move_left(),
+            NavigationMotion::Right => menu.move_right(),
+            NavigationMotion::Home => menu.move_home(),
+            NavigationMotion::End => menu.move_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_help_navigation(&mut self, motion: NavigationMotion) {
+        let Some(help) = self.help_state_mut() else {
+            return;
+        };
+        match motion {
+            NavigationMotion::Up => help.move_lines(-1),
+            NavigationMotion::Down => help.move_lines(1),
+            NavigationMotion::PageUp => help.move_pages(-1),
+            NavigationMotion::PageDown => help.move_pages(1),
+            NavigationMotion::HalfPageUp => help.move_half_pages(-1),
+            NavigationMotion::HalfPageDown => help.move_half_pages(1),
+            NavigationMotion::Home => help.move_home(),
+            NavigationMotion::End => help.move_end(),
+            _ => {}
+        }
+    }
+
     fn apply_help_route_command(&mut self, command: AppCommand) {
         match command {
-            AppCommand::HelpMoveUp => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_lines(-1);
-                }
-            }
-            AppCommand::HelpMoveDown => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_lines(1);
-                }
-            }
-            AppCommand::HelpPageUp => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_pages(-1);
-                }
-            }
-            AppCommand::HelpPageDown => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_pages(1);
-                }
-            }
-            AppCommand::HelpHalfPageUp => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_half_pages(-1);
-                }
-            }
-            AppCommand::HelpHalfPageDown => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_half_pages(1);
-                }
-            }
-            AppCommand::HelpHome => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_home();
-                }
-            }
-            AppCommand::HelpEnd => {
-                if let Some(help) = self.help_state_mut() {
-                    help.move_end();
-                }
-            }
             AppCommand::HelpFollowLink => {
                 if let Some(help) = self.help_state_mut()
                     && !help.follow_selected_link()

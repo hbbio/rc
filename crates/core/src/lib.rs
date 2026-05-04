@@ -97,12 +97,7 @@ pub enum AppCommand {
     PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
-    MoveUp,
-    MoveDown,
-    PageUp,
-    PageDown,
-    MoveHome,
-    MoveEnd,
+    Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
     InvertTags,
     SortNext,
@@ -113,33 +108,13 @@ pub enum AppCommand {
     CancelJob,
     OpenJobsScreen,
     CloseJobsScreen,
-    JobsMoveUp,
-    JobsMoveDown,
     OpenEntry,
     EditEntry,
     CdUp,
     Reread,
-    FindResultsMoveUp,
-    FindResultsMoveDown,
-    FindResultsPageUp,
-    FindResultsPageDown,
-    FindResultsHome,
-    FindResultsEnd,
     FindResultsOpenEntry,
     FindResultsPanelize,
-    TreeMoveUp,
-    TreeMoveDown,
-    TreePageUp,
-    TreePageDown,
-    TreeHome,
-    TreeEnd,
     TreeOpenEntry,
-    HotlistMoveUp,
-    HotlistMoveDown,
-    HotlistPageUp,
-    HotlistPageDown,
-    HotlistHome,
-    HotlistEnd,
     HotlistOpenEntry,
     HotlistAddCurrentDirectory,
     HotlistRemoveSelected,
@@ -156,22 +131,8 @@ pub enum AppCommand {
     OpenOptionsLearnKeys,
     OpenOptionsVirtualFs,
     SaveSetup,
-    MenuMoveUp,
-    MenuMoveDown,
-    MenuMoveLeft,
-    MenuMoveRight,
-    MenuHome,
-    MenuEnd,
     MenuAccept,
     MenuSelectAt(usize),
-    HelpMoveUp,
-    HelpMoveDown,
-    HelpPageUp,
-    HelpPageDown,
-    HelpHalfPageUp,
-    HelpHalfPageDown,
-    HelpHome,
-    HelpEnd,
     HelpFollowLink,
     HelpBack,
     HelpIndex,
@@ -186,12 +147,6 @@ pub enum AppCommand {
     DialogInputChar(char),
     DialogListboxUp,
     DialogListboxDown,
-    ViewerMoveUp,
-    ViewerMoveDown,
-    ViewerPageUp,
-    ViewerPageDown,
-    ViewerHome,
-    ViewerEnd,
     ViewerSearchForward,
     ViewerSearchBackward,
     ViewerSearchContinue,
@@ -201,6 +156,32 @@ pub enum AppCommand {
     ViewerToggleHex,
     MenuNoop,
     MenuNotImplemented(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NavigationTarget {
+    FileManager,
+    Jobs,
+    Menu,
+    Help,
+    FindResults,
+    Tree,
+    Hotlist,
+    Viewer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NavigationMotion {
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+    Home,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,24 +224,8 @@ impl AppCommand {
             | Self::SwitchPanel
             | Self::OpenJobsScreen
             | Self::CloseJobsScreen
-            | Self::JobsMoveUp
-            | Self::JobsMoveDown
-            | Self::MenuMoveUp
-            | Self::MenuMoveDown
-            | Self::MenuMoveLeft
-            | Self::MenuMoveRight
-            | Self::MenuHome
-            | Self::MenuEnd
             | Self::MenuAccept
             | Self::MenuSelectAt(_)
-            | Self::HelpMoveUp
-            | Self::HelpMoveDown
-            | Self::HelpPageUp
-            | Self::HelpPageDown
-            | Self::HelpHalfPageUp
-            | Self::HelpHalfPageDown
-            | Self::HelpHome
-            | Self::HelpEnd
             | Self::HelpFollowLink
             | Self::HelpBack
             | Self::HelpIndex
@@ -270,13 +235,17 @@ impl AppCommand {
             | Self::HelpNodePrev
             | Self::MenuNoop
             | Self::MenuNotImplemented(_) => CommandDomain::Route,
-            Self::MoveUp
-            | Self::MoveDown
-            | Self::PageUp
-            | Self::PageDown
-            | Self::MoveHome
-            | Self::MoveEnd
-            | Self::ToggleTag
+            Self::Navigate(target, _) => match target {
+                NavigationTarget::Jobs | NavigationTarget::Menu | NavigationTarget::Help => {
+                    CommandDomain::Route
+                }
+                NavigationTarget::FileManager
+                | NavigationTarget::FindResults
+                | NavigationTarget::Tree
+                | NavigationTarget::Hotlist => CommandDomain::Navigation,
+                NavigationTarget::Viewer => CommandDomain::Viewer,
+            },
+            Self::ToggleTag
             | Self::InvertTags
             | Self::SortNext
             | Self::SortReverse
@@ -288,37 +257,13 @@ impl AppCommand {
             | Self::EditEntry
             | Self::CdUp
             | Self::Reread
-            | Self::FindResultsMoveUp
-            | Self::FindResultsMoveDown
-            | Self::FindResultsPageUp
-            | Self::FindResultsPageDown
-            | Self::FindResultsHome
-            | Self::FindResultsEnd
             | Self::FindResultsOpenEntry
             | Self::FindResultsPanelize
-            | Self::TreeMoveUp
-            | Self::TreeMoveDown
-            | Self::TreePageUp
-            | Self::TreePageDown
-            | Self::TreeHome
-            | Self::TreeEnd
             | Self::TreeOpenEntry
-            | Self::HotlistMoveUp
-            | Self::HotlistMoveDown
-            | Self::HotlistPageUp
-            | Self::HotlistPageDown
-            | Self::HotlistHome
-            | Self::HotlistEnd
             | Self::HotlistOpenEntry
             | Self::HotlistAddCurrentDirectory
             | Self::HotlistRemoveSelected => CommandDomain::Navigation,
-            Self::ViewerMoveUp
-            | Self::ViewerMoveDown
-            | Self::ViewerPageUp
-            | Self::ViewerPageDown
-            | Self::ViewerHome
-            | Self::ViewerEnd
-            | Self::ViewerSearchForward
+            Self::ViewerSearchForward
             | Self::ViewerSearchBackward
             | Self::ViewerSearchContinue
             | Self::ViewerSearchContinueBackward

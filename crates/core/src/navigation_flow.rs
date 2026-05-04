@@ -11,18 +11,9 @@ impl AppState {
         command: AppCommand,
     ) -> io::Result<CommandOutcome> {
         match command {
-            AppCommand::MoveUp => self.move_cursor(-1),
-            AppCommand::MoveDown => self.move_cursor(1),
-            AppCommand::PageUp => {
-                let page_step = self.settings.advanced.page_step;
-                self.active_panel_mut().move_cursor_page(-1, page_step);
+            AppCommand::Navigate(NavigationTarget::FileManager, motion) => {
+                self.apply_file_manager_navigation(motion);
             }
-            AppCommand::PageDown => {
-                let page_step = self.settings.advanced.page_step;
-                self.active_panel_mut().move_cursor_page(1, page_step);
-            }
-            AppCommand::MoveHome => self.active_panel_mut().move_cursor_home(),
-            AppCommand::MoveEnd => self.active_panel_mut().move_cursor_end(),
             AppCommand::ToggleTag => {
                 let selected = self.active_panel().selected_entry();
                 if selected.is_none() {
@@ -108,31 +99,22 @@ impl AppState {
                 self.refresh_active_panel();
                 self.set_status("Refreshing active panel...");
             }
-            AppCommand::FindResultsMoveUp => self.move_find_results_cursor(-1),
-            AppCommand::FindResultsMoveDown => self.move_find_results_cursor(1),
-            AppCommand::FindResultsPageUp => self.move_find_results_page(-1),
-            AppCommand::FindResultsPageDown => self.move_find_results_page(1),
-            AppCommand::FindResultsHome => self.move_find_results_home(),
-            AppCommand::FindResultsEnd => self.move_find_results_end(),
+            AppCommand::Navigate(NavigationTarget::FindResults, motion) => {
+                self.apply_find_results_navigation(motion);
+            }
             AppCommand::FindResultsOpenEntry => {
                 self.open_selected_find_result()?;
             }
             AppCommand::FindResultsPanelize => self.panelize_find_results(),
-            AppCommand::TreeMoveUp => self.move_tree_cursor(-1),
-            AppCommand::TreeMoveDown => self.move_tree_cursor(1),
-            AppCommand::TreePageUp => self.move_tree_page(-1),
-            AppCommand::TreePageDown => self.move_tree_page(1),
-            AppCommand::TreeHome => self.move_tree_home(),
-            AppCommand::TreeEnd => self.move_tree_end(),
+            AppCommand::Navigate(NavigationTarget::Tree, motion) => {
+                self.apply_tree_navigation(motion);
+            }
             AppCommand::TreeOpenEntry => {
                 self.open_selected_tree_entry()?;
             }
-            AppCommand::HotlistMoveUp => self.move_hotlist_cursor(-1),
-            AppCommand::HotlistMoveDown => self.move_hotlist_cursor(1),
-            AppCommand::HotlistPageUp => self.move_hotlist_page(-1),
-            AppCommand::HotlistPageDown => self.move_hotlist_page(1),
-            AppCommand::HotlistHome => self.move_hotlist_home(),
-            AppCommand::HotlistEnd => self.move_hotlist_end(),
+            AppCommand::Navigate(NavigationTarget::Hotlist, motion) => {
+                self.apply_hotlist_navigation(motion);
+            }
             AppCommand::HotlistOpenEntry => {
                 self.open_selected_hotlist_entry()?;
             }
@@ -144,6 +126,60 @@ impl AppState {
         }
 
         Ok(CommandOutcome::Continue)
+    }
+
+    fn apply_file_manager_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_cursor(-1),
+            NavigationMotion::Down => self.move_cursor(1),
+            NavigationMotion::PageUp => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(-1, page_step);
+            }
+            NavigationMotion::PageDown => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(1, page_step);
+            }
+            NavigationMotion::Home => self.active_panel_mut().move_cursor_home(),
+            NavigationMotion::End => self.active_panel_mut().move_cursor_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_find_results_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_find_results_cursor(-1),
+            NavigationMotion::Down => self.move_find_results_cursor(1),
+            NavigationMotion::PageUp => self.move_find_results_page(-1),
+            NavigationMotion::PageDown => self.move_find_results_page(1),
+            NavigationMotion::Home => self.move_find_results_home(),
+            NavigationMotion::End => self.move_find_results_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_tree_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_tree_cursor(-1),
+            NavigationMotion::Down => self.move_tree_cursor(1),
+            NavigationMotion::PageUp => self.move_tree_page(-1),
+            NavigationMotion::PageDown => self.move_tree_page(1),
+            NavigationMotion::Home => self.move_tree_home(),
+            NavigationMotion::End => self.move_tree_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_hotlist_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_hotlist_cursor(-1),
+            NavigationMotion::Down => self.move_hotlist_cursor(1),
+            NavigationMotion::PageUp => self.move_hotlist_page(-1),
+            NavigationMotion::PageDown => self.move_hotlist_page(1),
+            NavigationMotion::Home => self.move_hotlist_home(),
+            NavigationMotion::End => self.move_hotlist_end(),
+            _ => {}
+        }
     }
 
     pub(crate) fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
