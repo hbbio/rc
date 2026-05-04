@@ -16,19 +16,15 @@ use rc_core::{
     FindResultsState, HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route,
     SettingsScreenState, TreeState, ViewerState, top_menus,
 };
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 use syntect::highlighting::{
     Color as SyntectColor, FontStyle, HighlightIterator, HighlightState, Highlighter,
     Style as SyntectStyle, Theme,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use unicode_width::UnicodeWidthStr;
-
-#[cfg(unix)]
-use nix::sys::statvfs::statvfs;
 
 use skin::{UiSkin, current_skin};
 pub use skin::{
@@ -48,8 +44,6 @@ struct CachedHighlightResources {
 static HIGHLIGHT_RESOURCES: OnceLock<Mutex<Option<CachedHighlightResources>>> = OnceLock::new();
 static HIGHLIGHT_SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static VIEWER_HIGHLIGHT_CACHE: OnceLock<Mutex<Option<CachedViewerHighlight>>> = OnceLock::new();
-static DISK_USAGE_SUMMARY_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, String)>>> =
-    OnceLock::new();
 const PANEL_SIZE_COL_WIDTH: usize = 12;
 const PANEL_SIZE_VALUE_WIDTH: usize = PANEL_SIZE_COL_WIDTH - 1;
 
@@ -1630,40 +1624,12 @@ fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
     (count, size)
 }
 
-fn panel_disk_summary(panel: &PanelState, app: &AppState) -> String {
-    let now = Instant::now();
-    let cache_ttl = app.disk_usage_cache_ttl();
-    let cache_max_entries = app.disk_usage_cache_max_entries();
-    let cache = DISK_USAGE_SUMMARY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut cache) = cache.lock() {
-        if let Some((captured_at, cached)) = cache.get(panel.cwd.as_path())
-            && now.saturating_duration_since(*captured_at) <= cache_ttl
-        {
-            return cached.clone();
-        }
-
-        let summary = compute_disk_summary(panel.cwd.as_path());
-        if cache.len() >= cache_max_entries {
-            cache.retain(|_, (captured_at, _)| {
-                now.saturating_duration_since(*captured_at) <= cache_ttl
-            });
-            if cache.len() >= cache_max_entries
-                && let Some(path) = cache.keys().next().cloned()
-            {
-                cache.remove(path.as_path());
-            }
-        }
-        cache.insert(panel.cwd.clone(), (now, summary.clone()));
-        return summary;
-    }
-
-    compute_disk_summary(panel.cwd.as_path())
-}
-
-fn compute_disk_summary(path: &Path) -> String {
-    let Some((free, total)) = disk_usage(path) else {
+fn panel_disk_summary(panel: &PanelState, _app: &AppState) -> String {
+    let Some(disk_usage) = panel.disk_usage else {
         return String::from("- / - (-%)");
     };
+    let free = disk_usage.free_bytes;
+    let total = disk_usage.total_bytes;
     if total == 0 {
         return String::from("0b / 0b (0%)");
     }
@@ -1688,28 +1654,6 @@ fn visible_window(total: usize, cursor: usize, viewport_rows: usize) -> (usize, 
     }
     let end = start + visible;
     (start, end)
-}
-
-#[cfg(unix)]
-fn disk_usage(path: &Path) -> Option<(u64, u64)> {
-    let stats = statvfs(path).ok()?;
-    let fragment_size = stats.fragment_size() as u64;
-    if fragment_size == 0 {
-        return None;
-    }
-
-    let total = bytes_from_blocks(stats.blocks() as u64, fragment_size);
-    let free = bytes_from_blocks(stats.blocks_available() as u64, fragment_size);
-    Some((free, total))
-}
-
-#[cfg(not(unix))]
-fn disk_usage(_path: &Path) -> Option<(u64, u64)> {
-    None
-}
-
-fn bytes_from_blocks(blocks: u64, block_size: u64) -> u64 {
-    ((blocks as u128).saturating_mul(block_size as u128)).min(u64::MAX as u128) as u64
 }
 
 fn format_modified(modified: Option<SystemTime>) -> String {
@@ -1851,7 +1795,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use rc_core::{
         AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
-        execute_worker_job,
+        execute_worker_job, refresh_panel_event,
     };
     use std::env;
     use std::fs;
@@ -1891,6 +1835,30 @@ mod tests {
                         let job_id = job.id;
                         let (event_tx, event_rx) = mpsc::channel();
                         match &job.request {
+                            JobRequest::RefreshPanel {
+                                panel,
+                                cwd,
+                                source,
+                                sort_mode,
+                                show_hidden_files,
+                                request_id,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let cancel_flag = job.cancel_flag();
+                                state.handle_background_event(refresh_panel_event(
+                                    *panel,
+                                    cwd.clone(),
+                                    source.clone(),
+                                    *sort_mode,
+                                    *show_hidden_files,
+                                    *request_id,
+                                    cancel_flag.as_ref(),
+                                ));
+                                let _ = event_tx.send(JobEvent::Finished {
+                                    id: job_id,
+                                    result: Ok(()),
+                                });
+                            }
                             JobRequest::LoadViewer { path } => {
                                 let _ = event_tx.send(JobEvent::Started { id: job_id });
                                 let viewer_result = rc_core::ViewerState::open(path.clone())
@@ -1919,6 +1887,13 @@ mod tests {
                 break;
             }
         }
+    }
+
+    fn app_with_loaded_panels(root: std::path::PathBuf) -> AppState {
+        let mut app = AppState::new(root).expect("app should initialize");
+        app.refresh_panels();
+        drain_background(&mut app);
+        app
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {
@@ -1972,7 +1947,7 @@ mod tests {
     fn render_draws_file_manager_panels() {
         let root = temp_root("panels");
         fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
-        let app = AppState::new(root.clone()).expect("app should initialize");
+        let app = app_with_loaded_panels(root.clone());
         let frame = render_to_text(&app, 100, 30);
         assert!(
             frame.contains("context: FileManager"),
@@ -2004,7 +1979,7 @@ mod tests {
     #[test]
     fn render_status_line_sanitizes_newlines_and_clips_width() {
         let root = temp_root("status-clamp");
-        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let mut app = app_with_loaded_panels(root.clone());
         app.settings_mut().layout.show_debug_status = false;
         app.set_status(format!("line1\nline2 {}", "x".repeat(200)));
 
@@ -2029,7 +2004,7 @@ mod tests {
     fn panel_title_marks_panelize_panels() {
         let root = temp_root("panelize-title");
         fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
-        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let mut app = app_with_loaded_panels(root.clone());
         app.apply(AppCommand::OpenPanelizeDialog)
             .expect("panelize dialog should open");
         app.apply(AppCommand::DialogAccept)
@@ -2055,7 +2030,7 @@ mod tests {
         )
         .expect("file should be creatable");
 
-        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let mut app = app_with_loaded_panels(root.clone());
         let index = app
             .active_panel()
             .entries

@@ -242,8 +242,17 @@ impl AppState {
                 source,
                 sort_mode,
                 request_id,
+                disk_usage,
                 result,
-            } => self.handle_panel_refreshed(panel, cwd, source, sort_mode, request_id, result),
+            } => self.handle_panel_refreshed(PanelRefreshCompletion {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                disk_usage,
+                result,
+            }),
             BackgroundEvent::ViewerLoaded { path, result } => match result {
                 Ok(viewer) => {
                     let is_preview = viewer.text_is_preview();

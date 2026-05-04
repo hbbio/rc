@@ -159,6 +159,13 @@ fn drain_background(app: &mut AppState) {
     }
 }
 
+fn app_with_loaded_panels(root: PathBuf) -> AppState {
+    let mut app = AppState::new(root).expect("app should initialize");
+    app.refresh_panels();
+    drain_background(&mut app);
+    app
+}
+
 #[test]
 fn panelized_entries_allow_process_backend_injection() {
     let stamp = SystemTime::now()
@@ -233,6 +240,7 @@ fn move_cursor_stays_in_bounds() {
         source: PanelListingSource::Directory,
         tagged: HashSet::new(),
         loading: false,
+        disk_usage: None,
     };
 
     panel.move_cursor(-1);
@@ -254,7 +262,8 @@ fn panel_listing_prepends_parent_entry() {
     fs::create_dir_all(&child).expect("must create child directory");
     fs::write(child.join("a.txt"), "x").expect("must create child file");
 
-    let panel = PanelState::new(child.clone()).expect("panel should initialize");
+    let mut panel = PanelState::new(child.clone()).expect("panel should initialize");
+    panel.refresh().expect("panel listing should load");
     let first = panel.entries.first().expect("entries should not be empty");
     assert_eq!(first.name, "..");
     assert!(first.is_parent);
@@ -377,6 +386,7 @@ fn toggle_and_invert_tags_work_for_non_parent_entries() {
         source: PanelListingSource::Directory,
         tagged: HashSet::new(),
         loading: false,
+        disk_usage: None,
     };
 
     assert!(
@@ -413,6 +423,7 @@ fn page_home_end_navigation_stays_bounded() {
         source: PanelListingSource::Directory,
         tagged: HashSet::new(),
         loading: false,
+        disk_usage: None,
     };
 
     panel.move_cursor_home();
@@ -439,6 +450,7 @@ fn sort_mode_cycles_and_toggles_direction() {
         source: PanelListingSource::Directory,
         tagged: HashSet::new(),
         loading: false,
+        disk_usage: None,
     };
 
     panel.sort_mode.field = SortField::Name;
@@ -465,7 +477,7 @@ fn toggle_tag_advances_cursor_to_next_entry() {
     fs::write(&alpha, "a").expect("must create alpha file");
     fs::write(&bravo, "b").expect("must create bravo file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let alpha_index = app
         .active_panel()
         .entries
@@ -507,7 +519,7 @@ fn mkdir_dialog_queues_mkdir_job() {
     let root = env::temp_dir().join(format!("rc-mkdir-dialog-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.apply(AppCommand::OpenInputDialog)
         .expect("mkdir dialog should open");
     for ch in "newdir".chars() {
@@ -542,7 +554,7 @@ fn rename_dialog_queues_rename_job() {
     let source = root.join("before.txt");
     fs::write(&source, "before").expect("must create source file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let source_index = app
         .active_panel()
         .entries
@@ -592,7 +604,7 @@ fn skin_dialog_emits_selected_skin() {
     let root = env::temp_dir().join(format!("rc-skin-dialog-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.set_available_skins(vec![String::from("default"), String::from("dark")]);
     app.set_active_skin_name("default");
 
@@ -620,7 +632,7 @@ fn skin_dialog_emits_preview_and_revert_on_cancel() {
     let root = env::temp_dir().join(format!("rc-skin-preview-cancel-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.set_available_skins(vec![String::from("default"), String::from("dark")]);
     app.set_active_skin_name("default");
 
@@ -654,7 +666,7 @@ fn help_route_supports_topic_links_and_back_navigation() {
     let root = env::temp_dir().join(format!("rc-help-route-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.apply(AppCommand::OpenHelp)
         .expect("help route should open");
     assert_eq!(app.key_context(), KeyContext::Help);
@@ -702,7 +714,7 @@ fn menu_shortcuts_follow_loaded_keymap_bindings() {
     let root = env::temp_dir().join(format!("rc-menu-shortcuts-keymap-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let keymap = Keymap::parse(
         r#"
 [filemanager]
@@ -743,7 +755,7 @@ fn help_content_applies_keybinding_replacements() {
     let root = env::temp_dir().join(format!("rc-help-keybindings-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let keymap = Keymap::parse(
         r#"
 [filemanager]
@@ -790,7 +802,7 @@ fn menu_route_supports_keyboard_navigation_and_selection() {
     let root = env::temp_dir().join(format!("rc-menu-route-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.apply(AppCommand::OpenMenuAt(2))
         .expect("menu route should open");
     assert_eq!(app.key_context(), KeyContext::Menu);
@@ -957,6 +969,8 @@ fn settings_toggle_marks_dirty_and_save_setup_sets_pending_flag() {
 
     app.apply(AppCommand::OpenOptionsConfiguration)
         .expect("configuration options should open");
+    app.apply(AppCommand::DialogListboxDown)
+        .expect("settings selection should move");
     app.apply(AppCommand::DialogAccept)
         .expect("toggle should apply");
     assert!(app.settings().save_setup.dirty);
@@ -977,7 +991,7 @@ fn status_line_expires_after_configured_timeout() {
     let root = env::temp_dir().join(format!("rc-status-timeout-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.settings.layout.status_message_timeout_seconds = 10;
     app.set_status("Loading selected directory...");
     let expires_at = app
@@ -1011,7 +1025,7 @@ fn status_line_timeout_zero_disables_auto_clear() {
     let root = env::temp_dir().join(format!("rc-status-timeout-off-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.settings.layout.status_message_timeout_seconds = 0;
     app.set_status("Loading selected directory...");
     assert!(
@@ -1040,7 +1054,7 @@ fn set_status_sanitizes_controls_and_truncates_very_long_messages() {
     let root = env::temp_dir().join(format!("rc-status-sanitize-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.set_status(format!(
         "line1\nline2\t{}\r{}",
         '\u{1b}',
@@ -1342,7 +1356,7 @@ fn delete_command_queues_job_only_after_confirmation() {
     let victim = root.join("victim.txt");
     fs::write(&victim, "victim").expect("must create victim file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let victim_index = app
         .active_panel()
         .entries
@@ -1387,7 +1401,7 @@ fn copy_command_uses_destination_and_policy_dialogs() {
     let source = root.join("a.txt");
     fs::write(&source, "a").expect("must create source file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let source_index = app
         .active_panel()
         .entries
@@ -1442,7 +1456,7 @@ fn copy_relative_destination_is_resolved_from_active_panel() {
     let source = root.join("a.txt");
     fs::write(&source, "a").expect("must create source file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let source_index = app
         .active_panel()
         .entries

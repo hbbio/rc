@@ -6,11 +6,14 @@ use std::thread;
 use std::time::Duration;
 
 use crate::{
-    ActivePanel, FileEntry, FindResultEntry, JOB_CANCELED_MESSAGE, JobId, PanelListingSource,
-    SortMode, TreeEntry, ViewerState, build_tree_entries, ensure_panel_refresh_not_canceled,
-    read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
-    sort_file_entries,
+    ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JOB_CANCELED_MESSAGE, JobId,
+    PanelListingSource, SortMode, TreeEntry, ViewerState, build_tree_entries,
+    ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
+    read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
 };
+
+#[cfg(unix)]
+use nix::sys::statvfs::statvfs;
 
 const FIND_EVENT_CHUNK_SIZE: usize = 64;
 const PANEL_EVENT_CHUNK_SIZE: usize = 96;
@@ -41,6 +44,7 @@ pub enum BackgroundEvent {
         source: PanelListingSource,
         sort_mode: SortMode,
         request_id: u64,
+        disk_usage: Option<DiskUsageSummary>,
         result: Result<Vec<FileEntry>, String>,
     },
     ViewerLoaded {
@@ -68,12 +72,17 @@ pub fn refresh_panel_event(
 ) -> BackgroundEvent {
     let result = refresh_panel_entries(&cwd, &source, sort_mode, show_hidden_files, cancel_flag)
         .map_err(|error| error.to_string());
+    let disk_usage = result
+        .as_ref()
+        .ok()
+        .and_then(|_| read_disk_usage(cwd.as_path()));
     BackgroundEvent::PanelRefreshed {
         panel,
         cwd,
         source,
         sort_mode,
         request_id,
+        disk_usage,
         result,
     }
 }
@@ -374,4 +383,33 @@ fn path_sort_key(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_lowercase())
         .unwrap_or_else(|| path.to_string_lossy().to_lowercase())
+}
+
+pub fn read_disk_usage(path: &Path) -> Option<DiskUsageSummary> {
+    disk_usage(path).map(|(free_bytes, total_bytes)| DiskUsageSummary {
+        free_bytes,
+        total_bytes,
+    })
+}
+
+#[cfg(unix)]
+fn disk_usage(path: &Path) -> Option<(u64, u64)> {
+    let stats = statvfs(path).ok()?;
+    let fragment_size = stats.fragment_size() as u64;
+    if fragment_size == 0 {
+        return None;
+    }
+
+    let total = bytes_from_blocks(stats.blocks() as u64, fragment_size);
+    let free = bytes_from_blocks(stats.blocks_available() as u64, fragment_size);
+    Some((free, total))
+}
+
+#[cfg(not(unix))]
+fn disk_usage(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+fn bytes_from_blocks(blocks: u64, block_size: u64) -> u64 {
+    ((blocks as u128).saturating_mul(block_size as u128)).min(u64::MAX as u128) as u64
 }

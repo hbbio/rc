@@ -35,8 +35,8 @@ use std::time::{Instant, SystemTime};
 #[cfg(test)]
 use background::stream_find_entries;
 pub use background::{
-    BackgroundEvent, PanelRefreshStreamRequest, build_tree_ready_event, refresh_panel_entries,
-    refresh_panel_event, run_find_entries, stream_refresh_panel_entries,
+    BackgroundEvent, PanelRefreshStreamRequest, build_tree_ready_event, read_disk_usage,
+    refresh_panel_entries, refresh_panel_event, run_find_entries, stream_refresh_panel_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
 pub use help::{HelpLine, HelpSpan, HelpState};
@@ -69,7 +69,7 @@ pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
 use crate::panel::{read_entries_with_visibility, read_panelized_entries};
-use crate::refresh_flow::{PanelRefreshPostWorkflow, PanelRefreshWorkflow};
+use crate::refresh_flow::{PanelRefreshCompletion, PanelRefreshPostWorkflow, PanelRefreshWorkflow};
 use crate::viewer::ViewerSearchDirection;
 
 const MAX_STATUS_LINE_CHARS: usize = 1024;
@@ -702,6 +702,12 @@ pub enum PanelListingSource {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiskUsageSummary {
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+}
+
 impl PanelListingSource {
     fn is_panelized(&self) -> bool {
         !matches!(self, Self::Directory)
@@ -718,11 +724,12 @@ pub struct PanelState {
     source: PanelListingSource,
     tagged: HashSet<PathBuf>,
     pub loading: bool,
+    pub disk_usage: Option<DiskUsageSummary>,
 }
 
 impl PanelState {
     pub fn new(cwd: PathBuf) -> io::Result<Self> {
-        let mut panel = Self {
+        Ok(Self {
             cwd,
             entries: Vec::new(),
             cursor: 0,
@@ -731,9 +738,8 @@ impl PanelState {
             source: PanelListingSource::Directory,
             tagged: HashSet::new(),
             loading: false,
-        };
-        panel.refresh()?;
-        Ok(panel)
+            disk_usage: None,
+        })
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
@@ -1277,7 +1283,6 @@ impl SettingsEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SettingsEntryAction {
-    ToggleUseInternalEditor,
     CycleDefaultOverwritePolicy,
     ToggleMacosOptionSymbols,
     ToggleLayoutShowMenuBar,
@@ -1383,7 +1388,7 @@ pub struct ExternalEditRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditSelectionResult {
     OpenedExternal,
-    OpenedInternal,
+    NoEditorResolved,
     NoEntrySelected,
     SelectedEntryIsDirectory,
 }
@@ -1595,18 +1600,32 @@ fn format_key_chord(chord: KeyChord) -> String {
     }
 }
 
-fn resolve_external_editor_command() -> Option<String> {
-    resolve_external_editor_command_with_lookup(|name| std::env::var(name).ok())
+fn resolve_external_editor_command(configured_editor: Option<&str>) -> Option<String> {
+    resolve_external_editor_command_with_lookup(
+        configured_editor,
+        |name| std::env::var(name).ok(),
+        executable_on_path,
+    )
 }
 
 fn resolve_external_editor_command_with_lookup(
+    configured_editor: Option<&str>,
     mut lookup_env: impl FnMut(&str) -> Option<String>,
+    mut executable_exists: impl FnMut(&str) -> bool,
 ) -> Option<String> {
+    if let Some(editor) = configured_editor.and_then(non_empty_env_value) {
+        return Some(editor.to_string());
+    }
     for variable in ["EDITOR", "VISUAL"] {
         if let Some(value) = lookup_env(variable)
             && let Some(trimmed) = non_empty_env_value(&value)
         {
             return Some(trimmed.to_string());
+        }
+    }
+    for executable in ["hx", "nvim", "vim", "vi", "emacs"] {
+        if executable_exists(executable) {
+            return Some(executable.to_string());
         }
     }
     None
@@ -1615,6 +1634,66 @@ fn resolve_external_editor_command_with_lookup(
 fn non_empty_env_value(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn executable_on_path(name: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| executable_candidate_exists(&dir, name))
+}
+
+fn executable_candidate_exists(dir: &Path, name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let candidate = dir.join(name);
+        if executable_path_is_runnable(&candidate) {
+            return true;
+        }
+        let extensions = std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|extension| !extension.trim().is_empty())
+                    .map(|extension| extension.trim().trim_start_matches('.').to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    String::from("exe"),
+                    String::from("cmd"),
+                    String::from("bat"),
+                ]
+            });
+        extensions
+            .into_iter()
+            .any(|extension| executable_path_is_runnable(&dir.join(format!("{name}.{extension}"))))
+    }
+    #[cfg(not(windows))]
+    {
+        executable_path_is_runnable(&dir.join(name))
+    }
+}
+
+#[cfg(windows)]
+fn executable_path_is_runnable(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(unix)]
+fn executable_path_is_runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(any(unix, windows)))]
+fn executable_path_is_runnable(path: &Path) -> bool {
+    path.is_file()
 }
 
 #[cfg(test)]

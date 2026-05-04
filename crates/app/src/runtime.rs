@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use rc_core::{
     AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
     PanelListingSource, PanelRefreshStreamRequest, WorkerCommand, build_tree_ready_event,
-    execute_worker_job, run_find_entries, stream_refresh_panel_entries,
+    execute_worker_job, read_disk_usage, run_find_entries, stream_refresh_panel_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
@@ -762,12 +762,17 @@ fn execute_refresh_worker_job(
             background_event_tx.send(event).is_ok()
         });
     let (event_result, result) = refresh_outcomes(refresh_result, cancel_flag.as_ref());
+    let disk_usage = event_result
+        .as_ref()
+        .ok()
+        .and_then(|_| read_disk_usage(cwd.as_path()));
     let event = BackgroundEvent::PanelRefreshed {
         panel,
         cwd,
         source,
         sort_mode,
         request_id,
+        disk_usage,
         result: event_result,
     };
     let delivered = background_event_tx.send(event).is_ok();

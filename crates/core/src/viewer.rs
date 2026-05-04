@@ -1,6 +1,6 @@
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::{FOUNDATION_SLO, VIEWER_TEXT_PREVIEW_LIMIT_BYTES};
@@ -37,20 +37,18 @@ pub struct ViewerState {
 impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
         let path_fingerprint = fingerprint(&path);
-        let bytes = fs::read(&path)?;
+        let total_size = fs::metadata(&path)?.len();
         let text_limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let text_is_preview = bytes.len() > text_limit;
-        let content_bytes = if text_is_preview {
-            &bytes[..text_limit]
-        } else {
-            bytes.as_slice()
-        };
+        let read_limit = total_size.min(text_limit as u64) as usize;
+        let bytes = read_file_prefix(&path, read_limit)?;
+        let text_is_preview = total_size > bytes.len() as u64;
+        let content_bytes = bytes.as_slice();
         let content = String::from_utf8_lossy(content_bytes).into_owned();
         let hex_mode = should_default_to_hex_mode(&bytes) || text_is_preview;
         let content_fingerprint = if text_is_preview {
-            fingerprint(&(bytes.len(), content.as_str()))
+            fingerprint(&(total_size, content.as_str()))
         } else {
             fingerprint(&content)
         };
@@ -235,6 +233,15 @@ impl ViewerState {
         let lines = (self.bytes.len().saturating_add(15)).saturating_div(16);
         lines.max(1)
     }
+}
+
+fn read_file_prefix(path: &Path, byte_limit: usize) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(byte_limit);
+    file.by_ref()
+        .take(byte_limit as u64)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn compute_line_offsets(content: &str) -> Vec<usize> {

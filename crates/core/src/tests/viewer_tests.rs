@@ -11,7 +11,7 @@ fn open_entry_on_file_opens_viewer_route() {
     let file_path = root.join("notes.txt");
     fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("must create viewer file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries
@@ -50,7 +50,7 @@ fn open_entry_on_directory_symlink_descends_into_directory() {
     std::os::unix::fs::symlink(&target_dir, &symlink_path)
         .expect("directory symlink should be creatable");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let symlink_index = app
         .active_panel()
         .entries
@@ -110,7 +110,7 @@ fn edit_entry_on_file_queues_external_editor_request() {
     let file_path = root.join("notes.txt");
     fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("must create edit target");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries
@@ -135,7 +135,7 @@ fn edit_entry_on_file_queues_external_editor_request() {
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 #[test]
-fn edit_entry_falls_back_to_internal_when_no_external_editor_is_set() {
+fn edit_entry_requires_external_editor() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -145,7 +145,7 @@ fn edit_entry_falls_back_to_internal_when_no_external_editor_is_set() {
     let file_path = root.join("notes.txt");
     fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("must create edit target");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries
@@ -156,22 +156,16 @@ fn edit_entry_falls_back_to_internal_when_no_external_editor_is_set() {
 
     assert_eq!(
         app.open_selected_file_in_editor_with_resolver(|| None),
-        EditSelectionResult::OpenedInternal
+        EditSelectionResult::NoEditorResolved
     );
     assert!(
         app.take_pending_external_edit_requests().is_empty(),
         "no external editor request should be queued"
     );
-
-    let pending_worker = app.take_pending_worker_commands();
-    assert_eq!(pending_worker.len(), 1, "viewer load should be queued");
-    match &pending_worker[0] {
-        WorkerCommand::Run(job) => match &job.request {
-            JobRequest::LoadViewer { path } => assert_eq!(path, &file_path),
-            other => panic!("expected load-viewer request, got {other:?}"),
-        },
-        other => panic!("expected worker run command, got {other:?}"),
-    }
+    assert!(
+        app.take_pending_worker_commands().is_empty(),
+        "edit without an external editor should not queue a viewer fallback"
+    );
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -187,7 +181,7 @@ fn viewer_supports_scroll_search_goto_and_wrap() {
     fs::write(&file_path, "first\nsecond target\nthird\nfourth target\n")
         .expect("must create viewer content");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries
@@ -270,7 +264,7 @@ fn viewer_hex_mode_switches_context_and_navigation_model() {
     )
     .expect("must create viewer content");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries
@@ -320,7 +314,7 @@ fn viewer_opens_binary_content_in_hex_mode_by_default() {
     let file_path = root.join("payload.bin");
     fs::write(&file_path, b"\x00\x1b\x7fBIN\x01\x02").expect("must create binary file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries
@@ -457,7 +451,7 @@ fn opening_large_text_file_reports_preview_mode_status() {
     let total_bytes = VIEWER_TEXT_PREVIEW_LIMIT_BYTES + 1;
     fs::write(&file_path, vec![b'a'; total_bytes]).expect("large fixture should be writable");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let file_index = app
         .active_panel()
         .entries

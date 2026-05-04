@@ -112,14 +112,6 @@ impl AppState {
         )
     }
 
-    pub fn disk_usage_cache_ttl(&self) -> Duration {
-        Duration::from_millis(self.settings.advanced.disk_usage_cache_ttl_ms)
-    }
-
-    pub fn disk_usage_cache_max_entries(&self) -> usize {
-        self.settings.advanced.disk_usage_cache_max_entries
-    }
-
     pub fn replace_settings(&mut self, settings: Settings) {
         self.settings = settings;
         self.overwrite_policy = self.settings.configuration.default_overwrite_policy;
@@ -139,7 +131,6 @@ impl AppState {
         for panel in &mut self.panels {
             panel.sort_mode = sort_mode;
             panel.set_show_hidden_files(show_hidden_files);
-            let _ = panel.refresh();
         }
     }
 
@@ -201,7 +192,10 @@ impl AppState {
     }
 
     pub(crate) fn open_selected_file_in_editor(&mut self) -> EditSelectionResult {
-        self.open_selected_file_in_editor_with_resolver(resolve_external_editor_command)
+        let configured_editor = self.settings.configuration.editor_command.clone();
+        self.open_selected_file_in_editor_with_resolver(|| {
+            resolve_external_editor_command(configured_editor.as_deref())
+        })
     }
 
     pub(crate) fn open_selected_file_in_editor_with_resolver(
@@ -229,8 +223,7 @@ impl AppState {
             return EditSelectionResult::OpenedExternal;
         }
 
-        self.queue_worker_job_request(JobRequest::LoadViewer { path });
-        EditSelectionResult::OpenedInternal
+        EditSelectionResult::NoEditorResolved
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {

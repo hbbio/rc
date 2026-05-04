@@ -14,6 +14,16 @@ pub(crate) struct PanelRefreshPostWorkflow {
     panelize_revert: Option<(ActivePanel, PanelListingSource)>,
 }
 
+pub(crate) struct PanelRefreshCompletion {
+    pub(crate) panel: ActivePanel,
+    pub(crate) cwd: PathBuf,
+    pub(crate) source: PanelListingSource,
+    pub(crate) sort_mode: SortMode,
+    pub(crate) request_id: u64,
+    pub(crate) disk_usage: Option<DiskUsageSummary>,
+    pub(crate) result: Result<Vec<FileEntry>, String>,
+}
+
 impl Default for PanelRefreshWorkflow {
     fn default() -> Self {
         Self {
@@ -269,15 +279,16 @@ impl AppState {
         self.set_status(format!("Loading {} entries...", partial_count));
     }
 
-    pub(crate) fn handle_panel_refreshed(
-        &mut self,
-        panel: ActivePanel,
-        cwd: PathBuf,
-        source: PanelListingSource,
-        sort_mode: SortMode,
-        request_id: u64,
-        result: Result<Vec<FileEntry>, String>,
-    ) {
+    pub(crate) fn handle_panel_refreshed(&mut self, completion: PanelRefreshCompletion) {
+        let PanelRefreshCompletion {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            request_id,
+            disk_usage,
+            result,
+        } = completion;
         if !self.panel_refresh_is_current_request(panel, request_id) {
             return;
         }
@@ -298,6 +309,7 @@ impl AppState {
             match result {
                 Ok(entries) => {
                     panel_state.apply_entries(entries);
+                    panel_state.disk_usage = disk_usage;
                     self.panel_refresh_post
                         .clear_panelize_revert_for_panel(panel);
                     if let Some(target_path) = focus_target {

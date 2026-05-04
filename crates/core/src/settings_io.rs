@@ -248,10 +248,12 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.configuration.macos_option_symbols = parsed;
                 }
             }
+            ("configuration", "editor_command") => {
+                settings.configuration.editor_command =
+                    (!value.is_empty()).then(|| value.to_string());
+            }
             ("configuration", "use_internal_editor") => {
-                if let Some(parsed) = parse_bool(value) {
-                    settings.configuration.use_internal_editor = parsed;
-                }
+                // Legacy rc setting. Internal editing is no longer implemented.
             }
             ("configuration", "keymap_override") => {
                 if value.is_empty() {
@@ -426,16 +428,6 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.advanced.tree_max_entries = parsed.max(1);
                 }
             }
-            ("advanced", "disk_usage_cache_ttl_ms") => {
-                if let Ok(parsed) = value.parse::<u64>() {
-                    settings.advanced.disk_usage_cache_ttl_ms = parsed.max(1);
-                }
-            }
-            ("advanced", "disk_usage_cache_max_entries") => {
-                if let Ok(parsed) = value.parse::<usize>() {
-                    settings.advanced.disk_usage_cache_max_entries = parsed.max(1);
-                }
-            }
             _ => {}
         }
     }
@@ -456,8 +448,12 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         settings.configuration.macos_option_symbols
     ));
     lines.push(format!(
-        "use_internal_editor={}",
-        settings.configuration.use_internal_editor
+        "editor_command={}",
+        settings
+            .configuration
+            .editor_command
+            .as_deref()
+            .unwrap_or_default()
     ));
     if let Some(path) = settings.configuration.keymap_override.as_ref() {
         lines.push(format!("keymap_override={}", path.to_string_lossy()));
@@ -588,14 +584,6 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     lines.push(format!(
         "tree_max_entries={}",
         settings.advanced.tree_max_entries
-    ));
-    lines.push(format!(
-        "disk_usage_cache_ttl_ms={}",
-        settings.advanced.disk_usage_cache_ttl_ms
-    ));
-    lines.push(format!(
-        "disk_usage_cache_max_entries={}",
-        settings.advanced.disk_usage_cache_max_entries
     ));
 
     let mut rendered = lines.join("\n");

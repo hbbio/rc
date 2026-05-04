@@ -12,7 +12,7 @@ fn reread_coalesces_previous_refresh_for_same_panel() {
     fs::create_dir_all(&root).expect("must create temp root");
     fs::write(root.join("a.txt"), "a").expect("must create file");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.refresh_active_panel();
     assert_eq!(app.pending_worker_commands.len(), 1);
 
@@ -80,7 +80,7 @@ fn stale_panel_refresh_event_is_ignored() {
     let root = env::temp_dir().join(format!("rc-refresh-stale-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     app.refresh_active_panel();
     app.refresh_active_panel();
     let commands = app.take_pending_worker_commands();
@@ -122,6 +122,7 @@ fn stale_panel_refresh_event_is_ignored() {
         source: source.clone(),
         sort_mode,
         request_id: stale_request_id,
+        disk_usage: None,
         result: Ok(Vec::new()),
     });
     assert!(
@@ -135,6 +136,7 @@ fn stale_panel_refresh_event_is_ignored() {
         source,
         sort_mode,
         request_id: latest_request_id,
+        disk_usage: None,
         result: Ok(Vec::new()),
     });
     assert!(
@@ -158,7 +160,7 @@ fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
     fs::write(&alpha_path, "alpha").expect("alpha fixture should be writable");
     fs::write(&beta_path, "beta").expect("beta fixture should be writable");
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let alpha_index = app
         .active_panel()
         .entries
@@ -222,6 +224,7 @@ fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
         source,
         sort_mode,
         request_id,
+        disk_usage: None,
         result: Ok(final_entries),
     });
     assert!(
@@ -244,7 +247,7 @@ fn panel_refresh_chunks_preserve_cursor_until_final_listing() {
         fs::write(root.join(name), name).expect("fixture should be writable");
     }
 
-    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let mut app = app_with_loaded_panels(root.clone());
     let target_path = root.join("f.txt");
     let target_cursor = app
         .active_panel()
@@ -304,6 +307,7 @@ fn panel_refresh_chunks_preserve_cursor_until_final_listing() {
         source,
         sort_mode,
         request_id,
+        disk_usage: None,
         result: Ok(final_entries),
     });
     assert_eq!(
@@ -366,6 +370,7 @@ fn panelize_revert_policy_stays_scoped_to_its_panel() {
         source: right_source,
         sort_mode: right_sort_mode,
         request_id: right_request_id,
+        disk_usage: None,
         result: Err(String::from("right refresh failed")),
     });
     assert!(
@@ -382,6 +387,7 @@ fn panelize_revert_policy_stays_scoped_to_its_panel() {
         source: left_source,
         sort_mode: left_sort_mode,
         request_id: left_request_id,
+        disk_usage: None,
         result: Err(String::from("left panelize failed")),
     });
     assert!(

@@ -77,6 +77,7 @@ fn main() -> Result<()> {
         .unwrap_or(std::env::current_dir().context("failed to resolve current directory")?);
     let mut state = AppState::new(start_path).context("failed to initialize app state")?;
     state.replace_settings(settings.clone());
+    state.refresh_panels();
 
     let skin_dirs = settings.appearance.skin_dirs.clone();
     state.set_available_skins(rc_ui::list_available_skins_with_search_roots(&skin_dirs));

@@ -65,9 +65,13 @@ impl AppState {
         match category {
             SettingsCategory::Configuration => vec![
                 SettingsEntry::new(
-                    "Use internal editor",
-                    bool_label(self.settings.configuration.use_internal_editor),
-                    SettingsEntryAction::ToggleUseInternalEditor,
+                    "Editor command",
+                    self.settings
+                        .configuration
+                        .editor_command
+                        .clone()
+                        .unwrap_or_else(|| String::from("<auto>")),
+                    SettingsEntryAction::Info,
                 ),
                 SettingsEntry::new(
                     "Default overwrite policy",
@@ -287,15 +291,6 @@ impl AppState {
         };
 
         match entry.action {
-            SettingsEntryAction::ToggleUseInternalEditor => {
-                self.settings.configuration.use_internal_editor =
-                    !self.settings.configuration.use_internal_editor;
-                self.settings.mark_dirty();
-                self.set_status(format!(
-                    "Use internal editor: {}",
-                    bool_label(self.settings.configuration.use_internal_editor)
-                ));
-            }
             SettingsEntryAction::CycleDefaultOverwritePolicy => {
                 self.overwrite_policy = next_overwrite_policy(self.overwrite_policy);
                 self.settings.configuration.default_overwrite_policy = self.overwrite_policy;

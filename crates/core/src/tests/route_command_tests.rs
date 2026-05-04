@@ -100,25 +100,68 @@ fn xmap_mode_applies_to_next_file_manager_command_only() {
 
 #[test]
 fn resolve_external_editor_command_prefers_editor_over_visual() {
-    let editor = resolve_external_editor_command_with_lookup(|name| match name {
-        "EDITOR" => Some(String::from("  nvim  ")),
-        "VISUAL" => Some(String::from("vim")),
-        _ => None,
-    });
-    assert_eq!(editor, Some(String::from("nvim")));
+    let editor = resolve_external_editor_command_with_lookup(
+        Some("  hx --wait  "),
+        |name| match name {
+            "EDITOR" => Some(String::from("  nvim  ")),
+            "VISUAL" => Some(String::from("vim")),
+            _ => None,
+        },
+        |_| false,
+    );
+    assert_eq!(editor, Some(String::from("hx --wait")));
 }
 
 #[test]
-fn resolve_external_editor_command_uses_visual_then_none() {
-    let editor = resolve_external_editor_command_with_lookup(|name| match name {
-        "EDITOR" => Some(String::from("  ")),
-        "VISUAL" => Some(String::from(" code --wait ")),
-        _ => None,
-    });
+fn resolve_external_editor_command_uses_env_then_path_probe() {
+    let editor = resolve_external_editor_command_with_lookup(
+        None,
+        |name| match name {
+            "EDITOR" => Some(String::from("  ")),
+            "VISUAL" => Some(String::from(" code --wait ")),
+            _ => None,
+        },
+        |_| false,
+    );
     assert_eq!(editor, Some(String::from("code --wait")));
 
-    let missing = resolve_external_editor_command_with_lookup(|_| None);
+    let probed =
+        resolve_external_editor_command_with_lookup(None, |_| None, |name| matches!(name, "vim"));
+    assert_eq!(probed, Some(String::from("vim")));
+
+    let missing = resolve_external_editor_command_with_lookup(None, |_| None, |_| false);
     assert_eq!(missing, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_candidate_requires_execute_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-editor-path-probe-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let editor = root.join("vim");
+    fs::write(&editor, "#!/bin/sh\n").expect("editor fixture should be writable");
+
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o644))
+        .expect("permissions should be writable");
+    assert!(
+        !executable_candidate_exists(&root, "vim"),
+        "non-executable files should not satisfy PATH probing"
+    );
+
+    fs::set_permissions(&editor, fs::Permissions::from_mode(0o755))
+        .expect("permissions should be writable");
+    assert!(
+        executable_candidate_exists(&root, "vim"),
+        "executable files should satisfy PATH probing"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
 }
 
 #[test]

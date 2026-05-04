@@ -820,7 +820,6 @@ name = "rc-ui"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "nix",
  "ratatui",
  "rc-core",
  "syntect",

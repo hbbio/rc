@@ -86,9 +86,8 @@ impl AppState {
                 EditSelectionResult::OpenedExternal => {
                     self.set_status("Opening external editor...")
                 }
-                EditSelectionResult::OpenedInternal => {
-                    self.set_status("Opening internal editor...")
-                }
+                EditSelectionResult::NoEditorResolved => self
+                    .set_status("No external editor found; set editor_command, EDITOR, or VISUAL"),
                 EditSelectionResult::NoEntrySelected => self.set_status("No entry selected"),
                 EditSelectionResult::SelectedEntryIsDirectory => {
                     self.set_status("Directory cannot be edited");

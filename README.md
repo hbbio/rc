@@ -18,10 +18,11 @@ Implemented milestones:
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
 - Milestone 4 (partial): find dialog/results, tree, and hotlist
 - Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup persistence
+- External editor workflow: deterministic resolution, terminal suspend/resume, command templates
 - Product direction update: external-editor-first workflow, command-based diff output, optional FTP/SFTP support
 
-Planned next major milestones include `mc.ext.ini`, user menu, external editor
-workflow hardening, command-based diff integration (`difftastic`/`diff`),
+Planned next major milestones include `mc.ext.ini`, user menu,
+command-based diff integration (`difftastic`/`diff`),
 optional remote VFS, and subshell integration. See [doc/roadmap.md](doc/roadmap.md).
 
 ## Quick start
@@ -80,7 +81,7 @@ Main file manager:
 
 - `Tab`: switch active panel
 - `Enter` / `F3`: open directory or open file in viewer
-- `F4`: edit file using configured editor / `$EDITOR` / `$VISUAL` (current build falls back to internal viewer)
+- `F4`: edit file using `editor_command`, `$EDITOR`, `$VISUAL`, or PATH probes (`hx`, `nvim`, `vim`, `vi`, `emacs`)
 - `Backspace`: go to parent directory
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
 - `Ctrl-J`: open jobs screen
