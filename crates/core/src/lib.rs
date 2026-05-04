@@ -585,12 +585,28 @@ impl ActivePanel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileEntryKind {
+    Parent,
+    Directory,
+    File,
+}
+
+impl FileEntryKind {
+    pub const fn is_dir(self) -> bool {
+        matches!(self, Self::Parent | Self::Directory)
+    }
+
+    pub const fn is_parent(self) -> bool {
+        matches!(self, Self::Parent)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
     pub name: String,
     pub path: PathBuf,
-    pub is_dir: bool,
-    pub is_parent: bool,
+    pub kind: FileEntryKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
 }
@@ -600,8 +616,7 @@ impl FileEntry {
         Self {
             name,
             path,
-            is_dir: true,
-            is_parent: false,
+            kind: FileEntryKind::Directory,
             size,
             modified,
         }
@@ -611,8 +626,7 @@ impl FileEntry {
         Self {
             name,
             path,
-            is_dir: false,
-            is_parent: false,
+            kind: FileEntryKind::File,
             size,
             modified,
         }
@@ -622,11 +636,18 @@ impl FileEntry {
         Self {
             name: String::from(".."),
             path,
-            is_dir: true,
-            is_parent: true,
+            kind: FileEntryKind::Parent,
             size: 0,
             modified: None,
         }
+    }
+
+    pub const fn is_dir(&self) -> bool {
+        self.kind.is_dir()
+    }
+
+    pub const fn is_parent(&self) -> bool {
+        self.kind.is_parent()
     }
 }
 
@@ -705,7 +726,7 @@ impl PanelState {
         self.tagged.retain(|tag| {
             self.entries
                 .iter()
-                .any(|entry| !entry.is_parent && entry.path == *tag)
+                .any(|entry| !entry.is_parent() && entry.path == *tag)
         });
         if self.entries.is_empty() {
             self.cursor = 0;
@@ -766,7 +787,7 @@ impl PanelState {
         let Some(entry) = self.selected_entry() else {
             return false;
         };
-        if entry.is_parent {
+        if entry.is_parent() {
             return false;
         }
         let path = entry.path.clone();
@@ -783,7 +804,7 @@ impl PanelState {
     pub fn invert_tags(&mut self) {
         let mut next_tags = HashSet::new();
         for entry in &self.entries {
-            if entry.is_parent {
+            if entry.is_parent() {
                 continue;
             }
             if !self.tagged.contains(&entry.path) {
@@ -796,7 +817,7 @@ impl PanelState {
     pub fn tagged_paths_in_display_order(&self) -> Vec<PathBuf> {
         self.entries
             .iter()
-            .filter(|entry| !entry.is_parent && self.tagged.contains(&entry.path))
+            .filter(|entry| !entry.is_parent() && self.tagged.contains(&entry.path))
             .map(|entry| entry.path.clone())
             .collect()
     }
@@ -824,7 +845,7 @@ impl PanelState {
     pub fn open_selected_directory(&mut self) -> bool {
         let Some((path, is_dir_hint)) = self
             .selected_entry()
-            .map(|entry| (entry.path.clone(), entry.is_dir))
+            .map(|entry| (entry.path.clone(), entry.is_dir()))
         else {
             return false;
         };

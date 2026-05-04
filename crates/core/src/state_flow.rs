@@ -192,7 +192,7 @@ impl AppState {
     ) -> EditSelectionResult {
         let Some((path, is_dir)) = self
             .selected_non_parent_entry()
-            .map(|entry| (entry.path.clone(), entry.is_dir))
+            .map(|entry| (entry.path.clone(), entry.is_dir()))
         else {
             return EditSelectionResult::NoEntrySelected;
         };
@@ -387,7 +387,7 @@ impl AppState {
 
         self.active_panel()
             .selected_entry()
-            .filter(|entry| !entry.is_parent)
+            .filter(|entry| !entry.is_parent())
             .map(|entry| vec![entry.path.clone()])
             .unwrap_or_default()
     }
@@ -395,6 +395,6 @@ impl AppState {
     pub(crate) fn selected_non_parent_entry(&self) -> Option<&FileEntry> {
         self.active_panel()
             .selected_entry()
-            .filter(|entry| !entry.is_parent)
+            .filter(|entry| !entry.is_parent())
     }
 }

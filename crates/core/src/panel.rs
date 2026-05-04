@@ -207,7 +207,7 @@ pub(crate) fn ensure_panel_refresh_not_canceled(
 }
 
 pub(crate) fn sort_file_entries(entries: &mut [FileEntry], sort_mode: SortMode) {
-    let type_rank = |entry: &FileEntry| if entry.is_dir { 0_u8 } else { 1_u8 };
+    let type_rank = |entry: &FileEntry| if entry.is_dir() { 0_u8 } else { 1_u8 };
 
     match (sort_mode.field, sort_mode.reverse) {
         (SortField::Name, false) => {

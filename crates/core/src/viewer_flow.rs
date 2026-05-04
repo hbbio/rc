@@ -96,7 +96,7 @@ impl AppState {
         let Some(entry) = self.selected_non_parent_entry() else {
             return false;
         };
-        if entry.is_dir {
+        if entry.is_dir() {
             return false;
         }
 

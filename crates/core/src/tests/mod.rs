@@ -18,8 +18,7 @@ fn file_entry(name: &str) -> FileEntry {
     FileEntry {
         name: name.to_string(),
         path: PathBuf::from(name),
-        is_dir: false,
-        is_parent: false,
+        kind: FileEntryKind::File,
         size: 0,
         modified: None,
     }
@@ -270,8 +269,8 @@ fn panel_listing_prepends_parent_entry() {
     panel.refresh().expect("panel listing should load");
     let first = panel.entries.first().expect("entries should not be empty");
     assert_eq!(first.name, "..");
-    assert!(first.is_parent);
-    assert!(first.is_dir);
+    assert!(first.is_parent());
+    assert!(first.is_dir());
     assert_eq!(first.path, root);
 
     fs::remove_dir_all(&root).expect("must remove temp tree");
@@ -298,7 +297,7 @@ fn listing_marks_directory_symlinks_as_directories() {
         .find(|entry| entry.path == symlink_path)
         .expect("directory symlink should be listed");
     assert!(
-        symlink_entry.is_dir,
+        symlink_entry.is_dir(),
         "directory symlink should be classified as a directory"
     );
 

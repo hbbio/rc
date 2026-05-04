@@ -58,7 +58,7 @@ fn open_entry_on_directory_symlink_descends_into_directory() {
         .position(|entry| entry.path == symlink_path)
         .expect("directory symlink should be visible");
     assert!(
-        app.active_panel().entries[symlink_index].is_dir,
+        app.active_panel().entries[symlink_index].is_dir(),
         "directory symlink should be treated as a directory entry"
     );
     app.active_panel_mut().cursor = symlink_index;

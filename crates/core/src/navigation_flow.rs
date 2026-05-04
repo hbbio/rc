@@ -18,7 +18,7 @@ impl AppState {
                 let selected = self.active_panel().selected_entry();
                 if selected.is_none() {
                     self.set_status("No entry selected");
-                } else if selected.is_some_and(|entry| entry.is_parent) {
+                } else if selected.is_some_and(FileEntry::is_parent) {
                     self.set_status("Parent entry cannot be tagged");
                 } else {
                     let added = self.active_panel_mut().toggle_tag_on_cursor();
