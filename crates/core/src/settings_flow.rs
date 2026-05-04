@@ -75,7 +75,7 @@ impl AppState {
                 ),
                 SettingsEntry::new(
                     "Default overwrite policy",
-                    self.overwrite_policy.label(),
+                    self.overwrite_policy().label(),
                     SettingsEntryAction::CycleDefaultOverwritePolicy,
                 ),
                 SettingsEntry::new(
@@ -95,12 +95,12 @@ impl AppState {
                 ),
                 SettingsEntry::new(
                     "Hotlist entries",
-                    self.hotlist.len().to_string(),
+                    self.hotlist().len().to_string(),
                     SettingsEntryAction::Info,
                 ),
                 SettingsEntry::new(
                     "Panelize presets",
-                    self.panelize_presets.len().to_string(),
+                    self.panelize_presets().len().to_string(),
                     SettingsEntryAction::Info,
                 ),
             ],
@@ -174,7 +174,7 @@ impl AppState {
             SettingsCategory::Appearance => vec![
                 SettingsEntry::new(
                     "Skin...",
-                    self.active_skin_name.clone(),
+                    self.active_skin_name().to_string(),
                     SettingsEntryAction::OpenSkinDialog,
                 ),
                 SettingsEntry::new(
@@ -292,12 +292,12 @@ impl AppState {
 
         match entry.action {
             SettingsEntryAction::CycleDefaultOverwritePolicy => {
-                self.overwrite_policy = next_overwrite_policy(self.overwrite_policy);
-                self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                let policy = next_overwrite_policy(self.overwrite_policy());
+                self.set_overwrite_policy(policy);
                 self.settings.mark_dirty();
                 self.set_status(format!(
                     "Default overwrite policy: {}",
-                    self.overwrite_policy.label()
+                    self.overwrite_policy().label()
                 ));
             }
             SettingsEntryAction::ToggleMacosOptionSymbols => {

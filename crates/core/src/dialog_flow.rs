@@ -154,7 +154,7 @@ impl AppState {
     }
 
     pub(crate) fn start_overwrite_policy_dialog(&mut self) {
-        let selected = overwrite_policy_index(self.overwrite_policy);
+        let selected = overwrite_policy_index(self.overwrite_policy());
         self.pending_dialog_action = Some(PendingDialogAction::SetDefaultOverwritePolicy);
         self.routes.push(Route::Dialog(DialogState::listbox(
             "Overwrite Policy",
@@ -173,10 +173,10 @@ impl AppState {
         let selected = self
             .available_skins
             .iter()
-            .position(|name| name.eq_ignore_ascii_case(&self.active_skin_name))
+            .position(|name| name.eq_ignore_ascii_case(self.active_skin_name()))
             .unwrap_or(0);
         self.pending_dialog_action = Some(PendingDialogAction::SetSkin {
-            original_skin: self.active_skin_name.clone(),
+            original_skin: self.active_skin_name().to_string(),
         });
         self.routes.push(Route::Dialog(DialogState::listbox(
             "Skin",
@@ -275,7 +275,7 @@ impl AppState {
                     source_base_dir.join(input_path)
                 };
                 if self.settings.confirmation.confirm_overwrite {
-                    let selected = overwrite_policy_index(self.overwrite_policy);
+                    let selected = overwrite_policy_index(self.overwrite_policy());
                     self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
                         kind,
                         sources,
@@ -292,7 +292,7 @@ impl AppState {
                         kind,
                         sources,
                         destination_dir,
-                        self.overwrite_policy,
+                        self.overwrite_policy(),
                     );
                 }
             }
@@ -309,7 +309,7 @@ impl AppState {
             ) => {
                 let overwrite = index
                     .map(overwrite_policy_from_index)
-                    .unwrap_or(self.overwrite_policy);
+                    .unwrap_or(self.overwrite_policy());
                 self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite);
             }
             (Some(PendingDialogAction::TransferOverwrite { .. }), DialogResult::Canceled) => {
@@ -320,12 +320,12 @@ impl AppState {
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {
                 if let Some(index) = index {
-                    self.overwrite_policy = overwrite_policy_from_index(index);
-                    self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                    let policy = overwrite_policy_from_index(index);
+                    self.set_overwrite_policy(policy);
                     self.settings.mark_dirty();
                     self.set_status(format!(
                         "Default overwrite policy: {}",
-                        self.overwrite_policy.label()
+                        self.overwrite_policy().label()
                     ));
                 } else {
                     self.set_status("Overwrite policy unchanged");
@@ -457,8 +457,7 @@ impl AppState {
                 }
 
                 preset_commands.push(command.clone());
-                self.panelize_presets = preset_commands.clone();
-                self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+                self.settings.configuration.panelize_presets = preset_commands.clone();
                 self.settings.mark_dirty();
                 self.routes.pop();
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
@@ -507,8 +506,7 @@ impl AppState {
                 };
                 *entry = command.clone();
 
-                self.panelize_presets = preset_commands.clone();
-                self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+                self.settings.configuration.panelize_presets = preset_commands.clone();
                 self.settings.mark_dirty();
                 self.routes.pop();
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);

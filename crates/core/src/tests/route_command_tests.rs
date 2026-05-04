@@ -52,7 +52,7 @@ fn hotlist_supports_add_remove_and_open() {
         .expect("hotlist should open");
     app.apply(AppCommand::HotlistAddCurrentDirectory)
         .expect("hotlist add should succeed");
-    assert_eq!(app.hotlist, vec![root.clone()]);
+    assert_eq!(app.hotlist(), std::slice::from_ref(&root));
 
     {
         let panel = app.active_panel_mut();
@@ -61,12 +61,12 @@ fn hotlist_supports_add_remove_and_open() {
     }
     app.apply(AppCommand::HotlistAddCurrentDirectory)
         .expect("hotlist add should succeed");
-    assert_eq!(app.hotlist, vec![root.clone(), branch.clone()]);
+    assert_eq!(app.hotlist(), &[root.clone(), branch.clone()]);
 
     app.hotlist_cursor = 0;
     app.apply(AppCommand::HotlistRemoveSelected)
         .expect("hotlist remove should succeed");
-    assert_eq!(app.hotlist, vec![branch.clone()]);
+    assert_eq!(app.hotlist(), std::slice::from_ref(&branch));
 
     app.hotlist_cursor = 0;
     app.apply(AppCommand::HotlistOpenEntry)

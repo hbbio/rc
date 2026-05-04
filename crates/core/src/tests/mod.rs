@@ -1436,7 +1436,7 @@ fn copy_command_uses_destination_and_policy_dialogs() {
             } => {
                 assert_eq!(sources, &vec![source.clone()]);
                 assert_eq!(destination_dir, &root);
-                assert_eq!(*overwrite, app.overwrite_policy);
+                assert_eq!(*overwrite, app.overwrite_policy());
             }
             _ => panic!("expected copy job request"),
         },

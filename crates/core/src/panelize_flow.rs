@@ -7,7 +7,7 @@ impl AppState {
             .panelize_command()
             .unwrap_or("find . -type f")
             .to_string();
-        let preset_commands = self.panelize_presets.clone();
+        let preset_commands = self.panelize_presets().to_vec();
         self.open_panelize_preset_selection_dialog(initial_command, preset_commands);
         self.set_status("External panelize");
     }
@@ -145,8 +145,7 @@ impl AppState {
             return;
         };
 
-        self.panelize_presets = preset_commands.clone();
-        self.settings.configuration.panelize_presets = self.panelize_presets.clone();
+        self.settings.configuration.panelize_presets = preset_commands.clone();
         self.settings.mark_dirty();
         self.routes.pop();
         let next_initial = if initial_command == removed_command {

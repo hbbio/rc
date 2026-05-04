@@ -675,7 +675,6 @@ fn apply_pending_skin_change(state: &mut AppState, skin_runtime: &SkinRuntimeCon
         Ok(()) => {
             let applied_skin = rc_ui::current_skin_name();
             state.set_active_skin_name(applied_skin.clone());
-            state.settings_mut().appearance.skin = applied_skin.clone();
             state.mark_settings_dirty();
             state.set_status(format!("Skin changed to {applied_skin}"));
         }
@@ -693,7 +692,7 @@ fn apply_pending_skin_preview(state: &mut AppState, skin_runtime: &SkinRuntimeCo
 
     match rc_ui::configure_skin_with_search_roots(&requested_skin, &skin_runtime.skin_dirs) {
         Ok(()) => {
-            state.set_active_skin_name(rc_ui::current_skin_name());
+            state.set_preview_skin_name(rc_ui::current_skin_name());
         }
         Err(error) => {
             tracing::warn!("failed to preview skin '{}': {error}", requested_skin);
@@ -709,7 +708,7 @@ fn apply_pending_skin_revert(state: &mut AppState, skin_runtime: &SkinRuntimeCon
 
     match rc_ui::configure_skin_with_search_roots(&original_skin, &skin_runtime.skin_dirs) {
         Ok(()) => {
-            state.set_active_skin_name(rc_ui::current_skin_name());
+            state.clear_preview_skin_name();
         }
         Err(error) => {
             tracing::warn!("failed to restore skin '{}': {error}", original_skin);

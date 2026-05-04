@@ -1327,7 +1327,8 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 88, 22);
     frame.render_widget(Clear, area);
 
-    let title = format!("Directory hotlist ({})", app.hotlist.len());
+    let hotlist = app.hotlist();
+    let title = format!("Directory hotlist ({})", hotlist.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -1342,13 +1343,13 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem<'_>> = if app.hotlist.is_empty() {
+    let items: Vec<ListItem<'_>> = if hotlist.is_empty() {
         vec![ListItem::new("<empty hotlist>")]
     } else {
         let viewport_rows = layout[0].height.max(1) as usize;
         let (window_start, window_end) =
-            visible_window(app.hotlist.len(), app.hotlist_cursor, viewport_rows);
-        app.hotlist
+            visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
+        hotlist
             .iter()
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
@@ -1361,10 +1362,10 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .highlight_symbol(">> ");
 
     let mut state = ListState::default();
-    if !app.hotlist.is_empty() {
+    if !hotlist.is_empty() {
         let viewport_rows = layout[0].height.max(1) as usize;
         let (window_start, window_end) =
-            visible_window(app.hotlist.len(), app.hotlist_cursor, viewport_rows);
+            visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
         let selected_row = app
             .hotlist_cursor
             .saturating_sub(window_start)
