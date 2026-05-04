@@ -375,19 +375,26 @@ impl JobError {
 
     pub fn from_message(message: impl Into<String>) -> Self {
         let message = message.into();
-        if is_canceled_message(&message) {
-            Self::canceled()
-        } else {
-            Self {
-                code: JobErrorCode::Other,
-                message,
-                retry_hint: JobRetryHint::Retry,
-            }
+        let (code, retry_hint) = classify_message_error(&message);
+        Self {
+            code,
+            message,
+            retry_hint,
         }
     }
 
     pub fn is_canceled(&self) -> bool {
         matches!(self.code, JobErrorCode::Canceled)
+    }
+
+    pub fn user_message(&self) -> String {
+        match self.retry_hint {
+            JobRetryHint::None => self.message.clone(),
+            JobRetryHint::Retry => format!("{} (retry recommended)", self.message),
+            JobRetryHint::Elevated => {
+                format!("{} (retry with elevated privileges)", self.message)
+            }
+        }
     }
 }
 
@@ -1218,6 +1225,50 @@ fn canceled_error() -> io::Error {
 
 fn is_canceled_message(message: &str) -> bool {
     message == JOB_CANCELED_MESSAGE
+}
+
+fn classify_message_error(message: &str) -> (JobErrorCode, JobRetryHint) {
+    if is_canceled_message(message) {
+        return (JobErrorCode::Canceled, JobRetryHint::None);
+    }
+
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("permission denied")
+        || normalized.contains("operation not permitted")
+        || normalized.contains("eacces")
+        || normalized.contains("eperm")
+    {
+        return (JobErrorCode::PermissionDenied, JobRetryHint::Elevated);
+    }
+    if normalized.contains("already exists")
+        || normalized.contains("file exists")
+        || normalized.contains("eexist")
+    {
+        return (JobErrorCode::AlreadyExists, JobRetryHint::None);
+    }
+    if normalized.contains("not found")
+        || normalized.contains("no such file")
+        || normalized.contains("enoent")
+    {
+        return (JobErrorCode::NotFound, JobRetryHint::None);
+    }
+    if normalized.contains("invalid input")
+        || normalized.contains("invalid argument")
+        || normalized.contains("einval")
+    {
+        return (JobErrorCode::InvalidInput, JobRetryHint::None);
+    }
+    if normalized.contains("not supported")
+        || normalized.contains("unsupported")
+        || normalized.contains("enosys")
+    {
+        return (JobErrorCode::Unsupported, JobRetryHint::None);
+    }
+    if normalized.contains("interrupted") || normalized.contains("eintr") {
+        return (JobErrorCode::Interrupted, JobRetryHint::Retry);
+    }
+
+    (JobErrorCode::Other, JobRetryHint::Retry)
 }
 
 fn ensure_not_canceled(cancel_flag: &AtomicBool) -> io::Result<()> {
@@ -2389,5 +2440,35 @@ mod tests {
         ));
         assert_eq!(error.code, JobErrorCode::PermissionDenied);
         assert_eq!(error.retry_hint, JobRetryHint::Elevated);
+    }
+
+    #[test]
+    fn message_classifier_maps_common_error_patterns() {
+        let not_found = JobError::from_message("No such file or directory (os error 2)");
+        assert_eq!(not_found.code, JobErrorCode::NotFound);
+        assert_eq!(not_found.retry_hint, JobRetryHint::None);
+
+        let denied = JobError::from_message("permission denied while opening destination");
+        assert_eq!(denied.code, JobErrorCode::PermissionDenied);
+        assert_eq!(denied.retry_hint, JobRetryHint::Elevated);
+
+        let invalid = JobError::from_message("invalid argument passed to operation");
+        assert_eq!(invalid.code, JobErrorCode::InvalidInput);
+        assert_eq!(invalid.retry_hint, JobRetryHint::None);
+    }
+
+    #[test]
+    fn user_message_includes_retry_guidance() {
+        let retry = JobError::from_message("temporary io interruption");
+        assert!(
+            retry.user_message().contains("retry recommended"),
+            "retry hint should be surfaced in user-facing message"
+        );
+
+        let elevated = JobError::from_message("permission denied");
+        assert!(
+            elevated.user_message().contains("elevated privileges"),
+            "elevated hint should be surfaced in user-facing message"
+        );
     }
 }

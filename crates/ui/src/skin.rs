@@ -77,10 +77,19 @@ impl UiSkin {
         dialog.insert("dfocus".to_string(), Style::default().fg(Color::Yellow));
         dialog.insert("dtitle".to_string(), Style::default().fg(Color::Yellow));
 
+        let mut menu = HashMap::new();
+        menu.insert("_default_".to_string(), Style::default().fg(Color::Gray));
+        menu.insert("menuhot".to_string(), Style::default().fg(Color::Yellow));
+        menu.insert(
+            "menuinactive".to_string(),
+            Style::default().fg(Color::DarkGray),
+        );
+
         let mut styles = HashMap::new();
         styles.insert("core".to_string(), core);
         styles.insert("statusbar".to_string(), statusbar);
         styles.insert("dialog".to_string(), dialog);
+        styles.insert("menu".to_string(), menu);
         styles.insert("viewer".to_string(), HashMap::new());
         styles.insert("filehighlight".to_string(), HashMap::new());
 

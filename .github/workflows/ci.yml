@@ -4,8 +4,16 @@ on:
   push:
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+  MSRV: 1.88.0
+
+permissions:
+  contents: read
+
 jobs:
   checks:
+    name: fmt-clippy-test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,10 +28,117 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: cargo --locked fmt --all --check
 
       - name: Lint with clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo --locked clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        run: cargo --locked test --all-targets --all-features
+
+  nextest:
+    name: nextest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run nextest
+        run: cargo --locked nextest run --workspace --all-targets --all-features
+
+  policy:
+    name: dependency-policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo-deny policy checks
+        run: cargo deny check bans licenses advisories sources
+
+      - name: Install nightly Rust toolchain for udeps
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install cargo-udeps
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-udeps
+
+      - name: Run cargo-udeps
+        run: cargo +nightly udeps --workspace --all-targets --all-features --locked
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.MSRV }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace on MSRV
+        run: cargo check --workspace --all-targets --locked
+
+  coverage:
+    name: coverage-trend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate coverage JSON
+        run: |
+          mkdir -p target/coverage
+          cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
+
+      - name: Check coverage trend
+        id: coverage
+        run: ./scripts/coverage_trend.sh target/coverage/llvm-cov.json .github/coverage-baseline.json
+
+      - name: Upload coverage summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json
+          path: target/coverage/llvm-cov.json
+          if-no-files-found: error

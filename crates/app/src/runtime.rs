@@ -7,20 +7,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use rc_core::{
-    AppState, BackgroundEvent, JobError, JobEvent, JobId, JobRequest, PanelListingSource,
-    WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_entries,
-    run_find_entries,
+    AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
+    PanelListingSource, PanelRefreshStreamRequest, WorkerCommand, build_tree_ready_event,
+    execute_worker_job, read_disk_usage, run_find_entries, stream_refresh_panel_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 const RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 256;
+const RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK: usize = 256;
 const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
 const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
 const SCAN_CONCURRENCY_LIMIT: usize = 4;
 const PROCESS_CONCURRENCY_LIMIT: usize = 2;
-const STALE_PENDING_WARN_AFTER: Duration = Duration::from_secs(10);
 
 pub(crate) struct RuntimeBridge {
     command_tx: tokio_mpsc::Sender<RuntimeCommand>,
@@ -48,6 +48,13 @@ enum PendingCommandKey {
     Run(JobId),
     Cancel(JobId),
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandPriority {
+    High,
+    Medium,
+    Low,
 }
 
 enum TaskCompletion {
@@ -107,7 +114,7 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn dispatch_pending_commands(&mut self, state: &mut AppState) {
-        let pending_commands = state.take_pending_worker_commands();
+        let pending_commands = prioritize_worker_commands(state.take_pending_worker_commands());
         if pending_commands.is_empty() {
             self.clear_pending_dispatch_metrics();
             return;
@@ -146,11 +153,40 @@ impl RuntimeBridge {
                 }
                 Err(tokio_mpsc::error::TrySendError::Full(runtime_command)) => {
                     let mut unsent = Vec::new();
-                    if let Some(command) = handle_runtime_queue_full(state, runtime_command) {
-                        unsent.push(command);
+                    self.record_queue_full_metrics();
+                    match runtime_command {
+                        RuntimeCommand::Worker { command, .. } => {
+                            let oldest_pending_age_ms =
+                                self.oldest_pending_age_ms(Instant::now()).unwrap_or(0);
+                            if should_drop_for_backpressure(
+                                &command,
+                                self.consecutive_full_count,
+                                oldest_pending_age_ms,
+                            ) {
+                                self.mark_command_dispatched(pending_key);
+                                finalize_backpressure_drop(state, command);
+                                state.set_status(
+                                    "runtime queue saturated; dropped low-priority refresh",
+                                );
+                                tracing::warn!(
+                                    runtime_event = "queue_drop",
+                                    command = command_name,
+                                    job_id = ?run_job_id,
+                                    job_kind = ?run_job_kind,
+                                    consecutive_full_count = self.consecutive_full_count,
+                                    oldest_pending_age_ms,
+                                    "dropped low-priority runtime command under backpressure"
+                                );
+                            } else {
+                                state.set_status("runtime queue is full; retrying");
+                                unsent.push(command);
+                            }
+                        }
+                        RuntimeCommand::Shutdown => {
+                            state.set_status("runtime queue is full");
+                        }
                     }
                     unsent.extend(pending_commands);
-                    self.record_queue_full_metrics();
                     state.restore_pending_worker_commands(unsent);
                     break;
                 }
@@ -167,32 +203,66 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn drain_events(&mut self, state: &mut AppState) {
-        loop {
-            match self.worker_event_rx.try_recv() {
-                Ok(event) => state.handle_job_event(event),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.worker_disconnected {
+        let drain_started = Instant::now();
+        let mut drained_events = 0_usize;
+        while drained_events < RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+            && drain_started.elapsed() < FOUNDATION_SLO.ui_frame_budget
+        {
+            let mut progressed = false;
+
+            if !self.worker_disconnected {
+                match self.worker_event_rx.try_recv() {
+                    Ok(event) => {
+                        state.handle_job_event(event);
+                        drained_events = drained_events.saturating_add(1);
+                        progressed = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
                         state.set_status("Worker channel disconnected");
                         self.worker_disconnected = true;
                     }
-                    break;
                 }
             }
-        }
 
-        loop {
-            match self.background_event_rx.try_recv() {
-                Ok(event) => state.handle_background_event(event),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.background_disconnected {
+            if drained_events >= RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+                || drain_started.elapsed() >= FOUNDATION_SLO.ui_frame_budget
+            {
+                break;
+            }
+
+            if !self.background_disconnected {
+                match self.background_event_rx.try_recv() {
+                    Ok(event) => {
+                        state.handle_background_event(event);
+                        drained_events = drained_events.saturating_add(1);
+                        progressed = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
                         state.set_status("Background worker channel disconnected");
                         self.background_disconnected = true;
                     }
-                    break;
                 }
             }
+
+            if !progressed {
+                break;
+            }
+        }
+
+        let elapsed = drain_started.elapsed();
+        if drained_events >= RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+            || elapsed >= FOUNDATION_SLO.ui_frame_budget
+        {
+            tracing::debug!(
+                runtime_event = "drain_budget_exhausted",
+                drained_events,
+                elapsed_ms = elapsed.as_millis(),
+                event_limit = RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK,
+                frame_budget_ms = FOUNDATION_SLO.ui_frame_budget.as_millis(),
+                "runtime event draining stopped at per-tick budget"
+            );
         }
 
         self.dispatch_pending_commands(state);
@@ -239,7 +309,10 @@ impl RuntimeBridge {
         self.consecutive_full_count = self.consecutive_full_count.saturating_add(1);
         let now = Instant::now();
         let oldest_pending_age_ms = self.oldest_pending_age_ms(now).unwrap_or(0);
-        let stale_threshold_ms = STALE_PENDING_WARN_AFTER.as_millis();
+        let stale_threshold_ms = FOUNDATION_SLO.queue_stale_warn_after.as_millis();
+        let is_stale = FOUNDATION_SLO.is_queue_stale(Duration::from_millis(
+            oldest_pending_age_ms.min(u64::MAX as u128) as u64,
+        ));
         tracing::debug!(
             runtime_event = "queue_full",
             consecutive_full_count = self.consecutive_full_count,
@@ -247,7 +320,7 @@ impl RuntimeBridge {
             stale_threshold_ms,
             "runtime command queue is full"
         );
-        if oldest_pending_age_ms >= stale_threshold_ms {
+        if is_stale {
             if !self.stale_pending_warned {
                 tracing::warn!(
                     runtime_event = "queue_stale",
@@ -676,20 +749,30 @@ fn execute_refresh_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let refresh_result = refresh_panel_entries(
-        &cwd,
-        &source,
+    let stream_request = PanelRefreshStreamRequest {
+        panel,
+        cwd: cwd.clone(),
+        source: source.clone(),
         sort_mode,
         show_hidden_files,
-        cancel_flag.as_ref(),
-    );
+        request_id,
+    };
+    let refresh_result =
+        stream_refresh_panel_entries(&stream_request, cancel_flag.as_ref(), |event| {
+            background_event_tx.send(event).is_ok()
+        });
     let (event_result, result) = refresh_outcomes(refresh_result, cancel_flag.as_ref());
+    let disk_usage = event_result
+        .as_ref()
+        .ok()
+        .and_then(|_| read_disk_usage(cwd.as_path()));
     let event = BackgroundEvent::PanelRefreshed {
         panel,
         cwd,
         source,
         sort_mode,
         request_id,
+        disk_usage,
         result: event_result,
     };
     let delivered = background_event_tx.send(event).is_ok();
@@ -832,20 +915,51 @@ fn runtime_queue_depth(command_tx: &tokio_mpsc::Sender<RuntimeCommand>) -> usize
         .saturating_sub(command_tx.capacity())
 }
 
-fn handle_runtime_queue_full(
-    state: &mut AppState,
-    command: RuntimeCommand,
-) -> Option<WorkerCommand> {
+fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
     match command {
-        RuntimeCommand::Worker { command, .. } => {
-            state.set_status("runtime queue is full; retrying");
-            Some(command)
-        }
-        RuntimeCommand::Shutdown => {
-            state.set_status("runtime queue is full");
-            None
+        WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => CommandPriority::High,
+        WorkerCommand::Run(job) => match job.request {
+            JobRequest::LoadViewer { .. } => CommandPriority::High,
+            JobRequest::RefreshPanel { .. } => CommandPriority::Low,
+            _ => CommandPriority::Medium,
+        },
+    }
+}
+
+fn prioritize_worker_commands(commands: Vec<WorkerCommand>) -> Vec<WorkerCommand> {
+    let mut high = Vec::new();
+    let mut medium = Vec::new();
+    let mut low = Vec::new();
+
+    for command in commands {
+        match worker_command_priority(&command) {
+            CommandPriority::High => high.push(command),
+            CommandPriority::Medium => medium.push(command),
+            CommandPriority::Low => low.push(command),
         }
     }
+
+    let mut prioritized = Vec::with_capacity(high.len() + medium.len() + low.len());
+    prioritized.extend(high);
+    prioritized.extend(medium);
+    prioritized.extend(low);
+    prioritized
+}
+
+fn should_drop_for_backpressure(
+    command: &WorkerCommand,
+    consecutive_full_count: u64,
+    oldest_pending_age_ms: u128,
+) -> bool {
+    if !matches!(worker_command_priority(command), CommandPriority::Low) {
+        return false;
+    }
+    if consecutive_full_count >= 3 {
+        return true;
+    }
+    FOUNDATION_SLO.is_queue_stale(Duration::from_millis(
+        oldest_pending_age_ms.min(u64::MAX as u128) as u64,
+    ))
 }
 
 fn handle_runtime_unavailable(state: &mut AppState, command: RuntimeCommand) {
@@ -868,6 +982,20 @@ fn handle_worker_unavailable(state: &mut AppState, command: WorkerCommand) {
     }
 }
 
+fn finalize_backpressure_drop(state: &mut AppState, command: WorkerCommand) {
+    match command {
+        WorkerCommand::Run(job) => {
+            state.handle_job_dispatch_failure(
+                job.id,
+                JobError::dispatch("runtime queue saturated; dropped low-priority refresh"),
+            );
+        }
+        WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {
+            state.set_status("runtime queue saturated; dropped runtime command");
+        }
+    }
+}
+
 fn is_canceled(cancel_flag: &AtomicBool) -> bool {
     cancel_flag.load(AtomicOrdering::Relaxed)
 }
@@ -884,8 +1012,8 @@ fn worker_command_name(command: &WorkerCommand) -> &'static str {
 mod tests {
     use super::*;
     use rc_core::{
-        ActivePanel, AppState, JobErrorCode, JobManager, JobRequest, JobRetryHint,
-        PanelListingSource, SortMode, settings_io,
+        ActivePanel, AppState, JobErrorCode, JobId, JobManager, JobRequest, JobRetryHint,
+        JobStatus, PanelListingSource, SortMode, settings_io,
     };
     use std::env;
     use std::fs;
@@ -1051,7 +1179,7 @@ mod tests {
             path: root.join("second"),
         });
 
-        let stale_age = STALE_PENDING_WARN_AFTER + Duration::from_secs(1);
+        let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
         let stale_seen = Instant::now()
             .checked_sub(stale_age)
             .unwrap_or_else(Instant::now);
@@ -1069,7 +1197,7 @@ mod tests {
             .oldest_pending_age_ms(Instant::now())
             .expect("overflowed command should remain pending");
         assert!(
-            oldest_pending_age_ms >= STALE_PENDING_WARN_AFTER.as_millis(),
+            oldest_pending_age_ms >= FOUNDATION_SLO.queue_stale_warn_after.as_millis(),
             "oldest pending age should reflect stale queue pressure"
         );
         assert!(
@@ -1082,6 +1210,272 @@ mod tests {
             pending.len(),
             1,
             "overflowed command should remain pending for retry"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn drain_events_limits_burst_to_per_tick_budget() {
+        let root = make_temp_dir("drain-event-budget");
+        let (mut runtime, _command_rx, worker_event_tx, _background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let total_events = RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK + 32;
+        for id in 1..=total_events {
+            worker_event_tx
+                .send(JobEvent::Started {
+                    id: JobId(id as u64),
+                })
+                .expect("worker event injection should succeed");
+        }
+
+        runtime.drain_events(&mut state);
+        assert!(
+            state.status_line.contains(&format!(
+                "Job #{} started",
+                RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+            )),
+            "first drain should stop at configured per-tick event budget"
+        );
+        assert!(
+            !state
+                .status_line
+                .contains(&format!("Job #{} started", total_events)),
+            "first drain should not consume the full burst"
+        );
+
+        runtime.drain_events(&mut state);
+        assert!(
+            state
+                .status_line
+                .contains(&format!("Job #{} started", total_events)),
+            "second drain should consume the remaining events"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn drain_events_reports_worker_disconnect_once() {
+        let root = make_temp_dir("drain-worker-disconnect");
+        let (mut runtime, _command_rx, worker_event_tx, _background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+
+        drop(worker_event_tx);
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "Worker channel disconnected",
+            "first disconnect should be surfaced to status line"
+        );
+
+        state.set_status("status should remain unchanged");
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "status should remain unchanged",
+            "disconnect warning should not be repeated every tick"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn drain_events_reports_background_disconnect_once() {
+        let root = make_temp_dir("drain-background-disconnect");
+        let (mut runtime, _command_rx, _worker_event_tx, background_event_tx) =
+            test_runtime_bridge_with_channels(4);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+
+        drop(background_event_tx);
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "Background worker channel disconnected",
+            "first disconnect should be surfaced to status line"
+        );
+
+        state.set_status("status should remain unchanged");
+        runtime.drain_events(&mut state);
+        assert_eq!(
+            state.status_line, "status should remain unchanged",
+            "disconnect warning should not be repeated every tick"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn priority_sorting_dispatches_high_before_medium_before_low() {
+        let mut manager = JobManager::new();
+        let medium_job = manager.enqueue(JobRequest::Mkdir {
+            path: PathBuf::from("/tmp/medium"),
+        });
+        let low_job = manager.enqueue(JobRequest::RefreshPanel {
+            panel: ActivePanel::Left,
+            cwd: PathBuf::from("/tmp"),
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            show_hidden_files: true,
+            request_id: 99,
+        });
+        let high_job = manager.enqueue(JobRequest::LoadViewer {
+            path: PathBuf::from("/tmp/high.txt"),
+        });
+        let high_cancel = WorkerCommand::Cancel(medium_job.id);
+
+        let prioritized = prioritize_worker_commands(vec![
+            WorkerCommand::Run(Box::new(low_job)),
+            WorkerCommand::Run(Box::new(medium_job)),
+            high_cancel,
+            WorkerCommand::Run(Box::new(high_job)),
+        ]);
+
+        assert!(
+            matches!(prioritized[0], WorkerCommand::Cancel(_)),
+            "cancel commands should have highest dispatch priority"
+        );
+        assert!(
+            matches!(
+                prioritized[1],
+                WorkerCommand::Run(ref job) if matches!(job.request, JobRequest::LoadViewer { .. })
+            ),
+            "interactive viewer loads should dispatch before medium jobs"
+        );
+        assert!(
+            matches!(
+                prioritized[2],
+                WorkerCommand::Run(ref job) if matches!(job.request, JobRequest::Mkdir { .. })
+            ),
+            "medium jobs should dispatch before refresh jobs"
+        );
+        assert!(
+            matches!(
+                prioritized[3],
+                WorkerCommand::Run(ref job) if matches!(job.request, JobRequest::RefreshPanel { .. })
+            ),
+            "refresh jobs should be treated as low-priority traffic"
+        );
+    }
+
+    #[test]
+    fn saturated_queue_drops_low_priority_refresh_after_repeated_pressure() {
+        let root = make_temp_dir("queue-drop-low-priority");
+        let (mut runtime, mut command_rx) = test_runtime_bridge_with_capacity(1);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let medium_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("first"),
+        });
+        let low_id = state.enqueue_worker_job_request(JobRequest::RefreshPanel {
+            panel: ActivePanel::Left,
+            cwd: root.clone(),
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            show_hidden_files: true,
+            request_id: 7,
+        });
+        let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
+        let stale_seen = Instant::now()
+            .checked_sub(stale_age)
+            .unwrap_or_else(Instant::now);
+        runtime
+            .pending_first_seen
+            .insert(PendingCommandKey::Run(low_id), stale_seen);
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => {
+                assert_eq!(job.id, medium_id, "medium command should stay queued");
+            }
+            other => panic!("expected medium run command in runtime queue, got {other:?}"),
+        }
+        assert!(
+            state.take_pending_worker_commands().is_empty(),
+            "low-priority refresh should be dropped instead of requeued"
+        );
+        assert!(
+            state.status_line.contains("dropped low-priority refresh"),
+            "status should explain backpressure drop behavior"
+        );
+        assert!(
+            !runtime
+                .pending_first_seen
+                .contains_key(&PendingCommandKey::Run(low_id)),
+            "dropped command should not remain tracked as pending"
+        );
+        assert!(
+            state
+                .jobs
+                .job(low_id)
+                .is_some_and(|job| job.status == JobStatus::Failed),
+            "dropped refresh should be finalized as a failed dispatch"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn dropped_refresh_clears_panel_loading_state_under_backpressure() {
+        let root = make_temp_dir("queue-drop-clears-refresh-state");
+        let (mut runtime, mut command_rx) = test_runtime_bridge_with_capacity(1);
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state.refresh_active_panel();
+        let refresh_job_id = {
+            let pending = state.take_pending_worker_commands();
+            let refresh_job_id = pending
+                .iter()
+                .find_map(|command| {
+                    let WorkerCommand::Run(job) = command else {
+                        return None;
+                    };
+                    matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+                })
+                .expect("refresh command should be queued");
+            state.restore_pending_worker_commands(pending);
+            refresh_job_id
+        };
+        let medium_id = state.enqueue_worker_job_request(JobRequest::Mkdir {
+            path: root.join("medium"),
+        });
+        assert!(
+            state.active_panel().loading,
+            "refresh should set panel loading before dispatch"
+        );
+
+        let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
+        let stale_seen = Instant::now()
+            .checked_sub(stale_age)
+            .unwrap_or_else(Instant::now);
+        runtime
+            .pending_first_seen
+            .insert(PendingCommandKey::Run(refresh_job_id), stale_seen);
+
+        runtime.dispatch_pending_commands(&mut state);
+
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => assert_eq!(job.id, medium_id, "medium job should dispatch first"),
+            other => panic!("expected medium job in runtime queue, got {other:?}"),
+        }
+        assert!(
+            state.take_pending_worker_commands().is_empty(),
+            "dropped refresh should not be requeued"
+        );
+        assert!(
+            !state.active_panel().loading,
+            "dropped refresh should clear panel loading state"
+        );
+        assert!(
+            state
+                .jobs
+                .job(refresh_job_id)
+                .is_some_and(|job| job.status == JobStatus::Failed),
+            "dropped refresh should not remain queued"
         );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
@@ -1500,6 +1894,63 @@ mod tests {
             "refresh path should still emit the background panel event"
         );
 
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn refresh_worker_streams_directory_entries_before_final_event() {
+        let root = make_temp_dir("refresh-streaming");
+        fs::write(root.join("alpha.txt"), "a").expect("first fixture should be writable");
+        fs::write(root.join("bravo.txt"), "b").expect("second fixture should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, _worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_refresh_worker_job(
+            JobId(7),
+            ActivePanel::Left,
+            root.clone(),
+            PanelListingSource::Directory,
+            SortMode::default(),
+            true,
+            11,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let mut saw_chunk = false;
+        let mut saw_final = false;
+        for event in background_event_rx.try_iter() {
+            match event {
+                BackgroundEvent::PanelEntriesChunk {
+                    request_id,
+                    entries,
+                    ..
+                } => {
+                    assert_eq!(request_id, 11);
+                    assert!(
+                        !entries.is_empty(),
+                        "chunk event should carry at least one discovered entry"
+                    );
+                    saw_chunk = true;
+                }
+                BackgroundEvent::PanelRefreshed { request_id, .. } => {
+                    assert_eq!(request_id, 11);
+                    saw_final = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_chunk,
+            "streaming refresh should emit at least one chunk"
+        );
+        assert!(
+            saw_final,
+            "streaming refresh should emit final completion event"
+        );
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 

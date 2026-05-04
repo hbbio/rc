@@ -18,17 +18,18 @@ Implemented milestones:
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
 - Milestone 4 (partial): find dialog/results, tree, and hotlist
 - Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup persistence
+- External editor workflow: deterministic resolution, terminal suspend/resume, command templates
 - Product direction update: external-editor-first workflow, command-based diff output, optional FTP/SFTP support
 
-Planned next major milestones include `mc.ext.ini`, user menu, external editor
-workflow hardening, command-based diff integration (`difftastic`/`diff`),
+Planned next major milestones include `mc.ext.ini`, user menu,
+command-based diff integration (`difftastic`/`diff`),
 optional remote VFS, and subshell integration. See [doc/roadmap.md](doc/roadmap.md).
 
 ## Quick start
 
 Requirements:
 
-- Rust stable toolchain
+- Rust 1.88.0 or newer
 - A terminal with ANSI support
 
 Install from a local checkout:
@@ -80,7 +81,8 @@ Main file manager:
 
 - `Tab`: switch active panel
 - `Enter` / `F3`: open directory or open file in viewer
-- `F4`: edit file using configured editor / `$EDITOR` / `$VISUAL` (current build falls back to internal viewer)
+- `F4`: edit file using `editor_command`, `$EDITOR`, `$VISUAL`, or PATH probes (`hx`, `nvim`, `vim`, `vi`, `emacs`)
+- `Space` / `Insert` / `Ctrl-T`: toggle selected item
 - `Backspace`: go to parent directory
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
 - `Ctrl-J`: open jobs screen
@@ -110,19 +112,33 @@ Notes:
 - `crates/app`: terminal app entrypoint, event loop, input normalization
 - `crates/core`: domain model, commands, routes, file operations, jobs, keymap parser
 - `crates/ui`: ratatui rendering layer
+- `crates/shell`: process backend primitives used by core/runtime
 - `doc/roadmap.md`: feature plan and milestone breakdown
+- `doc/architecture/`: bounded contexts, crate contracts, ownership map
+- `doc/adr/`: architecture decision records
 
 ## Development
 
-Run all checks locally:
+Run baseline checks locally:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo --locked fmt --all --check
+cargo --locked clippy --all-targets --all-features -- -D warnings
+cargo --locked test --all-targets --all-features
 ```
 
-CI runs the same checks on pushes and pull requests via:
+Optional Phase 1 policy/perf checks (requires extra cargo tools):
+
+```bash
+cargo --locked nextest run --workspace --all-targets --all-features
+cargo deny check bans licenses advisories sources
+cargo +nightly udeps --workspace --all-targets --all-features --locked
+mkdir -p target/coverage
+cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
+./scripts/coverage_trend.sh target/coverage/llvm-cov.json .github/coverage-baseline.json
+```
+
+CI runs all required gates on pushes and pull requests via:
 
 - `.github/workflows/ci.yml`
 

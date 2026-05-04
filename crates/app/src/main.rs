@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -76,6 +77,7 @@ fn main() -> Result<()> {
         .unwrap_or(std::env::current_dir().context("failed to resolve current directory")?);
     let mut state = AppState::new(start_path).context("failed to initialize app state")?;
     state.replace_settings(settings.clone());
+    state.refresh_panels();
 
     let skin_dirs = settings.appearance.skin_dirs.clone();
     state.set_available_skins(rc_ui::list_available_skins_with_search_roots(&skin_dirs));
@@ -508,14 +510,10 @@ fn resume_terminal_after_external_command(
     Ok(())
 }
 
-#[cfg(unix)]
 fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
-    let command = format!("{} \"$1\"", request.editor_command);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .arg("rc-editor")
-        .arg(&request.path)
+    let command = resolve_external_editor_process_command(request)?;
+    let status = Command::new(&command.program)
+        .args(&command.args)
         .current_dir(&request.cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -533,28 +531,139 @@ fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
-    let escaped_path = request.path.to_string_lossy().replace('"', "\"\"");
-    let command = format!("{} \"{}\"", request.editor_command, escaped_path);
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg(command)
-        .current_dir(&request.cwd)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to launch external editor command '{}'",
-                request.editor_command
-            )
-        })?;
-    if !status.success() {
-        return Err(anyhow!("external editor exited with {status}"));
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExternalProcessCommand {
+    program: String,
+    args: Vec<OsString>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalEditorParseStyle {
+    Posix,
+    Windows,
+}
+
+fn native_external_editor_parse_style() -> ExternalEditorParseStyle {
+    if cfg!(windows) {
+        ExternalEditorParseStyle::Windows
+    } else {
+        ExternalEditorParseStyle::Posix
     }
-    Ok(())
+}
+
+fn split_external_editor_command(
+    command: &str,
+    style: ExternalEditorParseStyle,
+) -> Option<Vec<String>> {
+    match style {
+        ExternalEditorParseStyle::Posix => shlex::split(command),
+        ExternalEditorParseStyle::Windows => split_windows_command_line(command),
+    }
+}
+
+fn split_windows_command_line(command: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_quotes = false;
+    let mut token_started = false;
+
+    while let Some(ch) = chars.next() {
+        if !in_quotes && matches!(ch, ' ' | '\t') {
+            if token_started {
+                parts.push(std::mem::take(&mut current));
+                token_started = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            token_started = true;
+            continue;
+        }
+
+        if ch == '\\' {
+            let mut slash_count = 1_usize;
+            while matches!(chars.peek(), Some('\\')) {
+                chars.next();
+                slash_count += 1;
+            }
+
+            if matches!(chars.peek(), Some('"')) {
+                for _ in 0..(slash_count / 2) {
+                    current.push('\\');
+                }
+                if slash_count.is_multiple_of(2) {
+                    chars.next();
+                    in_quotes = !in_quotes;
+                } else {
+                    chars.next();
+                    current.push('"');
+                }
+                token_started = true;
+                continue;
+            }
+
+            for _ in 0..slash_count {
+                current.push('\\');
+            }
+            token_started = true;
+            continue;
+        }
+
+        current.push(ch);
+        token_started = true;
+    }
+
+    if in_quotes {
+        return None;
+    }
+    if token_started {
+        parts.push(current);
+    }
+
+    Some(parts)
+}
+
+fn resolve_external_editor_process_command(
+    request: &ExternalEditRequest,
+) -> Result<ExternalProcessCommand> {
+    let Some(mut parts) = split_external_editor_command(
+        &request.editor_command,
+        native_external_editor_parse_style(),
+    ) else {
+        return Err(anyhow!(
+            "failed to parse external editor command '{}'",
+            request.editor_command
+        ));
+    };
+    if parts.is_empty() {
+        return Err(anyhow!("external editor command is empty"));
+    }
+
+    let program = parts.remove(0);
+    let mut args = Vec::with_capacity(parts.len() + 1);
+    let mut inserted_path = false;
+    for part in parts {
+        if part.contains("{path}") {
+            let Some(path) = request.path.to_str() else {
+                return Err(anyhow!(
+                    "external editor command '{}' uses {{path}} placeholder but selected path is not valid UTF-8",
+                    request.editor_command
+                ));
+            };
+            args.push(OsString::from(part.replace("{path}", path)));
+            inserted_path = true;
+        } else {
+            args.push(OsString::from(part));
+        }
+    }
+    if !inserted_path {
+        args.push(request.path.as_os_str().to_os_string());
+    }
+
+    Ok(ExternalProcessCommand { program, args })
 }
 
 fn apply_pending_skin_change(state: &mut AppState, skin_runtime: &SkinRuntimeConfig) {
@@ -761,6 +870,11 @@ mod tests {
     use rc_core::WorkerCommand;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
+    #[cfg(unix)]
+    use std::{
+        ffi::OsString,
+        os::unix::ffi::{OsStrExt, OsStringExt},
+    };
 
     fn compat_enabled() -> InputCompatibility {
         InputCompatibility {
@@ -930,6 +1044,135 @@ mod tests {
         apply_cli_overrides(&mut settings, &cli);
 
         assert!(!settings.configuration.macos_option_symbols);
+    }
+
+    #[test]
+    fn external_editor_command_parser_appends_path_by_default() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("nvim --clean"),
+            path: PathBuf::from("/tmp/note.txt"),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let command =
+            resolve_external_editor_process_command(&request).expect("command should parse");
+        assert_eq!(command.program, "nvim");
+        assert_eq!(
+            command.args,
+            vec![OsString::from("--clean"), OsString::from("/tmp/note.txt"),]
+        );
+    }
+
+    #[test]
+    fn external_editor_command_parser_substitutes_path_placeholder() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("code --goto {path}:1"),
+            path: PathBuf::from("/tmp/note.txt"),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let command =
+            resolve_external_editor_process_command(&request).expect("command should parse");
+        assert_eq!(command.program, "code");
+        assert_eq!(
+            command.args,
+            vec![OsString::from("--goto"), OsString::from("/tmp/note.txt:1")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_editor_command_parser_preserves_non_utf8_path_without_placeholder() {
+        let non_utf8_name =
+            OsString::from_vec(vec![b'n', b'o', b't', b'e', 0x80, b'.', b't', b'x', b't']);
+        let request = ExternalEditRequest {
+            editor_command: String::from("nvim"),
+            path: PathBuf::from(&non_utf8_name),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        let command =
+            resolve_external_editor_process_command(&request).expect("command should parse");
+        assert_eq!(command.program, "nvim");
+        assert_eq!(command.args.len(), 1);
+        assert_eq!(
+            command.args[0].as_os_str().as_bytes(),
+            non_utf8_name.as_os_str().as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_editor_command_parser_rejects_non_utf8_path_with_placeholder() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("code --goto {path}:1"),
+            path: PathBuf::from(OsString::from_vec(vec![b'n', b'o', b't', b'e', 0x80])),
+            cwd: PathBuf::from("/tmp"),
+        };
+        let error = resolve_external_editor_process_command(&request)
+            .expect_err("non-utf8 placeholder expansion should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("selected path is not valid UTF-8"),
+            "placeholder expansion should fail loudly for non-utf8 paths"
+        );
+    }
+
+    #[test]
+    fn external_editor_command_parser_rejects_invalid_templates() {
+        let request = ExternalEditRequest {
+            editor_command: String::from("\"unterminated"),
+            path: PathBuf::from("/tmp/note.txt"),
+            cwd: PathBuf::from("/tmp"),
+        };
+        let error =
+            resolve_external_editor_process_command(&request).expect_err("parse should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse external editor command"),
+            "invalid shell-like syntax should be rejected"
+        );
+    }
+
+    #[test]
+    fn windows_command_splitter_preserves_drive_letter_paths() {
+        let parts = split_external_editor_command(
+            r#"C:\Windows\notepad.exe"#,
+            ExternalEditorParseStyle::Windows,
+        )
+        .expect("windows command should parse");
+        assert_eq!(parts, vec![String::from(r#"C:\Windows\notepad.exe"#)]);
+    }
+
+    #[test]
+    fn windows_command_splitter_handles_quoted_program_path() {
+        let parts = split_external_editor_command(
+            r#""C:\Program Files\Notepad++\notepad++.exe" --goto "{path}:1""#,
+            ExternalEditorParseStyle::Windows,
+        )
+        .expect("windows command should parse");
+        assert_eq!(
+            parts,
+            vec![
+                String::from(r#"C:\Program Files\Notepad++\notepad++.exe"#),
+                String::from("--goto"),
+                String::from("{path}:1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_command_splitter_rejects_unterminated_quotes() {
+        let parts = split_external_editor_command(
+            r#""C:\Program Files\Notepad++\notepad++.exe --goto"#,
+            ExternalEditorParseStyle::Windows,
+        );
+        assert!(
+            parts.is_none(),
+            "unterminated windows-style quoting should fail to parse"
+        );
     }
 
     #[test]
@@ -1373,11 +1616,15 @@ mod tests {
         assert_eq!(
             pending.len(),
             1,
-            "cancel should stay pending under backpressure"
+            "one command should stay pending under backpressure"
         );
         assert!(
-            matches!(pending.first(), Some(WorkerCommand::Cancel(id)) if *id == job_id),
-            "pending command should keep the original cancel request"
+            matches!(
+                pending.first(),
+                Some(WorkerCommand::Run(job))
+                    if job.id == job_id && matches!(job.request, JobRequest::Mkdir { .. })
+            ),
+            "pending command should keep the original work item after cancel dispatches first"
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");

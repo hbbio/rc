@@ -1,115 +1,6 @@
 use crate::*;
 
 impl AppState {
-    pub(crate) fn apply_shell_command(&mut self, command: AppCommand) -> Option<ApplyResult> {
-        match command {
-            AppCommand::MenuNoop => {}
-            AppCommand::MenuNotImplemented(label) => {
-                self.set_status(format!("{label} is not implemented yet"));
-            }
-            AppCommand::OpenMenu => self.open_menu(0),
-            AppCommand::OpenMenuAt(index) => self.open_menu(index),
-            AppCommand::CloseMenu => self.close_menu(),
-            AppCommand::OpenHelp => self.open_help_screen(),
-            AppCommand::CloseHelp => self.close_help_screen(),
-            AppCommand::Quit => {
-                if self.settings.confirmation.confirm_quit {
-                    self.start_quit_confirmation();
-                } else {
-                    self.request_cancel_for_all_jobs();
-                    return Some(ApplyResult::Quit);
-                }
-            }
-            AppCommand::CloseViewer => self.close_viewer(),
-            AppCommand::OpenFindDialog => self.open_find_dialog(),
-            AppCommand::CloseFindResults => self.close_find_results(),
-            AppCommand::OpenTree => self.open_tree_screen(),
-            AppCommand::CloseTree => self.close_tree_screen(),
-            AppCommand::OpenHotlist => self.open_hotlist_screen(),
-            AppCommand::CloseHotlist => self.close_hotlist_screen(),
-            AppCommand::OpenPanelizeDialog => self.open_panelize_dialog(),
-            AppCommand::PanelizePresetAdd => self.start_panelize_preset_add(),
-            AppCommand::PanelizePresetEdit => self.start_panelize_preset_edit(),
-            AppCommand::PanelizePresetRemove => self.remove_panelize_preset(),
-            AppCommand::EnterXMap => {
-                self.xmap_pending = true;
-                self.set_status("Extended keymap mode");
-            }
-            AppCommand::SwitchPanel => {
-                self.toggle_active_panel();
-                self.set_status(format!(
-                    "Active panel: {}",
-                    match self.active_panel {
-                        ActivePanel::Left => "left",
-                        ActivePanel::Right => "right",
-                    }
-                ));
-            }
-            _ => return None,
-        }
-
-        Some(ApplyResult::Continue)
-    }
-
-    pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
-        let panel_index = panel.index();
-        let request_id = self.next_panel_refresh_request_id;
-        self.next_panel_refresh_request_id = self.next_panel_refresh_request_id.saturating_add(1);
-        self.panel_refresh_request_ids[panel_index] = request_id;
-
-        let (cwd, source, sort_mode, show_hidden_files) = {
-            let panel_state = &mut self.panels[panel.index()];
-            panel_state.loading = true;
-            (
-                panel_state.cwd.clone(),
-                panel_state.source.clone(),
-                panel_state.sort_mode,
-                panel_state.show_hidden_files,
-            )
-        };
-        let request = JobRequest::RefreshPanel {
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
-        };
-        if let Some(previous_job_id) = self.panel_refresh_job_ids[panel_index].take() {
-            if self.replace_pending_panel_refresh_request(previous_job_id, &request) {
-                self.panel_refresh_job_ids[panel_index] = Some(previous_job_id);
-                tracing::debug!(
-                    job_event = "coalesced",
-                    job_kind = JobKind::RefreshPanel.label(),
-                    job_id = %previous_job_id,
-                    panel_index,
-                    request_id,
-                    "coalesced pending panel refresh request"
-                );
-                return;
-            }
-            let _ = self.request_cancel_for_job(previous_job_id);
-        }
-
-        let job_id = self.queue_worker_job_request(request);
-        self.panel_refresh_job_ids[panel_index] = Some(job_id);
-    }
-
-    pub(crate) fn clear_panel_refresh_state_for_job(&mut self, id: JobId) {
-        for panel_index in 0..self.panel_refresh_job_ids.len() {
-            if self.panel_refresh_job_ids[panel_index].is_some_and(|job_id| job_id == id) {
-                self.panel_refresh_job_ids[panel_index] = None;
-                self.panels[panel_index].loading = false;
-                tracing::debug!(
-                    job_event = "panel_refresh_state_cleared",
-                    job_id = %id,
-                    panel_index,
-                    "cleared panel refresh loading state"
-                );
-            }
-        }
-    }
-
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
         std::mem::take(&mut self.pending_worker_commands)
     }
@@ -150,8 +41,12 @@ impl AppState {
                     .jobs
                     .job(id)
                     .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                let is_viewer_load = self
+                    .jobs
+                    .job(id)
+                    .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
                 tracing::debug!(job_event = "started", job_kind, job_id = %id, "job started");
-                if !is_refresh {
+                if !is_refresh && !is_viewer_load {
                     if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
                         self.set_status(format!("Job #{id} started: {}", job.summary));
                     } else {
@@ -217,6 +112,10 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                    let is_viewer_load = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
@@ -247,10 +146,10 @@ impl AppState {
                             self.set_status(format!("Job #{id} finished"));
                         }
                     } else if let Some(job) = self.jobs.job(id) {
-                        if !is_refresh {
+                        if !is_refresh && !is_viewer_load {
                             self.set_status(format!("Job #{id} finished: {}", job.summary));
                         }
-                    } else if !is_refresh {
+                    } else if !is_refresh && !is_viewer_load {
                         self.set_status(format!("Job #{id} finished"));
                     }
                     if is_persist_settings
@@ -277,6 +176,10 @@ impl AppState {
                         .jobs
                         .job(id)
                         .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
+                    let is_viewer_load = self
+                        .jobs
+                        .job(id)
+                        .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
                     if is_refresh {
                         self.clear_panel_refresh_state_for_job(id);
                     }
@@ -293,7 +196,7 @@ impl AppState {
                             retry_hint = ?error.retry_hint,
                             "job canceled"
                         );
-                        if !is_refresh {
+                        if !is_refresh && !is_viewer_load {
                             self.set_status(format!("Job #{id} canceled"));
                         }
                     } else {
@@ -307,8 +210,8 @@ impl AppState {
                             error_message = %error.message,
                             "job failed"
                         );
-                        if !is_refresh {
-                            self.set_status(format!("Job #{id} failed: {}", error.message));
+                        if !is_refresh && !is_viewer_load {
+                            self.set_status(format!("Job #{id} failed: {}", error.user_message()));
                         }
                     }
                     if is_persist_settings
@@ -323,122 +226,52 @@ impl AppState {
 
     pub fn handle_background_event(&mut self, event: BackgroundEvent) {
         match event {
+            BackgroundEvent::PanelEntriesChunk {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                entries,
+            } => {
+                self.handle_panel_entries_chunk(panel, cwd, source, sort_mode, request_id, entries)
+            }
             BackgroundEvent::PanelRefreshed {
                 panel,
                 cwd,
                 source,
                 sort_mode,
                 request_id,
+                disk_usage,
                 result,
-            } => {
-                if self.panel_refresh_request_ids[panel.index()] != request_id {
-                    return;
-                }
-                let panel_state = &self.panels[panel.index()];
-                let still_current = panel_state.cwd == cwd
-                    && panel_state.source == source
-                    && panel_state.sort_mode == sort_mode;
-                if !still_current {
-                    return;
-                }
-
-                let focus_target =
-                    self.pending_panel_focus
-                        .as_ref()
-                        .and_then(|(pending_panel, path)| {
-                            (*pending_panel == panel).then(|| path.clone())
-                        });
-                let mut clear_focus_target = false;
-                let mut focus_status = None;
-                {
-                    let panel_state = &mut self.panels[panel.index()];
-                    panel_state.loading = false;
-                    match result {
-                        Ok(entries) => {
-                            panel_state.apply_entries(entries);
-                            if self
-                                .pending_panelize_revert
-                                .as_ref()
-                                .is_some_and(|(pending_panel, _)| *pending_panel == panel)
-                            {
-                                self.pending_panelize_revert = None;
-                            }
-                            if let Some(target_path) = focus_target {
-                                clear_focus_target = true;
-                                if let Some(index) = panel_state
-                                    .entries
-                                    .iter()
-                                    .position(|entry| entry.path == target_path)
-                                {
-                                    panel_state.cursor = index;
-                                    focus_status =
-                                        Some(format!("Located {}", target_path.to_string_lossy()));
-                                } else {
-                                    focus_status = Some(format!(
-                                        "Opened {} (target not found in listing)",
-                                        panel_state.cwd.to_string_lossy()
-                                    ));
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let is_panelize = source.is_panelized();
-                            if let Some((pending_panel, revert_source)) =
-                                self.pending_panelize_revert.take()
-                            {
-                                if pending_panel == panel {
-                                    panel_state.source = revert_source;
-                                } else {
-                                    self.pending_panelize_revert =
-                                        Some((pending_panel, revert_source));
-                                }
-                            }
-                            if error != PANEL_REFRESH_CANCELED_MESSAGE {
-                                if is_panelize {
-                                    self.set_status(format!("Panelize failed: {error}"));
-                                } else {
-                                    self.set_status(format!("Panel refresh failed: {error}"));
-                                }
-                            }
-                        }
-                    }
-                }
-                self.panel_refresh_job_ids[panel.index()] = None;
-                if clear_focus_target {
-                    self.pending_panel_focus = None;
-                }
-                if let Some(focus_status) = focus_status {
-                    self.set_status(focus_status);
-                }
-            }
+            } => self.handle_panel_refreshed(PanelRefreshCompletion {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                disk_usage,
+                result,
+            }),
             BackgroundEvent::ViewerLoaded { path, result } => match result {
                 Ok(viewer) => {
+                    let is_preview = viewer.text_is_preview();
                     self.routes.push(Route::Viewer(viewer));
-                    self.set_status(format!("Opened viewer {}", path.to_string_lossy()));
+                    if is_preview {
+                        self.set_status(format!(
+                            "Opened viewer {} (text preview mode)",
+                            path.to_string_lossy()
+                        ));
+                    } else {
+                        self.set_status(format!("Opened viewer {}", path.to_string_lossy()));
+                    }
                 }
                 Err(error) => {
                     self.set_status(format!("Viewer open failed: {error}"));
                 }
             },
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
-                let status_message = if let Some(results) = self.find_results_by_job_id_mut(job_id)
-                {
-                    let was_empty = results.entries.is_empty();
-                    results.entries.extend(entries);
-                    if was_empty && !results.entries.is_empty() {
-                        results.cursor = 0;
-                    }
-                    Some(format!(
-                        "Finding '{}': {} result(s)...",
-                        results.query,
-                        results.entries.len()
-                    ))
-                } else {
-                    None
-                };
-                if let Some(status_message) = status_message {
-                    self.set_status(status_message);
-                }
+                self.handle_find_entries_chunk(job_id, entries)
             }
             BackgroundEvent::TreeReady { root, entries } => {
                 let mut replaced = false;

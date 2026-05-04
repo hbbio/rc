@@ -74,7 +74,7 @@ impl Settings {
 pub struct ConfigurationSettings {
     pub default_overwrite_policy: OverwritePolicy,
     pub macos_option_symbols: bool,
-    pub use_internal_editor: bool,
+    pub editor_command: Option<String>,
     pub hotlist: Vec<PathBuf>,
     pub panelize_presets: Vec<String>,
     pub keymap_override: Option<PathBuf>,
@@ -85,7 +85,7 @@ impl Default for ConfigurationSettings {
         Self {
             default_overwrite_policy: OverwritePolicy::Skip,
             macos_option_symbols: cfg!(target_os = "macos"),
-            use_internal_editor: false,
+            editor_command: None,
             hotlist: Vec::new(),
             panelize_presets: DEFAULT_PANELIZE_PRESETS
                 .iter()
@@ -220,8 +220,6 @@ pub struct AdvancedSettings {
     pub max_find_results: usize,
     pub tree_max_depth: usize,
     pub tree_max_entries: usize,
-    pub disk_usage_cache_ttl_ms: u64,
-    pub disk_usage_cache_max_entries: usize,
 }
 
 impl Default for AdvancedSettings {
@@ -232,8 +230,6 @@ impl Default for AdvancedSettings {
             max_find_results: 2_000,
             tree_max_depth: 6,
             tree_max_entries: 2_000,
-            disk_usage_cache_ttl_ms: 750,
-            disk_usage_cache_max_entries: 16,
         }
     }
 }
