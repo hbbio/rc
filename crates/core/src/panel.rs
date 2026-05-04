@@ -5,9 +5,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use crate::{FileEntry, LocalProcessBackend, ProcessBackend, SortField, SortMode};
+use crate::{
+    FileEntry, LocalProcessBackend, ProcessBackend, ProcessOutputLimits, SortField, SortMode,
+};
 
 pub(crate) const PANEL_REFRESH_CANCELED_MESSAGE: &str = "panel refresh canceled";
+const PANELIZE_STDOUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const PANELIZE_STDERR_LIMIT_BYTES: usize = 64 * 1024;
+const PANELIZE_MAX_ENTRIES: usize = 100_000;
 
 #[cfg(test)]
 pub(crate) fn read_entries(dir: &Path, sort_mode: SortMode) -> io::Result<Vec<FileEntry>> {
@@ -90,45 +95,58 @@ pub(crate) fn read_panelized_entries_with_process_backend(
     process_backend: &dyn ProcessBackend,
 ) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
-    let output = process_backend.run_shell_command(
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    let output = process_backend.run_shell_command_streaming(
         base_dir,
         command,
         cancel_flag,
         PANEL_REFRESH_CANCELED_MESSAGE,
+        ProcessOutputLimits {
+            stdout_bytes: PANELIZE_STDOUT_LIMIT_BYTES,
+            stderr_bytes: PANELIZE_STDERR_LIMIT_BYTES,
+        },
+        &mut |raw_line| {
+            append_panelized_stdout_line(base_dir, raw_line, &mut seen, &mut entries, cancel_flag)
+        },
     )?;
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
         let detail = if stderr.is_empty() {
-            format!("exit {}", output.status)
+            output.status_label
         } else {
             stderr.to_string()
         };
         return Err(io::Error::other(format!("command failed: {detail}")));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut seen = HashSet::new();
-    let mut entries = Vec::new();
-
-    for raw_line in stdout.lines() {
-        ensure_panel_refresh_not_canceled(cancel_flag)?;
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.is_empty() {
-            continue;
-        }
-
-        append_panelized_path_entry(
-            base_dir,
-            PathBuf::from(line),
-            &mut seen,
-            &mut entries,
-            cancel_flag,
-        )?;
-    }
-
     sort_file_entries(&mut entries, sort_mode);
     Ok(entries)
+}
+
+fn append_panelized_stdout_line(
+    base_dir: &Path,
+    raw_line: &[u8],
+    seen: &mut HashSet<PathBuf>,
+    entries: &mut Vec<FileEntry>,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<()> {
+    ensure_panel_refresh_not_canceled(cancel_flag)?;
+    let line = String::from_utf8_lossy(raw_line);
+    let line = line.strip_suffix('\n').unwrap_or(line.as_ref());
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.is_empty() {
+        return Ok(());
+    }
+
+    append_panelized_path_entry(base_dir, PathBuf::from(line), seen, entries, cancel_flag)?;
+    if entries.len() > PANELIZE_MAX_ENTRIES {
+        return Err(io::Error::other(format!(
+            "panelize produced more than {PANELIZE_MAX_ENTRIES} entries"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn read_panelized_paths(
@@ -241,5 +259,57 @@ fn panelized_entry_label(base_dir: &Path, path: &Path) -> String {
         }
     } else {
         path.to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProcessExit;
+
+    struct ManyLineProcessBackend {
+        lines: usize,
+    }
+
+    impl ProcessBackend for ManyLineProcessBackend {
+        fn run_shell_command_streaming(
+            &self,
+            _cwd: &Path,
+            _command: &str,
+            _cancel_flag: Option<&AtomicBool>,
+            _canceled_message: &str,
+            _limits: ProcessOutputLimits,
+            stdout_line: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+        ) -> io::Result<ProcessExit> {
+            for index in 0..self.lines {
+                stdout_line(format!("entry-{index}\n").as_bytes())?;
+            }
+            Ok(ProcessExit {
+                success: true,
+                status_label: String::from("exit status: 0"),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn panelize_rejects_too_many_streamed_entries() {
+        let backend = ManyLineProcessBackend {
+            lines: PANELIZE_MAX_ENTRIES + 1,
+        };
+        let error = read_panelized_entries_with_process_backend(
+            Path::new("."),
+            "ignored",
+            SortMode::default(),
+            None,
+            &backend,
+        )
+        .expect_err("panelize should reject excessive output");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("panelize produced more than"),
+            "panelize limit error should be explicit"
+        );
     }
 }

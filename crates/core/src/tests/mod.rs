@@ -1,7 +1,6 @@
 use super::*;
 use crate::keymap::{KeyCommand, KeyModifiers};
 use std::path::Path;
-use std::process::Output;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::thread;
@@ -29,13 +28,15 @@ fn file_entry(name: &str) -> FileEntry {
 struct PermissionDeniedProcessBackend;
 
 impl ProcessBackend for PermissionDeniedProcessBackend {
-    fn run_shell_command(
+    fn run_shell_command_streaming(
         &self,
         _cwd: &Path,
         _command: &str,
         _cancel_flag: Option<&AtomicBool>,
         _canceled_message: &str,
-    ) -> io::Result<Output> {
+        _limits: ProcessOutputLimits,
+        _stdout_line: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<ProcessExit> {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "permission denied",

@@ -54,7 +54,7 @@ pub(crate) use panel::{
     read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
     sort_file_entries,
 };
-pub use rc_shell::{LocalProcessBackend, ProcessBackend};
+pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
