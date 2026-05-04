@@ -146,6 +146,7 @@ impl AppState {
         let (cwd, source, sort_mode, show_hidden_files) = {
             let panel_state = &mut self.panels[panel_index];
             panel_state.loading = true;
+            panel_state.disk_usage = None;
             (
                 panel_state.cwd.clone(),
                 panel_state.source.clone(),
@@ -306,10 +307,10 @@ impl AppState {
         {
             let panel_state = &mut self.panels[panel.index()];
             panel_state.loading = false;
+            panel_state.disk_usage = disk_usage;
             match result {
                 Ok(entries) => {
                     panel_state.apply_entries(entries);
-                    panel_state.disk_usage = disk_usage;
                     self.panel_refresh_post
                         .clear_panelize_revert_for_panel(panel);
                     if let Some(target_path) = focus_target {

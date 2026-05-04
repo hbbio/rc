@@ -148,6 +148,72 @@ fn stale_panel_refresh_event_is_ignored() {
 }
 
 #[test]
+fn panel_refresh_clears_stale_disk_usage_while_loading_and_after_failure() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-disk-usage-clear-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let panel = app.active_panel;
+    let panel_index = panel.index();
+    app.panels[panel_index].disk_usage = Some(DiskUsageSummary {
+        free_bytes: 10,
+        total_bytes: 100,
+    });
+
+    app.refresh_active_panel();
+    assert_eq!(
+        app.panels[panel_index].disk_usage, None,
+        "queueing a refresh should clear stale disk usage while the panel is loading"
+    );
+
+    let (cwd, source, sort_mode, request_id) = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            let JobRequest::RefreshPanel {
+                panel: request_panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } = job.request
+            else {
+                return None;
+            };
+            (request_panel == panel).then_some((cwd, source, sort_mode, request_id))
+        })
+        .expect("refresh command should be queued");
+
+    app.panels[panel_index].disk_usage = Some(DiskUsageSummary {
+        free_bytes: 20,
+        total_bytes: 200,
+    });
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        disk_usage: None,
+        result: Err(String::from("permission denied")),
+    });
+    assert_eq!(
+        app.panels[panel_index].disk_usage, None,
+        "failed current refresh should not leave old disk usage visible"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
