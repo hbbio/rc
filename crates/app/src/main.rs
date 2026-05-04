@@ -594,7 +594,7 @@ fn split_windows_command_line(command: &str) -> Option<Vec<String>> {
                 for _ in 0..(slash_count / 2) {
                     current.push('\\');
                 }
-                if slash_count % 2 == 0 {
+                if slash_count.is_multiple_of(2) {
                     chars.next();
                     in_quotes = !in_quotes;
                 } else {

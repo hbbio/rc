@@ -29,7 +29,7 @@ optional remote VFS, and subshell integration. See [doc/roadmap.md](doc/roadmap.
 
 Requirements:
 
-- Rust stable toolchain
+- Rust 1.88.0 or newer
 - A terminal with ANSI support
 
 Install from a local checkout:

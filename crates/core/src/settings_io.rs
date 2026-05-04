@@ -354,10 +354,8 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.confirmation.confirm_quit = parsed;
                 }
             }
-            ("appearance", "skin") => {
-                if !value.is_empty() {
-                    settings.appearance.skin = value.to_string();
-                }
+            ("appearance", "skin") if !value.is_empty() => {
+                settings.appearance.skin = value.to_string();
             }
             ("appearance", "skin_dir") => {
                 if !saw_skin_dirs {
