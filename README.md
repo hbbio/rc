@@ -133,6 +133,7 @@ Optional Phase 1 policy/perf checks (requires extra cargo tools):
 cargo --locked nextest run --workspace --all-targets --all-features
 cargo deny check bans licenses advisories sources
 cargo +nightly udeps --workspace --all-targets --all-features --locked
+mkdir -p target/coverage
 cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
 ./scripts/coverage_trend.sh target/coverage/llvm-cov.json .github/coverage-baseline.json
 ```

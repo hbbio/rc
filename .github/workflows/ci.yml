@@ -128,7 +128,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Generate coverage JSON
-        run: cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
+        run: |
+          mkdir -p target/coverage
+          cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
 
       - name: Check coverage trend
         id: coverage
