@@ -211,12 +211,10 @@ impl AppState {
         }
 
         let base_dir = self.active_panel().cwd.clone();
-        self.pending_dialog_action = Some(PendingDialogAction::FindQuery { base_dir });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Find file",
-            "Name contains:",
-            "",
-        )));
+        self.push_dialog(
+            DialogState::input("Find file", "Name contains:", ""),
+            PendingDialogAction::FindQuery { base_dir },
+        );
         self.set_status("Find file");
     }
 

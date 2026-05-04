@@ -1469,13 +1469,16 @@ fn copy_relative_destination_is_resolved_from_active_panel() {
     app.start_copy_dialog();
     app.finish_dialog(DialogResult::InputSubmitted(String::from("dest")));
 
-    match app.pending_dialog_action.as_ref() {
-        Some(PendingDialogAction::TransferOverwrite {
-            destination_dir, ..
-        }) => {
-            assert_eq!(destination_dir, &root.join("dest"));
-        }
-        other => panic!("expected transfer overwrite action, got {other:?}"),
+    match app.top_route() {
+        Route::Dialog(dialog) => match dialog.action() {
+            Some(PendingDialogAction::TransferOverwrite {
+                destination_dir, ..
+            }) => {
+                assert_eq!(destination_dir, &root.join("dest"));
+            }
+            other => panic!("expected transfer overwrite action, got {other:?}"),
+        },
+        other => panic!("expected transfer overwrite dialog, got {other:?}"),
     }
 
     fs::remove_dir_all(&root).expect("must remove temp root");

@@ -5,6 +5,11 @@ use crate::dialog::DialogEvent;
 use crate::*;
 
 impl AppState {
+    pub(crate) fn push_dialog(&mut self, state: DialogState, action: PendingDialogAction) {
+        self.routes
+            .push(Route::Dialog(DialogRoute::new(state, action)));
+    }
+
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
             AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
@@ -75,16 +80,18 @@ impl AppState {
             TransferKind::Copy => "Copy",
             TransferKind::Move => "Move",
         };
-        self.pending_dialog_action = Some(PendingDialogAction::TransferDestination {
-            kind,
-            sources,
-            source_base_dir,
-        });
-        self.routes.push(Route::Dialog(DialogState::input(
-            title,
-            "Destination directory:",
-            destination_dir.to_string_lossy(),
-        )));
+        self.push_dialog(
+            DialogState::input(
+                title,
+                "Destination directory:",
+                destination_dir.to_string_lossy(),
+            ),
+            PendingDialogAction::TransferDestination {
+                kind,
+                sources,
+                source_base_dir,
+            },
+        );
         self.set_status(format!("{title}: choose destination"));
     }
 
@@ -104,16 +111,18 @@ impl AppState {
         } else {
             format!("Delete {} selected items?", targets.len())
         };
-        self.pending_dialog_action = Some(PendingDialogAction::ConfirmDelete { targets });
-        self.routes
-            .push(Route::Dialog(DialogState::confirm("Delete", message)));
+        self.push_dialog(
+            DialogState::confirm("Delete", message),
+            PendingDialogAction::ConfirmDelete { targets },
+        );
         self.set_status("Confirm delete");
     }
 
     pub(crate) fn start_quit_confirmation(&mut self) {
-        self.pending_dialog_action = Some(PendingDialogAction::ConfirmQuit);
-        self.routes
-            .push(Route::Dialog(DialogState::confirm("Quit", "Exit rc?")));
+        self.push_dialog(
+            DialogState::confirm("Quit", "Exit rc?"),
+            PendingDialogAction::ConfirmQuit,
+        );
         self.set_status("Confirm quit");
     }
 
@@ -133,34 +142,28 @@ impl AppState {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| entry.name.clone());
-        self.pending_dialog_action = Some(PendingDialogAction::RenameEntry { source });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Rename/Move",
-            "New name:",
-            current_name,
-        )));
+        self.push_dialog(
+            DialogState::input("Rename/Move", "New name:", current_name),
+            PendingDialogAction::RenameEntry { source },
+        );
         self.set_status("Rename/Move: enter new name");
     }
 
     pub(crate) fn start_mkdir_dialog(&mut self) {
         let base_dir = self.active_panel().cwd.clone();
-        self.pending_dialog_action = Some(PendingDialogAction::Mkdir { base_dir });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Mkdir",
-            "Directory name:",
-            "",
-        )));
+        self.push_dialog(
+            DialogState::input("Mkdir", "Directory name:", ""),
+            PendingDialogAction::Mkdir { base_dir },
+        );
         self.set_status("Mkdir: enter directory name");
     }
 
     pub(crate) fn start_overwrite_policy_dialog(&mut self) {
         let selected = overwrite_policy_index(self.overwrite_policy());
-        self.pending_dialog_action = Some(PendingDialogAction::SetDefaultOverwritePolicy);
-        self.routes.push(Route::Dialog(DialogState::listbox(
-            "Overwrite Policy",
-            overwrite_policy_items(),
-            selected,
-        )));
+        self.push_dialog(
+            DialogState::listbox("Overwrite Policy", overwrite_policy_items(), selected),
+            PendingDialogAction::SetDefaultOverwritePolicy,
+        );
         self.set_status("Choose default overwrite policy");
     }
 
@@ -175,19 +178,23 @@ impl AppState {
             .iter()
             .position(|name| name.eq_ignore_ascii_case(self.active_skin_name()))
             .unwrap_or(0);
-        self.pending_dialog_action = Some(PendingDialogAction::SetSkin {
-            original_skin: self.active_skin_name().to_string(),
-        });
-        self.routes.push(Route::Dialog(DialogState::listbox(
-            "Skin",
-            self.available_skins.clone(),
-            selected,
-        )));
+        self.push_dialog(
+            DialogState::listbox("Skin", self.available_skins.clone(), selected),
+            PendingDialogAction::SetSkin {
+                original_skin: self.active_skin_name().to_string(),
+            },
+        );
         self.set_status("Choose skin");
     }
 
     pub(crate) fn finish_dialog(&mut self, result: DialogResult) {
-        let pending = self.pending_dialog_action.take();
+        let pending = match self.routes.last() {
+            Some(Route::Dialog(_)) => match self.routes.pop() {
+                Some(Route::Dialog(mut dialog)) => dialog.take_action(),
+                _ => None,
+            },
+            _ => None,
+        };
         match (pending, result) {
             (None, result) => self.set_status(result.status_line()),
             (
@@ -276,16 +283,18 @@ impl AppState {
                 };
                 if self.settings.confirmation.confirm_overwrite {
                     let selected = overwrite_policy_index(self.overwrite_policy());
-                    self.pending_dialog_action = Some(PendingDialogAction::TransferOverwrite {
-                        kind,
-                        sources,
-                        destination_dir,
-                    });
-                    self.routes.push(Route::Dialog(DialogState::listbox(
-                        "Overwrite Policy",
-                        overwrite_policy_items(),
-                        selected,
-                    )));
+                    self.push_dialog(
+                        DialogState::listbox(
+                            "Overwrite Policy",
+                            overwrite_policy_items(),
+                            selected,
+                        ),
+                        PendingDialogAction::TransferOverwrite {
+                            kind,
+                            sources,
+                            destination_dir,
+                        },
+                    );
                     self.set_status("Choose overwrite policy");
                 } else {
                     self.queue_copy_or_move_job(
@@ -430,28 +439,17 @@ impl AppState {
             }
             (
                 Some(PendingDialogAction::PanelizePresetAdd {
-                    initial_command,
                     mut preset_commands,
                 }),
                 DialogResult::InputSubmitted(value),
             ) => {
                 let command = value.trim();
                 if command.is_empty() {
-                    self.pending_dialog_action =
-                        Some(PendingDialogAction::PanelizePresetSelection {
-                            initial_command,
-                            preset_commands,
-                        });
                     self.set_status("Panelize preset add canceled: empty command");
                     return;
                 }
                 let command = command.to_string();
                 if preset_commands.iter().any(|preset| preset == &command) {
-                    self.pending_dialog_action =
-                        Some(PendingDialogAction::PanelizePresetSelection {
-                            initial_command,
-                            preset_commands,
-                        });
                     self.set_status("Panelize preset already exists");
                     return;
                 }
@@ -464,21 +462,13 @@ impl AppState {
                 self.set_status(format!("Added panelize preset: {command}"));
             }
             (
-                Some(PendingDialogAction::PanelizePresetAdd {
-                    initial_command,
-                    preset_commands,
-                }),
+                Some(PendingDialogAction::PanelizePresetAdd { preset_commands: _ }),
                 DialogResult::Canceled,
             ) => {
-                self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetSelection {
-                    initial_command,
-                    preset_commands,
-                });
                 self.set_status("Panelize preset add canceled");
             }
             (
                 Some(PendingDialogAction::PanelizePresetEdit {
-                    initial_command,
                     mut preset_commands,
                     preset_index,
                 }),
@@ -486,21 +476,11 @@ impl AppState {
             ) => {
                 let command = value.trim();
                 if command.is_empty() {
-                    self.pending_dialog_action =
-                        Some(PendingDialogAction::PanelizePresetSelection {
-                            initial_command,
-                            preset_commands,
-                        });
                     self.set_status("Panelize preset edit canceled: empty command");
                     return;
                 }
                 let command = command.to_string();
                 let Some(entry) = preset_commands.get_mut(preset_index) else {
-                    self.pending_dialog_action =
-                        Some(PendingDialogAction::PanelizePresetSelection {
-                            initial_command,
-                            preset_commands,
-                        });
                     self.set_status("Panelize preset edit failed: invalid selection");
                     return;
                 };
@@ -514,16 +494,10 @@ impl AppState {
             }
             (
                 Some(PendingDialogAction::PanelizePresetEdit {
-                    initial_command,
-                    preset_commands,
-                    ..
+                    preset_commands: _, ..
                 }),
                 DialogResult::Canceled,
             ) => {
-                self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetSelection {
-                    initial_command,
-                    preset_commands,
-                });
                 self.set_status("Panelize preset edit canceled");
             }
             (
@@ -575,13 +549,11 @@ impl AppState {
     }
 
     pub(crate) fn handle_dialog_event(&mut self, event: DialogEvent) {
-        let preview_skin = matches!(
-            self.pending_dialog_action,
-            Some(PendingDialogAction::SetSkin { .. })
-        ) && matches!(event, DialogEvent::MoveUp | DialogEvent::MoveDown);
         let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
             return;
         };
+        let preview_skin = matches!(dialog.action(), Some(PendingDialogAction::SetSkin { .. }))
+            && matches!(event, DialogEvent::MoveUp | DialogEvent::MoveDown);
         let transition = dialog.handle_event(event);
         match transition {
             dialog::DialogTransition::Stay => {
@@ -593,7 +565,6 @@ impl AppState {
                 }
             }
             dialog::DialogTransition::Close(result) => {
-                self.routes.pop();
                 self.last_dialog_result = Some(result.clone());
                 self.finish_dialog(result);
             }

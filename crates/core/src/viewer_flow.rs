@@ -127,12 +127,10 @@ impl AppState {
             ViewerSearchDirection::Backward => "Search text (backward):",
         };
 
-        self.pending_dialog_action = Some(PendingDialogAction::ViewerSearch { direction });
-        self.routes.push(Route::Dialog(DialogState::input(
-            title,
-            prompt,
-            initial_query,
-        )));
+        self.push_dialog(
+            DialogState::input(title, prompt, initial_query),
+            PendingDialogAction::ViewerSearch { direction },
+        );
         self.set_status(title);
     }
 
@@ -143,12 +141,14 @@ impl AppState {
         };
         let current_line = viewer.current_line_number().to_string();
 
-        self.pending_dialog_action = Some(PendingDialogAction::ViewerGoto);
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Goto",
-            "Line number, @offset, or 0xHEX offset:",
-            current_line,
-        )));
+        self.push_dialog(
+            DialogState::input(
+                "Goto",
+                "Line number, @offset, or 0xHEX offset:",
+                current_line,
+            ),
+            PendingDialogAction::ViewerGoto,
+        );
         self.set_status("Goto");
     }
 

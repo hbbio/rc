@@ -28,7 +28,6 @@ impl AppState {
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
             paused_find_results: None,
-            pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
             panel_refresh: PanelRefreshWorkflow::default(),

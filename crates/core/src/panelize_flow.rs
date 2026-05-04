@@ -20,15 +20,13 @@ impl AppState {
         let mut items = vec![String::from(PANELIZE_CUSTOM_COMMAND_LABEL)];
         items.extend(preset_commands.iter().cloned());
         let selected = panelize_preset_selected_index(&initial_command, &preset_commands);
-        self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetSelection {
-            initial_command,
-            preset_commands,
-        });
-        self.routes.push(Route::Dialog(DialogState::listbox(
-            "External panelize",
-            items,
-            selected,
-        )));
+        self.push_dialog(
+            DialogState::listbox("External panelize", items, selected),
+            PendingDialogAction::PanelizePresetSelection {
+                initial_command,
+                preset_commands,
+            },
+        );
     }
 
     pub(crate) fn open_panelize_command_input_dialog(
@@ -36,27 +34,26 @@ impl AppState {
         initial_command: String,
         preset_commands: Vec<String>,
     ) {
-        self.pending_dialog_action = Some(PendingDialogAction::PanelizeCommand { preset_commands });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "External panelize",
-            "Command (stdout paths):",
-            initial_command,
-        )));
+        self.push_dialog(
+            DialogState::input(
+                "External panelize",
+                "Command (stdout paths):",
+                initial_command,
+            ),
+            PendingDialogAction::PanelizeCommand { preset_commands },
+        );
     }
 
     pub(crate) fn toggle_panelize_dialog_focus(&mut self) -> bool {
-        match self.pending_dialog_action.clone() {
+        let Some(Route::Dialog(dialog)) = self.routes.last() else {
+            return false;
+        };
+        match dialog.action().cloned() {
             Some(PendingDialogAction::PanelizePresetSelection {
                 initial_command,
                 preset_commands,
             }) => {
-                let is_listbox = matches!(
-                    self.top_route(),
-                    Route::Dialog(DialogState {
-                        kind: DialogKind::Listbox(_),
-                        ..
-                    })
-                );
+                let is_listbox = matches!(&dialog.kind, DialogKind::Listbox(_));
                 if !is_listbox {
                     return false;
                 }
@@ -66,11 +63,8 @@ impl AppState {
                 true
             }
             Some(PendingDialogAction::PanelizeCommand { preset_commands }) => {
-                let initial_command = match self.top_route() {
-                    Route::Dialog(dialog) => match &dialog.kind {
-                        DialogKind::Input(input) => input.value.clone(),
-                        _ => return false,
-                    },
+                let initial_command = match &dialog.kind {
+                    DialogKind::Input(input) => input.value.clone(),
                     _ => return false,
                 };
                 self.routes.pop();
@@ -83,25 +77,18 @@ impl AppState {
     }
 
     pub(crate) fn start_panelize_preset_add(&mut self) {
-        let Some((initial_command, preset_commands, _)) = self.active_panelize_preset_selection()
-        else {
+        let Some((_, preset_commands, _)) = self.active_panelize_preset_selection() else {
             return;
         };
-        self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetAdd {
-            initial_command,
-            preset_commands,
-        });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Add panelize command",
-            "Command:",
-            "",
-        )));
+        self.push_dialog(
+            DialogState::input("Add panelize command", "Command:", ""),
+            PendingDialogAction::PanelizePresetAdd { preset_commands },
+        );
         self.set_status("Panelize preset: add command");
     }
 
     pub(crate) fn start_panelize_preset_edit(&mut self) {
-        let Some((initial_command, preset_commands, selected_index)) =
-            self.active_panelize_preset_selection()
+        let Some((_, preset_commands, selected_index)) = self.active_panelize_preset_selection()
         else {
             return;
         };
@@ -114,16 +101,13 @@ impl AppState {
             self.set_status("Panelize preset selection is invalid");
             return;
         };
-        self.pending_dialog_action = Some(PendingDialogAction::PanelizePresetEdit {
-            initial_command,
-            preset_commands,
-            preset_index,
-        });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Edit panelize command",
-            "Command:",
-            existing_command,
-        )));
+        self.push_dialog(
+            DialogState::input("Edit panelize command", "Command:", existing_command),
+            PendingDialogAction::PanelizePresetEdit {
+                preset_commands,
+                preset_index,
+            },
+        );
         self.set_status("Panelize preset: edit command");
     }
 
@@ -176,14 +160,14 @@ impl AppState {
     }
 
     fn active_panelize_preset_selection(&self) -> Option<(String, Vec<String>, usize)> {
-        let PendingDialogAction::PanelizePresetSelection {
-            initial_command,
-            preset_commands,
-        } = self.pending_dialog_action.clone()?
-        else {
+        let Route::Dialog(dialog) = self.top_route() else {
             return None;
         };
-        let Route::Dialog(dialog) = self.top_route() else {
+        let Some(PendingDialogAction::PanelizePresetSelection {
+            initial_command,
+            preset_commands,
+        }) = dialog.action().cloned()
+        else {
             return None;
         };
         let DialogKind::Listbox(listbox) = &dialog.kind else {

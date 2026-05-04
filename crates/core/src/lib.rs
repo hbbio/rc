@@ -28,6 +28,7 @@ mod viewer_flow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
@@ -1311,20 +1312,6 @@ enum SettingsEntryAction {
     Info,
 }
 
-#[derive(Clone, Debug)]
-pub enum Route {
-    FileManager,
-    Help(HelpState),
-    Menu(MenuState),
-    Settings(SettingsScreenState),
-    Jobs,
-    Viewer(ViewerState),
-    FindResults(FindResultsState),
-    Tree(TreeState),
-    Hotlist,
-    Dialog(DialogState),
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransferKind {
     Copy,
@@ -1372,14 +1359,63 @@ enum PendingDialogAction {
         preset_commands: Vec<String>,
     },
     PanelizePresetAdd {
-        initial_command: String,
         preset_commands: Vec<String>,
     },
     PanelizePresetEdit {
-        initial_command: String,
         preset_commands: Vec<String>,
         preset_index: usize,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct DialogRoute {
+    pub state: DialogState,
+    action: Option<PendingDialogAction>,
+}
+
+impl DialogRoute {
+    fn new(state: DialogState, action: PendingDialogAction) -> Self {
+        Self {
+            state,
+            action: Some(action),
+        }
+    }
+
+    fn take_action(&mut self) -> Option<PendingDialogAction> {
+        self.action.take()
+    }
+
+    fn action(&self) -> Option<&PendingDialogAction> {
+        self.action.as_ref()
+    }
+}
+
+impl Deref for DialogRoute {
+    type Target = DialogState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for DialogRoute {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Route {
+    FileManager,
+    Help(HelpState),
+    Menu(MenuState),
+    Settings(SettingsScreenState),
+    Jobs,
+    Viewer(ViewerState),
+    FindResults(FindResultsState),
+    Tree(TreeState),
+    Hotlist,
+    Dialog(DialogRoute),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1489,7 +1525,6 @@ pub struct AppState {
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
     paused_find_results: Option<FindResultsState>,
-    pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh: PanelRefreshWorkflow,
