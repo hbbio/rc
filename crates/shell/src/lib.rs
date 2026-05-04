@@ -9,6 +9,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessOutputLimits {
     pub stdout_bytes: usize,
@@ -137,8 +139,12 @@ fn run_shell_command_streaming_impl(
         if child_status.is_some() && stdout_done {
             break;
         }
+        if stdout_done {
+            thread::sleep(SHELL_POLL_INTERVAL);
+            continue;
+        }
 
-        match stdout_event_rx.recv_timeout(Duration::from_millis(20)) {
+        match stdout_event_rx.recv_timeout(SHELL_POLL_INTERVAL) {
             Ok(event) => {
                 if let Err(error) = handle_stdout_event(event, &mut stdout_done, stdout_line) {
                     terminate_shell_command(&mut child);
@@ -332,5 +338,34 @@ mod tests {
             }
         }
         assert_eq!(lines, vec![b"one\n".to_vec(), b"two".to_vec()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_runner_handles_stdout_closing_before_process_exit() {
+        let mut lines = Vec::new();
+        let start = std::time::Instant::now();
+        let exit = run_shell_command_streaming_impl(
+            Path::new("."),
+            "exec 1>&-; sleep 0.05",
+            None,
+            "canceled",
+            ProcessOutputLimits {
+                stdout_bytes: 1024,
+                stderr_bytes: 1024,
+            },
+            &mut |line| {
+                lines.push(line.to_vec());
+                Ok(())
+            },
+        )
+        .expect("command should complete after closing stdout");
+
+        assert!(exit.success, "command should exit successfully");
+        assert!(lines.is_empty(), "closed stdout should not emit lines");
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "test command should stay alive after stdout closes"
+        );
     }
 }
