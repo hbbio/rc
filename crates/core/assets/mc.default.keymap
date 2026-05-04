@@ -82,7 +82,7 @@ PutOtherLink = ctrl-r
 [panel]
 CycleListingFormat = alt-t
 Search = ctrl-s; alt-s
-Mark = insert; ctrl-t
+Mark = insert; ctrl-t; space
 MarkUp = shift-up
 MarkDown = shift-down
 # MarkLeft =
@@ -510,7 +510,7 @@ End = end
 Enter = enter; f3
 CdUp = backspace
 Reread = r; ctrl-r
-ToggleTag = insert; ctrl-t
+ToggleTag = insert; ctrl-t; space
 InvertTags = alt-asterisk
 OpenJobs = ctrl-j
 Copy = f5

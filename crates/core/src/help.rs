@@ -554,7 +554,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_skin", String::from("Alt-S/Ctrl-K")),
         ("fm_quit", String::from("q/F10")),
         ("fm_move", String::from("Up/Down")),
-        ("fm_toggle_tag", String::from("Insert/Ctrl-T")),
+        ("fm_toggle_tag", String::from("Space/Insert/Ctrl-T")),
         ("fm_file_ops", String::from("F5/F6/F8")),
         ("viewer_scroll", String::from("Up/Down and PgUp/PgDn")),
         ("viewer_search", String::from("F7")),

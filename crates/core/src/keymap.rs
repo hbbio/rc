@@ -1251,6 +1251,10 @@ Reread = ctrl-r
             keymap.resolve(KeyContext::FileManager, ctrl_t),
             Some(&KeyCommand::ToggleTag)
         );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char(' '))),
+            Some(&KeyCommand::ToggleTag)
+        );
         assert!(
             report
                 .unknown_actions
@@ -1286,6 +1290,15 @@ Reread = ctrl-r
                 KeyChord::new(KeyCode::Char('!'))
             ),
             Some(&KeyCommand::OpenPanelizeDialog)
+        );
+    }
+
+    #[test]
+    fn bundled_keymap_includes_space_toggle_tag_binding() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char(' '))),
+            Some(&KeyCommand::ToggleTag)
         );
     }
 

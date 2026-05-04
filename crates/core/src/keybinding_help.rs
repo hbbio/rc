@@ -282,8 +282,8 @@ impl AppState {
             self.keybinding_joined_or_fallback(
                 KeyContext::FileManager,
                 AppCommand::ToggleTag,
-                "Insert/Ctrl-T",
-                2,
+                "Space/Insert/Ctrl-T",
+                3,
             ),
         );
         replacements.insert(
