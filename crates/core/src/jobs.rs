@@ -694,6 +694,7 @@ pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent
     }
 
     cancel_all_worker_jobs(&active_worker, &queued_jobs);
+    finish_canceled_queued_worker_jobs(&mut queued_jobs, &event_tx);
     if let Some(worker) = active_worker {
         let _ = worker.handle.join();
     }
@@ -771,6 +772,19 @@ fn cancel_all_worker_jobs(active_worker: &Option<ActiveWorker>, queued_jobs: &Ve
     }
     for job in queued_jobs {
         job.cancel_flag.store(true, Ordering::Relaxed);
+    }
+}
+
+fn finish_canceled_queued_worker_jobs(
+    queued_jobs: &mut VecDeque<WorkerJob>,
+    event_tx: &Sender<JobEvent>,
+) {
+    while let Some(job) = queued_jobs.pop_front() {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        let _ = event_tx.send(JobEvent::Finished {
+            id: job.id,
+            result: Err(JobError::canceled()),
+        });
     }
 }
 
@@ -1900,6 +1914,32 @@ mod tests {
         worker
             .join()
             .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn worker_shutdown_finishes_queued_jobs_as_canceled() {
+        let root = make_temp_dir("shutdown-queued-cancel");
+        let mut manager = JobManager::new();
+        let first_job = manager.enqueue(JobRequest::Mkdir {
+            path: root.join("one"),
+        });
+        let second_job = manager.enqueue(JobRequest::Mkdir {
+            path: root.join("two"),
+        });
+        let mut queued_jobs = VecDeque::from([first_job, second_job]);
+        let (event_tx, event_rx) = mpsc::channel();
+
+        finish_canceled_queued_worker_jobs(&mut queued_jobs, &event_tx);
+        drop(event_tx);
+
+        assert!(queued_jobs.is_empty(), "queued jobs should be drained");
+        for event in event_rx {
+            manager.handle_event(&event);
+        }
+
+        assert_eq!(manager.status_counts().canceled, 2);
+        assert_eq!(manager.status_counts().queued, 0);
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
