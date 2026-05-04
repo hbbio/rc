@@ -865,22 +865,13 @@ fn copy_path(
     }
 
     if metadata.is_dir() {
+        validate_directory_destination_not_inside_source(source, destination, "copy")?;
+
         if destination.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(
                     "destination already exists: {}",
-                    destination.to_string_lossy()
-                ),
-            ));
-        }
-
-        if destination.starts_with(source) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "cannot copy directory into itself: {} -> {}",
-                    source.to_string_lossy(),
                     destination.to_string_lossy()
                 ),
             ));
@@ -1082,17 +1073,35 @@ fn renamed_destination(destination: &Path) -> PathBuf {
 
 fn validate_move_destination(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
-    if metadata.is_dir() && destination.starts_with(source) {
+    if metadata.is_dir() {
+        validate_directory_destination_not_inside_source(source, destination, "move")?;
+    }
+    Ok(())
+}
+
+fn validate_directory_destination_not_inside_source(
+    source: &Path,
+    destination: &Path,
+    operation: &str,
+) -> io::Result<()> {
+    if destination_parent_is_inside_source(source, destination)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "cannot move directory into itself: {} -> {}",
+                "cannot {operation} directory into itself: {} -> {}",
                 source.to_string_lossy(),
                 destination.to_string_lossy()
             ),
         ));
     }
     Ok(())
+}
+
+fn destination_parent_is_inside_source(source: &Path, destination: &Path) -> io::Result<bool> {
+    let source = fs::canonicalize(source)?;
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let destination_parent = fs::canonicalize(destination_parent)?;
+    Ok(destination_parent == source || destination_parent.starts_with(&source))
 }
 
 fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
@@ -1915,6 +1924,56 @@ mod tests {
         worker
             .join()
             .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_rejects_destination_inside_source_via_symlink_alias() {
+        let root = make_temp_dir("copy-self-symlink");
+        let source_root = root.join("source");
+        let source_alias = root.join("source-alias");
+        fs::create_dir_all(source_root.join("child")).expect("source tree should exist");
+        fs::write(source_root.join("child/data.txt"), "x").expect("source file should exist");
+        std::os::unix::fs::symlink(&source_root, &source_alias)
+            .expect("source symlink should be creatable");
+
+        let (event_tx, _event_rx) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals { items: 2, bytes: 1 },
+            &event_tx,
+            cancel_flag,
+        );
+        let error = copy_path(
+            &source_root,
+            &source_alias.join("nested-copy"),
+            &mut progress,
+        )
+        .expect_err("copy through source symlink alias should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot copy directory into itself"),
+            "copy should fail with self-copy validation"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn move_validation_allows_normalized_sibling_destination_path() {
+        let root = make_temp_dir("move-sibling-dotdot");
+        let source_root = root.join("source");
+        fs::create_dir_all(&source_root).expect("source tree should exist");
+        let sibling_destination = source_root.join("..").join("moved");
+
+        validate_move_destination(&source_root, &sibling_destination)
+            .expect("normalized sibling destination should not be treated as self-move");
+
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 
