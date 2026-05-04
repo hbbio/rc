@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use filetime::FileTime;
 #[cfg(unix)]
@@ -642,28 +644,134 @@ impl FsBackend for LocalFsBackend {
 }
 
 pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent>) {
-    let fs_backend = LocalFsBackend;
+    let mut queued_jobs = VecDeque::new();
     let mut queued_cancellations = HashSet::new();
-    while let Ok(command) = command_rx.recv() {
+    let mut active_worker: Option<ActiveWorker> = None;
+
+    loop {
+        reap_finished_worker(&mut active_worker);
+        if active_worker.is_none()
+            && let Some(mut job) = queued_jobs.pop_front()
+        {
+            apply_queued_cancellation(&mut job, &mut queued_cancellations);
+            active_worker = Some(spawn_active_worker(job, event_tx.clone()));
+            continue;
+        }
+
+        let command = if active_worker.is_some() {
+            match command_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(command) => command,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match command_rx.recv() {
+                Ok(command) => command,
+                Err(_) => break,
+            }
+        };
+
         match command {
             WorkerCommand::Run(job) => {
-                let job = *job;
-                if queued_cancellations.remove(&job.id) {
-                    job.cancel_flag.store(true, Ordering::Relaxed);
+                let mut job = *job;
+                apply_queued_cancellation(&mut job, &mut queued_cancellations);
+                if active_worker.is_some() {
+                    queued_jobs.push_back(job);
+                } else {
+                    active_worker = Some(spawn_active_worker(job, event_tx.clone()));
                 }
-                run_single_job(job, &event_tx, &fs_backend);
             }
             WorkerCommand::Cancel(id) => {
-                queued_cancellations.insert(id);
+                if !cancel_active_or_queued_worker(id, &active_worker, &queued_jobs) {
+                    queued_cancellations.insert(id);
+                }
             }
-            WorkerCommand::Shutdown => break,
+            WorkerCommand::Shutdown => {
+                cancel_all_worker_jobs(&active_worker, &queued_jobs);
+                break;
+            }
         }
+    }
+
+    cancel_all_worker_jobs(&active_worker, &queued_jobs);
+    if let Some(worker) = active_worker {
+        let _ = worker.handle.join();
     }
 }
 
 pub fn execute_worker_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     let fs_backend = LocalFsBackend;
     run_single_job(job, event_tx, &fs_backend);
+}
+
+struct ActiveWorker {
+    id: JobId,
+    cancel_flag: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+fn spawn_active_worker(job: WorkerJob, event_tx: Sender<JobEvent>) -> ActiveWorker {
+    let id = job.id;
+    let cancel_flag = Arc::clone(&job.cancel_flag);
+    let handle = thread::spawn(move || {
+        let fs_backend = LocalFsBackend;
+        run_single_job(job, &event_tx, &fs_backend);
+    });
+    ActiveWorker {
+        id,
+        cancel_flag,
+        handle,
+    }
+}
+
+fn reap_finished_worker(active_worker: &mut Option<ActiveWorker>) {
+    let is_finished = active_worker
+        .as_ref()
+        .is_some_and(|worker| worker.handle.is_finished());
+    if is_finished && let Some(worker) = active_worker.take() {
+        let _ = worker.handle.join();
+    }
+}
+
+fn apply_queued_cancellation(
+    job: &mut WorkerJob,
+    queued_cancellations: &mut HashSet<JobId>,
+) -> bool {
+    if queued_cancellations.remove(&job.id) {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+fn cancel_active_or_queued_worker(
+    id: JobId,
+    active_worker: &Option<ActiveWorker>,
+    queued_jobs: &VecDeque<WorkerJob>,
+) -> bool {
+    let mut canceled = false;
+    if let Some(worker) = active_worker
+        && worker.id == id
+    {
+        worker.cancel_flag.store(true, Ordering::Relaxed);
+        canceled = true;
+    }
+    for job in queued_jobs {
+        if job.id == id {
+            job.cancel_flag.store(true, Ordering::Relaxed);
+            canceled = true;
+        }
+    }
+    canceled
+}
+
+fn cancel_all_worker_jobs(active_worker: &Option<ActiveWorker>, queued_jobs: &VecDeque<WorkerJob>) {
+    if let Some(worker) = active_worker {
+        worker.cancel_flag.store(true, Ordering::Relaxed);
+    }
+    for job in queued_jobs {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -1740,6 +1848,68 @@ mod tests {
         command_tx
             .send(WorkerCommand::Run(Box::new(copy_job)))
             .expect("copy command should send");
+
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => assert!(error.is_canceled(), "finished error should be cancellation"),
+            _ => panic!("job should finish with a cancellation error"),
+        }
+        assert_eq!(manager.status_counts().canceled, 1);
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn worker_cancel_command_cancels_active_job() {
+        let root = make_temp_dir("active-cancel-command");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let payload = vec![9_u8; 32 * 1024 * 1024];
+        let source_file = source_dir.join("blob.bin");
+        fs::write(&source_file, payload).expect("source payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
+        });
+        let copy_id = copy_job.id;
+        command_tx
+            .send(WorkerCommand::Run(Box::new(copy_job)))
+            .expect("copy command should send");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker should emit a start event");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Started { id } if id == copy_id => {
+                    command_tx
+                        .send(WorkerCommand::Cancel(copy_id))
+                        .expect("cancel command should send");
+                    break;
+                }
+                JobEvent::Finished { .. } => panic!("copy finished before active cancel was sent"),
+                _ => {}
+            }
+        }
 
         let finished = recv_until_finished(&event_rx, &mut manager);
         match finished {
