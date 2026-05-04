@@ -1439,9 +1439,14 @@ fn render_menu_overlay(frame: &mut Frame, state: &AppState, menu: &MenuState, sk
                 return ListItem::new(line);
             }
 
+            let entry_style = if entry.is_implemented() {
+                skin.style("menu", "_default_")
+            } else {
+                skin.style("menu", "menuinactive")
+            };
             let shortcut = state.menu_entry_shortcut_label(entry);
             if shortcut.is_empty() {
-                return ListItem::new(entry.label);
+                return ListItem::new(entry.label).style(entry_style);
             }
 
             let label_width = entry.label.chars().count();
@@ -1455,11 +1460,12 @@ fn render_menu_overlay(frame: &mut Frame, state: &AppState, menu: &MenuState, sk
                 " ".repeat(spacing),
                 shortcut
             ))
+            .style(entry_style)
         })
         .collect();
     let list = List::new(items)
         .style(skin.style("menu", "_default_"))
-        .highlight_style(skin.style("dialog", "dfocus"))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol(" ");
     let mut state = ListState::default();
     if !menu.active_entries().is_empty() {
@@ -1793,6 +1799,7 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::{Buffer, Cell};
     use rc_core::{
         AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
         execute_worker_job, refresh_panel_event,
@@ -1802,13 +1809,17 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
+    fn render_to_buffer(state: &AppState, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
         terminal
             .draw(|frame| render(frame, state))
             .expect("render should succeed");
-        let buffer = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
+        let buffer = render_to_buffer(state, width, height);
         let area = buffer.area;
         let mut out = String::new();
         for y in 0..area.height {
@@ -1818,6 +1829,20 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn first_cell_for_text<'a>(buffer: &'a Buffer, text: &str) -> Option<&'a Cell> {
+        let area = buffer.area;
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(column) = row.find(text) {
+                return Some(&buffer[(column as u16, y)]);
+            }
+        }
+        None
     }
 
     fn drain_background(state: &mut AppState) {
@@ -2185,6 +2210,39 @@ mod tests {
         assert!(
             frame.contains("M-c"),
             "meta-key shortcuts should keep trailing characters\n{frame}"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_styles_unimplemented_menu_entries_as_inactive() {
+        let root = temp_root("menu-inactive");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        app.apply(AppCommand::OpenMenuAt(1))
+            .expect("menu route should open");
+
+        let buffer = render_to_buffer(&app, 120, 40);
+        let skin = current_skin();
+        let inactive_style = skin.style("menu", "menuinactive");
+        let disabled_cell = first_cell_for_text(&buffer, "View file...")
+            .expect("unimplemented menu entry should render");
+        assert_eq!(
+            disabled_cell.fg,
+            inactive_style.fg.unwrap_or(Color::Reset),
+            "unimplemented menu label should use inactive foreground"
+        );
+        assert_eq!(
+            disabled_cell.bg,
+            inactive_style.bg.unwrap_or(Color::Reset),
+            "unimplemented menu label should use inactive background"
+        );
+
+        let enabled_cell =
+            first_cell_for_text(&buffer, "Copy").expect("implemented menu entry should render");
+        assert_ne!(
+            disabled_cell.fg, enabled_cell.fg,
+            "implemented and unimplemented menu entries should be visually distinct"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

@@ -358,6 +358,10 @@ pub struct MenuEntry {
 }
 
 impl MenuEntry {
+    pub fn is_implemented(&self) -> bool {
+        !matches!(self.command, AppCommand::MenuNotImplemented(_))
+    }
+
     const fn action(label: &'static str, command: AppCommand) -> Self {
         Self {
             label,
