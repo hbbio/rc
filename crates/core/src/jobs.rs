@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -1208,8 +1208,44 @@ fn validate_directory_destination_not_inside_source(
 fn destination_parent_is_inside_source(source: &Path, destination: &Path) -> io::Result<bool> {
     let source = fs::canonicalize(source)?;
     let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    let destination_parent = fs::canonicalize(destination_parent)?;
+    let destination_parent = canonicalize_allowing_missing_tail(destination_parent)?;
     Ok(destination_parent == source || destination_parent.starts_with(&source))
+}
+
+fn canonicalize_allowing_missing_tail(path: &Path) -> io::Result<PathBuf> {
+    for ancestor in path.ancestors() {
+        let candidate = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match fs::canonicalize(candidate) {
+            Ok(mut resolved) => {
+                let tail = path
+                    .strip_prefix(ancestor)
+                    .unwrap_or_else(|_| Path::new(""));
+                push_normalized_tail(&mut resolved, tail);
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    fs::canonicalize(path)
+}
+
+fn push_normalized_tail(base: &mut PathBuf, tail: &Path) {
+    for component in tail.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                base.pop();
+            }
+            Component::Normal(part) => base.push(part),
+            Component::Prefix(_) | Component::RootDir => base.push(component.as_os_str()),
+        }
+    }
 }
 
 fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
@@ -2122,6 +2158,79 @@ mod tests {
             &mut progress,
         )
         .expect_err("copy through source symlink alias should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot copy directory into itself"),
+            "copy should fail with self-copy validation"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_directory_allows_missing_destination_root() {
+        let root = make_temp_dir("copy-directory-missing-root");
+        let source_root = root.join("source");
+        let destination_root = root.join("new-destination");
+        fs::create_dir_all(&source_root).expect("source tree should exist");
+        fs::write(source_root.join("data.txt"), "payload").expect("source file should exist");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_root.clone()],
+            destination_dir: destination_root.clone(),
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(Box::new(copy_job)))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "directory copy should create missing destination roots"
+        );
+
+        let copied_payload = fs::read_to_string(destination_root.join("source/data.txt"))
+            .expect("copied file should be readable");
+        assert_eq!(copied_payload, "payload");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_directory_rejects_missing_destination_parent_inside_source() {
+        let root = make_temp_dir("copy-directory-missing-parent-inside-source");
+        let source_root = root.join("source");
+        fs::create_dir_all(&source_root).expect("source tree should exist");
+        fs::write(source_root.join("data.txt"), "payload").expect("source file should exist");
+
+        let (event_tx, _event_rx) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals { items: 2, bytes: 7 },
+            &event_tx,
+            cancel_flag,
+        );
+        let error = copy_path(
+            &source_root,
+            &source_root.join("missing-parent/source"),
+            &mut progress,
+        )
+        .expect_err("copy into missing parent below source should be rejected");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
