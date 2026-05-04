@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use crate::OverwritePolicy;
+use crate::{OverwritePolicy, SortField};
 
 pub const DEFAULT_PANELIZE_PRESETS: &[&str] = &[
     "find . -type f",
@@ -36,13 +36,6 @@ impl SettingsCategory {
             Self::VirtualFs => "Virtual FS",
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SettingsSortField {
-    Name,
-    Size,
-    Modified,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -128,7 +121,7 @@ impl Default for LayoutSettings {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PanelOptionsSettings {
     pub show_hidden_files: bool,
-    pub sort_field: SettingsSortField,
+    pub sort_field: SortField,
     pub sort_reverse: bool,
 }
 
@@ -136,7 +129,7 @@ impl Default for PanelOptionsSettings {
     fn default() -> Self {
         Self {
             show_hidden_files: true,
-            sort_field: SettingsSortField::Name,
+            sort_field: SortField::Name,
             sort_reverse: false,
         }
     }

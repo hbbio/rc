@@ -59,8 +59,7 @@ pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutp
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
-    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, SettingsSortField,
-    VirtualFsSettings,
+    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, VirtualFsSettings,
 };
 pub use slo::{FOUNDATION_SLO, SloBudgets};
 #[cfg(test)]
@@ -545,14 +544,6 @@ impl SortField {
             Self::Name => "name",
             Self::Size => "size",
             Self::Modified => "mtime",
-        }
-    }
-
-    fn from_settings(field: SettingsSortField) -> Self {
-        match field {
-            SettingsSortField::Name => Self::Name,
-            SettingsSortField::Size => Self::Size,
-            SettingsSortField::Modified => Self::Modified,
         }
     }
 }

@@ -124,7 +124,7 @@ impl AppState {
 
     pub(crate) fn default_panel_sort_mode(&self) -> SortMode {
         SortMode {
-            field: SortField::from_settings(self.settings.panel_options.sort_field),
+            field: self.settings.panel_options.sort_field,
             reverse: self.settings.panel_options.sort_reverse,
         }
     }

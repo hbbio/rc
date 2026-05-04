@@ -1,4 +1,4 @@
-use crate::{OverwritePolicy, Settings, SettingsSortField};
+use crate::{OverwritePolicy, Settings, SortField};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -606,20 +606,20 @@ fn overwrite_policy_label(policy: OverwritePolicy) -> &'static str {
     }
 }
 
-fn parse_sort_field(value: &str) -> Option<SettingsSortField> {
+fn parse_sort_field(value: &str) -> Option<SortField> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "name" => Some(SettingsSortField::Name),
-        "size" => Some(SettingsSortField::Size),
-        "modified" | "mtime" => Some(SettingsSortField::Modified),
+        "name" => Some(SortField::Name),
+        "size" => Some(SortField::Size),
+        "modified" | "mtime" => Some(SortField::Modified),
         _ => None,
     }
 }
 
-fn sort_field_label(field: SettingsSortField) -> &'static str {
+fn sort_field_label(field: SortField) -> &'static str {
     match field {
-        SettingsSortField::Name => "name",
-        SettingsSortField::Size => "size",
-        SettingsSortField::Modified => "modified",
+        SortField::Name => "name",
+        SortField::Size => "size",
+        SortField::Modified => "modified",
     }
 }
 
@@ -677,7 +677,7 @@ skin=default
         settings.configuration.panelize_presets =
             vec![String::from("find . -type f"), String::from("git ls-files")];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
-        settings.panel_options.sort_field = SettingsSortField::Modified;
+        settings.panel_options.sort_field = SortField::Modified;
         settings.layout.status_message_timeout_seconds = 42;
 
         let source = render_rc_settings_ini(&settings);
@@ -693,7 +693,7 @@ skin=default
             parsed.configuration.default_overwrite_policy,
             OverwritePolicy::Rename
         );
-        assert_eq!(parsed.panel_options.sort_field, SettingsSortField::Modified);
+        assert_eq!(parsed.panel_options.sort_field, SortField::Modified);
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
     }
 

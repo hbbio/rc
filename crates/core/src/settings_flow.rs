@@ -141,11 +141,7 @@ impl AppState {
                 ),
                 SettingsEntry::new(
                     "Default sort field",
-                    match self.settings.panel_options.sort_field {
-                        SettingsSortField::Name => "name",
-                        SettingsSortField::Size => "size",
-                        SettingsSortField::Modified => "mtime",
-                    },
+                    self.settings.panel_options.sort_field.label(),
                     SettingsEntryAction::CyclePanelSortField,
                 ),
                 SettingsEntry::new(
@@ -368,7 +364,7 @@ impl AppState {
             }
             SettingsEntryAction::CyclePanelSortField => {
                 self.settings.panel_options.sort_field =
-                    next_settings_sort_field(self.settings.panel_options.sort_field);
+                    self.settings.panel_options.sort_field.next();
                 let sort_mode = self.default_panel_sort_mode();
                 for panel in &mut self.panels {
                     panel.sort_mode = sort_mode;
@@ -486,14 +482,6 @@ fn next_overwrite_policy(policy: OverwritePolicy) -> OverwritePolicy {
         OverwritePolicy::Overwrite => OverwritePolicy::Skip,
         OverwritePolicy::Skip => OverwritePolicy::Rename,
         OverwritePolicy::Rename => OverwritePolicy::Overwrite,
-    }
-}
-
-fn next_settings_sort_field(field: SettingsSortField) -> SettingsSortField {
-    match field {
-        SettingsSortField::Name => SettingsSortField::Size,
-        SettingsSortField::Size => SettingsSortField::Modified,
-        SettingsSortField::Modified => SettingsSortField::Name,
     }
 }
 
