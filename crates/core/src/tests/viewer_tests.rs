@@ -404,6 +404,32 @@ fn viewer_state_uses_preview_mode_for_large_text_files() {
 }
 
 #[test]
+fn viewer_state_reads_content_when_reported_size_is_zero() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-viewer-zero-reported-size-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let file_path = root.join("virtual-ish.txt");
+    fs::write(&file_path, "virtual content\n").expect("fixture should be writable");
+
+    let viewer = ViewerState::open_with_reported_size_for_test(file_path, 0)
+        .expect("viewer fixture should open even when metadata under-reports size");
+    assert_eq!(
+        viewer.content(),
+        "virtual content\n",
+        "viewer should not derive the read cap solely from metadata length"
+    );
+    assert!(
+        !viewer.text_is_preview(),
+        "short content should not be marked as preview just because metadata under-reported"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn viewer_state_preview_fingerprint_includes_total_size() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

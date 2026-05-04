@@ -36,19 +36,27 @@ pub struct ViewerState {
 
 impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let path_fingerprint = fingerprint(&path);
         let total_size = fs::metadata(&path)?.len();
+        Self::open_with_reported_size(path, total_size)
+    }
+
+    fn open_with_reported_size(path: PathBuf, total_size: u64) -> io::Result<Self> {
+        let path_fingerprint = fingerprint(&path);
         let text_limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let read_limit = total_size.min(text_limit as u64) as usize;
-        let bytes = read_file_prefix(&path, read_limit)?;
-        let text_is_preview = total_size > bytes.len() as u64;
+        let (bytes, hit_read_limit) = read_file_prefix(&path, text_limit)?;
+        let observed_size = if hit_read_limit {
+            total_size.max(bytes.len().saturating_add(1) as u64)
+        } else {
+            total_size.max(bytes.len() as u64)
+        };
+        let text_is_preview = observed_size > bytes.len() as u64;
         let content_bytes = bytes.as_slice();
         let content = String::from_utf8_lossy(content_bytes).into_owned();
         let hex_mode = should_default_to_hex_mode(&bytes) || text_is_preview;
         let content_fingerprint = if text_is_preview {
-            fingerprint(&(total_size, content.as_str()))
+            fingerprint(&(observed_size, content.as_str()))
         } else {
             fingerprint(&content)
         };
@@ -69,6 +77,14 @@ impl ViewerState {
             last_search_match_offset: None,
             last_search_direction: ViewerSearchDirection::Forward,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_reported_size_for_test(
+        path: PathBuf,
+        total_size: u64,
+    ) -> io::Result<Self> {
+        Self::open_with_reported_size(path, total_size)
     }
 
     pub fn line_count(&self) -> usize {
@@ -235,13 +251,18 @@ impl ViewerState {
     }
 }
 
-fn read_file_prefix(path: &Path, byte_limit: usize) -> io::Result<Vec<u8>> {
+fn read_file_prefix(path: &Path, byte_limit: usize) -> io::Result<(Vec<u8>, bool)> {
     let mut file = fs::File::open(path)?;
+    let probe_limit = byte_limit.saturating_add(1);
     let mut bytes = Vec::with_capacity(byte_limit);
     file.by_ref()
-        .take(byte_limit as u64)
+        .take(probe_limit as u64)
         .read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let hit_read_limit = bytes.len() > byte_limit;
+    if hit_read_limit {
+        bytes.truncate(byte_limit);
+    }
+    Ok((bytes, hit_read_limit))
 }
 
 fn compute_line_offsets(content: &str) -> Vec<usize> {
