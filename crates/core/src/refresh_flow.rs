@@ -11,7 +11,7 @@ pub(crate) struct PanelRefreshWorkflow {
 #[derive(Debug, Default)]
 pub(crate) struct PanelRefreshPostWorkflow {
     focus_target: Option<(ActivePanel, PathBuf)>,
-    panelize_revert: Option<(ActivePanel, PanelListingSource)>,
+    panelize_revert: [Option<PanelState>; 2],
 }
 
 pub(crate) struct PanelRefreshCompletion {
@@ -68,6 +68,13 @@ impl PanelRefreshWorkflow {
         self.job_ids[panel.index()].take()
     }
 
+    fn invalidate_request(&mut self, panel: ActivePanel) -> Option<JobId> {
+        let job_id = self.take_job_id(panel);
+        self.begin_request(panel);
+        self.clear_panel(panel);
+        job_id
+    }
+
     fn clear_panel(&mut self, panel: ActivePanel) {
         let panel_index = panel.index();
         self.job_ids[panel_index] = None;
@@ -111,36 +118,38 @@ impl PanelRefreshPostWorkflow {
         }
     }
 
-    fn schedule_panelize_revert(&mut self, panel: ActivePanel, source: PanelListingSource) {
-        self.panelize_revert = Some((panel, source));
+    fn schedule_panelize_revert(&mut self, panel: ActivePanel, snapshot: PanelState) {
+        self.panelize_revert[panel.index()] = Some(snapshot);
+    }
+
+    fn ensure_panelize_revert(&mut self, panel: ActivePanel, snapshot: PanelState) {
+        let pending = &mut self.panelize_revert[panel.index()];
+        if pending.is_none() {
+            *pending = Some(snapshot);
+        }
     }
 
     fn clear_panelize_revert_for_panel(&mut self, panel: ActivePanel) {
-        if self
-            .panelize_revert
-            .as_ref()
-            .is_some_and(|(pending_panel, _)| *pending_panel == panel)
-        {
-            self.panelize_revert = None;
-        }
+        self.panelize_revert[panel.index()] = None;
     }
 
-    fn take_panelize_revert_source_for_panel(
-        &mut self,
-        panel: ActivePanel,
-    ) -> Option<PanelListingSource> {
-        let (pending_panel, revert_source) = self.panelize_revert.take()?;
-        if pending_panel == panel {
-            return Some(revert_source);
-        }
-        self.panelize_revert = Some((pending_panel, revert_source));
-        None
+    fn has_panelize_revert_for_panel(&self, panel: ActivePanel) -> bool {
+        self.panelize_revert[panel.index()].is_some()
+    }
+
+    fn take_panelize_revert_for_panel(&mut self, panel: ActivePanel) -> Option<PanelState> {
+        self.panelize_revert[panel.index()].take()
     }
 }
 
 impl AppState {
     pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
         let panel_index = panel.index();
+        if self.panels[panel_index].source.is_panelized() {
+            let snapshot = self.panels[panel_index].clone();
+            self.panel_refresh_post
+                .ensure_panelize_revert(panel, snapshot);
+        }
         let request_id = self.panel_refresh.begin_request(panel);
 
         let (cwd, source, sort_mode, show_hidden_files) = {
@@ -231,10 +240,30 @@ impl AppState {
     pub(crate) fn schedule_panelize_revert_for_panel_refresh(
         &mut self,
         panel: ActivePanel,
-        source: PanelListingSource,
+        snapshot: PanelState,
     ) {
         self.panel_refresh_post
-            .schedule_panelize_revert(panel, source);
+            .schedule_panelize_revert(panel, snapshot);
+    }
+
+    pub(crate) fn completed_panelized_result_snapshot(
+        &self,
+        panel: ActivePanel,
+    ) -> Option<PanelizedResultSnapshot> {
+        if self.panel_refresh_post.has_panelize_revert_for_panel(panel) {
+            return None;
+        }
+        PanelizedResultSnapshot::from_panel(&self.panels[panel.index()])
+    }
+
+    pub(crate) fn cancel_and_invalidate_panel_refresh(&mut self, panel: ActivePanel) {
+        if let Some(job_id) = self.panel_refresh.invalidate_request(panel) {
+            let _ = self.request_cancel_for_job(job_id);
+        }
+        self.panel_refresh_post
+            .clear_panelize_revert_for_panel(panel);
+        self.panel_refresh_post.clear_focus_target_for_panel(panel);
+        self.panels[panel.index()].loading = false;
     }
 
     pub(crate) fn handle_panel_entries_chunk(
@@ -333,11 +362,12 @@ impl AppState {
                 }
                 Err(error) => {
                     let is_panelize = source.is_panelized();
-                    if let Some(revert_source) = self
+                    if let Some(mut revert_snapshot) = self
                         .panel_refresh_post
-                        .take_panelize_revert_source_for_panel(panel)
+                        .take_panelize_revert_for_panel(panel)
                     {
-                        panel_state.source = revert_source;
+                        revert_snapshot.loading = false;
+                        *panel_state = revert_snapshot;
                     }
                     if error != PANEL_REFRESH_CANCELED_MESSAGE {
                         if is_panelize {

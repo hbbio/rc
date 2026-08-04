@@ -473,6 +473,94 @@ fn panelize_revert_policy_stays_scoped_to_its_panel() {
 }
 
 #[test]
+fn failed_panelize_refresh_restores_the_complete_previous_panel_state() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-panelize-full-rollback-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let target = root.join("a.txt");
+    fs::write(&target, "a").expect("fixture should be writable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let target_index = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == target)
+        .expect("fixture should be listed");
+    app.active_panel_mut().cursor = target_index;
+    assert!(app.active_panel_mut().toggle_tag_on_cursor());
+    let previous = app.active_panel().clone();
+
+    app.start_panelize_command(String::from("failing command"));
+    let request = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            let JobRequest::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } = job.request
+            else {
+                return None;
+            };
+            Some((panel, cwd, source, sort_mode, request_id))
+        })
+        .expect("panelize refresh should be queued");
+    let (panel, cwd, source, sort_mode, request_id) = request;
+    app.handle_background_event(BackgroundEvent::PanelEntriesChunk {
+        panel,
+        cwd: cwd.clone(),
+        source: source.clone(),
+        sort_mode,
+        request_id,
+        entries: vec![FileEntry::file(
+            String::from("partial.txt"),
+            root.join("partial.txt"),
+            0,
+            None,
+        )],
+    });
+    assert!(
+        app.active_panel()
+            .entries
+            .iter()
+            .any(|entry| entry.path == root.join("partial.txt")),
+        "precondition: a progressive chunk should replace the visible listing"
+    );
+
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        disk_usage: None,
+        result: Err(String::from("command failed after output")),
+    });
+
+    let restored = app.active_panel();
+    assert_eq!(restored.cwd, previous.cwd);
+    assert_eq!(restored.source, previous.source);
+    assert_eq!(restored.entries, previous.entries);
+    assert_eq!(restored.cursor, previous.cursor);
+    assert_eq!(restored.tagged, previous.tagged);
+    assert_eq!(restored.disk_usage, previous.disk_usage);
+    assert!(!restored.loading);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn refresh_dispatch_failure_clears_loading_state() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

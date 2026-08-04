@@ -148,6 +148,195 @@ fn cdup_leaves_panelize_mode_without_changing_directory() {
 
 #[cfg(unix)]
 #[test]
+fn side_panel_menu_restores_external_panelize_results_and_operation_targets() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-restore-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let target = root.join("remembered.txt");
+    fs::write(&target, "remember me").expect("must create panelized file");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_panelize_custom_command(&mut app, "printf 'remembered.txt\\n'");
+    drain_background(&mut app);
+    app.apply(AppCommand::ToggleTag)
+        .expect("panelized result should be taggable");
+
+    app.apply(AppCommand::CdUp)
+        .expect("CdUp should leave panelize mode");
+    drain_background(&mut app);
+    assert!(matches!(
+        app.active_panel().source,
+        PanelListingSource::Directory
+    ));
+
+    app.apply(AppCommand::OpenMenuAt(0))
+        .expect("left panel menu should open");
+    move_menu_selection_to_label(&mut app, "Panelize");
+    app.apply(AppCommand::MenuAccept)
+        .expect("side-panel Panelize should restore results");
+
+    assert_eq!(
+        app.active_panel().panelize_command(),
+        Some("printf 'remembered.txt\\n'")
+    );
+    assert_eq!(
+        app.active_panel().selected_entry().map(|entry| &entry.path),
+        Some(&target),
+        "restoring should preserve the selected result"
+    );
+    assert!(
+        app.active_panel().is_tagged(&target),
+        "restoring should preserve tagged results"
+    );
+    assert!(
+        app.take_pending_worker_commands().is_empty(),
+        "history restoration must not rerun the external command"
+    );
+
+    app.apply(AppCommand::Copy)
+        .expect("copy should open for a restored result");
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("copy should open a destination dialog");
+    };
+    match dialog.action() {
+        Some(PendingDialogAction::TransferDestination { sources, .. }) => {
+            assert_eq!(sources, &vec![target]);
+        }
+        other => panic!("expected copy destination action, got {other:?}"),
+    }
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn restoring_panelize_history_invalidates_an_older_directory_refresh() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-restore-stale-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let target = root.join("remembered.txt");
+    fs::write(&target, "remember me").expect("must create panelized file");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_panelize_custom_command(&mut app, "printf 'remembered.txt\\n'");
+    drain_background(&mut app);
+    app.apply(AppCommand::CdUp)
+        .expect("CdUp should queue a directory refresh");
+
+    let stale_request = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            let JobRequest::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } = job.request
+            else {
+                return None;
+            };
+            Some((panel, cwd, source, sort_mode, request_id))
+        })
+        .expect("leaving panelize should queue a directory refresh");
+
+    app.apply(AppCommand::RestorePanelizedResults)
+        .expect("history should restore synchronously");
+    let (panel, cwd, source, sort_mode, request_id) = stale_request;
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        disk_usage: None,
+        result: Ok(vec![FileEntry::file(
+            String::from("stale.txt"),
+            root.join("stale.txt"),
+            0,
+            None,
+        )]),
+    });
+
+    assert!(app.active_panel().is_panelized());
+    assert_eq!(
+        app.active_panel()
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        vec![target],
+        "a stale refresh must not replace restored history"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn panelize_history_is_independent_for_each_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-per-panel-history-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    fs::write(root.join("left.txt"), "left").expect("must create left fixture");
+    fs::write(root.join("right.txt"), "right").expect("must create right fixture");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_panelize_custom_command(&mut app, "printf 'left.txt\\n'");
+    drain_background(&mut app);
+    app.apply(AppCommand::CdUp)
+        .expect("left panel should leave panelize mode");
+    drain_background(&mut app);
+
+    app.toggle_active_panel();
+    submit_panelize_custom_command(&mut app, "printf 'right.txt\\n'");
+    drain_background(&mut app);
+    app.apply(AppCommand::CdUp)
+        .expect("right panel should leave panelize mode");
+    drain_background(&mut app);
+
+    app.apply(AppCommand::RestorePanelizedResults)
+        .expect("right history should restore");
+    assert_eq!(
+        app.active_panel()
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        vec![root.join("right.txt")]
+    );
+
+    app.toggle_active_panel();
+    app.apply(AppCommand::RestorePanelizedResults)
+        .expect("left history should restore");
+    assert_eq!(
+        app.active_panel()
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        vec![root.join("left.txt")]
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
 fn panelize_failure_preserves_previous_directory_listing() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -160,6 +160,24 @@ fn find_results_panelize_creates_virtual_panel_and_preserves_resume() {
         "leaving panelize mode should keep current directory unchanged"
     );
 
+    app.apply(AppCommand::RestorePanelizedResults)
+        .expect("find-panelized history should restore");
+    assert!(matches!(
+        app.active_panel().source,
+        PanelListingSource::FindResults { .. }
+    ));
+    assert!(
+        app.active_panel()
+            .entries
+            .iter()
+            .any(|entry| entry.path == target),
+        "restored find-panelized history should retain prior matches"
+    );
+    assert!(
+        app.take_pending_worker_commands().is_empty(),
+        "restoring find-panelized history should not start a refresh"
+    );
+
     app.apply(AppCommand::OpenFindDialog)
         .expect("find dialog should resume previous results");
     assert_eq!(app.key_context(), KeyContext::FindResults);

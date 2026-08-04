@@ -1,6 +1,57 @@
 use crate::*;
 
 impl AppState {
+    pub(crate) fn restore_panelized_results(&mut self) {
+        let panel_id = self.active_panel;
+        let panel_index = panel_id.index();
+        if self.panels[panel_index].source.is_panelized() {
+            self.set_status("Panelized results are already active");
+            return;
+        }
+        let Some(snapshot) = self.panelized_result_history[panel_index].clone() else {
+            self.set_status("No panelized results to restore for this panel");
+            return;
+        };
+
+        self.cancel_and_invalidate_panel_refresh(panel_id);
+        let PanelizedResultSnapshot {
+            cwd,
+            source,
+            mut entries,
+            cursor,
+            tagged,
+            disk_usage,
+        } = snapshot;
+        let source_label = match source {
+            PanelListingSource::Panelize { .. } => "external",
+            PanelListingSource::FindResults { .. } => "find",
+            PanelListingSource::Directory => {
+                self.set_status("Stored panelized results are invalid");
+                return;
+            }
+        };
+        let selected_path = entries.get(cursor).map(|entry| entry.path.clone());
+        let sort_mode = self.panels[panel_index].sort_mode;
+        sort_file_entries(&mut entries, sort_mode);
+        let restored_cursor = selected_path
+            .as_ref()
+            .and_then(|path| entries.iter().position(|entry| entry.path == *path))
+            .unwrap_or_else(|| cursor.min(entries.len().saturating_sub(1)));
+        let result_count = entries.len();
+
+        let panel = &mut self.panels[panel_index];
+        panel.cwd = cwd;
+        panel.source = source;
+        panel.entries = entries;
+        panel.cursor = restored_cursor;
+        panel.tagged = tagged;
+        panel.loading = false;
+        panel.disk_usage = disk_usage;
+        self.set_status(format!(
+            "Restored {result_count} {source_label} panelized result(s)"
+        ));
+    }
+
     pub(crate) fn open_panelize_dialog(&mut self) {
         let initial_command = self
             .active_panel()
@@ -321,7 +372,7 @@ impl AppState {
 
     pub(crate) fn start_panelize_command(&mut self, command: String) {
         let active_panel = self.active_panel;
-        let previous_source = self.active_panel().source.clone();
+        let previous_panel = self.active_panel().clone();
         {
             let panel = self.active_panel_mut();
             panel.source = PanelListingSource::Panelize { command };
@@ -329,7 +380,7 @@ impl AppState {
             panel.tagged.clear();
             panel.loading = true;
         }
-        self.schedule_panelize_revert_for_panel_refresh(active_panel, previous_source);
+        self.schedule_panelize_revert_for_panel_refresh(active_panel, previous_panel);
         self.queue_panel_refresh(active_panel);
         self.set_status("Panelize running...");
     }

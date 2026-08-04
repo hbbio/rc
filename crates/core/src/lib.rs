@@ -108,6 +108,7 @@ pub enum AppCommand {
     OpenHotlist,
     CloseHotlist,
     OpenPanelizeDialog,
+    RestorePanelizedResults,
     PanelizePresetAdd,
     PanelizePresetEdit,
     PanelizePresetRemove,
@@ -280,6 +281,7 @@ impl AppCommand {
             | Self::Move
             | Self::Delete
             | Self::CancelJob
+            | Self::RestorePanelizedResults
             | Self::OpenEntry
             | Self::EditEntry
             | Self::CdUp
@@ -436,7 +438,7 @@ const SIDE_MENU_ENTRIES: [MenuEntry; 16] = [
     MenuEntry::stub("FTP link...", ""),
     MenuEntry::stub("Shell link...", ""),
     MenuEntry::stub("SFTP link...", ""),
-    MenuEntry::action("Panelize", AppCommand::OpenPanelizeDialog),
+    MenuEntry::action("Panelize", AppCommand::RestorePanelizedResults),
     MenuEntry::separator(),
     MenuEntry::action_with_shortcut("Rescan", "C-r", AppCommand::Reread),
 ];
@@ -715,6 +717,29 @@ pub struct DiskUsageSummary {
 impl PanelListingSource {
     fn is_panelized(&self) -> bool {
         !matches!(self, Self::Directory)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PanelizedResultSnapshot {
+    cwd: PathBuf,
+    source: PanelListingSource,
+    entries: Vec<FileEntry>,
+    cursor: usize,
+    tagged: HashSet<PathBuf>,
+    disk_usage: Option<DiskUsageSummary>,
+}
+
+impl PanelizedResultSnapshot {
+    fn from_panel(panel: &PanelState) -> Option<Self> {
+        (panel.source.is_panelized() && !panel.loading).then(|| Self {
+            cwd: panel.cwd.clone(),
+            source: panel.source.clone(),
+            entries: panel.entries.clone(),
+            cursor: panel.cursor,
+            tagged: panel.tagged.clone(),
+            disk_usage: panel.disk_usage,
+        })
     }
 }
 
@@ -1534,6 +1559,7 @@ pub struct AppState {
     pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
+    panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
     panel_refresh: PanelRefreshWorkflow,
     panel_refresh_post: PanelRefreshPostWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,

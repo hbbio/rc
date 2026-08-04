@@ -31,6 +31,7 @@ impl AppState {
             pending_find_tree_picker: None,
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
+            panelized_result_history: [None, None],
             panel_refresh: PanelRefreshWorkflow::default(),
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             find_pause_flags: HashMap::new(),
@@ -170,15 +171,33 @@ impl AppState {
     }
 
     pub fn open_selected_directory(&mut self) -> bool {
-        self.active_panel_mut().open_selected_directory()
+        let panel = self.active_panel;
+        let snapshot = self.completed_panelized_result_snapshot(panel);
+        let opened = self.active_panel_mut().open_selected_directory();
+        if opened && let Some(snapshot) = snapshot {
+            self.panelized_result_history[panel.index()] = Some(snapshot);
+        }
+        opened
     }
 
     pub fn go_parent_directory(&mut self) -> bool {
-        self.active_panel_mut().go_parent()
+        let panel = self.active_panel;
+        let snapshot = self.completed_panelized_result_snapshot(panel);
+        let opened = self.active_panel_mut().go_parent();
+        if opened && let Some(snapshot) = snapshot {
+            self.panelized_result_history[panel.index()] = Some(snapshot);
+        }
+        opened
     }
 
     pub fn exit_panelize_mode(&mut self) -> bool {
-        self.active_panel_mut().exit_panelize()
+        let panel = self.active_panel;
+        let snapshot = self.completed_panelized_result_snapshot(panel);
+        let exited = self.active_panel_mut().exit_panelize();
+        if exited && let Some(snapshot) = snapshot {
+            self.panelized_result_history[panel.index()] = Some(snapshot);
+        }
+        exited
     }
 
     pub(crate) fn open_selected_file_in_editor(&mut self) -> EditSelectionResult {
