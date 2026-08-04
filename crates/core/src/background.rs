@@ -1,21 +1,18 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::thread;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
 
 use crate::{
-    ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JOB_CANCELED_MESSAGE, JobId,
-    PanelListingSource, SortMode, TreeBuildResult, ViewerState, build_tree_entries,
-    ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
-    read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
+    ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JobId, PanelListingSource, SortMode,
+    TreeBuildResult, ViewerState, build_tree_entries, ensure_panel_refresh_not_canceled,
+    read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
+    sort_file_entries,
 };
 
 #[cfg(unix)]
 use nix::sys::statvfs::statvfs;
 
-const FIND_EVENT_CHUNK_SIZE: usize = 64;
 const PANEL_EVENT_CHUNK_SIZE: usize = 96;
 
 #[derive(Clone, Debug)]
@@ -222,174 +219,6 @@ where
         entries.insert(0, FileEntry::parent(parent.to_path_buf()));
     }
     Ok(entries)
-}
-
-pub fn run_find_entries<F>(
-    base_dir: &Path,
-    query: &str,
-    max_results: usize,
-    cancel_flag: &AtomicBool,
-    pause_flag: &AtomicBool,
-    emit_chunk: F,
-) -> Result<(), String>
-where
-    F: FnMut(Vec<FindResultEntry>) -> bool,
-{
-    stream_find_entries(
-        base_dir,
-        query,
-        max_results,
-        cancel_flag,
-        pause_flag,
-        FIND_EVENT_CHUNK_SIZE,
-        emit_chunk,
-    )
-}
-
-pub fn stream_find_entries<F>(
-    base_dir: &Path,
-    query: &str,
-    max_results: usize,
-    cancel_flag: &AtomicBool,
-    pause_flag: &AtomicBool,
-    chunk_size: usize,
-    mut emit_chunk: F,
-) -> Result<(), String>
-where
-    F: FnMut(Vec<FindResultEntry>) -> bool,
-{
-    if max_results == 0 {
-        return Ok(());
-    }
-
-    let normalized_query = query.trim().to_lowercase();
-    if normalized_query.is_empty() {
-        return Ok(());
-    }
-
-    let wildcard_query = normalized_query.contains('*') || normalized_query.contains('?');
-    let chunk_size = chunk_size.max(1);
-    let mut emitted = Vec::new();
-    let mut matched = 0usize;
-    let mut stack = vec![base_dir.to_path_buf()];
-
-    while let Some(dir) = stack.pop() {
-        wait_for_find_resume(cancel_flag, pause_flag)?;
-
-        let read_dir = match fs::read_dir(&dir) {
-            Ok(read_dir) => read_dir,
-            Err(_) => continue,
-        };
-        let mut child_dirs = Vec::new();
-
-        for entry in read_dir.flatten() {
-            wait_for_find_resume(cancel_flag, pause_flag)?;
-
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
-            let is_dir =
-                file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
-
-            if query_matches_entry(&name, &normalized_query, wildcard_query) {
-                emitted.push(FindResultEntry {
-                    path: path.clone(),
-                    is_dir,
-                });
-                matched = matched.saturating_add(1);
-
-                if emitted.len() >= chunk_size && !emit_chunk(std::mem::take(&mut emitted)) {
-                    return Err(String::from("background event channel disconnected"));
-                }
-
-                if matched >= max_results {
-                    if !emitted.is_empty() && !emit_chunk(std::mem::take(&mut emitted)) {
-                        return Err(String::from("background event channel disconnected"));
-                    }
-                    return Ok(());
-                }
-            }
-
-            if file_type.is_dir() {
-                child_dirs.push(path);
-            }
-        }
-
-        child_dirs.sort_by_cached_key(|left| path_sort_key(left));
-        for child_dir in child_dirs.into_iter().rev() {
-            stack.push(child_dir);
-        }
-    }
-
-    if !emitted.is_empty() && !emit_chunk(emitted) {
-        return Err(String::from("background event channel disconnected"));
-    }
-    Ok(())
-}
-
-fn wait_for_find_resume(cancel_flag: &AtomicBool, pause_flag: &AtomicBool) -> Result<(), String> {
-    loop {
-        if cancel_flag.load(AtomicOrdering::Relaxed) {
-            return Err(String::from(JOB_CANCELED_MESSAGE));
-        }
-        if !pause_flag.load(AtomicOrdering::Relaxed) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn query_matches_entry(name: &str, normalized_query: &str, wildcard_query: bool) -> bool {
-    let normalized_name = name.to_lowercase();
-    if wildcard_query {
-        wildcard_match(&normalized_name, normalized_query)
-    } else {
-        normalized_name.contains(normalized_query)
-    }
-}
-
-fn wildcard_match(text: &str, pattern: &str) -> bool {
-    let text: Vec<char> = text.chars().collect();
-    let pattern: Vec<char> = pattern.chars().collect();
-    let mut text_index = 0usize;
-    let mut pattern_index = 0usize;
-    let mut star_index: Option<usize> = None;
-    let mut match_index = 0usize;
-
-    while text_index < text.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == '?' || pattern[pattern_index] == text[text_index])
-        {
-            text_index += 1;
-            pattern_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == '*' {
-            star_index = Some(pattern_index);
-            pattern_index += 1;
-            match_index = text_index;
-        } else if let Some(star) = star_index {
-            pattern_index = star + 1;
-            match_index += 1;
-            text_index = match_index;
-        } else {
-            return false;
-        }
-    }
-
-    while pattern_index < pattern.len() && pattern[pattern_index] == '*' {
-        pattern_index += 1;
-    }
-
-    pattern_index == pattern.len()
-}
-
-fn path_sort_key(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| path.to_string_lossy().to_lowercase())
 }
 
 pub fn read_disk_usage(path: &Path) -> Option<DiskUsageSummary> {

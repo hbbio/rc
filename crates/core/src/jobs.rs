@@ -17,7 +17,7 @@ use nix::unistd::{Gid, Uid, chown};
 
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
-use crate::{ActivePanel, PanelListingSource, SortMode};
+use crate::{ActivePanel, FindSpec, PanelListingSource, SortMode};
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
@@ -115,8 +115,7 @@ pub enum JobRequest {
         request_id: u64,
     },
     Find {
-        query: String,
-        base_dir: PathBuf,
+        spec: FindSpec,
         max_results: usize,
     },
     LoadViewer {
@@ -220,10 +219,13 @@ impl JobRequest {
                     source_label
                 )
             }
-            Self::Find {
-                query, base_dir, ..
-            } => {
-                format!("find '{}' under {}", query, base_dir.to_string_lossy())
+            Self::Find { spec, .. } => {
+                format!(
+                    "find '{}' ({}) under {}",
+                    spec.display_pattern(),
+                    spec.name_mode.label(),
+                    spec.start_dir.to_string_lossy()
+                )
             }
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
             Self::BuildTree {

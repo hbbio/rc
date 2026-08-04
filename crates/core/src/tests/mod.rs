@@ -82,13 +82,8 @@ fn drain_background(app: &mut AppState) {
                                 result: Ok(()),
                             });
                         }
-                        JobRequest::Find {
-                            query,
-                            base_dir,
-                            max_results,
-                        } => {
-                            let query = query.clone();
-                            let base_dir = base_dir.clone();
+                        JobRequest::Find { spec, max_results } => {
+                            let spec = spec.clone();
                             let max_results = *max_results;
                             let cancel_flag = job.cancel_flag();
                             let pause_flag = job
@@ -97,8 +92,7 @@ fn drain_background(app: &mut AppState) {
                             let _ = event_tx.send(JobEvent::Started { id: job_id });
                             let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
                             let result = run_find_entries(
-                                &base_dir,
-                                &query,
+                                &spec,
                                 max_results,
                                 cancel_flag.as_ref(),
                                 pause_flag.as_ref(),
@@ -108,7 +102,8 @@ fn drain_background(app: &mut AppState) {
                                         .is_ok()
                                 },
                             )
-                            .map_err(JobError::from_message);
+                            .map(|_| ())
+                            .map_err(|error| JobError::from_message(error.to_string()));
                             for event in chunk_rx.try_iter() {
                                 app.handle_background_event(event);
                             }

@@ -5,6 +5,7 @@ mod command_dispatch;
 mod command_map;
 pub mod dialog;
 mod dialog_flow;
+mod find_engine;
 mod find_flow;
 pub mod help;
 pub mod jobs;
@@ -33,13 +34,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
-#[cfg(test)]
-use background::stream_find_entries;
 pub use background::{
     BackgroundEvent, PanelRefreshStreamRequest, build_tree_ready_event, read_disk_usage,
-    refresh_panel_entries, refresh_panel_event, run_find_entries, stream_refresh_panel_entries,
+    refresh_panel_entries, refresh_panel_event, stream_refresh_panel_entries,
 };
 pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
+pub use find_engine::{
+    FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
+    FindSpec, run_find_entries, stream_find_entries,
+};
 pub use help::{HelpLine, HelpSpan, HelpState};
 pub use jobs::{
     JOB_CANCELED_MESSAGE, JobError, JobErrorCode, JobEvent, JobId, JobKind, JobManager,

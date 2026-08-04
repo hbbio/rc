@@ -410,9 +410,14 @@ impl AppState {
                 }
 
                 let query = query.to_string();
+                let mut spec = FindSpec::new(base_dir.clone());
+                spec.filename_pattern = if query.contains(['*', '?', '[']) {
+                    query.clone()
+                } else {
+                    format!("*{query}*")
+                };
                 let request = JobRequest::Find {
-                    query: query.clone(),
-                    base_dir: base_dir.clone(),
+                    spec,
                     max_results: self.settings.advanced.max_find_results,
                 };
                 let mut worker_job = self.jobs.enqueue(request);

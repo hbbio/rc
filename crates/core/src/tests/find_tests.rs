@@ -272,9 +272,10 @@ fn quit_cancels_find_but_keeps_persist_settings_job() {
         paths: settings_paths,
         snapshot: Box::new(app.persisted_settings_snapshot()),
     });
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.jpg");
     let find_job_id = app.enqueue_worker_job_request(JobRequest::Find {
-        query: String::from("*.jpg"),
-        base_dir: root.clone(),
+        spec,
         max_results: 64,
     });
 
@@ -321,19 +322,15 @@ fn stream_find_entries_supports_glob_patterns_and_chunking() {
     let cancel_flag = AtomicBool::new(false);
     let pause_flag = AtomicBool::new(false);
     let mut chunks = Vec::new();
-    let result = stream_find_entries(
-        &root,
-        "*.jpg",
-        32,
-        &cancel_flag,
-        &pause_flag,
-        1,
-        |entries| {
-            chunks.push(entries);
-            true
-        },
-    );
-    assert_eq!(result, Ok(()));
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.jpg");
+    let result = stream_find_entries(&spec, 32, &cancel_flag, &pause_flag, 1, |entries| {
+        chunks.push(entries);
+        true
+    });
+    let report = result.expect("glob search should succeed");
+    assert_eq!(report.matched_entries, 2);
+    assert!(!report.truncated);
     assert!(
         chunks.len() >= 2,
         "chunk size 1 should emit multiple chunks for two matches"
@@ -374,20 +371,14 @@ fn stream_find_entries_stops_after_cancel_request() {
     let cancel_flag = AtomicBool::new(false);
     let pause_flag = AtomicBool::new(false);
     let mut chunks_seen = 0usize;
-    let result = stream_find_entries(
-        &root,
-        "*.jpg",
-        32,
-        &cancel_flag,
-        &pause_flag,
-        1,
-        |_entries| {
-            chunks_seen = chunks_seen.saturating_add(1);
-            cancel_flag.store(true, AtomicOrdering::Relaxed);
-            true
-        },
-    );
-    assert_eq!(result, Err(String::from(JOB_CANCELED_MESSAGE)));
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.jpg");
+    let result = stream_find_entries(&spec, 32, &cancel_flag, &pause_flag, 1, |_entries| {
+        chunks_seen = chunks_seen.saturating_add(1);
+        cancel_flag.store(true, AtomicOrdering::Relaxed);
+        true
+    });
+    assert_eq!(result, Err(FindSearchError::Canceled));
     assert_eq!(chunks_seen, 1, "search should stop shortly after cancel");
 
     fs::remove_dir_all(&root).expect("must remove temp root");
@@ -412,9 +403,10 @@ fn stream_find_entries_waits_while_paused_and_resumes() {
     });
 
     let started = std::time::Instant::now();
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.jpg");
     let result = stream_find_entries(
-        &root,
-        "*.jpg",
+        &spec,
         32,
         &cancel_flag,
         pause_flag.as_ref(),
@@ -424,11 +416,309 @@ fn stream_find_entries_waits_while_paused_and_resumes() {
     let elapsed = started.elapsed();
     resumer.join().expect("resume thread should complete");
 
-    assert_eq!(result, Ok(()));
+    assert_eq!(
+        result.expect("paused search should resume").matched_entries,
+        1
+    );
     assert!(
         elapsed >= Duration::from_millis(25),
         "search should wait for resume while paused"
     );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_engine_supports_regex_and_case_modes() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-regex-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let lowercase = root.join("report-42.rs");
+    let uppercase = root.join("REPORT-7.RS");
+    let unrelated = root.join("report.rs.bak");
+    fs::write(&lowercase, "lowercase").expect("must create lowercase match");
+    fs::write(&uppercase, "uppercase").expect("must create uppercase match");
+    fs::write(&unrelated, "unrelated").expect("must create unrelated file");
+
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from(r"^report-[0-9]+[.]rs$");
+    spec.name_mode = FindNameMode::Regex;
+
+    let mut insensitive_matches = Vec::new();
+    let report = run_find_entries(&spec, 16, &cancel, &pause, |entries| {
+        insensitive_matches.extend(entries);
+        true
+    })
+    .expect("case-insensitive regex search should succeed");
+    assert_eq!(report.matched_entries, 2);
+    assert_eq!(
+        insensitive_matches
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        vec![uppercase.clone(), lowercase.clone()],
+        "results should use deterministic filename order"
+    );
+
+    spec.case_sensitive = true;
+    let mut sensitive_matches = Vec::new();
+    let report = run_find_entries(&spec, 16, &cancel, &pause, |entries| {
+        sensitive_matches.extend(entries);
+        true
+    })
+    .expect("case-sensitive regex search should succeed");
+    assert_eq!(report.matched_entries, 1);
+    assert_eq!(sensitive_matches[0].path, lowercase);
+
+    spec.filename_pattern = String::from("[");
+    assert!(matches!(
+        run_find_entries(&spec, 16, &cancel, &pause, |_| true),
+        Err(FindSearchError::InvalidPattern {
+            field: "filename",
+            ..
+        })
+    ));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn empty_filename_pattern_matches_all_nonignored_entries() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-empty-pattern-{stamp}"));
+    let nested = root.join("nested");
+    let ignored = root.join(".cache");
+    fs::create_dir_all(&nested).expect("must create nested directory");
+    fs::create_dir_all(&ignored).expect("must create ignored directory");
+    let top_file = root.join("top.txt");
+    let nested_file = nested.join("child.bin");
+    let ignored_file = ignored.join("hidden.txt");
+    fs::write(&top_file, "top").expect("must create top-level file");
+    fs::write(&nested_file, "nested").expect("must create nested file");
+    fs::write(&ignored_file, "ignored").expect("must create ignored file");
+
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let mut spec = FindSpec::new(root.clone());
+    spec.ignored_directories.push(String::from(".cache"));
+    let mut matches = Vec::new();
+    let report = run_find_entries(&spec, 16, &cancel, &pause, |entries| {
+        matches.extend(entries);
+        true
+    })
+    .expect("empty filename pattern should be valid");
+
+    let paths = matches
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    assert_eq!(report.matched_entries, 3);
+    assert_eq!(report.ignored_directories, 1);
+    assert!(paths.contains(&top_file));
+    assert!(paths.contains(&nested));
+    assert!(paths.contains(&nested_file));
+    assert!(!paths.contains(&ignored));
+    assert!(!paths.contains(&ignored_file));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_content_search_streams_files_and_honors_whole_words() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-content-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let exact = root.join("exact.txt");
+    let embedded = root.join("embedded.txt");
+    let punctuation = root.join("punctuation.txt");
+    let boundary = root.join("stream-boundary.txt");
+    fs::write(&exact, "A NEEDLE appears here").expect("must create exact content file");
+    fs::write(&embedded, "needlessly close").expect("must create embedded content file");
+    fs::write(&punctuation, "C++ is present").expect("must create punctuation content file");
+    let mut boundary_content = vec![b'x'; 64 * 1024 - 3];
+    boundary_content.extend_from_slice(b" needle after boundary");
+    fs::write(&boundary, boundary_content).expect("must create boundary content file");
+
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.txt");
+    spec.content_pattern = Some(String::from("needle"));
+    spec.whole_word = true;
+    let mut matches = Vec::new();
+    let report = run_find_entries(&spec, 16, &cancel, &pause, |entries| {
+        matches.extend(entries);
+        true
+    })
+    .expect("content search should succeed");
+
+    let paths = matches
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    assert_eq!(report.matched_entries, 2);
+    assert!(paths.contains(&exact));
+    assert!(paths.contains(&boundary));
+    assert!(!paths.contains(&embedded));
+
+    spec.content_pattern = Some(String::from("C++"));
+    let mut punctuation_matches = Vec::new();
+    let punctuation_report = run_find_entries(&spec, 16, &cancel, &pause, |entries| {
+        punctuation_matches.extend(entries);
+        true
+    })
+    .expect("whole-word search should support punctuation at pattern edges");
+    assert_eq!(punctuation_report.matched_entries, 1);
+    assert_eq!(punctuation_matches[0].path, punctuation);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_report_distinguishes_exact_limit_from_truncation() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-truncation-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    fs::write(root.join("a.txt"), "a").expect("must create first file");
+    fs::write(root.join("b.txt"), "b").expect("must create second file");
+
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.txt");
+    let exact_report = run_find_entries(&spec, 2, &cancel, &pause, |_| true)
+        .expect("exact-limit search should succeed");
+    assert_eq!(exact_report.matched_entries, 2);
+    assert!(!exact_report.truncated);
+
+    fs::write(root.join("c.txt"), "c").expect("must create overflow file");
+    let mut emitted = Vec::new();
+    let truncated_report = run_find_entries(&spec, 2, &cancel, &pause, |entries| {
+        emitted.extend(entries);
+        true
+    })
+    .expect("truncated search should succeed");
+    assert_eq!(truncated_report.matched_entries, 2);
+    assert!(truncated_report.truncated);
+    assert_eq!(emitted.len(), 2);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_report_retains_subdirectory_read_errors_as_partial_results() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-partial-{stamp}"));
+    let disappearing = root.join("0-disappearing");
+    fs::create_dir_all(&disappearing).expect("must create disappearing directory");
+    fs::write(root.join("a-result.txt"), "result").expect("must create result file");
+    fs::write(disappearing.join("lost.txt"), "lost").expect("must create disappearing file");
+
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.txt");
+    let report = stream_find_entries(&spec, 16, &cancel, &pause, 1, |_| {
+        fs::remove_dir_all(&disappearing).expect("callback should remove queued directory");
+        true
+    })
+    .expect("search should preserve partial results");
+
+    assert_eq!(report.matched_entries, 1);
+    assert_eq!(report.skipped_directories, 1);
+    assert_eq!(report.issue_count, 1);
+    assert!(report.is_partial());
+    assert_eq!(report.issues[0].kind, FindSearchIssueKind::ReadDirectory);
+    assert_eq!(report.issues[0].path, disappearing);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_fails_when_starting_directory_cannot_be_read() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let missing = env::temp_dir().join(format!("rc-find-missing-root-{stamp}"));
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let spec = FindSpec::new(missing.clone());
+
+    assert!(matches!(
+        run_find_entries(&spec, 16, &cancel, &pause, |_| true),
+        Err(FindSearchError::StartDirectory { path, .. }) if path == missing
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn find_reports_permission_denied_subdirectories_without_losing_results() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-permission-{stamp}"));
+    let denied = root.join("denied");
+    fs::create_dir_all(&denied).expect("must create denied directory");
+    fs::write(root.join("visible.txt"), "visible").expect("must create visible result");
+    fs::write(denied.join("hidden.txt"), "hidden").expect("must create hidden file");
+
+    let original_permissions = fs::metadata(&denied)
+        .expect("denied directory metadata should exist")
+        .permissions();
+    let mut denied_permissions = original_permissions.clone();
+    denied_permissions.set_mode(0o000);
+    fs::set_permissions(&denied, denied_permissions).expect("must remove directory permissions");
+
+    if fs::read_dir(&denied).is_ok() {
+        fs::set_permissions(&denied, original_permissions)
+            .expect("must restore directory permissions");
+        fs::remove_dir_all(&root).expect("must remove temp root");
+        return;
+    }
+
+    let cancel = AtomicBool::new(false);
+    let pause = AtomicBool::new(false);
+    let mut spec = FindSpec::new(root.clone());
+    spec.filename_pattern = String::from("*.txt");
+    let mut matches = Vec::new();
+    let result = run_find_entries(&spec, 16, &cancel, &pause, |entries| {
+        matches.extend(entries);
+        true
+    });
+
+    fs::set_permissions(&denied, original_permissions).expect("must restore directory permissions");
+    let report = result.expect("permission failure should produce partial results");
+    assert_eq!(report.matched_entries, 1);
+    assert_eq!(matches[0].path, root.join("visible.txt"));
+    assert_eq!(report.skipped_directories, 1);
+    assert!(report.is_partial());
+    assert!(report.issues.iter().any(|issue| {
+        issue
+            .message
+            .to_ascii_lowercase()
+            .contains("permission denied")
+    }));
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }

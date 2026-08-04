@@ -699,16 +699,11 @@ fn execute_runtime_worker_job(
             worker_event_tx,
             background_event_tx,
         ),
-        JobRequest::Find {
-            query,
-            base_dir,
-            max_results,
-        } => execute_find_worker_job(
+        JobRequest::Find { spec, max_results } => execute_find_worker_job(
             worker_job,
             worker_event_tx,
             background_event_tx,
-            query,
-            base_dir,
+            spec,
             max_results,
         ),
         JobRequest::LoadViewer { path } => execute_viewer_worker_job(
@@ -816,8 +811,7 @@ fn execute_find_worker_job(
     worker_job: rc_core::WorkerJob,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
-    query: String,
-    base_dir: std::path::PathBuf,
+    spec: rc_core::FindSpec,
     max_results: usize,
 ) {
     let job_id = worker_job.id;
@@ -827,8 +821,7 @@ fn execute_find_worker_job(
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
     let result = run_find_entries(
-        &base_dir,
-        &query,
+        &spec,
         max_results,
         cancel_flag.as_ref(),
         pause_flag.as_ref(),
@@ -838,7 +831,8 @@ fn execute_find_worker_job(
                 .is_ok()
         },
     )
-    .map_err(JobError::from_message);
+    .map(|_| ())
+    .map_err(|error| JobError::from_message(error.to_string()));
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
@@ -1072,9 +1066,10 @@ mod tests {
         root: &std::path::Path,
         pause_flag: Arc<AtomicBool>,
     ) -> rc_core::WorkerJob {
+        let mut spec = rc_core::FindSpec::new(root.to_path_buf());
+        spec.filename_pattern = String::from("*entry*");
         let mut job = manager.enqueue(JobRequest::Find {
-            query: String::from("entry"),
-            base_dir: root.to_path_buf(),
+            spec,
             max_results: 1024,
         });
         job.set_find_pause_flag(pause_flag);
