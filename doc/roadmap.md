@@ -602,6 +602,7 @@ Pick early; it impacts packaging and contributor expectations.
 * Directory tree screen.
 * Hotlist CRUD.
 * External panelize.
+* Quick CD, including home and previous-directory expansion.
 
 ### Milestone 5: Extension rules and user menu
 

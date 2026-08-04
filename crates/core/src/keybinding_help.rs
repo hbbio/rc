@@ -401,6 +401,22 @@ impl AppState {
             ),
         );
         replacements.insert(
+            "find_again",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsAgain,
+                "F4",
+            ),
+        );
+        replacements.insert(
+            "find_pause",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FindResults,
+                AppCommand::FindResultsTogglePause,
+                "F6",
+            ),
+        );
+        replacements.insert(
             "find_panelize",
             self.keybinding_primary_or_fallback(
                 KeyContext::FindResults,
@@ -521,6 +537,40 @@ impl AppState {
                 KeyContext::Tree,
                 AppCommand::TreeOpenEntry,
                 "Enter",
+            ),
+        );
+        replacements.insert(
+            "tree_rescan",
+            self.keybinding_primary_or_fallback(KeyContext::Tree, AppCommand::TreeRescan, "F2"),
+        );
+        replacements.insert(
+            "tree_forget",
+            self.keybinding_primary_or_fallback(KeyContext::Tree, AppCommand::TreeForget, "F3"),
+        );
+        replacements.insert(
+            "tree_mode",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Tree,
+                AppCommand::TreeToggleNavigation,
+                "F4",
+            ),
+        );
+        replacements.insert(
+            "tree_search",
+            self.keybinding_primary_or_fallback(
+                KeyContext::Tree,
+                AppCommand::TreeSearchNext,
+                "Ctrl-S",
+            ),
+        );
+        replacements.insert(
+            "tree_ops",
+            format!(
+                "{}/{}/{}/{}",
+                self.keybinding_primary_or_fallback(KeyContext::Tree, AppCommand::TreeCopy, "F5"),
+                self.keybinding_primary_or_fallback(KeyContext::Tree, AppCommand::TreeMove, "F6"),
+                self.keybinding_primary_or_fallback(KeyContext::Tree, AppCommand::TreeMkdir, "F7"),
+                self.keybinding_primary_or_fallback(KeyContext::Tree, AppCommand::TreeDelete, "F8"),
             ),
         );
         replacements.insert(

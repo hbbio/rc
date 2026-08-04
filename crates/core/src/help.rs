@@ -64,6 +64,9 @@ File operations:\n\
   {{fm_toggle_tag}} toggle selection\n\
   {{fm_file_ops}} copy/move/delete\n\
 \n\
+Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
+and - for the previous directory. Quote paths containing spaces.\n\
+\n\
 More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
     ),
     (
@@ -117,9 +120,12 @@ Keys:\n\
   {{find_move}} move\n\
   {{find_nav}} navigate\n\
   {{find_open}} locate the result in panel\n\
+  {{find_again}} start another search\n\
+  {{find_pause}} pause or continue the search\n\
   {{find_panelize}} panelize current results\n\
   {{find_cancel}} cancel active find job\n\
   {{find_close}} close\n\
+  Mouse click selects; double-click locates.\n\
 \n\
 Panelize here uses the internal Find results list.\n\
 Use external panelize for shell-command output lists.\n\
@@ -137,9 +143,12 @@ See also [File manager](file-manager) and [Panelize and VFS](panelize).",
     Source: shell command stdout, one path per line\n\
     Entry point: {{panelize_external_entry}}\n\
     Dialog keys: {{panelize_dialog_keys}}\n\
+    Presets have editable names and commands.\n\
+    Mouse click selects; double-click runs.\n\
 \n\
 Both allow normal file operations ({{panelize_ops}}),\n\
 {{panelize_refresh}} refresh, and exit by changing to a real directory.\n\
+The side-panel Panelize entry restores that panel's latest completed results.\n\
 \n\
 How this differs from VFS:\n\
   VFS mounts archives/remote locations as browsable trees.\n\
@@ -156,14 +165,20 @@ Keys:\n\
   {{tree_move}} move\n\
   {{tree_nav}} navigate\n\
   {{tree_open}} open selected directory in active panel\n\
+  {{tree_rescan}} rescan selected subtree\n\
+  {{tree_forget}} forget selected cached subtree\n\
+  {{tree_mode}} switch static/dynamic navigation\n\
+  {{tree_search}} repeat incremental search\n\
+  {{tree_ops}} copy/move/mkdir/delete\n\
   {{tree_close}} close\n\
+  Mouse click selects; double-click opens.\n\
 \n\
 See also [Directory hotlist](hotlist) and [File manager](file-manager).",
     ),
     (
         "hotlist",
         "Directory Hotlist",
-        "Hotlist stores frequently used directories.\n\
+        "Hotlist stores editable labels mapped to frequently used directories.\n\
 \n\
 Keys:\n\
   {{hotlist_open}} open selected directory\n\
@@ -171,6 +186,9 @@ Keys:\n\
   {{hotlist_edit}} edit selected entry\n\
   {{hotlist_remove}} remove selected entry\n\
   {{hotlist_close}} close\n\
+  Mouse click selects; double-click opens.\n\
+\n\
+Use {{fm_hotlist_add}} from the file manager to add the current directory quickly.\n\
 \n\
 See also [Directory tree](tree) and [File manager](file-manager).",
     ),
@@ -574,6 +592,8 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("find_move", String::from("Up/Down")),
         ("find_nav", String::from("PgUp/PgDn/Home/End")),
         ("find_open", String::from("Enter")),
+        ("find_again", String::from("F4")),
+        ("find_pause", String::from("F6")),
         ("find_panelize", String::from("F5")),
         ("find_cancel", String::from("Alt-J")),
         ("find_close", String::from("Esc/q")),
@@ -596,6 +616,11 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("tree_move", String::from("Up/Down")),
         ("tree_nav", String::from("PgUp/PgDn/Home/End")),
         ("tree_open", String::from("Enter")),
+        ("tree_rescan", String::from("F2")),
+        ("tree_forget", String::from("F3")),
+        ("tree_mode", String::from("F4")),
+        ("tree_search", String::from("Ctrl-S")),
+        ("tree_ops", String::from("F5/F6/F7/F8")),
         ("tree_close", String::from("Esc/q")),
         ("hotlist_open", String::from("Enter")),
         ("hotlist_add", String::from("a")),
@@ -676,7 +701,33 @@ mod tests {
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Find results panelize"));
         assert!(content.contains("External panelize (Ctrl-X !)"));
+        assert!(content.contains("Presets have editable names and commands"));
+        assert!(content.contains("restores that panel's latest completed results"));
+        assert!(content.contains("Mouse click selects; double-click runs"));
         assert!(content.contains("How this differs from VFS"));
+    }
+
+    #[test]
+    fn milestone_four_help_covers_lifecycle_actions_and_mouse_controls() {
+        let mut help = HelpState::for_context(KeyContext::FileManager);
+
+        help.open_topic("find-results", false);
+        let find = flatten_help_lines(help.lines());
+        assert!(find.contains("F4 start another search"));
+        assert!(find.contains("F6 pause or continue"));
+        assert!(find.contains("Mouse click selects; double-click locates"));
+
+        help.open_topic("tree", false);
+        let tree = flatten_help_lines(help.lines());
+        assert!(tree.contains("F2 rescan selected subtree"));
+        assert!(tree.contains("F5/F6/F7/F8 copy/move/mkdir/delete"));
+        assert!(tree.contains("Mouse click selects; double-click opens"));
+
+        help.open_topic("hotlist", false);
+        let hotlist = flatten_help_lines(help.lines());
+        assert!(hotlist.contains("editable labels mapped"));
+        assert!(hotlist.contains("Ctrl-X H from the file manager"));
+        assert!(hotlist.contains("Mouse click selects; double-click opens"));
     }
 
     #[test]

@@ -19,8 +19,8 @@ Implemented milestones:
 - Milestone 2: copy/move/mkdir/delete with background jobs, progress, overwrite
   policies, and cancellation
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
-- Milestone 4 (partial): find dialog/results, tree, hotlist, and external panelize
-  with managed presets
+- Milestone 4: complete find workflow, directory tree, labeled hotlist, external/find
+  panelize, Quick CD, and mouse interaction
 - Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup
   persistence
 - External editor workflow: deterministic resolution, terminal suspend/resume, command
@@ -28,17 +28,22 @@ Implemented milestones:
 - Product direction update: external-editor-first workflow, command-based diff output,
   optional FTP/SFTP support
 
-Recent foundation and reliability progress:
+Recent Milestone 4 and reliability progress:
 
-- Explicit file-entry kinds, shared panel/settings sort types, and context-aware navigation
-  commands reduce invalid state combinations.
-- Dialog routes now carry their own action intent, while the settings model is the session
-  source of truth for skin, overwrite, hotlist, panelize, and panel defaults.
-- File jobs reject recursive copy/move destinations through normalized and symlinked paths,
-  create missing copy roots, honor active and queued cancellation, and finish queued jobs on
-  worker shutdown.
-- External panelize streams bounded process output, caps result counts, supports cancellation,
-  and handles commands that close stdout before exiting.
+- Find compiles glob or regular-expression matchers once per search, supports optional
+  whole-word content matching and ignored directories, streams stable selections, and reports
+  truncation and bounded read errors distinctly from cancellation or failure.
+- Tree scanning is iterative, cancellation-aware, request-correlated, sorted in preorder, and
+  indexed for parent/child/subtree operations. Static/dynamic navigation, incremental search,
+  rescan/forget, and file operations are complete.
+- Hotlist entries persist editable labels and paths with legacy migration, duplicate/path
+  validation, optional deletion confirmation, and `Ctrl-X H` quick-add.
+- External panelize uses named presets, bounded adaptive streaming, exact-job cancellation, and
+  per-panel result history; find results use the same virtual-panel layer.
+- Quick CD supports quoted relative/absolute paths, `~`, Unix `~user`, and per-panel
+  `cd -` history.
+- Find results, tree, hotlist, and panelize preset lists support click selection and double-click
+  activation from a renderer-shared hit-test layout.
 
 Planned next major milestones include `mc.ext.ini`, user menu, command-based diff
 integration (`difftastic`/`diff`), optional remote VFS, and subshell integration.
@@ -107,6 +112,7 @@ Main file manager:
   `nvim`, `vim`, `vi`, `emacs`)
 - `Space` / `Insert` / `Ctrl-T`: toggle selected item
 - `Backspace`: go to parent directory
+- `Alt-C`: Quick CD (`~`, Unix `~user`, relative/absolute paths, or `-` for previous)
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
 - `Ctrl-J`: open jobs screen
 - `Alt-J`: cancel latest/selected job
@@ -115,6 +121,17 @@ Main file manager:
 - `Alt-H`: open hotlist
 - `Alt-P` / `Ctrl-P` or `Ctrl-X` then `!`: open external panelize
 - `q` / `Esc`: quit
+
+Milestone 4 screens:
+
+- Find results: `F4` search again, `F5` panelize, `F6` pause/continue, `Alt-J` cancel
+  the exact search.
+- Tree: arrows navigate, `F2` rescan, `F3` forget subtree, `F4` static/dynamic mode,
+  `F5`/`F6`/`F7`/`F8` copy/move/mkdir/delete.
+- Hotlist: `a` add, `e`/`F4` edit, `d`/`Delete` remove, `Enter` open.
+- Panelize presets: `Tab` custom command, `F2` add, `F4` edit, `F8` remove,
+  `Enter` run. The side-panel `Panelize` menu entry restores that panel's latest results.
+- Mouse: click a result/list entry to select it; double-click to open or run it.
 
 Viewer:
 
