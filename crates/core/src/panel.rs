@@ -262,43 +262,145 @@ pub(crate) fn ensure_panel_refresh_not_canceled(
 pub(crate) fn sort_file_entries(entries: &mut [FileEntry], sort_mode: SortMode) {
     let type_rank = |entry: &FileEntry| if entry.is_dir() { 0_u8 } else { 1_u8 };
 
-    match (sort_mode.field, sort_mode.reverse) {
-        (SortField::Name, false) => {
-            entries.sort_by_cached_key(|entry| (type_rank(entry), entry.name.to_lowercase()));
+    if sort_mode.field == SortField::Unsorted {
+        entries.sort_by_key(type_rank);
+        if sort_mode.reverse {
+            let first_file = entries.partition_point(FileEntry::is_dir);
+            entries[..first_file].reverse();
+            entries[first_file..].reverse();
         }
-        (SortField::Name, true) => {
-            entries
-                .sort_by_cached_key(|entry| (type_rank(entry), Reverse(entry.name.to_lowercase())));
+        return;
+    }
+
+    if sort_mode.reverse {
+        entries.sort_by_cached_key(|entry| {
+            (
+                type_rank(entry),
+                Reverse(entry_sort_key(entry, sort_mode.field)),
+            )
+        });
+    } else {
+        entries
+            .sort_by_cached_key(|entry| (type_rank(entry), entry_sort_key(entry, sort_mode.field)));
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct EntrySortKey {
+    primary: EntrySortValue,
+    natural_name: VersionKey,
+    folded_name: String,
+    exact_name: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EntrySortValue {
+    Text(String),
+    Version(VersionKey),
+    Time(Option<std::time::SystemTime>),
+    Number(Option<u64>),
+}
+
+fn entry_sort_key(entry: &FileEntry, field: SortField) -> EntrySortKey {
+    let folded_name = entry.name.to_lowercase();
+    let natural_name = VersionKey::new(&entry.name);
+    let primary = match field {
+        SortField::Name => EntrySortValue::Text(folded_name.clone()),
+        SortField::Version => EntrySortValue::Version(natural_name.clone()),
+        SortField::Extension => EntrySortValue::Text(
+            Path::new(&entry.name)
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+        ),
+        SortField::Modified => EntrySortValue::Time(entry.modified),
+        SortField::Accessed => EntrySortValue::Time(entry.metadata.accessed),
+        SortField::Changed => EntrySortValue::Time(entry.metadata.changed),
+        SortField::Size => EntrySortValue::Number(Some(entry.size)),
+        SortField::Inode => EntrySortValue::Number(entry.metadata.inode),
+        SortField::Unsorted => unreachable!("unsorted entries do not build sort keys"),
+    };
+    EntrySortKey {
+        primary,
+        natural_name,
+        folded_name,
+        exact_name: entry.name.clone(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct VersionKey(Vec<VersionToken>);
+
+impl VersionKey {
+    fn new(value: &str) -> Self {
+        let mut tokens = Vec::new();
+        let mut characters = value.chars().peekable();
+        while let Some(character) = characters.peek().copied() {
+            if character.is_ascii_digit() {
+                let mut digits = String::new();
+                while let Some(digit) = characters.peek().copied().filter(char::is_ascii_digit) {
+                    digits.push(digit);
+                    characters.next();
+                }
+                tokens.push(VersionToken::Number(NumericVersionToken::new(digits)));
+            } else {
+                let mut text = String::new();
+                while let Some(character) = characters
+                    .peek()
+                    .copied()
+                    .filter(|character| !character.is_ascii_digit())
+                {
+                    text.extend(character.to_lowercase());
+                    characters.next();
+                }
+                tokens.push(VersionToken::Text(text));
+            }
         }
-        (SortField::Size, false) => {
-            entries.sort_by_cached_key(|entry| {
-                (type_rank(entry), (entry.size, entry.name.to_lowercase()))
-            });
+        Self(tokens)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum VersionToken {
+    Number(NumericVersionToken),
+    Text(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NumericVersionToken {
+    significant_digits: String,
+    leading_zeroes: usize,
+}
+
+impl NumericVersionToken {
+    fn new(digits: String) -> Self {
+        let significant = digits.trim_start_matches('0');
+        let significant_digits = if significant.is_empty() {
+            String::from("0")
+        } else {
+            significant.to_string()
+        };
+        let leading_zeroes = digits.len().saturating_sub(significant_digits.len());
+        Self {
+            significant_digits,
+            leading_zeroes,
         }
-        (SortField::Size, true) => {
-            entries.sort_by_cached_key(|entry| {
-                (
-                    type_rank(entry),
-                    Reverse((entry.size, entry.name.to_lowercase())),
-                )
-            });
-        }
-        (SortField::Modified, false) => {
-            entries.sort_by_cached_key(|entry| {
-                (
-                    type_rank(entry),
-                    (entry.modified, entry.name.to_lowercase()),
-                )
-            });
-        }
-        (SortField::Modified, true) => {
-            entries.sort_by_cached_key(|entry| {
-                (
-                    type_rank(entry),
-                    Reverse((entry.modified, entry.name.to_lowercase())),
-                )
-            });
-        }
+    }
+}
+
+impl Ord for NumericVersionToken {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.significant_digits
+            .len()
+            .cmp(&other.significant_digits.len())
+            .then_with(|| self.significant_digits.cmp(&other.significant_digits))
+            .then_with(|| self.leading_zeroes.cmp(&other.leading_zeroes))
+    }
+}
+
+impl PartialOrd for NumericVersionToken {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

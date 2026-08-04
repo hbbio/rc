@@ -472,10 +472,121 @@ fn sort_mode_cycles_and_toggles_direction() {
     assert_eq!(panel.sort_label(), "name asc");
 
     panel.sort_mode.field = panel.sort_mode.field.next();
-    assert_eq!(panel.sort_mode.field, SortField::Size);
+    assert_eq!(panel.sort_mode.field, SortField::Version);
 
     panel.sort_mode.reverse = true;
-    assert_eq!(panel.sort_label(), "size desc");
+    assert_eq!(panel.sort_label(), "version desc");
+}
+
+#[test]
+fn version_sort_compares_arbitrarily_large_numeric_runs_without_parsing() {
+    let mut entries = vec![
+        file_entry("release10"),
+        file_entry("release0002"),
+        file_entry("release2"),
+        file_entry("release999999999999999999999999999999"),
+        file_entry("release11"),
+    ];
+
+    sort_file_entries(
+        &mut entries,
+        SortMode {
+            field: SortField::Version,
+            reverse: false,
+        },
+    );
+
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "release2",
+            "release0002",
+            "release10",
+            "release11",
+            "release999999999999999999999999999999",
+        ]
+    );
+}
+
+#[test]
+fn unsorted_mode_stably_partitions_directories_and_reverses_within_each_partition() {
+    let file_a = file_entry("file-a");
+    let mut directory_a = file_entry("directory-a");
+    directory_a.kind = FileEntryKind::Directory;
+    let file_b = file_entry("file-b");
+    let mut directory_b = file_entry("directory-b");
+    directory_b.kind = FileEntryKind::Directory;
+    let mut entries = vec![file_a.clone(), directory_a, file_b.clone(), directory_b];
+
+    sort_file_entries(
+        &mut entries,
+        SortMode {
+            field: SortField::Unsorted,
+            reverse: false,
+        },
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["directory-a", "directory-b", "file-a", "file-b"]
+    );
+
+    sort_file_entries(
+        &mut entries,
+        SortMode {
+            field: SortField::Unsorted,
+            reverse: true,
+        },
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["directory-b", "directory-a", "file-b", "file-a"]
+    );
+}
+
+#[test]
+fn metadata_sort_orders_use_the_cached_entry_snapshot() {
+    let earlier = UNIX_EPOCH + Duration::from_secs(10);
+    let later = UNIX_EPOCH + Duration::from_secs(20);
+    let mut first = file_entry("zeta.rs");
+    first.size = 20;
+    first.modified = Some(later);
+    first.metadata.accessed = Some(earlier);
+    first.metadata.changed = Some(later);
+    first.metadata.inode = Some(2);
+    let mut second = file_entry("alpha.txt");
+    second.size = 10;
+    second.modified = Some(earlier);
+    second.metadata.accessed = Some(later);
+    second.metadata.changed = Some(earlier);
+    second.metadata.inode = Some(1);
+
+    for (field, expected_first) in [
+        (SortField::Extension, "zeta.rs"),
+        (SortField::Modified, "alpha.txt"),
+        (SortField::Accessed, "zeta.rs"),
+        (SortField::Changed, "alpha.txt"),
+        (SortField::Size, "alpha.txt"),
+        (SortField::Inode, "alpha.txt"),
+    ] {
+        let mut entries = vec![first.clone(), second.clone()];
+        sort_file_entries(
+            &mut entries,
+            SortMode {
+                field,
+                reverse: false,
+            },
+        );
+        assert_eq!(entries[0].name, expected_first, "unexpected {field:?} sort");
+    }
 }
 
 #[test]
@@ -1025,6 +1136,77 @@ fn listing_format_dialog_updates_only_its_named_panel() {
     );
     assert!(app.settings().save_setup.dirty);
     assert_eq!(app.active_panel, ActivePanel::Left);
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn sort_order_dialog_applies_field_and_reverse_to_only_its_named_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-sort-order-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::OpenSortOrder,
+    ))
+    .expect("sort order dialog should open");
+    app.apply(AppCommand::DialogListboxSelectAt(
+        SortField::Version.index(),
+    ))
+    .expect("version sort should be selected");
+    app.apply(AppCommand::DialogInputChar(' '))
+        .expect("reverse should toggle");
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("sort order dialog should remain open");
+    };
+    let DialogKind::Listbox(listbox) = &dialog.kind else {
+        panic!("sort order should use a listbox");
+    };
+    assert!(
+        listbox
+            .footer_hint
+            .as_deref()
+            .is_some_and(|footer| footer.contains("Reverse: on"))
+    );
+
+    app.apply(AppCommand::DialogAccept)
+        .expect("sort order should be applied");
+    let expected = SortMode {
+        field: SortField::Version,
+        reverse: true,
+    };
+    assert_eq!(app.panels[ActivePanel::Right.index()].sort_mode, expected);
+    assert_eq!(
+        app.panels[ActivePanel::Left.index()].sort_mode,
+        SortMode::default()
+    );
+    assert_eq!(
+        app.settings().panel_options.sort_modes,
+        [SortMode::default(), expected]
+    );
+    assert!(
+        app.take_pending_worker_commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                WorkerCommand::Run(job)
+                    if matches!(job.request, JobRequest::RefreshPanel {
+                        panel: ActivePanel::Right,
+                        sort_mode,
+                        ..
+                    } if sort_mode == expected)
+            ))
+    );
+    assert_eq!(
+        app.active_panel,
+        ActivePanel::Left,
+        "sorting a named panel should not steal focus"
+    );
 
     fs::remove_dir_all(root).expect("must remove temp root");
 }

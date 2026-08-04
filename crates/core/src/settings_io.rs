@@ -421,12 +421,36 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             }
             ("panel_options", "sort_field") => {
                 if let Some(parsed) = parse_sort_field(value) {
-                    settings.panel_options.sort_field = parsed;
+                    for sort_mode in &mut settings.panel_options.sort_modes {
+                        sort_mode.field = parsed;
+                    }
                 }
             }
             ("panel_options", "sort_reverse") => {
                 if let Some(parsed) = parse_bool(value) {
-                    settings.panel_options.sort_reverse = parsed;
+                    for sort_mode in &mut settings.panel_options.sort_modes {
+                        sort_mode.reverse = parsed;
+                    }
+                }
+            }
+            ("panel_options", "left_sort_field") => {
+                if let Some(parsed) = parse_sort_field(value) {
+                    settings.panel_options.sort_modes[0].field = parsed;
+                }
+            }
+            ("panel_options", "left_sort_reverse") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.panel_options.sort_modes[0].reverse = parsed;
+                }
+            }
+            ("panel_options", "right_sort_field") => {
+                if let Some(parsed) = parse_sort_field(value) {
+                    settings.panel_options.sort_modes[1].field = parsed;
+                }
+            }
+            ("panel_options", "right_sort_reverse") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.panel_options.sort_modes[1].reverse = parsed;
                 }
             }
             ("panel_options", "left_listing_format") => {
@@ -616,12 +640,20 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         settings.panel_options.show_hidden_files
     ));
     lines.push(format!(
-        "sort_field={}",
-        sort_field_label(settings.panel_options.sort_field)
+        "left_sort_field={}",
+        sort_field_label(settings.panel_options.sort_modes[0].field)
     ));
     lines.push(format!(
-        "sort_reverse={}",
-        settings.panel_options.sort_reverse
+        "left_sort_reverse={}",
+        settings.panel_options.sort_modes[0].reverse
+    ));
+    lines.push(format!(
+        "right_sort_field={}",
+        sort_field_label(settings.panel_options.sort_modes[1].field)
+    ));
+    lines.push(format!(
+        "right_sort_reverse={}",
+        settings.panel_options.sort_modes[1].reverse
     ));
     lines.push(format!(
         "left_listing_format={}",
@@ -729,18 +761,20 @@ fn overwrite_policy_label(policy: OverwritePolicy) -> &'static str {
 fn parse_sort_field(value: &str) -> Option<SortField> {
     match value.trim().to_ascii_lowercase().as_str() {
         "name" => Some(SortField::Name),
-        "size" => Some(SortField::Size),
+        "version" | "natural" => Some(SortField::Version),
+        "extension" | "ext" => Some(SortField::Extension),
         "modified" | "mtime" => Some(SortField::Modified),
+        "accessed" | "atime" => Some(SortField::Accessed),
+        "changed" | "ctime" => Some(SortField::Changed),
+        "size" => Some(SortField::Size),
+        "inode" => Some(SortField::Inode),
+        "unsorted" | "none" => Some(SortField::Unsorted),
         _ => None,
     }
 }
 
 fn sort_field_label(field: SortField) -> &'static str {
-    match field {
-        SortField::Name => "name",
-        SortField::Size => "size",
-        SortField::Modified => "modified",
-    }
+    field.label()
 }
 
 fn parse_listing_format(value: &str) -> Option<PanelListingFormat> {
@@ -811,7 +845,16 @@ skin=default
             PanelizePreset::new("Git files", "git ls-files"),
         ];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
-        settings.panel_options.sort_field = SortField::Modified;
+        settings.panel_options.sort_modes = [
+            crate::SortMode {
+                field: SortField::Modified,
+                reverse: true,
+            },
+            crate::SortMode {
+                field: SortField::Inode,
+                reverse: false,
+            },
+        ];
         settings.panel_options.listing_formats =
             [PanelListingFormat::Brief, PanelListingFormat::Long];
         settings.layout.status_message_timeout_seconds = 42;
@@ -830,13 +873,31 @@ skin=default
             parsed.configuration.default_overwrite_policy,
             OverwritePolicy::Rename
         );
-        assert_eq!(parsed.panel_options.sort_field, SortField::Modified);
+        assert_eq!(
+            parsed.panel_options.sort_modes,
+            settings.panel_options.sort_modes
+        );
         assert_eq!(
             parsed.panel_options.listing_formats,
             [PanelListingFormat::Brief, PanelListingFormat::Long]
         );
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
         assert!(!parsed.confirmation.confirm_hotlist_delete);
+    }
+
+    #[test]
+    fn legacy_global_sort_settings_apply_to_both_panels() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(
+            &mut settings,
+            "[panel_options]\nsort_field=size\nsort_reverse=true\n",
+        );
+
+        let expected = crate::SortMode {
+            field: SortField::Size,
+            reverse: true,
+        };
+        assert_eq!(settings.panel_options.sort_modes, [expected; 2]);
     }
 
     #[test]

@@ -19,6 +19,9 @@ impl AppState {
             AppCommand::Panel(panel, PanelCommand::OpenListingFormat) => {
                 self.open_panel_listing_format_dialog(panel)
             }
+            AppCommand::Panel(panel, PanelCommand::OpenSortOrder) => {
+                self.open_panel_sort_order_dialog(panel)
+            }
             AppCommand::FindDialogBrowse => self.open_find_tree_picker(),
             AppCommand::DialogAccept => {
                 if matches!(self.top_route(), Route::Settings(_)) {
@@ -35,13 +38,16 @@ impl AppState {
                 }
             }
             AppCommand::DialogFocusNext => {
-                if !self.toggle_panelize_dialog_focus() {
+                if !self.toggle_panel_sort_dialog_reverse() && !self.toggle_panelize_dialog_focus()
+                {
                     self.handle_dialog_event(DialogEvent::FocusNext);
                 }
             }
             AppCommand::DialogBackspace => self.handle_dialog_event(DialogEvent::Backspace),
             AppCommand::DialogInputChar(ch) => {
-                self.handle_dialog_event(DialogEvent::InsertChar(ch))
+                if ch != ' ' || !self.toggle_panel_sort_dialog_reverse() {
+                    self.handle_dialog_event(DialogEvent::InsertChar(ch));
+                }
             }
             AppCommand::DialogListboxUp => {
                 if let Some(settings) = self.settings_state_mut() {
@@ -86,6 +92,44 @@ impl AppState {
             PendingDialogAction::SetPanelListingFormat { panel },
         );
         self.set_status(format!("{} panel: choose listing format", panel.label()));
+    }
+
+    fn open_panel_sort_order_dialog(&mut self, panel: ActivePanel) {
+        let sort_mode = self.panels[panel.index()].sort_mode;
+        let items = SortField::ALL
+            .into_iter()
+            .map(|field| field.dialog_label().to_string())
+            .collect();
+        self.push_dialog(
+            DialogState::listbox_with_hint(
+                "Sort order",
+                items,
+                sort_mode.field.index(),
+                panel_sort_dialog_footer(sort_mode.reverse),
+            ),
+            PendingDialogAction::SetPanelSortOrder {
+                panel,
+                reverse: sort_mode.reverse,
+            },
+        );
+        self.set_status(format!("{} panel: choose sort order", panel.label()));
+    }
+
+    fn toggle_panel_sort_dialog_reverse(&mut self) -> bool {
+        let Some(Route::Dialog(dialog)) = self.routes.last_mut() else {
+            return false;
+        };
+        let reverse = match dialog.action_mut() {
+            Some(PendingDialogAction::SetPanelSortOrder { reverse, .. }) => {
+                *reverse = !*reverse;
+                *reverse
+            }
+            _ => return false,
+        };
+        if let DialogKind::Listbox(listbox) = &mut dialog.kind {
+            listbox.footer_hint = Some(panel_sort_dialog_footer(reverse));
+        }
+        true
     }
 
     pub(crate) fn start_move_dialog(&mut self) {
@@ -437,6 +481,26 @@ impl AppState {
             (Some(PendingDialogAction::SetPanelListingFormat { .. }), DialogResult::Canceled) => {
                 self.set_status("Listing format unchanged");
             }
+            (
+                Some(PendingDialogAction::SetPanelSortOrder { panel, reverse }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(field) = index.and_then(SortField::from_index) {
+                    let sort_mode = SortMode { field, reverse };
+                    self.set_panel_sort_mode(panel, sort_mode);
+                    self.queue_panel_refresh(panel);
+                    self.set_status(format!(
+                        "{} panel sort: {}",
+                        panel.label(),
+                        self.panels[panel.index()].sort_label()
+                    ));
+                } else {
+                    self.set_status("Sort order unchanged");
+                }
+            }
+            (Some(PendingDialogAction::SetPanelSortOrder { .. }), DialogResult::Canceled) => {
+                self.set_status("Sort order unchanged");
+            }
             (Some(PendingDialogAction::FindSearch), DialogResult::FindSubmitted(spec)) => {
                 self.start_find_search(*spec);
             }
@@ -630,6 +694,13 @@ impl AppState {
             }
         }
     }
+}
+
+fn panel_sort_dialog_footer(reverse: bool) -> String {
+    format!(
+        "Reverse: {} | Space/Tab toggle | Enter apply | Esc cancel",
+        if reverse { "on" } else { "off" }
+    )
 }
 
 fn overwrite_policy_items() -> Vec<String> {

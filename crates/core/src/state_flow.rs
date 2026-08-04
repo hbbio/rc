@@ -120,20 +120,18 @@ impl AppState {
             .and_then(|timeout| Instant::now().checked_add(timeout))
             .filter(|_| !self.status_line.is_empty());
 
-        let sort_mode = self.default_panel_sort_mode();
         let show_hidden_files = self.settings.panel_options.show_hidden_files;
         self.panel_listing_formats = self.settings.panel_options.listing_formats;
-        for panel in &mut self.panels {
-            panel.sort_mode = sort_mode;
+        for (index, panel) in self.panels.iter_mut().enumerate() {
+            panel.sort_mode = self.settings.panel_options.sort_modes[index];
             panel.set_show_hidden_files(show_hidden_files);
         }
     }
 
-    pub(crate) fn default_panel_sort_mode(&self) -> SortMode {
-        SortMode {
-            field: self.settings.panel_options.sort_field,
-            reverse: self.settings.panel_options.sort_reverse,
-        }
+    pub(crate) fn set_panel_sort_mode(&mut self, panel: ActivePanel, sort_mode: SortMode) {
+        self.panels[panel.index()].sort_mode = sort_mode;
+        self.settings.panel_options.sort_modes[panel.index()] = sort_mode;
+        self.settings.mark_dirty();
     }
 
     pub fn active_panel(&self) -> &PanelState {

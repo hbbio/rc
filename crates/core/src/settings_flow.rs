@@ -150,14 +150,32 @@ impl AppState {
                     SettingsEntryAction::TogglePanelShowHiddenFiles,
                 ),
                 SettingsEntry::new(
-                    "Default sort field",
-                    self.settings.panel_options.sort_field.label(),
-                    SettingsEntryAction::CyclePanelSortField,
+                    "Left sort field",
+                    self.settings.panel_options.sort_modes[ActivePanel::Left.index()]
+                        .field
+                        .label(),
+                    SettingsEntryAction::CyclePanelSortField(ActivePanel::Left),
                 ),
                 SettingsEntry::new(
-                    "Default sort reverse",
-                    bool_label(self.settings.panel_options.sort_reverse),
-                    SettingsEntryAction::TogglePanelSortReverse,
+                    "Left sort reverse",
+                    bool_label(
+                        self.settings.panel_options.sort_modes[ActivePanel::Left.index()].reverse,
+                    ),
+                    SettingsEntryAction::TogglePanelSortReverse(ActivePanel::Left),
+                ),
+                SettingsEntry::new(
+                    "Right sort field",
+                    self.settings.panel_options.sort_modes[ActivePanel::Right.index()]
+                        .field
+                        .label(),
+                    SettingsEntryAction::CyclePanelSortField(ActivePanel::Right),
+                ),
+                SettingsEntry::new(
+                    "Right sort reverse",
+                    bool_label(
+                        self.settings.panel_options.sort_modes[ActivePanel::Right.index()].reverse,
+                    ),
+                    SettingsEntryAction::TogglePanelSortReverse(ActivePanel::Right),
                 ),
             ],
             SettingsCategory::Confirmation => vec![
@@ -377,29 +395,26 @@ impl AppState {
                     bool_label(show_hidden_files)
                 ));
             }
-            SettingsEntryAction::CyclePanelSortField => {
-                self.settings.panel_options.sort_field =
-                    self.settings.panel_options.sort_field.next();
-                let sort_mode = self.default_panel_sort_mode();
-                for panel in &mut self.panels {
-                    panel.sort_mode = sort_mode;
-                }
-                self.settings.mark_dirty();
-                self.refresh_panels();
-                self.set_status(format!("Default sort: {}", sort_mode.field.label()));
-            }
-            SettingsEntryAction::TogglePanelSortReverse => {
-                self.settings.panel_options.sort_reverse =
-                    !self.settings.panel_options.sort_reverse;
-                let sort_mode = self.default_panel_sort_mode();
-                for panel in &mut self.panels {
-                    panel.sort_mode = sort_mode;
-                }
-                self.settings.mark_dirty();
-                self.refresh_panels();
+            SettingsEntryAction::CyclePanelSortField(panel) => {
+                let mut sort_mode = self.settings.panel_options.sort_modes[panel.index()];
+                sort_mode.field = sort_mode.field.next();
+                self.set_panel_sort_mode(panel, sort_mode);
+                self.queue_panel_refresh(panel);
                 self.set_status(format!(
-                    "Default sort reverse: {}",
-                    bool_label(self.settings.panel_options.sort_reverse)
+                    "{} panel sort: {}",
+                    panel.label(),
+                    sort_mode.field.label()
+                ));
+            }
+            SettingsEntryAction::TogglePanelSortReverse(panel) => {
+                let mut sort_mode = self.settings.panel_options.sort_modes[panel.index()];
+                sort_mode.reverse = !sort_mode.reverse;
+                self.set_panel_sort_mode(panel, sort_mode);
+                self.queue_panel_refresh(panel);
+                self.set_status(format!(
+                    "{} panel sort reverse: {}",
+                    panel.label(),
+                    bool_label(sort_mode.reverse)
                 ));
             }
             SettingsEntryAction::ToggleConfirmDelete => {

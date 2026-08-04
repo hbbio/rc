@@ -200,6 +200,7 @@ pub enum PanelCommand {
     SetView(PanelViewMode),
     OpenTree,
     OpenListingFormat,
+    OpenSortOrder,
     RestorePanelizedResults,
     Reread,
 }
@@ -393,7 +394,7 @@ impl AppCommand {
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
-            | Self::Panel(_, PanelCommand::OpenListingFormat)
+            | Self::Panel(_, PanelCommand::OpenListingFormat | PanelCommand::OpenSortOrder)
             | Self::FindDialogBrowse
             | Self::DialogAccept
             | Self::DialogCancel
@@ -521,7 +522,10 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
             "Listing format...",
             AppCommand::Panel(panel, PanelCommand::OpenListingFormat),
         ),
-        MenuEntry::stub("Sort order...", ""),
+        MenuEntry::action(
+            "Sort order...",
+            AppCommand::Panel(panel, PanelCommand::OpenSortOrder),
+        ),
         MenuEntry::stub("Filter...", ""),
         MenuEntry::stub("Encoding...", "M-e"),
         MenuEntry::separator(),
@@ -693,25 +697,87 @@ const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SortField {
     Name,
-    Size,
+    Version,
+    Extension,
     Modified,
+    Accessed,
+    Changed,
+    Size,
+    Inode,
+    Unsorted,
 }
 
 impl SortField {
+    pub const ALL: [Self; 9] = [
+        Self::Name,
+        Self::Version,
+        Self::Extension,
+        Self::Modified,
+        Self::Accessed,
+        Self::Changed,
+        Self::Size,
+        Self::Inode,
+        Self::Unsorted,
+    ];
+
     fn next(self) -> Self {
         match self {
-            Self::Name => Self::Size,
-            Self::Size => Self::Modified,
-            Self::Modified => Self::Name,
+            Self::Name => Self::Version,
+            Self::Version => Self::Extension,
+            Self::Extension => Self::Modified,
+            Self::Modified => Self::Accessed,
+            Self::Accessed => Self::Changed,
+            Self::Changed => Self::Size,
+            Self::Size => Self::Inode,
+            Self::Inode => Self::Unsorted,
+            Self::Unsorted => Self::Name,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Name => "name",
-            Self::Size => "size",
+            Self::Version => "version",
+            Self::Extension => "extension",
             Self::Modified => "mtime",
+            Self::Accessed => "atime",
+            Self::Changed => "ctime",
+            Self::Size => "size",
+            Self::Inode => "inode",
+            Self::Unsorted => "unsorted",
         }
+    }
+
+    pub const fn dialog_label(self) -> &'static str {
+        match self {
+            Self::Name => "Name (alphabetical)",
+            Self::Version => "Name (natural/version)",
+            Self::Extension => "Extension",
+            Self::Modified => "Modification time",
+            Self::Accessed => "Access time",
+            Self::Changed => "Inode change time",
+            Self::Size => "Size",
+            Self::Inode => "Inode",
+            Self::Unsorted => "Unsorted (filesystem order)",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Name => 0,
+            Self::Version => 1,
+            Self::Extension => 2,
+            Self::Modified => 3,
+            Self::Accessed => 4,
+            Self::Changed => 5,
+            Self::Size => 6,
+            Self::Inode => 7,
+            Self::Unsorted => 8,
+        }
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
     }
 }
 
@@ -1118,14 +1184,6 @@ impl PanelState {
         )
     }
 
-    pub fn cycle_sort_field(&mut self) {
-        self.sort_mode.field = self.sort_mode.field.next();
-    }
-
-    pub fn toggle_sort_direction(&mut self) {
-        self.sort_mode.reverse = !self.sort_mode.reverse;
-    }
-
     pub fn open_selected_directory(&mut self) -> bool {
         let Some((path, is_dir_hint)) = self
             .selected_entry()
@@ -1515,8 +1573,8 @@ enum SettingsEntryAction {
     ToggleLayoutShowPanelTotals,
     CycleLayoutStatusMessageTimeout,
     TogglePanelShowHiddenFiles,
-    CyclePanelSortField,
-    TogglePanelSortReverse,
+    CyclePanelSortField(ActivePanel),
+    TogglePanelSortReverse(ActivePanel),
     ToggleConfirmDelete,
     ToggleConfirmOverwrite,
     ToggleConfirmQuit,
@@ -1576,6 +1634,10 @@ enum PendingDialogAction {
     },
     SetPanelListingFormat {
         panel: ActivePanel,
+    },
+    SetPanelSortOrder {
+        panel: ActivePanel,
+        reverse: bool,
     },
     ViewerSearch {
         direction: ViewerSearchDirection,
@@ -1638,6 +1700,10 @@ impl DialogRoute {
 
     fn action(&self) -> Option<&PendingDialogAction> {
         self.action.as_ref()
+    }
+
+    fn action_mut(&mut self) -> Option<&mut PendingDialogAction> {
+        self.action.as_mut()
     }
 }
 

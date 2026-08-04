@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::{OverwritePolicy, PanelListingFormat, SortField};
+use crate::{OverwritePolicy, PanelListingFormat, SortMode};
 
 pub const DEFAULT_PANELIZE_PRESETS: &[(&str, &str)] = &[
     ("All files", "find . -type f"),
@@ -173,8 +173,7 @@ impl Default for LayoutSettings {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PanelOptionsSettings {
     pub show_hidden_files: bool,
-    pub sort_field: SortField,
-    pub sort_reverse: bool,
+    pub sort_modes: [SortMode; 2],
     pub listing_formats: [PanelListingFormat; 2],
 }
 
@@ -182,8 +181,7 @@ impl Default for PanelOptionsSettings {
     fn default() -> Self {
         Self {
             show_hidden_files: true,
-            sort_field: SortField::Name,
-            sort_reverse: false,
+            sort_modes: [SortMode::default(); 2],
             listing_formats: [PanelListingFormat::Full; 2],
         }
     }

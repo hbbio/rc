@@ -51,15 +51,21 @@ impl AppState {
                 self.set_status(format!("Inverted tags ({count} selected)"));
             }
             AppCommand::SortNext => {
-                self.active_panel_mut().cycle_sort_field();
-                self.refresh_active_panel();
-                let label = self.active_panel().sort_label();
+                let panel = self.active_panel;
+                let mut sort_mode = self.panels[panel.index()].sort_mode;
+                sort_mode.field = sort_mode.field.next();
+                self.set_panel_sort_mode(panel, sort_mode);
+                self.queue_panel_refresh(panel);
+                let label = self.panels[panel.index()].sort_label();
                 self.set_status(format!("Sort: {label}"));
             }
             AppCommand::SortReverse => {
-                self.active_panel_mut().toggle_sort_direction();
-                self.refresh_active_panel();
-                let label = self.active_panel().sort_label();
+                let panel = self.active_panel;
+                let mut sort_mode = self.panels[panel.index()].sort_mode;
+                sort_mode.reverse = !sort_mode.reverse;
+                self.set_panel_sort_mode(panel, sort_mode);
+                self.queue_panel_refresh(panel);
+                let label = self.panels[panel.index()].sort_label();
                 self.set_status(format!("Sort: {label}"));
             }
             AppCommand::Copy => self.start_copy_dialog(),
