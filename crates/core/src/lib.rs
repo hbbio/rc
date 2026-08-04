@@ -12,6 +12,7 @@ mod hotlist_flow;
 pub mod jobs;
 mod keybinding_help;
 pub mod keymap;
+pub mod layout;
 mod navigation_flow;
 mod orchestration;
 mod panel;
@@ -133,6 +134,7 @@ pub enum AppCommand {
     Reread,
     FindResultsOpenEntry,
     FindResultsPanelize,
+    FindResultsSelectAt(usize),
     TreeOpenEntry,
     TreeRescan,
     TreeForget,
@@ -144,10 +146,12 @@ pub enum AppCommand {
     TreeSearchNext,
     TreeSearchBackspace,
     TreeSearchAppend(char),
+    TreeSelectVisibleAt(usize),
     HotlistOpenEntry,
     HotlistAddCurrentDirectory,
     HotlistEditSelected,
     HotlistRemoveSelected,
+    HotlistSelectAt(usize),
     OpenConfirmDialog,
     OpenInputDialog,
     OpenListboxDialog,
@@ -177,6 +181,7 @@ pub enum AppCommand {
     DialogInputChar(char),
     DialogListboxUp,
     DialogListboxDown,
+    DialogListboxSelectAt(usize),
     ViewerSearchForward,
     ViewerSearchBackward,
     ViewerSearchContinue,
@@ -290,6 +295,7 @@ impl AppCommand {
             | Self::Reread
             | Self::FindResultsOpenEntry
             | Self::FindResultsPanelize
+            | Self::FindResultsSelectAt(_)
             | Self::FindResultsAgain
             | Self::FindResultsTogglePause
             | Self::TreeOpenEntry
@@ -303,10 +309,12 @@ impl AppCommand {
             | Self::TreeSearchNext
             | Self::TreeSearchBackspace
             | Self::TreeSearchAppend(_)
+            | Self::TreeSelectVisibleAt(_)
             | Self::HotlistOpenEntry
             | Self::HotlistAddCurrentDirectory
             | Self::HotlistEditSelected
-            | Self::HotlistRemoveSelected => CommandDomain::Navigation,
+            | Self::HotlistRemoveSelected
+            | Self::HotlistSelectAt(_) => CommandDomain::Navigation,
             Self::ViewerSearchForward
             | Self::ViewerSearchBackward
             | Self::ViewerSearchContinue
@@ -326,7 +334,8 @@ impl AppCommand {
             | Self::DialogBackspace
             | Self::DialogInputChar(_)
             | Self::DialogListboxUp
-            | Self::DialogListboxDown => CommandDomain::Dialog,
+            | Self::DialogListboxDown
+            | Self::DialogListboxSelectAt(_) => CommandDomain::Dialog,
             Self::OpenOptionsConfiguration
             | Self::OpenOptionsLayout
             | Self::OpenOptionsPanelOptions
@@ -566,6 +575,28 @@ pub fn top_menu_hit_test(column: u16) -> Option<usize> {
 pub enum ApplyResult {
     Continue,
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MouseClickCommands {
+    pub primary: AppCommand,
+    pub activation: Option<AppCommand>,
+}
+
+impl MouseClickCommands {
+    const fn primary(primary: AppCommand) -> Self {
+        Self {
+            primary,
+            activation: None,
+        }
+    }
+
+    const fn list_selection(primary: AppCommand, activation: AppCommand) -> Self {
+        Self {
+            primary,
+            activation: Some(activation),
+        }
+    }
 }
 
 const PANELIZE_CUSTOM_COMMAND_LABEL: &str = "<Custom command>";

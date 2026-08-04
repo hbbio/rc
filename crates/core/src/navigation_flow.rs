@@ -114,6 +114,13 @@ impl AppState {
                 self.open_selected_find_result()?;
             }
             AppCommand::FindResultsPanelize => self.panelize_find_results(),
+            AppCommand::FindResultsSelectAt(index) => {
+                if let Some(Route::FindResults(results)) = self.routes.last_mut()
+                    && index < results.entries.len()
+                {
+                    results.cursor = index;
+                }
+            }
             AppCommand::FindResultsAgain => self.open_find_again_dialog(),
             AppCommand::FindResultsTogglePause => self.toggle_active_find_pause(),
             AppCommand::Navigate(NavigationTarget::Tree, motion) => {
@@ -132,6 +139,11 @@ impl AppState {
             AppCommand::TreeSearchNext => self.search_next_tree_entry(),
             AppCommand::TreeSearchBackspace => self.remove_tree_search_char(),
             AppCommand::TreeSearchAppend(ch) => self.append_tree_search_char(ch),
+            AppCommand::TreeSelectVisibleAt(index) => {
+                if let Some(Route::Tree(tree)) = self.routes.last_mut() {
+                    tree.select_visible_index(index);
+                }
+            }
             AppCommand::Navigate(NavigationTarget::Hotlist, motion) => {
                 self.apply_hotlist_navigation(motion);
             }
@@ -141,6 +153,11 @@ impl AppState {
             AppCommand::HotlistAddCurrentDirectory => self.start_hotlist_add_dialog(),
             AppCommand::HotlistEditSelected => self.start_hotlist_edit_dialog(),
             AppCommand::HotlistRemoveSelected => self.remove_selected_hotlist_entry(),
+            AppCommand::HotlistSelectAt(index) => {
+                if index < self.settings.configuration.hotlist.len() {
+                    self.hotlist_cursor = index;
+                }
+            }
             _ => {
                 unreachable!("non-navigation command dispatched to navigation handler: {command:?}")
             }

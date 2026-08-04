@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 mod find_tests;
+mod mouse_tests;
 mod panelize_tests;
 mod quick_cd_tests;
 mod refresh_tests;
@@ -1357,18 +1358,30 @@ fn menu_mouse_clicks_map_to_commands() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
-    let command = app.command_for_left_click(8, 0);
-    assert_eq!(command, Some(AppCommand::OpenMenuAt(1)));
+    let commands = app.commands_for_left_click(8, 0, 120, 40);
+    assert_eq!(
+        commands,
+        Some(MouseClickCommands {
+            primary: AppCommand::OpenMenuAt(1),
+            activation: None,
+        })
+    );
 
     app.apply(AppCommand::OpenMenuAt(1))
         .expect("menu route should open");
     assert_eq!(
-        app.command_for_left_click(8, 3),
-        Some(AppCommand::MenuSelectAt(1))
+        app.commands_for_left_click(8, 3, 120, 40),
+        Some(MouseClickCommands {
+            primary: AppCommand::MenuSelectAt(1),
+            activation: None,
+        })
     );
     assert_eq!(
-        app.command_for_left_click(100, 20),
-        Some(AppCommand::CloseMenu)
+        app.commands_for_left_click(100, 20, 120, 40),
+        Some(MouseClickCommands {
+            primary: AppCommand::CloseMenu,
+            activation: None,
+        })
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");

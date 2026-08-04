@@ -54,6 +54,14 @@ impl AppState {
                     self.handle_dialog_event(DialogEvent::MoveDown);
                 }
             }
+            AppCommand::DialogListboxSelectAt(index) => {
+                if let Some(Route::Dialog(dialog)) = self.routes.last_mut()
+                    && let DialogKind::Listbox(listbox) = &mut dialog.kind
+                    && index < listbox.items.len()
+                {
+                    listbox.selected = index;
+                }
+            }
             _ => unreachable!("non-dialog command dispatched to dialog handler: {command:?}"),
         }
 

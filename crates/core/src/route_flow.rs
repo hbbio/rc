@@ -1,3 +1,7 @@
+use crate::layout::{
+    ScreenRect, find_results_layout, hotlist_layout, listbox_dialog_layout, tree_layout,
+    visible_window,
+};
 use crate::*;
 
 impl AppState {
@@ -237,15 +241,97 @@ impl AppState {
         self.accept_menu_selection()
     }
 
-    pub fn command_for_left_click(&self, column: u16, row: u16) -> Option<AppCommand> {
-        if !matches!(self.top_route(), Route::FileManager | Route::Menu(_)) {
-            return None;
+    pub fn commands_for_left_click(
+        &self,
+        column: u16,
+        row: u16,
+        viewport_width: u16,
+        viewport_height: u16,
+    ) -> Option<MouseClickCommands> {
+        let viewport = ScreenRect::new(0, 0, viewport_width, viewport_height);
+        match self.top_route() {
+            Route::FileManager | Route::Menu(_) => self.menu_commands_for_left_click(column, row),
+            Route::FindResults(results) => {
+                let layout = find_results_layout(viewport);
+                let index = visible_list_index_at(
+                    layout.list,
+                    column,
+                    row,
+                    results.entries.len(),
+                    results.cursor,
+                )?;
+                Some(MouseClickCommands::list_selection(
+                    AppCommand::FindResultsSelectAt(index),
+                    AppCommand::FindResultsOpenEntry,
+                ))
+            }
+            Route::Tree(tree) => {
+                let layout = tree_layout(viewport);
+                let index = visible_list_index_at(
+                    layout.list,
+                    column,
+                    row,
+                    tree.visible_entry_count(),
+                    tree.visible_cursor(),
+                )?;
+                Some(MouseClickCommands::list_selection(
+                    AppCommand::TreeSelectVisibleAt(index),
+                    AppCommand::TreeOpenEntry,
+                ))
+            }
+            Route::Hotlist => {
+                let layout = hotlist_layout(viewport);
+                let index = visible_list_index_at(
+                    layout.list,
+                    column,
+                    row,
+                    self.hotlist().len(),
+                    self.hotlist_cursor,
+                )?;
+                Some(MouseClickCommands::list_selection(
+                    AppCommand::HotlistSelectAt(index),
+                    AppCommand::HotlistOpenEntry,
+                ))
+            }
+            Route::Dialog(dialog)
+                if matches!(
+                    dialog.action(),
+                    Some(PendingDialogAction::PanelizePresetSelection { .. })
+                ) =>
+            {
+                let DialogKind::Listbox(listbox) = &dialog.kind else {
+                    return None;
+                };
+                let footer_height = if listbox.footer_hint.is_some() { 2 } else { 1 };
+                let layout = listbox_dialog_layout(viewport, footer_height);
+                let index = visible_list_index_at(
+                    layout.list,
+                    column,
+                    row,
+                    listbox.items.len(),
+                    listbox.selected,
+                )?;
+                Some(MouseClickCommands::list_selection(
+                    AppCommand::DialogListboxSelectAt(index),
+                    AppCommand::DialogAccept,
+                ))
+            }
+            Route::Dialog(_)
+            | Route::Jobs
+            | Route::Viewer(_)
+            | Route::Help(_)
+            | Route::Settings(_) => None,
         }
+    }
 
-        if row == 0
+    fn menu_commands_for_left_click(&self, column: u16, row: u16) -> Option<MouseClickCommands> {
+        if self.show_menu_bar()
+            && row == 0
             && let Some(menu_index) = top_menu_hit_test(column)
         {
-            return Some(AppCommand::OpenMenuAt(menu_index));
+            return Some(MouseClickCommands::primary(AppCommand::OpenMenuAt(
+                menu_index,
+            )));
         }
 
         let Route::Menu(menu) = self.top_route() else {
@@ -253,10 +339,12 @@ impl AppState {
         };
 
         if let Some(entry_index) = self.menu_hit_test_entry(menu, column, row) {
-            return Some(AppCommand::MenuSelectAt(entry_index));
+            return Some(MouseClickCommands::primary(AppCommand::MenuSelectAt(
+                entry_index,
+            )));
         }
 
-        Some(AppCommand::CloseMenu)
+        Some(MouseClickCommands::primary(AppCommand::CloseMenu))
     }
 
     pub(crate) fn open_jobs_screen(&mut self) {
@@ -331,4 +419,20 @@ impl AppState {
             .filter(|entry| entry.selectable)
             .map(|_| index)
     }
+}
+
+fn visible_list_index_at(
+    list_area: ScreenRect,
+    column: u16,
+    row: u16,
+    total: usize,
+    cursor: usize,
+) -> Option<usize> {
+    if !list_area.contains(column, row) || total == 0 {
+        return None;
+    }
+    let (window_start, window_end) =
+        visible_window(total, cursor, list_area.height.max(1) as usize);
+    let index = window_start.saturating_add(row.saturating_sub(list_area.y) as usize);
+    (index < window_end).then_some(index)
 }

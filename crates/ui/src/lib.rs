@@ -11,6 +11,11 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
 use rc_core::keymap::KeyContext;
+use rc_core::layout::{
+    FIND_DIALOG_HEIGHT, FIND_DIALOG_WIDTH, STANDARD_DIALOG_HEIGHT, STANDARD_DIALOG_WIDTH,
+    ScreenRect, centered_overlay_rect, find_results_layout, hotlist_layout, listbox_dialog_layout,
+    tree_layout, visible_window,
+};
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
@@ -939,9 +944,9 @@ fn indexed_color_rgb(index: u8) -> (u8, u8, u8) {
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
     let (width, height) = if matches!(&dialog.kind, DialogKind::Find(_)) {
-        (88, 20)
+        (FIND_DIALOG_WIDTH, FIND_DIALOG_HEIGHT)
     } else {
-        (56, 14)
+        (STANDARD_DIALOG_WIDTH, STANDARD_DIALOG_HEIGHT)
     };
     let area = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, area);
@@ -1107,24 +1112,25 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 .border_set(skin.dialog_border_set())
                 .border_style(skin.style("dialog", "_default_"))
                 .style(skin.style("dialog", "_default_"));
-            let inner = block.inner(area);
             frame.render_widget(block, area);
 
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(1),
-                    Constraint::Length(if listbox.footer_hint.is_some() { 2 } else { 1 }),
-                ])
-                .split(inner);
+            let footer_height = if listbox.footer_hint.is_some() { 2 } else { 1 };
+            let overlay = listbox_dialog_layout(frame_area(frame), footer_height);
+            let list_area = terminal_rect(overlay.list);
+            let footer_area = terminal_rect(overlay.footer);
 
             let items: Vec<ListItem<'_>> = if listbox.items.is_empty() {
                 vec![ListItem::new("<empty>")]
             } else {
-                let item_width = layout[0].width.saturating_sub(3) as usize;
+                let viewport_rows = list_area.height.max(1) as usize;
+                let (window_start, window_end) =
+                    visible_window(listbox.items.len(), listbox.selected, viewport_rows);
+                let item_width = list_area.width.saturating_sub(3) as usize;
                 listbox
                     .items
                     .iter()
+                    .skip(window_start)
+                    .take(window_end.saturating_sub(window_start))
                     .map(|item| ListItem::new(fit_single_line(item, item_width)))
                     .collect()
             };
@@ -1135,9 +1141,16 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
 
             let mut state = ListState::default();
             if !listbox.items.is_empty() {
-                state.select(Some(listbox.selected));
+                let viewport_rows = list_area.height.max(1) as usize;
+                let (window_start, window_end) =
+                    visible_window(listbox.items.len(), listbox.selected, viewport_rows);
+                let selected_row = listbox
+                    .selected
+                    .saturating_sub(window_start)
+                    .min(window_end.saturating_sub(window_start).saturating_sub(1));
+                state.select(Some(selected_row));
             }
-            frame.render_stateful_widget(list, layout[0], &mut state);
+            frame.render_stateful_widget(list, list_area, &mut state);
 
             frame.render_widget(
                 Paragraph::new(
@@ -1148,7 +1161,7 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 )
                 .style(skin.style("core", "disabled"))
                 .wrap(Wrap { trim: false }),
-                layout[1],
+                footer_area,
             );
         }
         DialogKind::Find(find) => {
@@ -1325,7 +1338,8 @@ fn render_find_results_screen(
     results: &FindResultsState,
     skin: &UiSkin,
 ) {
-    let area = centered_rect(frame.area(), 96, 28);
+    let screen_layout = find_results_layout(frame_area(frame));
+    let area = terminal_rect(screen_layout.outer);
     frame.render_widget(Clear, area);
 
     let mut title_flags = vec![results.status.label()];
@@ -1355,17 +1369,11 @@ fn render_find_results_screen(
         .border_set(skin.dialog_border_set())
         .border_style(skin.style("dialog", "_default_"))
         .style(skin.style("dialog", "_default_"));
-    let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(inner);
+    let summary_area = terminal_rect(screen_layout.header);
+    let list_area = terminal_rect(screen_layout.list);
+    let footer_area = terminal_rect(screen_layout.footer);
 
     let mut summary = vec![Line::from(format!(
         "Root: {} | {} | {}",
@@ -1404,7 +1412,7 @@ fn render_find_results_screen(
     summary.push(Line::from(detail));
     frame.render_widget(
         Paragraph::new(summary).style(skin.style("dialog", "_default_")),
-        layout[0],
+        summary_area,
     );
 
     let items: Vec<ListItem<'_>> = if results.entries.is_empty() {
@@ -1414,7 +1422,7 @@ fn render_find_results_screen(
             vec![ListItem::new("<no matches>")]
         }
     } else {
-        let viewport_rows = layout[1].height.max(1) as usize;
+        let viewport_rows = list_area.height.max(1) as usize;
         let (window_start, window_end) =
             visible_window(results.entries.len(), results.cursor, viewport_rows);
         results
@@ -1442,7 +1450,7 @@ fn render_find_results_screen(
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     if !results.entries.is_empty() {
-        let viewport_rows = layout[1].height.max(1) as usize;
+        let viewport_rows = list_area.height.max(1) as usize;
         let (window_start, window_end) =
             visible_window(results.entries.len(), results.cursor, viewport_rows);
         let selected_row = results
@@ -1451,7 +1459,7 @@ fn render_find_results_screen(
             .min(window_end.saturating_sub(window_start).saturating_sub(1));
         state.select(Some(selected_row));
     }
-    frame.render_stateful_widget(list, layout[1], &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
 
     let open = app
         .keybinding_primary_label(KeyContext::FindResults, AppCommand::FindResultsOpenEntry)
@@ -1485,12 +1493,13 @@ fn render_find_results_screen(
             "{open} locate | {again} again | {panelize} panelize | {pause} pause/continue\nUp/Down/PgUp/PgDn move | {cancel} cancel exact search | {close} close"
         ))
         .style(skin.style("core", "disabled")),
-        layout[2],
+        footer_area,
     );
 }
 
 fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 88, 28);
+    let screen_layout = tree_layout(frame_area(frame));
+    let area = terminal_rect(screen_layout.outer);
     frame.render_widget(Clear, area);
 
     let state_label = match tree.load_state() {
@@ -1526,17 +1535,11 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         .border_set(skin.dialog_border_set())
         .border_style(skin.style("dialog", "_default_"))
         .style(skin.style("dialog", "_default_"));
-    let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(inner);
+    let root_area = terminal_rect(screen_layout.header);
+    let list_area = terminal_rect(screen_layout.list);
+    let footer_area = terminal_rect(screen_layout.footer);
 
     let mut root = format!("Root: {}", tree.root().to_string_lossy());
     match tree.load_state() {
@@ -1549,10 +1552,10 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         TreeLoadState::Failed(message) => root.push_str(&format!(" | Error: {message}")),
         _ => {}
     }
-    let root = fit_single_line(root, layout[0].width as usize);
+    let root = fit_single_line(root, root_area.width as usize);
     frame.render_widget(
         Paragraph::new(root).style(skin.style("dialog", "_default_")),
-        layout[0],
+        root_area,
     );
 
     let visible_count = tree.visible_entry_count();
@@ -1560,7 +1563,7 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
     let items: Vec<ListItem<'_>> = if visible_count == 0 {
         vec![ListItem::new("<empty tree>")]
     } else {
-        let viewport_rows = layout[1].height.max(1) as usize;
+        let viewport_rows = list_area.height.max(1) as usize;
         let (window_start, window_end) =
             visible_window(visible_count, visible_cursor, viewport_rows);
         tree.visible_entries()
@@ -1583,7 +1586,7 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         .highlight_symbol(">> ");
     let mut state = ListState::default();
     if visible_count > 0 {
-        let viewport_rows = layout[1].height.max(1) as usize;
+        let viewport_rows = list_area.height.max(1) as usize;
         let (window_start, window_end) =
             visible_window(visible_count, visible_cursor, viewport_rows);
         let selected_row = visible_cursor
@@ -1591,7 +1594,7 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
             .min(window_end.saturating_sub(window_start).saturating_sub(1));
         state.select(Some(selected_row));
     }
-    frame.render_stateful_widget(list, layout[1], &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
 
     let open = app
         .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeOpenEntry)
@@ -1629,7 +1632,7 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
     } else {
         format!("Search: {}", tree.search_query())
     };
-    let footer_width = layout[2].width as usize;
+    let footer_width = footer_area.width as usize;
     let action_hints = fit_single_line(
         format!(
             "{rescan} scan | {forget} forget | {mode} mode | {copy} copy | {move_directory} move | {mkdir} mkdir | {delete} delete"
@@ -1645,12 +1648,13 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
     frame.render_widget(
         Paragraph::new(vec![Line::from(action_hints), Line::from(navigation_hints)])
             .style(skin.style("core", "disabled")),
-        layout[2],
+        footer_area,
     );
 }
 
 fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 88, 22);
+    let screen_layout = hotlist_layout(frame_area(frame));
+    let area = terminal_rect(screen_layout.outer);
     frame.render_widget(Clear, area);
 
     let hotlist = app.hotlist();
@@ -1661,19 +1665,16 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .border_set(skin.dialog_border_set())
         .border_style(skin.style("dialog", "_default_"))
         .style(skin.style("dialog", "_default_"));
-    let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
+    let list_area = terminal_rect(screen_layout.list);
+    let footer_area = terminal_rect(screen_layout.footer);
 
     let items: Vec<ListItem<'_>> = if hotlist.is_empty() {
         vec![ListItem::new("<empty hotlist>")]
     } else {
-        let viewport_rows = layout[0].height.max(1) as usize;
-        let viewport_width = layout[0].width.saturating_sub(3) as usize;
+        let viewport_rows = list_area.height.max(1) as usize;
+        let viewport_width = list_area.width.saturating_sub(3) as usize;
         let (window_start, window_end) =
             visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
         hotlist
@@ -1695,7 +1696,7 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
 
     let mut state = ListState::default();
     if !hotlist.is_empty() {
-        let viewport_rows = layout[0].height.max(1) as usize;
+        let viewport_rows = list_area.height.max(1) as usize;
         let (window_start, window_end) =
             visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
         let selected_row = app
@@ -1704,7 +1705,7 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
             .min(window_end.saturating_sub(window_start).saturating_sub(1));
         state.select(Some(selected_row));
     }
-    frame.render_stateful_widget(list, layout[0], &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
 
     let open = app
         .keybinding_primary_label(KeyContext::Hotlist, AppCommand::HotlistOpenEntry)
@@ -1738,7 +1739,7 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
             "{open} open | {add} add | {edit} edit | {remove} remove | {close} close"
         ))
         .style(skin.style("core", "disabled")),
-        layout[1],
+        footer_area,
     );
 }
 
@@ -1989,20 +1990,6 @@ fn panel_disk_summary(panel: &PanelState, _app: &AppState) -> String {
     )
 }
 
-fn visible_window(total: usize, cursor: usize, viewport_rows: usize) -> (usize, usize) {
-    if total == 0 || viewport_rows == 0 {
-        return (0, 0);
-    }
-
-    let visible = viewport_rows.min(total);
-    let mut start = cursor.saturating_sub(visible / 2);
-    if start + visible > total {
-        start = total.saturating_sub(visible);
-    }
-    let end = start + visible;
-    (start, end)
-}
-
 fn format_modified(modified: Option<SystemTime>) -> String {
     modified
         .map(|time| {
@@ -2111,28 +2098,19 @@ fn job_row(job: &JobRecord) -> Row<'_> {
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width.saturating_sub(2));
-    let height = height.min(area.height.saturating_sub(2));
+    terminal_rect(centered_overlay_rect(screen_rect(area), width, height))
+}
 
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Fill(1),
-            Constraint::Length(width),
-            Constraint::Fill(1),
-        ])
-        .split(area);
+fn screen_rect(area: Rect) -> ScreenRect {
+    ScreenRect::new(area.x, area.y, area.width, area.height)
+}
 
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Fill(1),
-            Constraint::Length(height),
-            Constraint::Fill(1),
-        ])
-        .split(horizontal[1]);
+fn frame_area(frame: &Frame<'_>) -> ScreenRect {
+    screen_rect(frame.area())
+}
 
-    vertical[1]
+fn terminal_rect(area: ScreenRect) -> Rect {
+    Rect::new(area.x, area.y, area.width, area.height)
 }
 
 #[cfg(test)]

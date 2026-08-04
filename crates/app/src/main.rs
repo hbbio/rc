@@ -28,6 +28,49 @@ mod runtime;
 
 use runtime::RuntimeBridge;
 
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct MouseClickTracker {
+    previous: Option<TrackedMouseClick>,
+}
+
+struct TrackedMouseClick {
+    column: u16,
+    row: u16,
+    context: KeyContext,
+    occurred_at: Instant,
+}
+
+impl MouseClickTracker {
+    fn clear(&mut self) {
+        self.previous = None;
+    }
+
+    fn register(
+        &mut self,
+        column: u16,
+        row: u16,
+        context: KeyContext,
+        occurred_at: Instant,
+    ) -> bool {
+        let is_double_click = self.previous.as_ref().is_some_and(|previous| {
+            previous.column == column
+                && previous.row == row
+                && previous.context == context
+                && occurred_at.saturating_duration_since(previous.occurred_at)
+                    <= DOUBLE_CLICK_INTERVAL
+        });
+        self.previous = (!is_double_click).then_some(TrackedMouseClick {
+            column,
+            row,
+            context,
+            occurred_at,
+        });
+        is_double_click
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about = "Roadmap bootstrap for the rc file manager")]
 struct Cli {
@@ -311,6 +354,7 @@ fn run_event_loop(
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
+    let mut mouse_click_tracker = MouseClickTracker::default();
 
     loop {
         runtime.drain_events(state);
@@ -323,7 +367,12 @@ fn run_event_loop(
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).context("failed to poll input")? {
-            match event::read().context("failed to read input event")? {
+            let viewport = terminal.size().context("failed to read terminal size")?;
+            let input_event = event::read().context("failed to read input event")?;
+            if matches!(&input_event, Event::Key(_)) {
+                mouse_click_tracker.clear();
+            }
+            match input_event {
                 Event::Key(key_event)
                     if key_event.kind == KeyEventKind::Press
                         && handle_key(
@@ -343,7 +392,15 @@ fn run_event_loop(
                     return Ok(());
                 }
                 Event::Mouse(mouse_event)
-                    if handle_mouse(state, mouse_event, runtime, skin_runtime)? =>
+                    if handle_mouse(
+                        state,
+                        mouse_event,
+                        viewport.width,
+                        viewport.height,
+                        &mut mouse_click_tracker,
+                        runtime,
+                        skin_runtime,
+                    )? =>
                 {
                     return Ok(());
                 }
@@ -414,17 +471,46 @@ fn handle_key(
 fn handle_mouse(
     state: &mut AppState,
     mouse_event: MouseEvent,
+    viewport_width: u16,
+    viewport_height: u16,
+    click_tracker: &mut MouseClickTracker,
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
-    if !matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left)) {
-        return Ok(false);
+    match mouse_event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {}
+        MouseEventKind::Down(_) => {
+            click_tracker.clear();
+            return Ok(false);
+        }
+        _ => return Ok(false),
     }
 
-    let Some(command) = state.command_for_left_click(mouse_event.column, mouse_event.row) else {
+    let Some(commands) = state.commands_for_left_click(
+        mouse_event.column,
+        mouse_event.row,
+        viewport_width,
+        viewport_height,
+    ) else {
+        click_tracker.clear();
         return Ok(false);
     };
-    Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
+    let is_double_click = click_tracker.register(
+        mouse_event.column,
+        mouse_event.row,
+        state.key_context(),
+        Instant::now(),
+    );
+    if apply_and_dispatch(state, commands.primary, runtime, skin_runtime)? == ApplyResult::Quit {
+        return Ok(true);
+    }
+    if is_double_click
+        && let Some(activation) = commands.activation
+        && apply_and_dispatch(state, activation, runtime, skin_runtime)? == ApplyResult::Quit
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn apply_and_dispatch(
@@ -912,6 +998,134 @@ mod tests {
 
     fn test_runtime_bridge() -> RuntimeBridge {
         runtime::test_runtime_bridge_with_capacity(4).0
+    }
+
+    #[test]
+    fn mouse_click_tracker_requires_matching_recent_clicks() {
+        let started_at = Instant::now();
+        let mut tracker = MouseClickTracker::default();
+
+        assert!(!tracker.register(10, 12, KeyContext::Hotlist, started_at));
+        assert!(tracker.register(
+            10,
+            12,
+            KeyContext::Hotlist,
+            started_at + Duration::from_millis(100),
+        ));
+        assert!(
+            !tracker.register(
+                10,
+                12,
+                KeyContext::Hotlist,
+                started_at + Duration::from_millis(150),
+            ),
+            "a completed pair should not turn a third click into another double-click"
+        );
+        tracker.clear();
+        assert!(!tracker.register(
+            10,
+            12,
+            KeyContext::Hotlist,
+            started_at + Duration::from_millis(175),
+        ));
+        assert!(!tracker.register(
+            11,
+            12,
+            KeyContext::Hotlist,
+            started_at + Duration::from_millis(200),
+        ));
+        assert!(!tracker.register(
+            11,
+            12,
+            KeyContext::Tree,
+            started_at + Duration::from_millis(250),
+        ));
+        assert!(!tracker.register(
+            11,
+            12,
+            KeyContext::Tree,
+            started_at + DOUBLE_CLICK_INTERVAL + Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn hotlist_double_click_opens_directory_and_dispatches_refresh() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-hotlist-double-click-{stamp}"));
+        let target = root.join("target");
+        fs::create_dir_all(&target).expect("must create hotlist target");
+        let expected_target = fs::canonicalize(&target).expect("target should canonicalize");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state.settings_mut().configuration.hotlist =
+            vec![rc_core::HotlistEntry::new("Target", target.clone())];
+        state
+            .apply(AppCommand::OpenHotlist)
+            .expect("hotlist should open");
+        let viewport_width = 120;
+        let viewport_height = 40;
+        let list = rc_core::layout::hotlist_layout(rc_core::layout::ScreenRect::new(
+            0,
+            0,
+            viewport_width,
+            viewport_height,
+        ))
+        .list;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x,
+            row: list.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("first click should select the hotlist entry");
+        assert_eq!(state.key_context(), KeyContext::Hotlist);
+
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("second click should activate the hotlist entry");
+        assert_eq!(state.key_context(), KeyContext::FileManager);
+        assert_eq!(state.active_panel().cwd, expected_target);
+        match command_rx.try_recv() {
+            Ok(RuntimeCommand::Worker {
+                command: WorkerCommand::Run(job),
+                ..
+            }) => assert!(matches!(
+                &job.request,
+                JobRequest::RefreshPanel { cwd, .. } if cwd == &expected_target
+            )),
+            Ok(other) => panic!("unexpected double-click runtime command: {other:?}"),
+            Err(error) => panic!("double-click refresh should dispatch: {error}"),
+        }
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
     }
 
     #[test]

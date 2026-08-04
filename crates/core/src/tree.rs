@@ -304,6 +304,14 @@ impl TreeState {
         true
     }
 
+    pub(crate) fn select_visible_index(&mut self, visible_index: usize) -> bool {
+        let Some(&entry_index) = self.visible_indices.get(visible_index) else {
+            return false;
+        };
+        self.set_cursor(entry_index);
+        true
+    }
+
     pub(crate) fn plan_selected_rescan(
         &self,
         max_depth: usize,
