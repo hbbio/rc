@@ -166,12 +166,16 @@ impl AppState {
                     let is_refresh = kind == Some(JobKind::RefreshPanel);
                     let is_tree = kind == Some(JobKind::BuildTree);
                     let is_quick_view = kind == Some(JobKind::LoadQuickView);
+                    let is_selection_size = kind == Some(JobKind::MeasureSelection);
                     let suppress_status = suppress_transient_job_status(kind);
                     if is_refresh {
                         self.clear_panel_refresh_state_for_job(id);
                     }
                     if is_quick_view {
                         self.handle_quick_view_job_failure(id, &error);
+                    }
+                    if is_selection_size {
+                        self.handle_selection_size_job_failure(id, &error);
                     }
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
                         results.status = if error.is_canceled() {
@@ -315,6 +319,11 @@ impl AppState {
                 request_id,
                 result,
             } => self.handle_quick_view_loaded(panel, path, request_id, result),
+            BackgroundEvent::SelectionSizeMeasured {
+                panel,
+                request_id,
+                report,
+            } => self.handle_selection_size_measured(panel, request_id, report),
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
                 self.handle_find_entries_chunk(job_id, entries)
             }
@@ -617,6 +626,7 @@ impl AppState {
             return false;
         }
         self.handle_quick_view_cancel_requested(job_id);
+        self.handle_selection_size_cancel_requested(job_id);
         let job_kind = self
             .jobs
             .job(job_id)
@@ -666,6 +676,7 @@ fn suppress_transient_job_status(kind: Option<JobKind>) -> bool {
             JobKind::RefreshPanel
                 | JobKind::LoadViewer
                 | JobKind::LoadQuickView
+                | JobKind::MeasureSelection
                 | JobKind::BuildTree
         )
     )

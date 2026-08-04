@@ -453,7 +453,9 @@ async fn run_runtime_loop(
                             | JobRequest::Rename { .. } => {
                                 (Arc::clone(&fs_mutation_limit), "fs_mutation", true)
                             }
-                            JobRequest::Find { .. } | JobRequest::BuildTree { .. } => {
+                            JobRequest::Find { .. }
+                            | JobRequest::MeasureSelection { .. }
+                            | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan", true)
                             }
                             JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
@@ -808,6 +810,19 @@ fn execute_runtime_worker_job(
             worker_event_tx,
             background_event_tx,
         ),
+        JobRequest::MeasureSelection {
+            panel,
+            paths,
+            request_id,
+        } => execute_selection_size_worker_job(
+            worker_job.id,
+            panel,
+            paths,
+            request_id,
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
         JobRequest::BuildTree {
             root,
             max_depth,
@@ -1003,6 +1018,55 @@ fn execute_viewer_load_worker(
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_selection_size_worker_job(
+    job_id: JobId,
+    panel: rc_core::ActivePanel,
+    paths: Vec<std::path::PathBuf>,
+    request_id: u64,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let report = match rc_core::measure_selection_size(&paths, cancel_flag.as_ref()) {
+        Ok(report) if !is_canceled(cancel_flag.as_ref()) => report,
+        Ok(_) => {
+            let _ = worker_event_tx.send(JobEvent::Finished {
+                id: job_id,
+                result: Err(JobError::canceled()),
+            });
+            return;
+        }
+        Err(error)
+            if is_canceled(cancel_flag.as_ref())
+                || error.kind() == std::io::ErrorKind::Interrupted =>
+        {
+            let _ = worker_event_tx.send(JobEvent::Finished {
+                id: job_id,
+                result: Err(JobError::canceled()),
+            });
+            return;
+        }
+        Err(error) => {
+            let _ = worker_event_tx.send(JobEvent::Finished {
+                id: job_id,
+                result: Err(JobError::from_io(error)),
+            });
+            return;
+        }
+    };
+
+    let result = background_event_tx
+        .send(BackgroundEvent::SelectionSizeMeasured {
+            panel,
+            request_id,
+            report,
+        })
+        .map_err(|_| JobError::from_message("background event channel disconnected"));
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
 fn execute_tree_worker_job(
     job_id: JobId,
     root: std::path::PathBuf,
@@ -1062,7 +1126,9 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
             JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
                 CommandPriority::High
             }
-            JobRequest::RefreshPanel { .. } => CommandPriority::Low,
+            JobRequest::RefreshPanel { .. } | JobRequest::MeasureSelection { .. } => {
+                CommandPriority::Low
+            }
             _ => CommandPriority::Medium,
         },
     }
@@ -2092,6 +2158,56 @@ mod tests {
             }
             other => panic!("expected quick-view completion, got {other:?}"),
         }
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Ok(())
+            }
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn selection_size_worker_reports_recursive_bytes_with_request_identity() {
+        let root = make_temp_dir("selection-size-worker");
+        let selected = root.join("selected");
+        fs::create_dir_all(selected.join("nested")).expect("nested directory should be creatable");
+        fs::write(selected.join("first"), vec![0_u8; 13]).expect("first file should be writable");
+        fs::write(selected.join("nested/second"), vec![0_u8; 31])
+            .expect("second file should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_selection_size_worker_job(
+            JobId(1),
+            ActivePanel::Right,
+            vec![selected],
+            73,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Started { id: JobId(1) }
+        ));
+        assert!(matches!(
+            background_event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("selection-size background event should arrive"),
+            BackgroundEvent::SelectionSizeMeasured {
+                panel: ActivePanel::Right,
+                request_id: 73,
+                report: rc_core::SelectionSizeReport {
+                    apparent_bytes: 44,
+                    unreadable_entries: 0,
+                },
+            }
+        ));
         assert!(matches!(
             recv_event(&worker_event_rx, Duration::from_secs(1)),
             JobEvent::Finished {

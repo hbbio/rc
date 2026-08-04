@@ -365,6 +365,8 @@ impl AppState {
             SettingsEntryAction::ToggleLayoutShowPanelTotals => {
                 self.settings.layout.show_panel_totals = !self.settings.layout.show_panel_totals;
                 self.settings.mark_dirty();
+                self.sync_selection_size(ActivePanel::Left, true);
+                self.sync_selection_size(ActivePanel::Right, true);
                 self.set_status(format!(
                     "Show panel totals: {}",
                     bool_label(self.settings.layout.show_panel_totals)

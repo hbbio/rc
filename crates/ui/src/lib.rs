@@ -20,8 +20,8 @@ use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FilterDialogField, FindDialogField, FindNameMode, FindResultsState, FindResultsStatus,
     HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PairInputField, PanelListingFormat,
-    PanelState, PanelViewMode, QuickViewState, Route, SettingsScreenState, TreeLoadState,
-    TreeState, ViewerState, top_menus,
+    PanelState, PanelViewMode, QuickViewState, Route, SelectionSizeState, SettingsScreenState,
+    TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -533,14 +533,8 @@ fn render_panel(
         }
     }
 
-    let (selected_count, selected_size) = panel_selected_totals(panel);
-    let selected_summary = if app.show_panel_totals() && selected_count > 0 {
-        format!(
-            "{} in {} {}",
-            format_human_size(selected_size),
-            selected_count,
-            if selected_count == 1 { "file" } else { "files" }
-        )
+    let selected_summary = if app.show_panel_totals() {
+        panel_selection_summary(app.selection_size_state(panel_id))
     } else {
         String::new()
     };
@@ -2413,23 +2407,45 @@ fn panel_entry_size_label(entry: &FileEntry) -> String {
     format_human_size_compact(entry.size)
 }
 
-fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
-    if panel.tagged_count() == 0 {
-        return (0, 0);
-    }
-
-    let mut count = 0usize;
-    let mut size = 0u64;
-
-    for entry in &panel.entries {
-        if entry.is_parent() || !panel.is_tagged(&entry.path) {
-            continue;
+fn panel_selection_summary(state: &SelectionSizeState) -> String {
+    match state {
+        SelectionSizeState::Empty => String::new(),
+        SelectionSizeState::Calculating { selected_items } => {
+            format!(
+                "Calculating size of {selected_items} {}...",
+                item_label(*selected_items)
+            )
         }
-        count = count.saturating_add(1);
-        size = size.saturating_add(entry.size);
+        SelectionSizeState::Ready {
+            selected_items,
+            apparent_bytes,
+            unreadable_entries: 0,
+        } => format!(
+            "{} in {selected_items} {}",
+            format_human_size(*apparent_bytes),
+            item_label(*selected_items)
+        ),
+        SelectionSizeState::Ready {
+            selected_items,
+            apparent_bytes,
+            unreadable_entries,
+        } => format!(
+            "{} in {selected_items} {} (partial: {unreadable_entries} unreadable)",
+            format_human_size(*apparent_bytes),
+            item_label(*selected_items)
+        ),
+        SelectionSizeState::Failed {
+            selected_items,
+            error,
+        } => format!(
+            "Size unavailable for {selected_items} {}: {error}",
+            item_label(*selected_items)
+        ),
     }
+}
 
-    (count, size)
+fn item_label(count: usize) -> &'static str {
+    if count == 1 { "item" } else { "items" }
 }
 
 fn panel_disk_summary(panel: &PanelState, _app: &AppState) -> String {
@@ -2582,7 +2598,7 @@ mod tests {
     use rc_core::{
         AppCommand, AppState, BackgroundEvent, FileEntryKind, FileEntryMetadata, JobError,
         JobEvent, JobRequest, PanelCommand, WorkerCommand, build_tree_ready_event,
-        execute_worker_job, refresh_panel_event,
+        execute_worker_job, measure_selection_size, refresh_panel_event,
     };
     use std::env;
     use std::fs;
@@ -2702,6 +2718,32 @@ mod tests {
                                 });
                                 let result =
                                     viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            JobRequest::MeasureSelection {
+                                panel,
+                                paths,
+                                request_id,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let cancel_flag = job.cancel_flag();
+                                let result = measure_selection_size(paths, cancel_flag.as_ref())
+                                    .map(|report| {
+                                        state.handle_background_event(
+                                            BackgroundEvent::SelectionSizeMeasured {
+                                                panel: *panel,
+                                                request_id: *request_id,
+                                                report,
+                                            },
+                                        );
+                                    })
+                                    .map_err(|error| {
+                                        if error.kind() == std::io::ErrorKind::Interrupted {
+                                            JobError::canceled()
+                                        } else {
+                                            JobError::from_io(error)
+                                        }
+                                    });
                                 let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                             }
                             JobRequest::BuildTree {
@@ -2935,6 +2977,33 @@ mod tests {
             "frame should include panel entry names"
         );
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn panel_footer_reports_recursive_size_for_a_tagged_directory() {
+        let root = temp_root("recursive-selected-total");
+        let selected = root.join("selected");
+        fs::create_dir_all(selected.join("nested")).expect("nested directory should be creatable");
+        fs::write(selected.join("nested/payload"), vec![0_u8; 3 * 1024])
+            .expect("payload should be writable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.active_panel_mut().cursor = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == selected)
+            .expect("selected directory should be listed");
+
+        app.apply(AppCommand::ToggleTag)
+            .expect("directory should be taggable");
+        let calculating = render_to_text(&app, 120, 24);
+        assert!(calculating.contains("Calculating size of 1 item..."));
+
+        drain_background(&mut app);
+        let measured = render_to_text(&app, 120, 24);
+        assert!(measured.contains("3kb in 1 item"));
+
+        fs::remove_dir_all(root).expect("temporary root should be removable");
     }
 
     #[test]

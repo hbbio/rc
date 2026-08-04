@@ -83,6 +83,11 @@ pub enum BackgroundEvent {
         request_id: u64,
         result: Result<ViewerState, String>,
     },
+    SelectionSizeMeasured {
+        panel: ActivePanel,
+        request_id: u64,
+        report: crate::SelectionSizeReport,
+    },
     FindEntriesChunk {
         job_id: JobId,
         entries: Vec<FindResultEntry>,

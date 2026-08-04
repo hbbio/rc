@@ -88,6 +88,9 @@ deferred; this milestone covers the standalone tree screen.
   results, and filters cached panelize/find results without rerunning their source.
 - [x] Bundled and custom MC keymap actions reach listing-format, sort, and filter
   controls without being reported as unknown.
+- [x] Tagged totals recursively measure directory contents off the UI thread, with
+  cancellation, request correlation, overlapping-tree deduplication, and explicit partial
+  results for unreadable entries.
 
 ## 7. Cross-cutting acceptance
 

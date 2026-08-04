@@ -89,6 +89,7 @@ impl AppState {
         panel.loading = false;
         panel.disk_usage = disk_usage;
         self.sync_quick_view_from(panel_id, true);
+        self.sync_selection_size(panel_id, true);
         self.set_status(format!(
             "Restored {result_count} {source_label} result(s) in the {} panel",
             panel_id.label()
@@ -426,6 +427,7 @@ impl AppState {
         }
         self.schedule_panel_refresh_revert(active_panel, revert);
         self.sync_quick_view_from(active_panel, false);
+        self.sync_selection_size(active_panel, false);
         self.queue_panel_refresh(active_panel);
         self.set_status("Panelize running...");
     }

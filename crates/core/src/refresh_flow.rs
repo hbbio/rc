@@ -499,6 +499,7 @@ impl AppState {
             self.set_status(completion_status);
         }
         self.sync_quick_view_from(panel, true);
+        self.sync_selection_size(panel, true);
     }
 
     #[cfg(test)]

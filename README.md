@@ -50,6 +50,9 @@ Recent Milestone 4 and reliability progress:
 - Quick view uses cancelable request-correlated background reads. Listing filters preserve hidden
   tags and selection where possible, and reuse cached panelized results instead of rerunning a
   command.
+- Tagged selection totals use cancelable background traversal and include complete directory
+  contents, while overlapping trees are counted once and unreadable entries are reported as a
+  partial total.
 
 The remaining inactive Left/Right entries are explicitly later work: user-defined listing
 formats in Milestone 5, FTP/SFTP in Milestone 8, Shell links in Milestone 9, and lossless legacy

@@ -18,6 +18,7 @@ impl AppState {
             panel_views: [PanelViewMode::Listing; 2],
             panel_listing_formats: [PanelListingFormat::Full; 2],
             quick_views: std::array::from_fn(|_| QuickViewState::default()),
+            selection_sizes: std::array::from_fn(|_| SelectionSizeState::default()),
             status_line: String::from("Press F1 for help"),
             status_expires_at: None,
             last_dialog_result: None,
@@ -39,6 +40,7 @@ impl AppState {
             panel_refresh: PanelRefreshWorkflow::default(),
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             quick_view: QuickViewWorkflow::default(),
+            selection_size: SelectionSizeWorkflow::default(),
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
             panel_mkdirs: PanelMkdirTracker::default(),
@@ -130,6 +132,8 @@ impl AppState {
             panel.filter = self.settings.panel_options.filters[index].clone();
             panel.set_show_hidden_files(show_hidden_files);
         }
+        self.sync_selection_size(ActivePanel::Left, true);
+        self.sync_selection_size(ActivePanel::Right, true);
     }
 
     pub(crate) fn set_panel_sort_mode(&mut self, panel: ActivePanel, sort_mode: SortMode) {
@@ -270,6 +274,7 @@ impl AppState {
             }
             self.remember_previous_directory(panel, previous_directory);
             self.sync_quick_view_from(panel, false);
+            self.sync_selection_size(panel, false);
         }
         opened
     }
@@ -287,6 +292,7 @@ impl AppState {
             }
             self.remember_previous_directory(panel, previous_directory);
             self.sync_quick_view_from(panel, false);
+            self.sync_selection_size(panel, false);
         }
         opened
     }
@@ -305,6 +311,7 @@ impl AppState {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
             self.sync_quick_view_from(panel, false);
+            self.sync_selection_size(panel, false);
         }
         exited
     }

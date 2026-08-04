@@ -22,6 +22,8 @@ mod quick_cd;
 mod quick_view_flow;
 mod refresh_flow;
 mod route_flow;
+mod selection_size;
+mod selection_size_flow;
 pub mod settings;
 mod settings_flow;
 pub mod settings_io;
@@ -69,6 +71,10 @@ pub(crate) use panel::{
 pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
 pub use quick_view_flow::QuickViewState;
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
+pub use selection_size::{
+    SELECTION_SIZE_CANCELED_MESSAGE, SelectionSizeReport, measure_selection_size,
+};
+pub use selection_size_flow::SelectionSizeState;
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, HotlistEntry, LayoutSettings, LearnKeysSettings,
@@ -94,6 +100,7 @@ use crate::quick_view_flow::QuickViewWorkflow;
 use crate::refresh_flow::{
     PanelEntriesChunk, PanelRefreshCompletion, PanelRefreshPostWorkflow, PanelRefreshWorkflow,
 };
+use crate::selection_size_flow::SelectionSizeWorkflow;
 use crate::viewer::ViewerSearchDirection;
 
 const MAX_STATUS_LINE_CHARS: usize = 1024;
@@ -1243,6 +1250,12 @@ impl PanelState {
             .collect()
     }
 
+    pub fn tagged_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.tagged.iter().cloned().collect::<Vec<_>>();
+        paths.sort_unstable();
+        paths
+    }
+
     pub fn sort_label(&self) -> String {
         format!(
             "{} {}",
@@ -1927,6 +1940,7 @@ pub struct AppState {
     panel_views: [PanelViewMode; 2],
     panel_listing_formats: [PanelListingFormat; 2],
     quick_views: [QuickViewState; 2],
+    selection_sizes: [SelectionSizeState; 2],
     pub status_line: String,
     status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,
@@ -1948,6 +1962,7 @@ pub struct AppState {
     panel_refresh: PanelRefreshWorkflow,
     panel_refresh_post: PanelRefreshPostWorkflow,
     quick_view: QuickViewWorkflow,
+    selection_size: SelectionSizeWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
     panel_mkdirs: PanelMkdirTracker,

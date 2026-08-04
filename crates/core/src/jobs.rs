@@ -43,6 +43,7 @@ pub enum JobKind {
     Find,
     LoadViewer,
     LoadQuickView,
+    MeasureSelection,
     BuildTree,
 }
 
@@ -59,6 +60,7 @@ impl JobKind {
             Self::Find => "find",
             Self::LoadViewer => "load-viewer",
             Self::LoadQuickView => "load-quick-view",
+            Self::MeasureSelection => "measure-selection",
             Self::BuildTree => "build-tree",
         }
     }
@@ -130,6 +132,11 @@ pub enum JobRequest {
         path: PathBuf,
         request_id: u64,
     },
+    MeasureSelection {
+        panel: ActivePanel,
+        paths: Vec<PathBuf>,
+        request_id: u64,
+    },
     BuildTree {
         root: PathBuf,
         max_depth: usize,
@@ -150,6 +157,7 @@ impl JobRequest {
             Self::Find { .. } => JobKind::Find,
             Self::LoadViewer { .. } => JobKind::LoadViewer,
             Self::LoadQuickView { .. } => JobKind::LoadQuickView,
+            Self::MeasureSelection { .. } => JobKind::MeasureSelection,
             Self::BuildTree { .. } => JobKind::BuildTree,
         }
     }
@@ -166,6 +174,7 @@ impl JobRequest {
             Self::Find { .. } => 1,
             Self::LoadViewer { .. } => 1,
             Self::LoadQuickView { .. } => 1,
+            Self::MeasureSelection { paths, .. } => paths.len(),
             Self::BuildTree { .. } => 1,
         }
     }
@@ -242,6 +251,11 @@ impl JobRequest {
             Self::LoadQuickView { panel, path, .. } => format!(
                 "preview {} in {} panel",
                 path.to_string_lossy(),
+                panel.label()
+            ),
+            Self::MeasureSelection { panel, paths, .. } => format!(
+                "measure {} selected item(s) in {} panel",
+                paths.len(),
                 panel.label()
             ),
             Self::BuildTree {
@@ -932,6 +946,10 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "quick-view jobs are executed by the runtime adapter",
         )),
+        JobRequest::MeasureSelection { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "selection-size jobs are executed by the runtime adapter",
+        )),
         JobRequest::BuildTree { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "tree jobs are executed by the runtime adapter",
@@ -1498,6 +1516,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::RefreshPanel { .. }
         | JobRequest::LoadViewer { .. }
         | JobRequest::LoadQuickView { .. }
+        | JobRequest::MeasureSelection { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }

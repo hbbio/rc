@@ -38,6 +38,7 @@ impl AppState {
                     let added = self.active_panel_mut().toggle_tag_on_cursor();
                     self.active_panel_mut().move_cursor(1);
                     self.sync_quick_view_from(self.active_panel, false);
+                    self.sync_selection_size(self.active_panel, false);
                     let count = self.active_panel().tagged_count();
                     self.set_status(if added {
                         format!("Tagged entry ({count} total)")
@@ -48,6 +49,7 @@ impl AppState {
             }
             AppCommand::InvertTags => {
                 self.active_panel_mut().invert_tags();
+                self.sync_selection_size(self.active_panel, false);
                 let count = self.active_panel().tagged_count();
                 self.set_status(format!("Inverted tags ({count} selected)"));
             }
@@ -628,6 +630,7 @@ impl AppState {
         self.schedule_panel_refresh_revert(active_panel, revert);
         self.pause_active_find_results();
         self.sync_quick_view_from(active_panel, false);
+        self.sync_selection_size(active_panel, false);
         self.queue_panel_refresh(active_panel);
         self.set_status(format!("Panelizing {result_count} find result(s)..."));
     }
@@ -1003,6 +1006,7 @@ impl AppState {
         self.schedule_panel_refresh_revert(panel_id, revert);
         self.remember_previous_directory(panel_id, previous_directory);
         self.sync_quick_view_from(panel_id, false);
+        self.sync_selection_size(panel_id, false);
         self.queue_panel_refresh(panel_id);
         Ok(true)
     }

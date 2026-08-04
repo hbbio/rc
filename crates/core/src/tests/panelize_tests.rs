@@ -191,9 +191,18 @@ fn side_panel_menu_restores_external_panelize_results_and_operation_targets() {
         app.active_panel().is_tagged(&target),
         "restoring should preserve tagged results"
     );
+    let pending = app.take_pending_worker_commands();
     assert!(
-        app.take_pending_worker_commands().is_empty(),
-        "history restoration must not rerun the external command"
+        pending.iter().all(|command| matches!(
+            command,
+            WorkerCommand::Run(job)
+                if matches!(
+                    &job.request,
+                    JobRequest::MeasureSelection { paths, .. }
+                        if paths.as_slice() == std::slice::from_ref(&target)
+                )
+        )),
+        "history restoration may remeasure restored tags but must not rerun the external command"
     );
 
     app.apply(AppCommand::Copy)
