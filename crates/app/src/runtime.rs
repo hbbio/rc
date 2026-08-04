@@ -603,10 +603,11 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
                     reason = "runtime shutdown",
                     "runtime worker task canceled while waiting for scheduler permit"
                 );
-                let _ = worker_event_tx.send(JobEvent::Finished {
-                    id: job_id,
-                    result: Err(JobError::canceled()),
-                });
+                finish_canceled_worker_before_start(
+                    &worker_job,
+                    &worker_event_tx,
+                    &background_event_tx,
+                );
                 return TaskCompletion::Worker { job_id };
             }
             _ = job_cancel.cancelled() => {
@@ -620,10 +621,11 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
                     reason = "job cancellation token",
                     "runtime worker task canceled while waiting for scheduler permit"
                 );
-                let _ = worker_event_tx.send(JobEvent::Finished {
-                    id: job_id,
-                    result: Err(JobError::canceled()),
-                });
+                finish_canceled_worker_before_start(
+                    &worker_job,
+                    &worker_event_tx,
+                    &background_event_tx,
+                );
                 return TaskCompletion::Worker { job_id };
             }
             permit = limit.acquire_owned() => {
@@ -649,10 +651,11 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
                 },
                 "runtime worker task canceled before start"
             );
-            let _ = worker_event_tx.send(JobEvent::Finished {
-                id: job_id,
-                result: Err(JobError::canceled()),
-            });
+            finish_canceled_worker_before_start(
+                &worker_job,
+                &worker_event_tx,
+                &background_event_tx,
+            );
             return TaskCompletion::Worker { job_id };
         }
         let blocking = tokio::task::spawn_blocking(move || {
@@ -692,6 +695,36 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
             );
         }
         TaskCompletion::Worker { job_id }
+    });
+}
+
+fn finish_canceled_worker_before_start(
+    worker_job: &rc_core::WorkerJob,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    if let JobRequest::RefreshPanel {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        show_hidden_files,
+        request_id,
+    } = &worker_job.request
+    {
+        let request = PanelRefreshStreamRequest {
+            panel: *panel,
+            cwd: cwd.clone(),
+            source: source.clone(),
+            sort_mode: *sort_mode,
+            show_hidden_files: *show_hidden_files,
+            request_id: *request_id,
+        };
+        let _ = background_event_tx.send(request.canceled_event());
+    }
+    let _ = worker_event_tx.send(JobEvent::Finished {
+        id: worker_job.id,
+        result: Err(JobError::canceled()),
     });
 }
 
@@ -2014,6 +2047,44 @@ mod tests {
             ),
             "refresh path should still emit the background panel event"
         );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn refresh_canceled_before_start_emits_terminal_background_event() {
+        let root = make_temp_dir("refresh-canceled-before-start");
+        let mut manager = JobManager::new();
+        let job = manager.enqueue(JobRequest::RefreshPanel {
+            panel: ActivePanel::Right,
+            cwd: root.clone(),
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            show_hidden_files: true,
+            request_id: 17,
+        });
+        let job_id = job.id;
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        finish_canceled_worker_before_start(&job, &worker_event_tx, &background_event_tx);
+
+        assert!(matches!(
+            background_event_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(BackgroundEvent::PanelRefreshed {
+                panel: ActivePanel::Right,
+                request_id: 17,
+                result: Err(error),
+                ..
+            }) if error == "panel refresh canceled"
+        ));
+        assert!(matches!(
+            worker_event_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(JobEvent::Finished {
+                id,
+                result: Err(error),
+            }) if id == job_id && error.code == JobErrorCode::Canceled
+        ));
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }

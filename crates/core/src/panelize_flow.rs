@@ -390,7 +390,7 @@ impl AppState {
 
     pub(crate) fn start_panelize_command(&mut self, command: String) {
         let active_panel = self.active_panel;
-        let previous_panel = self.active_panel().clone();
+        let revert = self.panel_refresh_revert_snapshot(active_panel);
         {
             let panel = self.active_panel_mut();
             panel.source = PanelListingSource::Panelize { command };
@@ -398,7 +398,7 @@ impl AppState {
             panel.tagged.clear();
             panel.loading = true;
         }
-        self.schedule_panelize_revert_for_panel_refresh(active_panel, previous_panel);
+        self.schedule_panel_refresh_revert(active_panel, revert);
         self.queue_panel_refresh(active_panel);
         self.set_status("Panelize running...");
     }

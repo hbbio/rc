@@ -312,6 +312,7 @@ impl AppState {
             error_message = %error.message,
             "job dispatch failed"
         );
+        self.rollback_panel_refresh_for_job(id);
         self.handle_job_event(JobEvent::Finished {
             id,
             result: Err(error),

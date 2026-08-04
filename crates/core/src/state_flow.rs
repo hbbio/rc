@@ -174,9 +174,11 @@ impl AppState {
     pub fn open_selected_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
+        let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().open_selected_directory();
         if opened {
+            self.schedule_panel_refresh_revert(panel, revert);
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
@@ -188,9 +190,11 @@ impl AppState {
     pub fn go_parent_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
+        let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().go_parent();
         if opened {
+            self.schedule_panel_refresh_revert(panel, revert);
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
@@ -201,10 +205,14 @@ impl AppState {
 
     pub fn exit_panelize_mode(&mut self) -> bool {
         let panel = self.active_panel;
+        let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let exited = self.active_panel_mut().exit_panelize();
-        if exited && let Some(snapshot) = snapshot {
-            self.panelized_result_history[panel.index()] = Some(snapshot);
+        if exited {
+            self.schedule_panel_refresh_revert(panel, revert);
+            if let Some(snapshot) = snapshot {
+                self.panelized_result_history[panel.index()] = Some(snapshot);
+            }
         }
         exited
     }

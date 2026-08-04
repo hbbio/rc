@@ -777,7 +777,7 @@ impl PanelizedResultSnapshot {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PanelState {
     pub cwd: PathBuf,
     pub entries: Vec<FileEntry>,

@@ -27,6 +27,20 @@ pub struct PanelRefreshStreamRequest {
     pub request_id: u64,
 }
 
+impl PanelRefreshStreamRequest {
+    pub fn canceled_event(&self) -> BackgroundEvent {
+        BackgroundEvent::PanelRefreshed {
+            panel: self.panel,
+            cwd: self.cwd.clone(),
+            source: self.source.clone(),
+            sort_mode: self.sort_mode,
+            request_id: self.request_id,
+            disk_usage: None,
+            result: Err(String::from(crate::PANEL_REFRESH_CANCELED_MESSAGE)),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum BackgroundEvent {
     PanelEntriesChunk {

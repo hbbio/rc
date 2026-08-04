@@ -214,6 +214,136 @@ fn panel_refresh_clears_stale_disk_usage_while_loading_and_after_failure() {
 }
 
 #[test]
+fn failed_directory_transition_restores_the_complete_previous_panel_state() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-directory-rollback-{stamp}"));
+    let destination = root.join("restricted");
+    fs::create_dir_all(&destination).expect("destination fixture should be creatable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let panel = app.active_panel;
+    let panel_index = panel.index();
+    let destination_index = app.panels[panel_index]
+        .entries
+        .iter()
+        .position(|entry| entry.path == destination)
+        .expect("destination should be listed");
+    app.panels[panel_index].cursor = destination_index;
+    app.panels[panel_index].disk_usage = Some(DiskUsageSummary {
+        free_bytes: 25,
+        total_bytes: 100,
+    });
+    let older_directory = root.join("older");
+    app.previous_panel_directories[panel_index] = Some(older_directory.clone());
+    let previous_panel = app.panels[panel_index].clone();
+
+    app.apply(AppCommand::OpenEntry)
+        .expect("opening the selected directory should queue a refresh");
+    assert_eq!(app.panels[panel_index].cwd, destination);
+    assert!(app.panels[panel_index].loading);
+
+    let (cwd, source, sort_mode, request_id) = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            let JobRequest::RefreshPanel {
+                panel: request_panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } = job.request
+            else {
+                return None;
+            };
+            (request_panel == panel).then_some((cwd, source, sort_mode, request_id))
+        })
+        .expect("directory refresh should be queued");
+
+    app.handle_background_event(BackgroundEvent::PanelEntriesChunk {
+        panel,
+        cwd: cwd.clone(),
+        source: source.clone(),
+        sort_mode,
+        request_id,
+        entries: vec![FileEntry::file(
+            String::from("partial.txt"),
+            destination.join("partial.txt"),
+            7,
+            None,
+        )],
+    });
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        disk_usage: None,
+        result: Err(String::from("permission denied")),
+    });
+
+    assert_eq!(
+        app.panels[panel_index], previous_panel,
+        "a failed directory transition must restore the last usable panel atomically"
+    );
+    assert_eq!(
+        app.previous_panel_directories[panel_index],
+        Some(older_directory),
+        "a failed transition must not corrupt per-panel cd history"
+    );
+    assert!(app.status_line.contains("permission denied"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn failed_directory_refresh_dispatch_rolls_back_the_pending_transition() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-dispatch-rollback-{stamp}"));
+    let destination = root.join("destination");
+    fs::create_dir_all(&destination).expect("destination fixture should be creatable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let panel_index = app.active_panel.index();
+    let previous_panel = app.panels[panel_index].clone();
+    assert!(
+        app.set_active_panel_directory(destination)
+            .expect("directory transition should be accepted")
+    );
+    let refresh_job_id = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            matches!(job.request, JobRequest::RefreshPanel { .. }).then_some(job.id)
+        })
+        .expect("directory refresh should be queued");
+
+    app.handle_job_dispatch_failure(refresh_job_id, JobError::dispatch("runtime unavailable"));
+
+    assert_eq!(
+        app.panels[panel_index], previous_panel,
+        "a transition whose refresh never starts must restore the previous panel"
+    );
+    assert_eq!(app.panel_refresh_job_id_at(panel_index), None);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

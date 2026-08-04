@@ -586,7 +586,7 @@ impl AppState {
 
         let result_count = paths.len();
         let active_panel = self.active_panel;
-        let previous_panel = self.active_panel().clone();
+        let revert = self.panel_refresh_revert_snapshot(active_panel);
         {
             let panel = self.active_panel_mut();
             panel.source = PanelListingSource::FindResults {
@@ -598,7 +598,7 @@ impl AppState {
             panel.tagged.clear();
             panel.loading = true;
         }
-        self.schedule_panelize_revert_for_panel_refresh(active_panel, previous_panel);
+        self.schedule_panel_refresh_revert(active_panel, revert);
         self.pause_active_find_results();
         self.queue_panel_refresh(active_panel);
         self.set_status(format!("Panelizing {result_count} find result(s)..."));
@@ -945,6 +945,7 @@ impl AppState {
 
         let panel_index = self.active_panel.index();
         let previous_directory = self.active_panel().cwd.clone();
+        let revert = self.panel_refresh_revert_snapshot(self.active_panel);
         if let Some(snapshot) = self.completed_panelized_result_snapshot(self.active_panel) {
             self.panelized_result_history[panel_index] = Some(snapshot);
         }
@@ -955,6 +956,7 @@ impl AppState {
         panel.tagged.clear();
         panel.entries.clear();
         panel.loading = true;
+        self.schedule_panel_refresh_revert(self.active_panel, revert);
         self.remember_previous_directory(self.active_panel, previous_directory);
         self.queue_panel_refresh(self.active_panel);
         Ok(true)
