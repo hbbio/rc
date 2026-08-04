@@ -32,23 +32,16 @@ impl AppState {
         self.clamp_jobs_cursor();
         match event {
             JobEvent::Started { id } => {
-                let job_kind = self
-                    .jobs
-                    .job(id)
-                    .map(|job| job.kind.label())
-                    .unwrap_or("unknown");
-                let is_refresh = self
-                    .jobs
-                    .job(id)
-                    .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
-                let is_viewer_load = self
-                    .jobs
-                    .job(id)
-                    .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
+                let kind = self.jobs.job(id).map(|job| job.kind);
+                let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
+                let suppress_status = matches!(
+                    kind,
+                    Some(JobKind::RefreshPanel | JobKind::LoadViewer | JobKind::BuildTree)
+                );
                 tracing::debug!(job_event = "started", job_kind, job_id = %id, "job started");
-                if !is_refresh && !is_viewer_load {
-                    if let Some(job) = self.jobs.jobs().iter().find(|job| job.id == id) {
-                        self.set_status(format!("Job #{id} started: {}", job.summary));
+                if !suppress_status {
+                    if let Some(summary) = self.jobs.job(id).map(|job| job.summary.clone()) {
+                        self.set_status(format!("Job #{id} started: {summary}"));
                     } else {
                         self.set_status(format!("Job #{id} started"));
                     }
@@ -88,11 +81,8 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
-                    let job_kind = self
-                        .jobs
-                        .job(id)
-                        .map(|job| job.kind.label())
-                        .unwrap_or("unknown");
+                    let kind = self.jobs.job(id).map(|job| job.kind);
+                    let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
                     tracing::info!(
                         job_event = "finished",
                         outcome = "succeeded",
@@ -100,38 +90,28 @@ impl AppState {
                         job_id = %id,
                         "job finished successfully"
                     );
-                    let is_persist_settings = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
-                    let is_find = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::Find));
-                    let is_refresh = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
-                    let is_viewer_load = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
+                    let is_persist_settings = kind == Some(JobKind::PersistSettings);
+                    let is_find = kind == Some(JobKind::Find);
+                    let suppress_status = matches!(
+                        kind,
+                        Some(JobKind::RefreshPanel | JobKind::LoadViewer | JobKind::BuildTree)
+                    );
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
                         results.loading = false;
                     }
-                    let should_refresh = self.jobs.job(id).is_some_and(|job| {
-                        matches!(
-                            job.kind,
+                    let should_refresh = matches!(
+                        kind,
+                        Some(
                             JobKind::Copy
                                 | JobKind::Move
                                 | JobKind::Delete
                                 | JobKind::Mkdir
                                 | JobKind::Rename
                         )
-                    });
+                    );
                     if should_refresh {
                         self.refresh_panels();
                     }
@@ -145,12 +125,12 @@ impl AppState {
                         } else {
                             self.set_status(format!("Job #{id} finished"));
                         }
-                    } else if let Some(job) = self.jobs.job(id) {
-                        if !is_refresh && !is_viewer_load {
-                            self.set_status(format!("Job #{id} finished: {}", job.summary));
+                    } else if !suppress_status {
+                        if let Some(summary) = self.jobs.job(id).map(|job| job.summary.clone()) {
+                            self.set_status(format!("Job #{id} finished: {summary}"));
+                        } else {
+                            self.set_status(format!("Job #{id} finished"));
                         }
-                    } else if !is_refresh && !is_viewer_load {
-                        self.set_status(format!("Job #{id} finished"));
                     }
                     if is_persist_settings
                         && let Some(request) = self.deferred_persist_settings_request.take()
@@ -159,32 +139,42 @@ impl AppState {
                     }
                 }
                 Err(error) => {
-                    let job_kind = self
-                        .jobs
-                        .job(id)
-                        .map(|job| job.kind.label())
-                        .unwrap_or("unknown");
-                    let is_persist_settings = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::PersistSettings));
-                    let is_find = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::Find));
-                    let is_refresh = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::RefreshPanel));
-                    let is_viewer_load = self
-                        .jobs
-                        .job(id)
-                        .is_some_and(|job| matches!(job.kind, JobKind::LoadViewer));
+                    let kind = self.jobs.job(id).map(|job| job.kind);
+                    let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
+                    let is_persist_settings = kind == Some(JobKind::PersistSettings);
+                    let is_find = kind == Some(JobKind::Find);
+                    let is_refresh = kind == Some(JobKind::RefreshPanel);
+                    let is_tree = kind == Some(JobKind::BuildTree);
+                    let suppress_status = matches!(
+                        kind,
+                        Some(JobKind::RefreshPanel | JobKind::LoadViewer | JobKind::BuildTree)
+                    );
                     if is_refresh {
                         self.clear_panel_refresh_state_for_job(id);
                     }
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
                         results.loading = false;
+                    }
+                    if is_tree {
+                        let canceled = error.is_canceled();
+                        let failure = (!canceled).then(|| error.user_message());
+                        let tree_is_active = if let Some(tree) = self.tree_by_job_id_mut(id) {
+                            if canceled {
+                                tree.mark_canceled();
+                            } else if let Some(failure) = failure.as_ref() {
+                                tree.mark_failed(failure.clone());
+                            }
+                            true
+                        } else {
+                            false
+                        };
+                        if tree_is_active {
+                            if canceled {
+                                self.set_status("Directory tree canceled");
+                            } else if let Some(failure) = failure {
+                                self.set_status(format!("Directory tree failed: {failure}"));
+                            }
+                        }
                     }
                     if error.is_canceled() {
                         tracing::info!(
@@ -196,7 +186,7 @@ impl AppState {
                             retry_hint = ?error.retry_hint,
                             "job canceled"
                         );
-                        if !is_refresh && !is_viewer_load {
+                        if !suppress_status {
                             self.set_status(format!("Job #{id} canceled"));
                         }
                     } else {
@@ -210,7 +200,7 @@ impl AppState {
                             error_message = %error.message,
                             "job failed"
                         );
-                        if !is_refresh && !is_viewer_load {
+                        if !suppress_status {
                             self.set_status(format!("Job #{id} failed: {}", error.user_message()));
                         }
                     }
@@ -273,21 +263,19 @@ impl AppState {
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
                 self.handle_find_entries_chunk(job_id, entries)
             }
-            BackgroundEvent::TreeReady { root, entries } => {
-                let mut replaced = false;
-                for route in self.routes.iter_mut().rev() {
-                    if let Route::Tree(tree) = route
-                        && tree.root == root
-                    {
-                        tree.entries = entries.clone();
-                        tree.cursor = 0;
-                        tree.loading = false;
-                        replaced = true;
-                        break;
-                    }
-                }
+            BackgroundEvent::TreeReady {
+                job_id,
+                root,
+                result,
+            } => {
+                let status = tree_ready_status(&result);
+                let replaced = self
+                    .tree_by_job_id_mut(job_id)
+                    .filter(|tree| tree.root == root)
+                    .map(|tree| tree.apply_build_result(result))
+                    .is_some();
                 if replaced {
-                    self.set_status(format!("Opened directory tree ({})", entries.len()));
+                    self.set_status(status);
                 }
             }
         }
@@ -517,4 +505,30 @@ impl AppState {
     pub(crate) fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
         self.queue_worker_job_request(JobRequest::Delete { targets });
     }
+}
+
+fn tree_ready_status(result: &TreeBuildResult) -> String {
+    let mut status = format!("Opened directory tree ({})", result.entries.len());
+    let summary = &result.summary;
+    if summary.depth_limit_reached && summary.entry_limit_reached {
+        status.push_str(" | truncated by depth and entry limits");
+    } else if summary.depth_limit_reached {
+        status.push_str(" | truncated by depth limit");
+    } else if summary.entry_limit_reached {
+        status.push_str(" | truncated by entry limit");
+    }
+    if summary.skipped_items > 0 {
+        status.push_str(&format!(
+            " | skipped {} unreadable item(s)",
+            summary.skipped_items
+        ));
+        if let Some(issue) = &summary.first_issue {
+            status.push_str(&format!(
+                ": {}: {}",
+                issue.path.to_string_lossy(),
+                issue.message
+            ));
+        }
+    }
+    status
 }

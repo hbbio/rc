@@ -21,7 +21,7 @@ mod settings_flow;
 pub mod settings_io;
 pub mod slo;
 mod state_flow;
-mod tree_builder;
+mod tree;
 mod viewer;
 mod viewer_flow;
 
@@ -64,7 +64,10 @@ pub use settings::{
 pub use slo::{FOUNDATION_SLO, SloBudgets};
 #[cfg(test)]
 use std::sync::atomic::Ordering as AtomicOrdering;
-pub(crate) use tree_builder::build_tree_entries;
+pub(crate) use tree::build_tree_entries;
+pub use tree::{
+    TreeBuildResult, TreeEntry, TreeLoadState, TreeScanIssue, TreeScanSummary, TreeState,
+};
 pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
@@ -976,70 +979,6 @@ impl FindResultsState {
     }
 
     fn selected_entry(&self) -> Option<&FindResultEntry> {
-        self.entries.get(self.cursor)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TreeEntry {
-    pub path: PathBuf,
-    pub depth: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct TreeState {
-    pub root: PathBuf,
-    pub entries: Vec<TreeEntry>,
-    pub cursor: usize,
-    pub loading: bool,
-}
-
-impl TreeState {
-    fn loading(root: PathBuf) -> Self {
-        let entries = vec![TreeEntry {
-            path: root.clone(),
-            depth: 0,
-        }];
-        Self {
-            root,
-            entries,
-            cursor: 0,
-            loading: true,
-        }
-    }
-
-    fn move_cursor(&mut self, delta: isize) {
-        if self.entries.is_empty() {
-            self.cursor = 0;
-            return;
-        }
-
-        let last = self.entries.len() - 1;
-        let next = if delta.is_negative() {
-            self.cursor.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.cursor.saturating_add(delta as usize).min(last)
-        };
-        self.cursor = next;
-    }
-
-    fn move_page(&mut self, pages: isize, page_step: usize) {
-        self.move_cursor(pages.saturating_mul(page_step as isize));
-    }
-
-    fn move_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    fn move_end(&mut self) {
-        if self.entries.is_empty() {
-            self.cursor = 0;
-        } else {
-            self.cursor = self.entries.len() - 1;
-        }
-    }
-
-    fn selected_entry(&self) -> Option<&TreeEntry> {
         self.entries.get(self.cursor)
     }
 }

@@ -883,21 +883,31 @@ fn execute_tree_worker_job(
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    if is_canceled(cancel_flag.as_ref()) {
-        let _ = worker_event_tx.send(JobEvent::Finished {
-            id: job_id,
-            result: Err(JobError::canceled()),
-        });
-        return;
-    }
-    let event = build_tree_ready_event(root, max_depth, max_entries);
-    if is_canceled(cancel_flag.as_ref()) {
-        let _ = worker_event_tx.send(JobEvent::Finished {
-            id: job_id,
-            result: Err(JobError::canceled()),
-        });
-        return;
-    }
+    let event =
+        match build_tree_ready_event(job_id, root, max_depth, max_entries, cancel_flag.as_ref()) {
+            Ok(event) if !is_canceled(cancel_flag.as_ref()) => event,
+            Ok(_) => {
+                let _ = worker_event_tx.send(JobEvent::Finished {
+                    id: job_id,
+                    result: Err(JobError::canceled()),
+                });
+                return;
+            }
+            Err(_error) if is_canceled(cancel_flag.as_ref()) => {
+                let _ = worker_event_tx.send(JobEvent::Finished {
+                    id: job_id,
+                    result: Err(JobError::canceled()),
+                });
+                return;
+            }
+            Err(error) => {
+                let _ = worker_event_tx.send(JobEvent::Finished {
+                    id: job_id,
+                    result: Err(JobError::from_io(error)),
+                });
+                return;
+            }
+        };
     let delivered = background_event_tx.send(event).is_ok();
     let result = if delivered {
         Ok(())

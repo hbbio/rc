@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::{
     ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JOB_CANCELED_MESSAGE, JobId,
-    PanelListingSource, SortMode, TreeEntry, ViewerState, build_tree_entries,
+    PanelListingSource, SortMode, TreeBuildResult, ViewerState, build_tree_entries,
     ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
     read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
 };
@@ -56,8 +56,9 @@ pub enum BackgroundEvent {
         entries: Vec<FindResultEntry>,
     },
     TreeReady {
+        job_id: JobId,
         root: PathBuf,
-        entries: Vec<TreeEntry>,
+        result: TreeBuildResult,
     },
 }
 
@@ -88,12 +89,18 @@ pub fn refresh_panel_event(
 }
 
 pub fn build_tree_ready_event(
+    job_id: JobId,
     root: PathBuf,
     max_depth: usize,
     max_entries: usize,
-) -> BackgroundEvent {
-    let entries = build_tree_entries(&root, max_depth, max_entries);
-    BackgroundEvent::TreeReady { root, entries }
+    cancel_flag: &AtomicBool,
+) -> io::Result<BackgroundEvent> {
+    let result = build_tree_entries(&root, max_depth, max_entries, Some(cancel_flag))?;
+    Ok(BackgroundEvent::TreeReady {
+        job_id,
+        root,
+        result,
+    })
 }
 
 pub fn refresh_panel_entries(

@@ -382,21 +382,33 @@ impl AppState {
             return;
         }
         let root = self.active_panel().cwd.clone();
-        self.routes
-            .push(Route::Tree(TreeState::loading(root.clone())));
-        self.queue_worker_job_request(JobRequest::BuildTree {
-            root,
+        let job_id = self.queue_worker_job_request(JobRequest::BuildTree {
+            root: root.clone(),
             max_depth: self.settings.advanced.tree_max_depth,
             max_entries: self.settings.advanced.tree_max_entries,
         });
+        self.routes
+            .push(Route::Tree(TreeState::loading(job_id, root)));
         self.set_status("Loading directory tree...");
     }
 
     pub(crate) fn close_tree_screen(&mut self) {
-        if matches!(self.top_route(), Route::Tree(_)) {
-            self.routes.pop();
-            self.set_status("Closed directory tree");
+        let Some(Route::Tree(tree)) = self.routes.last() else {
+            return;
+        };
+        let pending_job = tree.is_loading().then_some(tree.job_id);
+        self.routes.pop();
+        if let Some(job_id) = pending_job {
+            let _ = self.request_cancel_for_job(job_id);
         }
+        self.set_status("Closed directory tree");
+    }
+
+    pub(crate) fn tree_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut TreeState> {
+        self.routes.iter_mut().rev().find_map(|route| match route {
+            Route::Tree(tree) if tree.job_id == job_id => Some(tree),
+            _ => None,
+        })
     }
 
     pub(crate) fn move_tree_cursor(&mut self, delta: isize) {

@@ -38,6 +38,120 @@ fn tree_screen_selects_directory_for_active_panel() {
 }
 
 #[test]
+fn closing_tree_cancels_its_exact_build_job() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-tree-close-cancel-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp tree");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenTree)
+        .expect("tree screen should open");
+    let tree_job_id = match app.top_route() {
+        Route::Tree(tree) => tree.job_id,
+        _ => panic!("top route should be tree"),
+    };
+
+    app.apply(AppCommand::CloseTree)
+        .expect("tree screen should close");
+    assert_eq!(app.key_context(), KeyContext::FileManager);
+    let commands = app.take_pending_worker_commands();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Cancel(job_id) if *job_id == tree_job_id
+    )));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn stale_tree_completion_cannot_replace_reopened_tree() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-tree-stale-{stamp}"));
+    let branch = root.join("branch");
+    fs::create_dir_all(&branch).expect("must create temp tree");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenTree)
+        .expect("first tree screen should open");
+    let first_job_id = match app.top_route() {
+        Route::Tree(tree) => tree.job_id,
+        _ => panic!("top route should be tree"),
+    };
+    app.apply(AppCommand::CloseTree)
+        .expect("first tree screen should close");
+    app.apply(AppCommand::OpenTree)
+        .expect("second tree screen should open");
+    let second_job_id = match app.top_route() {
+        Route::Tree(tree) => tree.job_id,
+        _ => panic!("top route should be tree"),
+    };
+    assert_ne!(first_job_id, second_job_id);
+
+    let cancel_flag = AtomicBool::new(false);
+    let stale_event = build_tree_ready_event(first_job_id, root.clone(), 4, 64, &cancel_flag)
+        .expect("stale tree event should build");
+    app.handle_background_event(stale_event);
+    let Route::Tree(tree) = app.top_route() else {
+        panic!("reopened tree should remain active");
+    };
+    assert!(tree.is_loading(), "stale result must not finish new tree");
+    assert_eq!(tree.entries.len(), 1, "stale entries must be ignored");
+
+    let current_event = build_tree_ready_event(second_job_id, root.clone(), 4, 64, &cancel_flag)
+        .expect("current tree event should build");
+    app.handle_background_event(current_event);
+    let Route::Tree(tree) = app.top_route() else {
+        panic!("reopened tree should remain active");
+    };
+    assert!(!tree.is_loading());
+    assert!(tree.entries.iter().any(|entry| entry.path == branch));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn tree_build_failure_is_retained_by_the_active_route() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-tree-failure-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp tree");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenTree)
+        .expect("tree screen should open");
+    let job_id = match app.top_route() {
+        Route::Tree(tree) => tree.job_id,
+        _ => panic!("top route should be tree"),
+    };
+    app.handle_job_event(JobEvent::Finished {
+        id: job_id,
+        result: Err(JobError::from_io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "tree fixture denied",
+        ))),
+    });
+
+    let Route::Tree(tree) = app.top_route() else {
+        panic!("tree route should remain active after failure");
+    };
+    assert!(matches!(
+        &tree.load_state,
+        TreeLoadState::Failed(message) if message.contains("tree fixture denied")
+    ));
+    assert!(app.status_line.contains("Directory tree failed"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn hotlist_supports_add_remove_and_open() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

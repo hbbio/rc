@@ -131,15 +131,17 @@ fn drain_background(app: &mut AppState) {
                             max_entries,
                         } => {
                             let _ = event_tx.send(JobEvent::Started { id: job_id });
-                            app.handle_background_event(build_tree_ready_event(
+                            let cancel_flag = job.cancel_flag();
+                            let result = build_tree_ready_event(
+                                job_id,
                                 root.clone(),
                                 *max_depth,
                                 *max_entries,
-                            ));
-                            let _ = event_tx.send(JobEvent::Finished {
-                                id: job_id,
-                                result: Ok(()),
-                            });
+                                cancel_flag.as_ref(),
+                            )
+                            .map(|event| app.handle_background_event(event))
+                            .map_err(JobError::from_io);
+                            let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                         }
                         _ => {
                             execute_worker_job(job, &event_tx);

@@ -3,9 +3,10 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rc_core::{BackgroundEvent, build_tree_ready_event};
+use rc_core::{BackgroundEvent, JobId, build_tree_ready_event};
 
 fn make_temp_dir(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
@@ -22,15 +23,19 @@ fn build_tree_event_includes_root_entry() {
     let root = make_temp_dir("shutdown");
     fs::write(root.join("needle.txt"), "needle").expect("fixture file should be writable");
 
-    let event = build_tree_ready_event(root.clone(), 2, 64);
+    let cancel_flag = AtomicBool::new(false);
+    let event = build_tree_ready_event(JobId(1), root.clone(), 2, 64, &cancel_flag)
+        .expect("tree event should build");
     match event {
         BackgroundEvent::TreeReady {
+            job_id,
             root: event_root,
-            entries,
+            result,
         } => {
+            assert_eq!(job_id, JobId(1));
             assert_eq!(event_root, root);
             assert!(
-                entries.iter().any(|entry| entry.path == root),
+                result.entries.iter().any(|entry| entry.path == root),
                 "tree event should include the root directory"
             );
         }

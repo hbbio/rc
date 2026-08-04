@@ -14,7 +14,7 @@ use rc_core::keymap::KeyContext;
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindResultsState, HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route,
-    SettingsScreenState, TreeState, ViewerState, top_menus,
+    SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1240,11 +1240,29 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
     let area = centered_rect(frame.area(), 88, 28);
     frame.render_widget(Clear, area);
 
-    let title = format!(
-        "Directory tree ({}){}",
-        tree.entries.len(),
-        if tree.loading { " | loading..." } else { "" }
-    );
+    let state_label = match &tree.load_state {
+        TreeLoadState::Loading => String::from(" | loading..."),
+        TreeLoadState::Ready(summary) => {
+            let mut labels = Vec::new();
+            if summary.depth_limit_reached {
+                labels.push("depth limit");
+            }
+            if summary.entry_limit_reached {
+                labels.push("entry limit");
+            }
+            if summary.skipped_items > 0 {
+                labels.push("read errors");
+            }
+            if labels.is_empty() {
+                String::new()
+            } else {
+                format!(" | {}", labels.join(", "))
+            }
+        }
+        TreeLoadState::Canceled => String::from(" | canceled"),
+        TreeLoadState::Failed(_) => String::from(" | failed"),
+    };
+    let title = format!("Directory tree ({}){state_label}", tree.entries.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -1263,7 +1281,18 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         ])
         .split(inner);
 
-    let root = format!("Root: {}", tree.root.to_string_lossy());
+    let mut root = format!("Root: {}", tree.root.to_string_lossy());
+    match &tree.load_state {
+        TreeLoadState::Ready(summary) if summary.skipped_items > 0 => {
+            root.push_str(&format!(
+                " | skipped {} unreadable item(s)",
+                summary.skipped_items
+            ));
+        }
+        TreeLoadState::Failed(message) => root.push_str(&format!(" | Error: {message}")),
+        _ => {}
+    }
+    let root = fit_single_line(root, layout[0].width as usize);
     frame.render_widget(
         Paragraph::new(root).style(skin.style("dialog", "_default_")),
         layout[0],
@@ -1803,7 +1832,7 @@ mod tests {
     use ratatui::buffer::{Buffer, Cell};
     use rc_core::{
         AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
-        execute_worker_job, refresh_panel_event,
+        build_tree_ready_event, execute_worker_job, refresh_panel_event,
     };
     use std::env;
     use std::fs;
@@ -1895,6 +1924,24 @@ mod tests {
                                 });
                                 let result =
                                     viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
+                            JobRequest::BuildTree {
+                                root,
+                                max_depth,
+                                max_entries,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let cancel_flag = job.cancel_flag();
+                                let result = build_tree_ready_event(
+                                    job_id,
+                                    root.clone(),
+                                    *max_depth,
+                                    *max_entries,
+                                    cancel_flag.as_ref(),
+                                )
+                                .map(|event| state.handle_background_event(event))
+                                .map_err(JobError::from_io);
                                 let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                             }
                             _ => {
@@ -2041,6 +2088,26 @@ mod tests {
         assert!(
             title.contains("panelize"),
             "panel title should indicate panelize mode"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_tree_reports_depth_truncation() {
+        let root = temp_root("tree-depth-limit");
+        fs::create_dir_all(root.join("branch").join("deep"))
+            .expect("tree fixture should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.settings_mut().advanced.tree_max_depth = 1;
+        app.apply(AppCommand::OpenTree)
+            .expect("tree route should open");
+        drain_background(&mut app);
+
+        let frame = render_to_text(&app, 120, 40);
+        assert!(
+            frame.contains("Directory tree (2) | depth limit"),
+            "{frame}"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
