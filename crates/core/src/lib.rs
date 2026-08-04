@@ -64,9 +64,12 @@ pub use settings::{
 pub use slo::{FOUNDATION_SLO, SloBudgets};
 #[cfg(test)]
 use std::sync::atomic::Ordering as AtomicOrdering;
-pub(crate) use tree::build_tree_entries;
 pub use tree::{
-    TreeBuildResult, TreeEntry, TreeLoadState, TreeScanIssue, TreeScanSummary, TreeState,
+    TreeBuildResult, TreeEntry, TreeLoadState, TreeNavigationMode, TreeScanIssue, TreeScanSummary,
+    TreeState,
+};
+pub(crate) use tree::{
+    TreeMutationTracker, TreeRescanPlan, TreeScanCompletion, build_tree_entries,
 };
 pub use viewer::ViewerState;
 
@@ -117,6 +120,16 @@ pub enum AppCommand {
     FindResultsOpenEntry,
     FindResultsPanelize,
     TreeOpenEntry,
+    TreeRescan,
+    TreeForget,
+    TreeToggleNavigation,
+    TreeCopy,
+    TreeMove,
+    TreeMkdir,
+    TreeDelete,
+    TreeSearchNext,
+    TreeSearchBackspace,
+    TreeSearchAppend(char),
     HotlistOpenEntry,
     HotlistAddCurrentDirectory,
     HotlistRemoveSelected,
@@ -262,6 +275,16 @@ impl AppCommand {
             | Self::FindResultsOpenEntry
             | Self::FindResultsPanelize
             | Self::TreeOpenEntry
+            | Self::TreeRescan
+            | Self::TreeForget
+            | Self::TreeToggleNavigation
+            | Self::TreeCopy
+            | Self::TreeMove
+            | Self::TreeMkdir
+            | Self::TreeDelete
+            | Self::TreeSearchNext
+            | Self::TreeSearchBackspace
+            | Self::TreeSearchAppend(_)
             | Self::HotlistOpenEntry
             | Self::HotlistAddCurrentDirectory
             | Self::HotlistRemoveSelected => CommandDomain::Navigation,
@@ -1214,14 +1237,22 @@ enum TransferKind {
     Move,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperationOrigin {
+    Panel,
+    Tree,
+}
+
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
     ConfirmDelete {
         targets: Vec<PathBuf>,
+        origin: OperationOrigin,
     },
     ConfirmQuit,
     Mkdir {
         base_dir: PathBuf,
+        origin: OperationOrigin,
     },
     RenameEntry {
         source: PathBuf,
@@ -1230,11 +1261,13 @@ enum PendingDialogAction {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         source_base_dir: PathBuf,
+        origin: OperationOrigin,
     },
     TransferOverwrite {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
+        origin: OperationOrigin,
     },
     SetDefaultOverwritePolicy,
     SetSkin {
@@ -1309,7 +1342,7 @@ pub enum Route {
     Jobs,
     Viewer(ViewerState),
     FindResults(FindResultsState),
-    Tree(TreeState),
+    Tree(Box<TreeState>),
     Hotlist,
     Dialog(DialogRoute),
 }
@@ -1427,6 +1460,7 @@ pub struct AppState {
     panel_refresh_post: PanelRefreshPostWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
+    tree_mutations: TreeMutationTracker,
     keybinding_hints: KeybindingHints,
     keymap_unknown_actions: usize,
     keymap_invalid_bindings: usize,

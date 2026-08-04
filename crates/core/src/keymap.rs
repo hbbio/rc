@@ -121,6 +121,8 @@ pub enum KeyCommand {
     EditEntry,
     CdUp,
     Reread,
+    Forget,
+    ToggleNavigation,
     ToggleTag,
     InvertTags,
     SortNext,
@@ -202,6 +204,8 @@ impl KeyCommand {
             "edit" => Self::EditEntry,
             "cdup" => Self::CdUp,
             "reread" => Self::Reread,
+            "forget" => Self::Forget,
+            "togglenavigation" | "staticdynamic" => Self::ToggleNavigation,
             "toggletag" | "mark" => Self::ToggleTag,
             "inverttags" | "markinverse" => Self::InvertTags,
             "sortnext" => Self::SortNext,
@@ -1336,11 +1340,56 @@ Reread = ctrl-r
     }
 
     #[test]
+    fn bundled_keymap_supports_complete_tree_actions() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+
+        let expected = [
+            (KeyCode::F(2), KeyCommand::Reread),
+            (KeyCode::F(3), KeyCommand::Forget),
+            (KeyCode::F(4), KeyCommand::ToggleNavigation),
+            (KeyCode::F(5), KeyCommand::Copy),
+            (KeyCode::F(6), KeyCommand::Move),
+            (KeyCode::F(7), KeyCommand::OpenInputDialog),
+            (KeyCode::F(8), KeyCommand::Delete),
+            (KeyCode::Left, KeyCommand::CursorLeft),
+            (KeyCode::Right, KeyCommand::CursorRight),
+            (KeyCode::Backspace, KeyCommand::DialogBackspace),
+        ];
+        for (code, command) in expected {
+            assert_eq!(
+                keymap.resolve(KeyContext::Tree, KeyChord::new(code)),
+                Some(&command)
+            );
+        }
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::Tree,
+                KeyChord {
+                    code: KeyCode::Char('h'),
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: false,
+                    },
+                }
+            ),
+            Some(&KeyCommand::DialogBackspace)
+        );
+    }
+
+    #[test]
     fn bundled_keymap_no_longer_reports_common_mc_actions_as_unknown() {
         let (_, report) =
             Keymap::bundled_mc_default_with_report().expect("bundled keymap should parse");
 
-        for action in ["UserMenu", "View", "Edit", "MakeDir"] {
+        for action in [
+            "UserMenu",
+            "View",
+            "Edit",
+            "MakeDir",
+            "Forget",
+            "ToggleNavigation",
+        ] {
             assert!(
                 !report
                     .unknown_actions

@@ -56,6 +56,15 @@ impl AppCommand {
             (KeyContext::FindResults, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::FileManager, KeyCommand::OpenTree) => Some(Self::OpenTree),
             (KeyContext::Tree, KeyCommand::OpenEntry) => Some(Self::TreeOpenEntry),
+            (KeyContext::Tree, KeyCommand::Reread) => Some(Self::TreeRescan),
+            (KeyContext::Tree, KeyCommand::Forget) => Some(Self::TreeForget),
+            (KeyContext::Tree, KeyCommand::ToggleNavigation) => Some(Self::TreeToggleNavigation),
+            (KeyContext::Tree, KeyCommand::Copy) => Some(Self::TreeCopy),
+            (KeyContext::Tree, KeyCommand::Move) => Some(Self::TreeMove),
+            (KeyContext::Tree, KeyCommand::OpenInputDialog) => Some(Self::TreeMkdir),
+            (KeyContext::Tree, KeyCommand::Delete) => Some(Self::TreeDelete),
+            (KeyContext::Tree, KeyCommand::Search) => Some(Self::TreeSearchNext),
+            (KeyContext::Tree, KeyCommand::DialogBackspace) => Some(Self::TreeSearchBackspace),
             (KeyContext::FileManager, KeyCommand::OpenHotlist) => Some(Self::OpenHotlist),
             (KeyContext::FileManager, KeyCommand::OpenPanelizeDialog) => {
                 Some(Self::OpenPanelizeDialog)
@@ -143,8 +152,12 @@ fn navigation_command(context: KeyContext, key_command: &KeyCommand) -> Option<A
     let motion = match (target, key_command) {
         (_, KeyCommand::CursorUp) => NavigationMotion::Up,
         (_, KeyCommand::CursorDown) => NavigationMotion::Down,
-        (NavigationTarget::Menu, KeyCommand::CursorLeft) => NavigationMotion::Left,
-        (NavigationTarget::Menu, KeyCommand::CursorRight) => NavigationMotion::Right,
+        (NavigationTarget::Menu | NavigationTarget::Tree, KeyCommand::CursorLeft) => {
+            NavigationMotion::Left
+        }
+        (NavigationTarget::Menu | NavigationTarget::Tree, KeyCommand::CursorRight) => {
+            NavigationMotion::Right
+        }
         (
             NavigationTarget::FileManager
             | NavigationTarget::Help

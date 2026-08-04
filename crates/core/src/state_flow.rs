@@ -34,6 +34,7 @@ impl AppState {
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
+            tree_mutations: TreeMutationTracker::default(),
             keybinding_hints: KeybindingHints::default(),
             keymap_unknown_actions: 0,
             keymap_invalid_bindings: 0,

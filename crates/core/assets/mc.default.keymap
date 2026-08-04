@@ -579,14 +579,19 @@ Panelize = f5
 CancelJob = alt-j
 
 [tree]
-Quit = esc; q
+Quit = esc; f10; q
 Up = up
 Down = down
+Left = left
+Right = right
 PageUp = pgup
 PageDown = pgdn
 Home = home
 End = end
 Enter = enter
+MakeDir = f7
+Delete = f8
+Backspace = backspace; ctrl-h
 
 [hotlist]
 Quit = esc; q

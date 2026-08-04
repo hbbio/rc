@@ -1240,7 +1240,7 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
     let area = centered_rect(frame.area(), 88, 28);
     frame.render_widget(Clear, area);
 
-    let state_label = match &tree.load_state {
+    let state_label = match tree.load_state() {
         TreeLoadState::Loading => String::from(" | loading..."),
         TreeLoadState::Ready(summary) => {
             let mut labels = Vec::new();
@@ -1262,7 +1262,11 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         TreeLoadState::Canceled => String::from(" | canceled"),
         TreeLoadState::Failed(_) => String::from(" | failed"),
     };
-    let title = format!("Directory tree ({}){state_label}", tree.entries.len());
+    let title = format!(
+        "Directory tree ({}){state_label} | {}",
+        tree.entries().len(),
+        tree.navigation_mode().label()
+    );
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -1277,12 +1281,12 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(inner);
 
-    let mut root = format!("Root: {}", tree.root.to_string_lossy());
-    match &tree.load_state {
+    let mut root = format!("Root: {}", tree.root().to_string_lossy());
+    match tree.load_state() {
         TreeLoadState::Ready(summary) if summary.skipped_items > 0 => {
             root.push_str(&format!(
                 " | skipped {} unreadable item(s)",
@@ -1298,14 +1302,15 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         layout[0],
     );
 
-    let items: Vec<ListItem<'_>> = if tree.entries.is_empty() {
+    let visible_count = tree.visible_entry_count();
+    let visible_cursor = tree.visible_cursor();
+    let items: Vec<ListItem<'_>> = if visible_count == 0 {
         vec![ListItem::new("<empty tree>")]
     } else {
         let viewport_rows = layout[1].height.max(1) as usize;
         let (window_start, window_end) =
-            visible_window(tree.entries.len(), tree.cursor, viewport_rows);
-        tree.entries
-            .iter()
+            visible_window(visible_count, visible_cursor, viewport_rows);
+        tree.visible_entries()
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
             .map(|entry| {
@@ -1324,12 +1329,11 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
         .highlight_style(skin.style("core", "selected"))
         .highlight_symbol(">> ");
     let mut state = ListState::default();
-    if !tree.entries.is_empty() {
+    if visible_count > 0 {
         let viewport_rows = layout[1].height.max(1) as usize;
         let (window_start, window_end) =
-            visible_window(tree.entries.len(), tree.cursor, viewport_rows);
-        let selected_row = tree
-            .cursor
+            visible_window(visible_count, visible_cursor, viewport_rows);
+        let selected_row = visible_cursor
             .saturating_sub(window_start)
             .min(window_end.saturating_sub(window_start).saturating_sub(1));
         state.select(Some(selected_row));
@@ -1343,11 +1347,51 @@ fn render_tree_screen(frame: &mut Frame, app: &AppState, tree: &TreeState, skin:
     let close = app
         .keybinding_joined_label(KeyContext::Tree, AppCommand::CloseTree, " / ", 2)
         .unwrap_or_else(|| String::from("Esc/q"));
+    let rescan = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeRescan)
+        .unwrap_or("F2");
+    let forget = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeForget)
+        .unwrap_or("F3");
+    let mode = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeToggleNavigation)
+        .unwrap_or("F4");
+    let copy = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeCopy)
+        .unwrap_or("F5");
+    let move_directory = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeMove)
+        .unwrap_or("F6");
+    let mkdir = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeMkdir)
+        .unwrap_or("F7");
+    let delete = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeDelete)
+        .unwrap_or("F8");
+    let search_next = app
+        .keybinding_primary_label(KeyContext::Tree, AppCommand::TreeSearchNext)
+        .unwrap_or("C-s");
+    let search = if tree.search_query().is_empty() {
+        String::from("Search: <empty>")
+    } else {
+        format!("Search: {}", tree.search_query())
+    };
+    let footer_width = layout[2].width as usize;
+    let action_hints = fit_single_line(
+        format!(
+            "{rescan} scan | {forget} forget | {mode} mode | {copy} copy | {move_directory} move | {mkdir} mkdir | {delete} delete"
+        ),
+        footer_width,
+    );
+    let navigation_hints = fit_single_line(
+        format!(
+            "{search} | arrows navigate | {search_next} next | Backspace edit | {open} open | {close} close"
+        ),
+        footer_width,
+    );
     frame.render_widget(
-        Paragraph::new(format!(
-            "{open} open | Up/Down move | PgUp/PgDn | Home/End | {close} close"
-        ))
-        .style(skin.style("core", "disabled")),
+        Paragraph::new(vec![Line::from(action_hints), Line::from(navigation_hints)])
+            .style(skin.style("core", "disabled")),
         layout[2],
     );
 }
@@ -2109,6 +2153,35 @@ mod tests {
             frame.contains("Directory tree (2) | depth limit"),
             "{frame}"
         );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_tree_switches_between_dynamic_and_static_views() {
+        let root = temp_root("tree-navigation-mode");
+        fs::create_dir_all(root.join("alpha").join("deep"))
+            .expect("tree fixture should be creatable");
+        fs::create_dir_all(root.join("beta")).expect("tree fixture should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::OpenTree)
+            .expect("tree route should open");
+        drain_background(&mut app);
+
+        let dynamic = render_to_text(&app, 120, 40);
+        assert!(dynamic.contains("| dynamic"), "{dynamic}");
+        assert!(dynamic.contains("alpha/"), "{dynamic}");
+        assert!(dynamic.contains("beta/"), "{dynamic}");
+        assert!(!dynamic.contains("deep/"), "{dynamic}");
+
+        app.apply(AppCommand::TreeToggleNavigation)
+            .expect("tree navigation should toggle");
+        app.apply(AppCommand::TreeSearchAppend('d'))
+            .expect("tree search should update");
+        let static_view = render_to_text(&app, 120, 40);
+        assert!(static_view.contains("| static"), "{static_view}");
+        assert!(static_view.contains("deep/"), "{static_view}");
+        assert!(static_view.contains("Search: d"), "{static_view}");
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }

@@ -1,5 +1,16 @@
 use super::*;
 
+fn select_tree_path(app: &mut AppState, path: &Path) {
+    let Some(Route::Tree(tree)) = app.routes.last_mut() else {
+        panic!("top route should be tree");
+    };
+    assert!(
+        tree.select_path(path),
+        "tree should contain {}",
+        path.display()
+    );
+}
+
 #[test]
 fn tree_screen_selects_directory_for_active_panel() {
     let stamp = SystemTime::now()
@@ -16,18 +27,10 @@ fn tree_screen_selects_directory_for_active_panel() {
     drain_background(&mut app);
     assert_eq!(app.key_context(), KeyContext::Tree);
 
-    let branch_index = match app.top_route() {
-        Route::Tree(tree) => tree
-            .entries
-            .iter()
-            .position(|entry| entry.path == branch)
-            .expect("branch should appear in tree"),
-        _ => panic!("top route should be tree"),
-    };
     let Some(Route::Tree(tree)) = app.routes.last_mut() else {
         panic!("top route should be tree");
     };
-    tree.cursor = branch_index;
+    assert!(tree.select_path(&branch));
 
     app.apply(AppCommand::TreeOpenEntry)
         .expect("tree open should succeed");
@@ -50,7 +53,7 @@ fn closing_tree_cancels_its_exact_build_job() {
     app.apply(AppCommand::OpenTree)
         .expect("tree screen should open");
     let tree_job_id = match app.top_route() {
-        Route::Tree(tree) => tree.job_id,
+        Route::Tree(tree) => tree.scan_job_id().expect("tree scan should be pending"),
         _ => panic!("top route should be tree"),
     };
 
@@ -80,7 +83,7 @@ fn stale_tree_completion_cannot_replace_reopened_tree() {
     app.apply(AppCommand::OpenTree)
         .expect("first tree screen should open");
     let first_job_id = match app.top_route() {
-        Route::Tree(tree) => tree.job_id,
+        Route::Tree(tree) => tree.scan_job_id().expect("tree scan should be pending"),
         _ => panic!("top route should be tree"),
     };
     app.apply(AppCommand::CloseTree)
@@ -88,7 +91,7 @@ fn stale_tree_completion_cannot_replace_reopened_tree() {
     app.apply(AppCommand::OpenTree)
         .expect("second tree screen should open");
     let second_job_id = match app.top_route() {
-        Route::Tree(tree) => tree.job_id,
+        Route::Tree(tree) => tree.scan_job_id().expect("tree scan should be pending"),
         _ => panic!("top route should be tree"),
     };
     assert_ne!(first_job_id, second_job_id);
@@ -101,7 +104,7 @@ fn stale_tree_completion_cannot_replace_reopened_tree() {
         panic!("reopened tree should remain active");
     };
     assert!(tree.is_loading(), "stale result must not finish new tree");
-    assert_eq!(tree.entries.len(), 1, "stale entries must be ignored");
+    assert_eq!(tree.entries().len(), 1, "stale entries must be ignored");
 
     let current_event = build_tree_ready_event(second_job_id, root.clone(), 4, 64, &cancel_flag)
         .expect("current tree event should build");
@@ -110,7 +113,7 @@ fn stale_tree_completion_cannot_replace_reopened_tree() {
         panic!("reopened tree should remain active");
     };
     assert!(!tree.is_loading());
-    assert!(tree.entries.iter().any(|entry| entry.path == branch));
+    assert!(tree.entries().iter().any(|entry| entry.path == branch));
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -128,7 +131,7 @@ fn tree_build_failure_is_retained_by_the_active_route() {
     app.apply(AppCommand::OpenTree)
         .expect("tree screen should open");
     let job_id = match app.top_route() {
-        Route::Tree(tree) => tree.job_id,
+        Route::Tree(tree) => tree.scan_job_id().expect("tree scan should be pending"),
         _ => panic!("top route should be tree"),
     };
     app.handle_job_event(JobEvent::Finished {
@@ -143,10 +146,230 @@ fn tree_build_failure_is_retained_by_the_active_route() {
         panic!("tree route should remain active after failure");
     };
     assert!(matches!(
-        &tree.load_state,
+        tree.load_state(),
         TreeLoadState::Failed(message) if message.contains("tree fixture denied")
     ));
     assert!(app.status_line.contains("Directory tree failed"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn tree_commands_navigate_search_rescan_and_forget_cached_subtrees() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-tree-actions-{stamp}"));
+    let alpha = root.join("alpha");
+    let alpha_child = alpha.join("child");
+    let beta = root.join("beta");
+    fs::create_dir_all(&alpha_child).expect("must create alpha subtree");
+    fs::create_dir_all(&beta).expect("must create beta subtree");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenTree)
+        .expect("tree screen should open");
+    drain_background(&mut app);
+
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Tree,
+        NavigationMotion::Right,
+    ))
+    .expect("right should select first child");
+    assert_eq!(
+        match app.top_route() {
+            Route::Tree(tree) => tree.selected_entry().map(|entry| &entry.path),
+            _ => None,
+        },
+        Some(&alpha)
+    );
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Tree,
+        NavigationMotion::Down,
+    ))
+    .expect("down should select next sibling");
+    assert_eq!(
+        match app.top_route() {
+            Route::Tree(tree) => tree.selected_entry().map(|entry| &entry.path),
+            _ => None,
+        },
+        Some(&beta)
+    );
+    app.apply(AppCommand::TreeSearchAppend('a'))
+        .expect("incremental search should run");
+    assert_eq!(
+        match app.top_route() {
+            Route::Tree(tree) => tree.selected_entry().map(|entry| &entry.path),
+            _ => None,
+        },
+        Some(&alpha)
+    );
+    app.apply(AppCommand::TreeSearchBackspace)
+        .expect("search should clear");
+    app.apply(AppCommand::TreeToggleNavigation)
+        .expect("navigation mode should toggle");
+    assert!(matches!(
+        app.top_route(),
+        Route::Tree(tree) if tree.navigation_mode() == TreeNavigationMode::Static
+    ));
+
+    let added = alpha.join("added");
+    fs::create_dir_all(&added).expect("must create rescan fixture");
+    select_tree_path(&mut app, &alpha);
+    app.apply(AppCommand::TreeRescan)
+        .expect("first selected rescan should queue");
+    let first_rescan = match app.top_route() {
+        Route::Tree(tree) => tree.scan_job_id().expect("rescan should be pending"),
+        _ => panic!("top route should be tree"),
+    };
+    app.apply(AppCommand::TreeRescan)
+        .expect("second selected rescan should supersede first");
+    let second_rescan = match app.top_route() {
+        Route::Tree(tree) => tree.scan_job_id().expect("rescan should be pending"),
+        _ => panic!("top route should be tree"),
+    };
+    assert_ne!(first_rescan, second_rescan);
+    let commands = app.take_pending_worker_commands();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Cancel(job_id) if *job_id == first_rescan
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Run(job)
+            if job.id == second_rescan
+                && matches!(&job.request, JobRequest::BuildTree { root, .. } if root == &alpha)
+    )));
+    app.restore_pending_worker_commands(commands);
+    drain_background(&mut app);
+    assert!(matches!(
+        app.top_route(),
+        Route::Tree(tree) if tree.entries().iter().any(|entry| entry.path == added)
+    ));
+
+    select_tree_path(&mut app, &alpha);
+    app.apply(AppCommand::TreeForget)
+        .expect("forget should remove cached subtree");
+    assert!(matches!(
+        app.top_route(),
+        Route::Tree(tree)
+            if tree.entries().iter().all(|entry| entry.path != alpha && entry.path != alpha_child)
+    ));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn tree_filesystem_actions_use_existing_jobs_and_refresh_the_cache() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let sandbox = env::temp_dir().join(format!("rc-tree-file-actions-{stamp}"));
+    let root = sandbox.join("root");
+    let destination = sandbox.join("destination");
+    let copy_source = root.join("copy-source");
+    let move_source = root.join("move-source");
+    let mkdir_parent = root.join("mkdir-parent");
+    let delete_target = root.join("delete-target");
+    for path in [
+        &copy_source,
+        &move_source,
+        &mkdir_parent,
+        &delete_target,
+        &destination,
+    ] {
+        fs::create_dir_all(path).expect("must create tree operation fixture");
+    }
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.settings_mut().confirmation.confirm_overwrite = false;
+    app.panels[1].cwd = destination.clone();
+    app.panels[1]
+        .refresh()
+        .expect("passive panel destination should load");
+    app.apply(AppCommand::OpenTree)
+        .expect("tree screen should open");
+    drain_background(&mut app);
+
+    select_tree_path(&mut app, &copy_source);
+    app.apply(AppCommand::TreeCopy)
+        .expect("tree copy dialog should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("tree copy destination should submit");
+    drain_background(&mut app);
+    assert!(destination.join("copy-source").is_dir());
+    assert!(copy_source.is_dir(), "copy must preserve the source");
+
+    select_tree_path(&mut app, &move_source);
+    app.apply(AppCommand::TreeMove)
+        .expect("tree move dialog should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("tree move destination should submit");
+    drain_background(&mut app);
+    assert!(destination.join("move-source").is_dir());
+    assert!(!move_source.exists());
+    assert!(matches!(
+        app.top_route(),
+        Route::Tree(tree) if tree.entries().iter().all(|entry| entry.path != move_source)
+    ));
+
+    select_tree_path(&mut app, &mkdir_parent);
+    app.apply(AppCommand::TreeMkdir)
+        .expect("tree mkdir dialog should open");
+    for ch in "child".chars() {
+        app.apply(AppCommand::DialogInputChar(ch))
+            .expect("mkdir name should be editable");
+    }
+    app.apply(AppCommand::DialogAccept)
+        .expect("tree mkdir should submit");
+    drain_background(&mut app);
+    let created = mkdir_parent.join("child");
+    assert!(created.is_dir());
+    assert!(matches!(
+        app.top_route(),
+        Route::Tree(tree) if tree.entries().iter().any(|entry| entry.path == created)
+    ));
+
+    select_tree_path(&mut app, &delete_target);
+    app.apply(AppCommand::TreeDelete)
+        .expect("tree delete confirmation should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("tree delete should confirm");
+    drain_background(&mut app);
+    assert!(!delete_target.exists());
+    assert!(matches!(
+        app.top_route(),
+        Route::Tree(tree) if tree.entries().iter().all(|entry| entry.path != delete_target)
+    ));
+
+    fs::remove_dir_all(&sandbox).expect("must remove temp sandbox");
+}
+
+#[test]
+fn tree_destructive_actions_protect_the_scan_root() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-tree-root-protection-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenTree)
+        .expect("tree screen should open");
+    drain_background(&mut app);
+
+    for (command, expected_status) in [
+        (AppCommand::TreeForget, "cannot be forgotten"),
+        (AppCommand::TreeMove, "cannot be moved"),
+        (AppCommand::TreeDelete, "cannot be deleted"),
+    ] {
+        app.apply(command).expect("root protection should apply");
+        assert!(app.status_line.contains(expected_status));
+        assert!(matches!(app.top_route(), Route::Tree(_)));
+    }
+    assert!(app.take_pending_worker_commands().is_empty());
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -439,6 +662,49 @@ fn app_command_mapping_is_context_aware() {
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::OpenEntry),
         Some(AppCommand::TreeOpenEntry)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::CursorLeft),
+        Some(AppCommand::Navigate(
+            NavigationTarget::Tree,
+            NavigationMotion::Left,
+        ))
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Reread),
+        Some(AppCommand::TreeRescan)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Forget),
+        Some(AppCommand::TreeForget)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::ToggleNavigation),
+        Some(AppCommand::TreeToggleNavigation)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Copy),
+        Some(AppCommand::TreeCopy)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Move),
+        Some(AppCommand::TreeMove)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::OpenInputDialog),
+        Some(AppCommand::TreeMkdir)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Delete),
+        Some(AppCommand::TreeDelete)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Search),
+        Some(AppCommand::TreeSearchNext)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::DialogBackspace),
+        Some(AppCommand::TreeSearchBackspace)
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Tree, &KeyCommand::Quit),

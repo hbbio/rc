@@ -76,6 +76,23 @@ impl AppState {
 
         let destination_dir = self.passive_panel().cwd.clone();
         let source_base_dir = self.active_panel().cwd.clone();
+        self.start_transfer_dialog_for_paths(
+            kind,
+            sources,
+            source_base_dir,
+            destination_dir,
+            OperationOrigin::Panel,
+        );
+    }
+
+    pub(crate) fn start_transfer_dialog_for_paths(
+        &mut self,
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+        source_base_dir: PathBuf,
+        destination_dir: PathBuf,
+        origin: OperationOrigin,
+    ) {
         let title = match kind {
             TransferKind::Copy => "Copy",
             TransferKind::Move => "Move",
@@ -90,6 +107,7 @@ impl AppState {
                 kind,
                 sources,
                 source_base_dir,
+                origin,
             },
         );
         self.set_status(format!("{title}: choose destination"));
@@ -102,6 +120,14 @@ impl AppState {
             return;
         }
 
+        self.start_delete_confirmation_for_targets(targets, OperationOrigin::Panel);
+    }
+
+    pub(crate) fn start_delete_confirmation_for_targets(
+        &mut self,
+        targets: Vec<PathBuf>,
+        origin: OperationOrigin,
+    ) {
         let message = if targets.len() == 1 {
             let name = targets[0]
                 .file_name()
@@ -113,7 +139,7 @@ impl AppState {
         };
         self.push_dialog(
             DialogState::confirm("Delete", message),
-            PendingDialogAction::ConfirmDelete { targets },
+            PendingDialogAction::ConfirmDelete { targets, origin },
         );
         self.set_status("Confirm delete");
     }
@@ -151,9 +177,13 @@ impl AppState {
 
     pub(crate) fn start_mkdir_dialog(&mut self) {
         let base_dir = self.active_panel().cwd.clone();
+        self.start_mkdir_dialog_at(base_dir, OperationOrigin::Panel);
+    }
+
+    pub(crate) fn start_mkdir_dialog_at(&mut self, base_dir: PathBuf, origin: OperationOrigin) {
         self.push_dialog(
             DialogState::input("Mkdir", "Directory name:", ""),
-            PendingDialogAction::Mkdir { base_dir },
+            PendingDialogAction::Mkdir { base_dir, origin },
         );
         self.set_status("Mkdir: enter directory name");
     }
@@ -198,10 +228,10 @@ impl AppState {
         match (pending, result) {
             (None, result) => self.set_status(result.status_line()),
             (
-                Some(PendingDialogAction::ConfirmDelete { targets }),
+                Some(PendingDialogAction::ConfirmDelete { targets, origin }),
                 DialogResult::ConfirmAccepted,
             ) => {
-                self.queue_delete_job(targets);
+                self.queue_delete_job_from(targets, origin);
             }
             (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::ConfirmDeclined)
             | (Some(PendingDialogAction::ConfirmDelete { .. }), DialogResult::Canceled) => {
@@ -217,7 +247,7 @@ impl AppState {
                 self.set_status("Quit canceled");
             }
             (
-                Some(PendingDialogAction::Mkdir { base_dir }),
+                Some(PendingDialogAction::Mkdir { base_dir, origin }),
                 DialogResult::InputSubmitted(value),
             ) => {
                 let value = value.trim();
@@ -231,7 +261,7 @@ impl AppState {
                 } else {
                     base_dir.join(input_path)
                 };
-                self.queue_worker_job_request(JobRequest::Mkdir { path: destination });
+                self.queue_filesystem_job(JobRequest::Mkdir { path: destination }, origin);
             }
             (Some(PendingDialogAction::Mkdir { .. }), DialogResult::Canceled) => {
                 self.set_status("Mkdir canceled");
@@ -267,6 +297,7 @@ impl AppState {
                     kind,
                     sources,
                     source_base_dir,
+                    origin,
                 }),
                 DialogResult::InputSubmitted(value),
             ) => {
@@ -293,6 +324,7 @@ impl AppState {
                             kind,
                             sources,
                             destination_dir,
+                            origin,
                         },
                     );
                     self.set_status("Choose overwrite policy");
@@ -302,6 +334,7 @@ impl AppState {
                         sources,
                         destination_dir,
                         self.overwrite_policy(),
+                        origin,
                     );
                 }
             }
@@ -313,13 +346,14 @@ impl AppState {
                     kind,
                     sources,
                     destination_dir,
+                    origin,
                 }),
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {
                 let overwrite = index
                     .map(overwrite_policy_from_index)
                     .unwrap_or(self.overwrite_policy());
-                self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite);
+                self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite, origin);
             }
             (Some(PendingDialogAction::TransferOverwrite { .. }), DialogResult::Canceled) => {
                 self.set_status("Copy/Move canceled");

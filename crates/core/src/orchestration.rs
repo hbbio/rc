@@ -81,6 +81,7 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
+                    let tree_impacts = self.tree_mutations.finish(id, true);
                     let kind = self.jobs.job(id).map(|job| job.kind);
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
                     tracing::info!(
@@ -137,8 +138,12 @@ impl AppState {
                     {
                         self.queue_worker_job_request(request);
                     }
+                    if let Some(impacts) = tree_impacts {
+                        self.rescan_tree_for_impacts(&impacts);
+                    }
                 }
                 Err(error) => {
+                    let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
                     let is_persist_settings = kind == Some(JobKind::PersistSettings);
@@ -160,9 +165,9 @@ impl AppState {
                         let failure = (!canceled).then(|| error.user_message());
                         let tree_is_active = if let Some(tree) = self.tree_by_job_id_mut(id) {
                             if canceled {
-                                tree.mark_canceled();
+                                tree.mark_canceled(id);
                             } else if let Some(failure) = failure.as_ref() {
-                                tree.mark_failed(failure.clone());
+                                tree.mark_failed(id, failure.clone());
                             }
                             true
                         } else {
@@ -208,6 +213,9 @@ impl AppState {
                         && let Some(request) = self.deferred_persist_settings_request.take()
                     {
                         self.queue_worker_job_request(request);
+                    }
+                    if let Some(impacts) = tree_impacts {
+                        self.rescan_tree_for_impacts(&impacts);
                     }
                 }
             },
@@ -268,14 +276,11 @@ impl AppState {
                 root,
                 result,
             } => {
-                let status = tree_ready_status(&result);
-                let replaced = self
+                let completion = self
                     .tree_by_job_id_mut(job_id)
-                    .filter(|tree| tree.root == root)
-                    .map(|tree| tree.apply_build_result(result))
-                    .is_some();
-                if replaced {
-                    self.set_status(status);
+                    .and_then(|tree| tree.apply_build_result(job_id, &root, result));
+                if let Some(completion) = completion {
+                    self.set_status(tree_ready_status(&completion));
                 }
             }
         }
@@ -306,6 +311,7 @@ impl AppState {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
         overwrite: OverwritePolicy,
+        origin: OperationOrigin,
     ) {
         let request = match kind {
             TransferKind::Copy => JobRequest::Copy {
@@ -319,7 +325,24 @@ impl AppState {
                 overwrite,
             },
         };
-        self.queue_worker_job_request(request);
+        self.queue_filesystem_job(request, origin);
+    }
+
+    pub(crate) fn queue_filesystem_job(
+        &mut self,
+        request: JobRequest,
+        origin: OperationOrigin,
+    ) -> JobId {
+        let impacts = if origin == OperationOrigin::Tree {
+            tree_mutation_impacts(&request)
+        } else {
+            Vec::new()
+        };
+        let job_id = self.queue_worker_job_request(request);
+        if origin == OperationOrigin::Tree {
+            self.tree_mutations.track(job_id, impacts);
+        }
+        job_id
     }
 
     pub fn enqueue_worker_job_request(&mut self, request: JobRequest) -> JobId {
@@ -503,13 +526,61 @@ impl AppState {
     }
 
     pub(crate) fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
-        self.queue_worker_job_request(JobRequest::Delete { targets });
+        self.queue_delete_job_from(targets, OperationOrigin::Panel);
+    }
+
+    pub(crate) fn queue_delete_job_from(&mut self, targets: Vec<PathBuf>, origin: OperationOrigin) {
+        self.queue_filesystem_job(JobRequest::Delete { targets }, origin);
     }
 }
 
-fn tree_ready_status(result: &TreeBuildResult) -> String {
-    let mut status = format!("Opened directory tree ({})", result.entries.len());
-    let summary = &result.summary;
+fn tree_mutation_impacts(request: &JobRequest) -> Vec<PathBuf> {
+    let mut impacts = Vec::new();
+    match request {
+        JobRequest::Copy {
+            destination_dir, ..
+        } => impacts.push(destination_dir.clone()),
+        JobRequest::Move {
+            sources,
+            destination_dir,
+            ..
+        } => {
+            impacts.extend(
+                sources
+                    .iter()
+                    .filter_map(|source| source.parent().map(Path::to_path_buf)),
+            );
+            impacts.push(destination_dir.clone());
+        }
+        JobRequest::Delete { targets } => impacts.extend(
+            targets
+                .iter()
+                .filter_map(|target| target.parent().map(Path::to_path_buf)),
+        ),
+        JobRequest::Mkdir { path } => {
+            if let Some(parent) = path.parent() {
+                impacts.push(parent.to_path_buf());
+            }
+        }
+        _ => {}
+    }
+    impacts.sort();
+    impacts.dedup();
+    impacts
+}
+
+fn tree_ready_status(completion: &TreeScanCompletion) -> String {
+    let mut status = if completion.full_scan {
+        format!("Opened directory tree ({})", completion.known_entries)
+    } else {
+        format!(
+            "Rescanned {} ({} scanned, {} known)",
+            completion.scan_root.to_string_lossy(),
+            completion.scanned_entries,
+            completion.known_entries
+        )
+    };
+    let summary = &completion.summary;
     if summary.depth_limit_reached && summary.entry_limit_reached {
         status.push_str(" | truncated by depth and entry limits");
     } else if summary.depth_limit_reached {

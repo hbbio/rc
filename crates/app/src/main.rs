@@ -373,6 +373,10 @@ fn handle_key(
         return Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit);
     }
 
+    let tree_input_command = (context == KeyContext::Tree)
+        .then(|| tree_search_input_command(&key_event))
+        .flatten();
+
     let Some(chord) = map_key_event_to_chord(key_event, input_compatibility) else {
         return Ok(false);
     };
@@ -386,21 +390,23 @@ fn handle_key(
             None
         }
     });
-    let Some(key_command) = key_command else {
+    let command = key_command.and_then(|key_command| {
+        AppCommand::from_key_command(context, key_command).or_else(|| {
+            (context == KeyContext::FileManagerXMap)
+                .then(|| AppCommand::from_key_command(KeyContext::FileManager, key_command))
+                .flatten()
+        })
+    });
+    if command.is_none() && tree_input_command.is_none() {
         if context == KeyContext::FileManagerXMap {
             state.clear_xmap();
             state.set_status("Extended keymap command not found");
         }
         return Ok(false);
-    };
-    let command = AppCommand::from_key_command(context, key_command).or_else(|| {
-        (context == KeyContext::FileManagerXMap)
-            .then(|| AppCommand::from_key_command(KeyContext::FileManager, key_command))
-            .flatten()
-    });
-    let Some(command) = command else {
-        return Ok(false);
-    };
+    }
+    let command = command
+        .or(tree_input_command)
+        .expect("a command was checked above");
 
     Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
@@ -733,6 +739,23 @@ fn input_char_command(key_event: &KeyEvent) -> Option<AppCommand> {
     }
 
     None
+}
+
+fn tree_search_input_command(key_event: &KeyEvent) -> Option<AppCommand> {
+    let no_shortcut_modifiers = !key_event.modifiers.intersects(
+        crossterm::event::KeyModifiers::CONTROL
+            | crossterm::event::KeyModifiers::ALT
+            | crossterm::event::KeyModifiers::SUPER,
+    );
+    if !no_shortcut_modifiers {
+        return None;
+    }
+
+    match key_event.code {
+        CrosstermKeyCode::Char(ch) => Some(AppCommand::TreeSearchAppend(ch)),
+        CrosstermKeyCode::Backspace => Some(AppCommand::TreeSearchBackspace),
+        _ => None,
+    }
 }
 
 fn map_key_event_to_chord(
@@ -1220,6 +1243,71 @@ mod tests {
             Some("Ctrl-x")
         );
 
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn tree_unbound_characters_search_while_bound_q_still_closes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-tree-input-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .apply(AppCommand::OpenTree)
+            .expect("tree screen should open");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('b'), KeyModifiers::NONE),
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("unbound tree character should be handled");
+        assert!(matches!(
+            state.top_route(),
+            rc_core::Route::Tree(tree) if tree.search_query() == "b"
+        ));
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Backspace, KeyModifiers::NONE),
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("tree backspace should be handled");
+        assert!(matches!(
+            state.top_route(),
+            rc_core::Route::Tree(tree) if tree.search_query().is_empty()
+        ));
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('q'), KeyModifiers::NONE),
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("bound tree quit key should be handled");
+        assert_eq!(state.key_context(), KeyContext::FileManager);
+
+        drop(runtime);
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
 

@@ -112,6 +112,16 @@ impl AppState {
             AppCommand::TreeOpenEntry => {
                 self.open_selected_tree_entry()?;
             }
+            AppCommand::TreeRescan => self.rescan_selected_tree(),
+            AppCommand::TreeForget => self.forget_selected_tree_entry(),
+            AppCommand::TreeToggleNavigation => self.toggle_tree_navigation_mode(),
+            AppCommand::TreeCopy => self.start_tree_transfer(TransferKind::Copy),
+            AppCommand::TreeMove => self.start_tree_transfer(TransferKind::Move),
+            AppCommand::TreeMkdir => self.start_tree_mkdir(),
+            AppCommand::TreeDelete => self.start_tree_delete(),
+            AppCommand::TreeSearchNext => self.search_next_tree_entry(),
+            AppCommand::TreeSearchBackspace => self.remove_tree_search_char(),
+            AppCommand::TreeSearchAppend(ch) => self.append_tree_search_char(ch),
             AppCommand::Navigate(NavigationTarget::Hotlist, motion) => {
                 self.apply_hotlist_navigation(motion);
             }
@@ -162,6 +172,8 @@ impl AppState {
         match motion {
             NavigationMotion::Up => self.move_tree_cursor(-1),
             NavigationMotion::Down => self.move_tree_cursor(1),
+            NavigationMotion::Left => self.move_tree_parent(),
+            NavigationMotion::Right => self.move_tree_first_child(),
             NavigationMotion::PageUp => self.move_tree_page(-1),
             NavigationMotion::PageDown => self.move_tree_page(1),
             NavigationMotion::Home => self.move_tree_home(),
@@ -388,7 +400,7 @@ impl AppState {
             max_entries: self.settings.advanced.tree_max_entries,
         });
         self.routes
-            .push(Route::Tree(TreeState::loading(job_id, root)));
+            .push(Route::Tree(Box::new(TreeState::loading(job_id, root))));
         self.set_status("Loading directory tree...");
     }
 
@@ -396,7 +408,7 @@ impl AppState {
         let Some(Route::Tree(tree)) = self.routes.last() else {
             return;
         };
-        let pending_job = tree.is_loading().then_some(tree.job_id);
+        let pending_job = tree.scan_job_id();
         self.routes.pop();
         if let Some(job_id) = pending_job {
             let _ = self.request_cancel_for_job(job_id);
@@ -406,7 +418,7 @@ impl AppState {
 
     pub(crate) fn tree_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut TreeState> {
         self.routes.iter_mut().rev().find_map(|route| match route {
-            Route::Tree(tree) if tree.job_id == job_id => Some(tree),
+            Route::Tree(tree) if tree.scan_job_id() == Some(job_id) => Some(tree.as_mut()),
             _ => None,
         })
     }
@@ -425,6 +437,20 @@ impl AppState {
         tree.move_page(pages, self.settings.advanced.page_step);
     }
 
+    pub(crate) fn move_tree_parent(&mut self) {
+        let Some(Route::Tree(tree)) = self.routes.last_mut() else {
+            return;
+        };
+        tree.move_parent();
+    }
+
+    pub(crate) fn move_tree_first_child(&mut self) {
+        let Some(Route::Tree(tree)) = self.routes.last_mut() else {
+            return;
+        };
+        tree.move_first_child();
+    }
+
     pub(crate) fn move_tree_home(&mut self) {
         let Some(Route::Tree(tree)) = self.routes.last_mut() else {
             return;
@@ -437,6 +463,212 @@ impl AppState {
             return;
         };
         tree.move_end();
+    }
+
+    pub(crate) fn rescan_selected_tree(&mut self) {
+        let plan = match self.top_route() {
+            Route::Tree(tree) => tree.plan_selected_rescan(
+                self.settings.advanced.tree_max_depth,
+                self.settings.advanced.tree_max_entries,
+            ),
+            _ => None,
+        };
+        let Some(plan) = plan else {
+            self.set_status("Selected directory cannot be rescanned");
+            return;
+        };
+        let label = format!("Rescanning {}...", plan.scan_root.to_string_lossy());
+        self.queue_tree_rescan(plan, label);
+    }
+
+    pub(crate) fn rescan_tree_for_impacts(&mut self, impacts: &[PathBuf]) {
+        let plan = self.routes.iter().rev().find_map(|route| match route {
+            Route::Tree(tree) => tree.plan_rescan_for_impacts(
+                impacts,
+                self.settings.advanced.tree_max_depth,
+                self.settings.advanced.tree_max_entries,
+            ),
+            _ => None,
+        });
+        if let Some(plan) = plan {
+            let label = format!(
+                "Updating directory tree from {}...",
+                plan.scan_root.to_string_lossy()
+            );
+            self.queue_tree_rescan(plan, label);
+        }
+    }
+
+    fn queue_tree_rescan(&mut self, plan: TreeRescanPlan, status: String) {
+        let pending_job = self.routes.iter().rev().find_map(|route| match route {
+            Route::Tree(tree) => tree.scan_job_id(),
+            _ => None,
+        });
+        if let Some(job_id) = pending_job {
+            let _ = self.request_cancel_for_job(job_id);
+        }
+        let job_id = self.queue_worker_job_request(JobRequest::BuildTree {
+            root: plan.scan_root.clone(),
+            max_depth: plan.scan_max_depth,
+            max_entries: plan.scan_max_entries,
+        });
+        if let Some(tree) = self.routes.iter_mut().rev().find_map(|route| match route {
+            Route::Tree(tree) => Some(tree),
+            _ => None,
+        }) {
+            tree.begin_rescan(job_id, plan);
+            self.set_status(status);
+        }
+    }
+
+    pub(crate) fn forget_selected_tree_entry(&mut self) {
+        let (is_root, pending_job) = match self.top_route() {
+            Route::Tree(tree) => (
+                tree.selected_entry()
+                    .is_some_and(|entry| entry.path == tree.root()),
+                tree.scan_job_id(),
+            ),
+            _ => return,
+        };
+        if is_root {
+            self.set_status("The tree root cannot be forgotten");
+            return;
+        }
+        if let Some(job_id) = pending_job {
+            let _ = self.request_cancel_for_job(job_id);
+        }
+        let removed = match self.routes.last_mut() {
+            Some(Route::Tree(tree)) => {
+                let _ = tree.cancel_scan_for_local_change();
+                tree.forget_selected()
+            }
+            _ => None,
+        };
+        if let Some(path) = removed {
+            self.set_status(format!("Forgot cached subtree {}", path.to_string_lossy()));
+        } else {
+            self.set_status("No tree directory selected");
+        }
+    }
+
+    pub(crate) fn toggle_tree_navigation_mode(&mut self) {
+        let mode = match self.routes.last_mut() {
+            Some(Route::Tree(tree)) => tree.toggle_navigation_mode(),
+            _ => return,
+        };
+        self.set_status(format!("Tree navigation: {}", mode.label()));
+    }
+
+    pub(crate) fn append_tree_search_char(&mut self, ch: char) {
+        let outcome = match self.routes.last_mut() {
+            Some(Route::Tree(tree)) => {
+                let matched = tree.append_search_char(ch);
+                Some((matched, tree.search_query().to_string()))
+            }
+            _ => None,
+        };
+        if let Some((matched, query)) = outcome {
+            if matched {
+                self.set_status(format!("Tree search: {query}"));
+            } else {
+                self.set_status(format!("No directory starts with '{query}'"));
+            }
+        }
+    }
+
+    pub(crate) fn remove_tree_search_char(&mut self) {
+        let query = match self.routes.last_mut() {
+            Some(Route::Tree(tree)) => {
+                if !tree.remove_search_char() {
+                    return;
+                }
+                tree.search_query().to_string()
+            }
+            _ => return,
+        };
+        self.set_status(if query.is_empty() {
+            String::from("Tree search cleared")
+        } else {
+            format!("Tree search: {query}")
+        });
+    }
+
+    pub(crate) fn search_next_tree_entry(&mut self) {
+        let outcome = match self.routes.last_mut() {
+            Some(Route::Tree(tree)) => {
+                let matched = tree.search_next();
+                Some((matched, tree.search_query().to_string()))
+            }
+            _ => None,
+        };
+        if let Some((matched, query)) = outcome {
+            if matched && !query.is_empty() {
+                self.set_status(format!("Tree search: {query}"));
+            } else if !matched && !query.is_empty() {
+                self.set_status(format!("No further directory starts with '{query}'"));
+            }
+        }
+    }
+
+    fn start_tree_transfer(&mut self, kind: TransferKind) {
+        let selected = match self.top_route() {
+            Route::Tree(tree) => tree
+                .selected_entry()
+                .map(|entry| (entry.path.clone(), entry.path == tree.root())),
+            _ => None,
+        };
+        let Some((source, is_root)) = selected else {
+            self.set_status("No tree directory selected");
+            return;
+        };
+        if kind == TransferKind::Move && is_root {
+            self.set_status("The tree root cannot be moved");
+            return;
+        }
+        let source_base_dir = source
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| source.clone());
+        let destination_dir = self.passive_panel().cwd.clone();
+        self.start_transfer_dialog_for_paths(
+            kind,
+            vec![source],
+            source_base_dir,
+            destination_dir,
+            OperationOrigin::Tree,
+        );
+    }
+
+    fn start_tree_mkdir(&mut self) {
+        let selected = match self.top_route() {
+            Route::Tree(tree) => tree.selected_entry().map(|entry| entry.path.clone()),
+            _ => None,
+        };
+        if let Some(base_dir) = selected {
+            self.start_mkdir_dialog_at(base_dir, OperationOrigin::Tree);
+        } else {
+            self.set_status("No tree directory selected");
+        }
+    }
+
+    fn start_tree_delete(&mut self) {
+        let selected = match self.top_route() {
+            Route::Tree(tree) => tree
+                .selected_entry()
+                .map(|entry| (entry.path.clone(), entry.path == tree.root())),
+            _ => None,
+        };
+        let Some((target, is_root)) = selected else {
+            self.set_status("No tree directory selected");
+            return;
+        };
+        if is_root {
+            self.set_status("The tree root cannot be deleted");
+        } else if self.settings.confirmation.confirm_delete {
+            self.start_delete_confirmation_for_targets(vec![target], OperationOrigin::Tree);
+        } else {
+            self.queue_delete_job_from(vec![target], OperationOrigin::Tree);
+        }
     }
 
     pub(crate) fn open_selected_tree_entry(&mut self) -> io::Result<()> {
