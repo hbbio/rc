@@ -66,7 +66,7 @@ impl AppState {
             AppCommand::CancelJob => {
                 if matches!(self.top_route(), Route::FindResults(_)) {
                     self.cancel_active_find_search();
-                } else {
+                } else if !self.cancel_active_panelized_refresh() {
                     self.cancel_latest_job();
                 }
             }

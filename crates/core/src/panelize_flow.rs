@@ -1,6 +1,24 @@
 use crate::*;
 
 impl AppState {
+    pub(crate) fn cancel_active_panelized_refresh(&mut self) -> bool {
+        let panel = self.active_panel;
+        let panel_state = &self.panels[panel.index()];
+        if !panel_state.source.is_panelized() || !panel_state.loading {
+            return false;
+        }
+        let Some(job_id) = self.panel_refresh_job_id(panel) else {
+            return false;
+        };
+
+        if self.request_cancel_for_job(job_id) {
+            self.set_status(format!("Canceling panelize job #{job_id}..."));
+        } else {
+            self.set_status(format!("Panelize job #{job_id} cannot be canceled"));
+        }
+        true
+    }
+
     pub(crate) fn restore_panelized_results(&mut self) {
         let panel_id = self.active_panel;
         let panel_index = panel_id.index();

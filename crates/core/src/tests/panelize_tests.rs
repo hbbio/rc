@@ -335,6 +335,46 @@ fn panelize_history_is_independent_for_each_panel() {
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 
+#[test]
+fn cancel_job_targets_the_active_panelize_refresh_not_a_newer_job() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-targeted-cancel-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.start_panelize_command(String::from("long-running command"));
+    let panelize_job = app
+        .panel_refresh_job_id(ActivePanel::Left)
+        .expect("left panelize refresh should have a job");
+    app.toggle_active_panel();
+    app.refresh_active_panel();
+    let newer_job = app
+        .panel_refresh_job_id(ActivePanel::Right)
+        .expect("right directory refresh should have a job");
+    assert!(newer_job.0 > panelize_job.0);
+    app.toggle_active_panel();
+
+    app.apply(AppCommand::CancelJob)
+        .expect("cancel should target the visible panelize job");
+    app.apply(AppCommand::CancelJob)
+        .expect("a repeated cancel must remain scoped to the panelize job");
+    let canceled_jobs: Vec<JobId> = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            WorkerCommand::Cancel(job_id) => Some(job_id),
+            WorkerCommand::Run(_) | WorkerCommand::Shutdown => None,
+        })
+        .collect();
+    assert_eq!(canceled_jobs, vec![panelize_job]);
+    assert!(app.status_line.contains(&format!("#{panelize_job}")));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
 #[cfg(unix)]
 #[test]
 fn panelize_failure_preserves_previous_directory_listing() {

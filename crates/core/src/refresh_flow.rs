@@ -68,6 +68,10 @@ impl PanelRefreshWorkflow {
         self.job_ids[panel.index()].take()
     }
 
+    fn job_id(&self, panel: ActivePanel) -> Option<JobId> {
+        self.job_ids[panel.index()]
+    }
+
     fn invalidate_request(&mut self, panel: ActivePanel) -> Option<JobId> {
         let job_id = self.take_job_id(panel);
         self.begin_request(panel);
@@ -254,6 +258,10 @@ impl AppState {
             return None;
         }
         PanelizedResultSnapshot::from_panel(&self.panels[panel.index()])
+    }
+
+    pub(crate) fn panel_refresh_job_id(&self, panel: ActivePanel) -> Option<JobId> {
+        self.panel_refresh.job_id(panel)
     }
 
     pub(crate) fn cancel_and_invalidate_panel_refresh(&mut self, panel: ActivePanel) {

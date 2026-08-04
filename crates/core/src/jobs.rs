@@ -554,8 +554,7 @@ impl JobManager {
         let Some(flag) = self.cancel_flags.get(&id) else {
             return false;
         };
-        flag.store(true, Ordering::Relaxed);
-        true
+        !flag.swap(true, Ordering::Relaxed)
     }
 
     pub fn clear_cancel_request(&mut self, id: JobId) -> bool {
@@ -1845,6 +1844,10 @@ mod tests {
         assert!(
             manager.request_cancel(copy_id),
             "cancel request should succeed for queued job"
+        );
+        assert!(
+            !manager.request_cancel(copy_id),
+            "an already-requested cancellation should be idempotent"
         );
         command_tx
             .send(WorkerCommand::Run(Box::new(copy_job)))
