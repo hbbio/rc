@@ -525,6 +525,7 @@ OpenMenu = f9
 OpenSkinDialog = alt-s; ctrl-k
 OpenFindDialog = alt-f; alt-question; ctrl-slash
 OpenTree = alt-t
+CycleListingFormat = alt-shift-t
 OpenHotlist = alt-h
 OpenPanelizeDialog = alt-p; ctrl-p
 

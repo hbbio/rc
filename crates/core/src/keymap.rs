@@ -1481,6 +1481,35 @@ Reread = ctrl-r
     }
 
     #[test]
+    fn bundled_keymap_keeps_tree_and_listing_cycle_shortcuts_distinct() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let alt_t = KeyChord {
+            code: KeyCode::Char('t'),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+        let alt_shift_t = KeyChord {
+            code: KeyCode::Char('t'),
+            modifiers: KeyModifiers {
+                shift: true,
+                ..alt_t.modifiers
+            },
+        };
+
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt_t),
+            Some(&KeyCommand::OpenTree)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt_shift_t),
+            Some(&KeyCommand::CycleListingFormat)
+        );
+    }
+
+    #[test]
     fn bundled_keymap_supports_complete_tree_actions() {
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
 
