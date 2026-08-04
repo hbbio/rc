@@ -19,8 +19,8 @@ use rc_core::layout::{
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
-    JobStatus, MenuState, PairInputField, PanelState, PanelViewMode, Route, SettingsScreenState,
-    TreeLoadState, TreeState, ViewerState, top_menus,
+    JobStatus, MenuState, PairInputField, PanelListingFormat, PanelState, PanelViewMode, Route,
+    SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -94,29 +94,49 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
     } else {
-        let panel_areas = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(root[1]);
+        let uses_single_panel_layout =
+            [ActivePanel::Left, ActivePanel::Right]
+                .into_iter()
+                .any(|panel| {
+                    state.panel_view_mode(panel) == PanelViewMode::Listing
+                        && state.panel_listing_format(panel) == PanelListingFormat::Long
+                });
+        if uses_single_panel_layout {
+            let panel = state.active_panel;
+            render_panel(
+                frame,
+                root[1],
+                panel,
+                &state.panels[panel.index()],
+                true,
+                skin.as_ref(),
+                state,
+            );
+        } else {
+            let panel_areas = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(root[1]);
 
-        render_panel(
-            frame,
-            panel_areas[0],
-            ActivePanel::Left,
-            &state.panels[0],
-            state.active_panel == ActivePanel::Left,
-            skin.as_ref(),
-            state,
-        );
-        render_panel(
-            frame,
-            panel_areas[1],
-            ActivePanel::Right,
-            &state.panels[1],
-            state.active_panel == ActivePanel::Right,
-            skin.as_ref(),
-            state,
-        );
+            render_panel(
+                frame,
+                panel_areas[0],
+                ActivePanel::Left,
+                &state.panels[0],
+                state.active_panel == ActivePanel::Left,
+                skin.as_ref(),
+                state,
+            );
+            render_panel(
+                frame,
+                panel_areas[1],
+                ActivePanel::Right,
+                &state.panels[1],
+                state.active_panel == ActivePanel::Right,
+                skin.as_ref(),
+                state,
+            );
+        }
     }
 
     let status = if state.show_debug_status() {
@@ -381,17 +401,18 @@ fn keybinding_joined_or(
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn panel_title(panel: &PanelState) -> String {
+fn panel_title(panel: &PanelState, format: PanelListingFormat) -> String {
     let panelize_suffix = if panel.is_panelized() {
         " | panelize"
     } else {
         ""
     };
     format!(
-        "{}{} | sort:{} | tagged:{}{}",
+        "{} | sort:{} | {}{} | tagged:{}{}",
+        format.title_label(),
+        panel.sort_label(),
         panel.cwd.to_string_lossy(),
         panelize_suffix,
-        panel.sort_label(),
         panel.tagged_count(),
         if panel.loading { " | loading..." } else { "" }
     )
@@ -445,17 +466,11 @@ fn render_panel(
         return;
     }
 
-    let title = fit_single_line(panel_title(panel), area.width.saturating_sub(2) as usize);
-    let selected_tagged = panel
-        .selected_entry()
-        .is_some_and(|entry| !entry.is_parent() && panel.is_tagged(&entry.path));
-    let highlight_style = if !active {
-        skin.style("core", "_default_")
-    } else if selected_tagged {
-        skin.style("core", "markselect")
-    } else {
-        skin.style("core", "selected")
-    };
+    let format = app.panel_listing_format(panel_id);
+    let title = fit_single_line(
+        panel_title(panel, format),
+        area.width.saturating_sub(2) as usize,
+    );
 
     let block = Block::default()
         .title(title)
@@ -484,72 +499,17 @@ fn render_panel(
             panel_layout[0],
         );
     } else {
-        let viewport_rows = panel_layout[0].height.saturating_sub(1).max(1) as usize;
-        let (window_start, window_end) =
-            visible_window(panel.entries.len(), panel.cursor, viewport_rows);
-        let selected_row = panel
-            .cursor
-            .saturating_sub(window_start)
-            .min(window_end.saturating_sub(window_start).saturating_sub(1));
-        let rows: Vec<Row<'_>> = panel
-            .entries
-            .iter()
-            .skip(window_start)
-            .take(window_end.saturating_sub(window_start))
-            .map(|entry| {
-                let tagged = !entry.is_parent() && panel.is_tagged(&entry.path);
-                let mut entry_style = if tagged {
-                    skin.style("core", "marked")
-                } else {
-                    skin.style("core", "_default_")
-                };
-                if entry.is_dir() {
-                    entry_style = entry_style.patch(skin.style("filehighlight", "directory"));
-                }
-
-                let marker = if tagged { "*" } else { " " };
-                let label = if entry.is_parent() {
-                    String::from("/..")
-                } else if entry.is_dir() {
-                    format!("/{}/", entry.name)
-                } else {
-                    entry.name.clone()
-                };
-                Row::new(vec![
-                    Cell::from(format!("{marker}{label}")),
-                    Cell::from(format!(
-                        "{:>width$} ",
-                        panel_entry_size_label(entry),
-                        width = PANEL_SIZE_VALUE_WIDTH
-                    )),
-                    Cell::from(format_modified(entry.modified)),
-                ])
-                .style(entry_style)
-            })
-            .collect();
-        let header = Row::new(vec![
-            Cell::from("Name"),
-            Cell::from("Size"),
-            Cell::from("Modify time"),
-        ])
-        .style(skin.style("core", "header"));
-
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Fill(1),
-                Constraint::Length(PANEL_SIZE_COL_WIDTH as u16),
-                Constraint::Length(12),
-            ],
-        )
-        .header(header)
-        .style(skin.style("core", "_default_"))
-        .highlight_style(highlight_style)
-        .column_spacing(1);
-
-        let mut table_state = TableState::default();
-        table_state.select(Some(selected_row));
-        frame.render_stateful_widget(table, panel_layout[0], &mut table_state);
+        match format {
+            PanelListingFormat::Full => {
+                render_full_panel_entries(frame, panel_layout[0], panel, active, skin)
+            }
+            PanelListingFormat::Brief => {
+                render_brief_panel_entries(frame, panel_layout[0], panel, active, skin)
+            }
+            PanelListingFormat::Long => {
+                render_long_panel_entries(frame, panel_layout[0], panel, active, skin)
+            }
+        }
     }
 
     let (selected_count, selected_size) = panel_selected_totals(panel);
@@ -583,6 +543,265 @@ fn render_panel(
             .alignment(Alignment::Right),
         footer_layout[1],
     );
+}
+
+fn render_full_panel_entries(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+) {
+    let viewport_rows = area.height.saturating_sub(1).max(1) as usize;
+    let (window_start, window_end) =
+        visible_window(panel.entries.len(), panel.cursor, viewport_rows);
+    let selected_row = panel
+        .cursor
+        .saturating_sub(window_start)
+        .min(window_end.saturating_sub(window_start).saturating_sub(1));
+    let rows: Vec<Row<'_>> = panel
+        .entries
+        .iter()
+        .skip(window_start)
+        .take(window_end.saturating_sub(window_start))
+        .map(|entry| {
+            Row::new(vec![
+                Cell::from(panel_entry_display_label(panel, entry)),
+                Cell::from(format!(
+                    "{:>width$} ",
+                    panel_entry_size_label(entry),
+                    width = PANEL_SIZE_VALUE_WIDTH
+                )),
+                Cell::from(format_modified(entry.modified)),
+            ])
+            .style(panel_entry_style(panel, entry, false, skin))
+        })
+        .collect();
+    let header = Row::new(vec![
+        Cell::from("Name"),
+        Cell::from("Size"),
+        Cell::from("Modify time"),
+    ])
+    .style(skin.style("core", "header"));
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Fill(1),
+            Constraint::Length(PANEL_SIZE_COL_WIDTH as u16),
+            Constraint::Length(12),
+        ],
+    )
+    .header(header)
+    .style(skin.style("core", "_default_"))
+    .highlight_style(panel_selection_style(panel, active, skin))
+    .column_spacing(1);
+
+    let mut table_state = TableState::default();
+    table_state.select(Some(selected_row));
+    frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn render_brief_panel_entries(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+) {
+    const MIN_COLUMN_WIDTH: u16 = 16;
+    const MAX_COLUMNS: usize = 9;
+
+    let columns = usize::from((area.width / MIN_COLUMN_WIDTH).max(1)).min(MAX_COLUMNS);
+    let total_rows = panel.entries.len().div_ceil(columns);
+    let selected_row = panel.cursor % total_rows.max(1);
+    let viewport_rows = usize::from(area.height.max(1));
+    let (window_start, window_end) = visible_window(total_rows, selected_row, viewport_rows);
+    let cell_width = usize::from(area.width)
+        .saturating_sub(columns.saturating_sub(1))
+        .checked_div(columns)
+        .unwrap_or(0);
+    let rows = (window_start..window_end).map(|row_index| {
+        let cells = (0..columns).map(|column| {
+            let entry_index = column.saturating_mul(total_rows).saturating_add(row_index);
+            let Some(entry) = panel.entries.get(entry_index) else {
+                return Cell::from(String::new());
+            };
+            Cell::from(fit_single_line(
+                panel_entry_display_label(panel, entry),
+                cell_width,
+            ))
+            .style(panel_entry_style(
+                panel,
+                entry,
+                active && entry_index == panel.cursor,
+                skin,
+            ))
+        });
+        Row::new(cells)
+    });
+    let widths = vec![Constraint::Ratio(1, columns as u32); columns];
+    frame.render_widget(
+        Table::new(rows, widths)
+            .style(skin.style("core", "_default_"))
+            .column_spacing(1),
+        area,
+    );
+}
+
+fn render_long_panel_entries(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+) {
+    let viewport_rows = area.height.saturating_sub(1).max(1) as usize;
+    let (window_start, window_end) =
+        visible_window(panel.entries.len(), panel.cursor, viewport_rows);
+    let selected_row = panel
+        .cursor
+        .saturating_sub(window_start)
+        .min(window_end.saturating_sub(window_start).saturating_sub(1));
+    let rows = panel
+        .entries
+        .iter()
+        .skip(window_start)
+        .take(window_end.saturating_sub(window_start))
+        .map(|entry| {
+            Row::new(vec![
+                Cell::from(format_file_mode(entry)),
+                Cell::from(optional_number(entry.metadata.hard_links)),
+                Cell::from(optional_number(entry.metadata.user_id)),
+                Cell::from(optional_number(entry.metadata.group_id)),
+                Cell::from(panel_entry_size_label(entry)),
+                Cell::from(format_modified(entry.modified)),
+                Cell::from(panel_entry_display_label(panel, entry)),
+            ])
+            .style(panel_entry_style(panel, entry, false, skin))
+        });
+    let header = Row::new(vec![
+        "Mode",
+        "Links",
+        "UID",
+        "GID",
+        "Size",
+        "Modify time",
+        "Name",
+    ])
+    .style(skin.style("core", "header"));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(PANEL_SIZE_COL_WIDTH as u16),
+            Constraint::Length(12),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header)
+    .style(skin.style("core", "_default_"))
+    .highlight_style(panel_selection_style(panel, active, skin))
+    .column_spacing(1);
+
+    let mut table_state = TableState::default();
+    table_state.select(Some(selected_row));
+    frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn panel_entry_display_label(panel: &PanelState, entry: &FileEntry) -> String {
+    let marker = if !entry.is_parent() && panel.is_tagged(&entry.path) {
+        "*"
+    } else {
+        " "
+    };
+    let label = if entry.is_parent() {
+        String::from("/..")
+    } else if entry.is_dir() {
+        format!("/{}/", entry.name)
+    } else {
+        entry.name.clone()
+    };
+    format!("{marker}{label}")
+}
+
+fn panel_entry_style(
+    panel: &PanelState,
+    entry: &FileEntry,
+    selected: bool,
+    skin: &UiSkin,
+) -> Style {
+    let tagged = !entry.is_parent() && panel.is_tagged(&entry.path);
+    let mut style = if tagged {
+        skin.style("core", "marked")
+    } else {
+        skin.style("core", "_default_")
+    };
+    if entry.is_dir() {
+        style = style.patch(skin.style("filehighlight", "directory"));
+    }
+    if selected {
+        style = style.patch(if tagged {
+            skin.style("core", "markselect")
+        } else {
+            skin.style("core", "selected")
+        });
+    }
+    style
+}
+
+fn panel_selection_style(panel: &PanelState, active: bool, skin: &UiSkin) -> Style {
+    if !active {
+        return skin.style("core", "_default_");
+    }
+    let selected_tagged = panel
+        .selected_entry()
+        .is_some_and(|entry| !entry.is_parent() && panel.is_tagged(&entry.path));
+    if selected_tagged {
+        skin.style("core", "markselect")
+    } else {
+        skin.style("core", "selected")
+    }
+}
+
+fn optional_number(value: Option<impl ToString>) -> String {
+    value.map_or_else(|| String::from("-"), |value| value.to_string())
+}
+
+fn format_file_mode(entry: &FileEntry) -> String {
+    let Some(mode) = entry.metadata.mode else {
+        return String::from("??????????");
+    };
+    let mut output = String::with_capacity(10);
+    output.push(if entry.is_dir() { 'd' } else { '-' });
+    output.push(if mode & 0o400 != 0 { 'r' } else { '-' });
+    output.push(if mode & 0o200 != 0 { 'w' } else { '-' });
+    output.push(special_execute_bit(mode, 0o100, 0o4000, 's', 'S'));
+    output.push(if mode & 0o040 != 0 { 'r' } else { '-' });
+    output.push(if mode & 0o020 != 0 { 'w' } else { '-' });
+    output.push(special_execute_bit(mode, 0o010, 0o2000, 's', 'S'));
+    output.push(if mode & 0o004 != 0 { 'r' } else { '-' });
+    output.push(if mode & 0o002 != 0 { 'w' } else { '-' });
+    output.push(special_execute_bit(mode, 0o001, 0o1000, 't', 'T'));
+    output
+}
+
+fn special_execute_bit(
+    mode: u32,
+    execute_bit: u32,
+    special_bit: u32,
+    special_execute: char,
+    special_no_execute: char,
+) -> char {
+    match (mode & execute_bit != 0, mode & special_bit != 0) {
+        (true, true) => special_execute,
+        (false, true) => special_no_execute,
+        (true, false) => 'x',
+        (false, false) => '-',
+    }
 }
 
 fn render_info_panel(
@@ -626,12 +845,19 @@ fn render_info_panel(
                 format!("Name: {}", entry.name),
                 format!("Type: {entry_type}"),
                 format!("Path: {}", entry.path.to_string_lossy()),
+                format!("Mode: {}", format_file_mode(entry)),
+                format!("Links: {}", optional_number(entry.metadata.hard_links)),
+                format!("UID: {}", optional_number(entry.metadata.user_id)),
+                format!("GID: {}", optional_number(entry.metadata.group_id)),
+                format!("Inode: {}", optional_number(entry.metadata.inode)),
                 format!(
                     "Size: {} ({} bytes)",
                     format_human_size(entry.size),
                     entry.size
                 ),
                 format!("Modified: {}", format_modified(entry.modified)),
+                format!("Accessed: {}", format_modified(entry.metadata.accessed)),
+                format!("Changed: {}", format_modified(entry.metadata.changed)),
             ]);
         }
         None if source.loading => rows.push(String::from("Selection: loading...")),
@@ -2194,8 +2420,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use rc_core::{
-        AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, PanelCommand,
-        WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_event,
+        AppCommand, AppState, BackgroundEvent, FileEntryKind, FileEntryMetadata, JobError,
+        JobEvent, JobRequest, PanelCommand, WorkerCommand, build_tree_ready_event,
+        execute_worker_job, refresh_panel_event,
     };
     use std::env;
     use std::fs;
@@ -2527,6 +2754,95 @@ mod tests {
     }
 
     #[test]
+    fn brief_listing_uses_multiple_responsive_name_columns() {
+        let root = temp_root("brief-listing");
+        for name in ["alpha", "bravo", "charlie", "delta"] {
+            fs::write(root.join(name), name).expect("file should be creatable");
+        }
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::OpenListingFormat,
+        ))
+        .expect("listing format dialog should open");
+        app.apply(AppCommand::DialogListboxSelectAt(1))
+            .expect("brief format should be selected");
+        app.apply(AppCommand::DialogAccept)
+            .expect("brief format should be applied");
+
+        let frame = render_to_text(&app, 120, 24);
+        assert!(frame.contains("brief | sort:name asc"));
+        assert!(
+            frame.lines().any(|line| {
+                ["alpha", "bravo", "charlie", "delta"]
+                    .into_iter()
+                    .filter(|name| line.contains(name))
+                    .count()
+                    >= 2
+            }),
+            "brief format should place multiple names on one row"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn long_listing_uses_full_width_metadata_columns() {
+        let root = temp_root("long-listing");
+        fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
+        let other = root.join("other");
+        fs::create_dir_all(&other).expect("other panel directory should be creatable");
+        fs::write(other.join("right-only.txt"), "hidden")
+            .expect("other panel file should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.panels[ActivePanel::Right.index()].cwd = other;
+        app.panels[ActivePanel::Right.index()]
+            .refresh()
+            .expect("other panel should refresh");
+        app.apply(AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::OpenListingFormat,
+        ))
+        .expect("listing format dialog should open");
+        app.apply(AppCommand::DialogListboxSelectAt(2))
+            .expect("long format should be selected");
+        app.apply(AppCommand::DialogAccept)
+            .expect("long format should be applied");
+
+        let frame = render_to_text(&app, 120, 24);
+        assert!(frame.contains("long | sort:name asc"));
+        assert!(frame.lines().any(|line| {
+            ["Mode", "Links", "UID", "GID", "Modify time", "Name"]
+                .into_iter()
+                .all(|label| line.contains(label))
+        }));
+        assert!(frame.contains("entry.txt"));
+        assert!(
+            !frame.contains("right-only.txt"),
+            "long format should allocate the content area to one panel"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn file_mode_formatter_handles_special_execute_bits() {
+        let entry = FileEntry {
+            name: String::from("tool"),
+            path: "tool".into(),
+            kind: FileEntryKind::File,
+            size: 0,
+            modified: None,
+            metadata: FileEntryMetadata {
+                mode: Some(0o104751),
+                ..FileEntryMetadata::default()
+            },
+        };
+
+        assert_eq!(format_file_mode(&entry), "-rwsr-x--x");
+    }
+
+    #[test]
     fn render_info_panel_tracks_the_other_panel_selection() {
         let root = temp_root("info-panel");
         fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
@@ -2599,7 +2915,10 @@ mod tests {
             .expect("default panelize preset should run");
         drain_background(&mut app);
 
-        let title = panel_title(app.active_panel());
+        let title = panel_title(
+            app.active_panel(),
+            app.panel_listing_format(app.active_panel),
+        );
         assert!(
             title.contains("panelize"),
             "panel title should indicate panelize mode"

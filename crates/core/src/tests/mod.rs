@@ -23,6 +23,7 @@ fn file_entry(name: &str) -> FileEntry {
         kind: FileEntryKind::File,
         size: 0,
         modified: None,
+        metadata: FileEntryMetadata::default(),
     }
 }
 
@@ -337,6 +338,14 @@ fn name_sort_listing_populates_metadata_fields() {
         file_entry.modified.is_some(),
         "name sort should include file metadata mtime"
     );
+    #[cfg(unix)]
+    {
+        assert!(file_entry.metadata.mode.is_some());
+        assert!(file_entry.metadata.hard_links.is_some());
+        assert!(file_entry.metadata.user_id.is_some());
+        assert!(file_entry.metadata.group_id.is_some());
+        assert!(file_entry.metadata.inode.is_some());
+    }
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -974,6 +983,48 @@ fn file_listing_mode_leaves_panelized_results_recoverably() {
                     })
             ))
     );
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn listing_format_dialog_updates_only_its_named_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-listing-format-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    app.active_panel = ActivePanel::Right;
+    app.apply(AppCommand::OpenMenuAt(0))
+        .expect("left menu should open");
+    move_menu_selection_to_label(&mut app, "Listing format...");
+    app.apply(AppCommand::MenuAccept)
+        .expect("listing format dialog should open");
+    assert_eq!(app.key_context(), KeyContext::Listbox);
+
+    app.apply(AppCommand::DialogListboxSelectAt(1))
+        .expect("brief format should be selected");
+    app.apply(AppCommand::DialogAccept)
+        .expect("brief format should be applied");
+
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Left),
+        PanelListingFormat::Brief
+    );
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Right),
+        PanelListingFormat::Full,
+        "the other panel format must remain unchanged"
+    );
+    assert_eq!(
+        app.settings().panel_options.listing_formats,
+        [PanelListingFormat::Brief, PanelListingFormat::Full]
+    );
+    assert!(app.settings().save_setup.dirty);
+    assert_eq!(app.active_panel, ActivePanel::Left);
 
     fs::remove_dir_all(root).expect("must remove temp root");
 }

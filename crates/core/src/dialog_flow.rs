@@ -16,6 +16,9 @@ impl AppState {
             AppCommand::OpenQuickCd => self.start_quick_cd_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::Panel(panel, PanelCommand::OpenListingFormat) => {
+                self.open_panel_listing_format_dialog(panel)
+            }
             AppCommand::FindDialogBrowse => self.open_find_tree_picker(),
             AppCommand::DialogAccept => {
                 if matches!(self.top_route(), Route::Settings(_)) {
@@ -70,6 +73,19 @@ impl AppState {
 
     pub(crate) fn start_copy_dialog(&mut self) {
         self.start_transfer_dialog(TransferKind::Copy);
+    }
+
+    fn open_panel_listing_format_dialog(&mut self, panel: ActivePanel) {
+        let selected = self.panel_listing_format(panel).index();
+        let items = PanelListingFormat::ALL
+            .into_iter()
+            .map(|format| format.label().to_string())
+            .collect();
+        self.push_dialog(
+            DialogState::listbox("Listing format", items, selected),
+            PendingDialogAction::SetPanelListingFormat { panel },
+        );
+        self.set_status(format!("{} panel: choose listing format", panel.label()));
     }
 
     pub(crate) fn start_move_dialog(&mut self) {
@@ -407,6 +423,19 @@ impl AppState {
                 self.pending_skin_preview = None;
                 self.pending_skin_revert = Some(original_skin);
                 self.set_status("Skin unchanged");
+            }
+            (
+                Some(PendingDialogAction::SetPanelListingFormat { panel }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(format) = index.and_then(PanelListingFormat::from_index) {
+                    self.set_panel_listing_format(panel, format);
+                } else {
+                    self.set_status("Listing format unchanged");
+                }
+            }
+            (Some(PendingDialogAction::SetPanelListingFormat { .. }), DialogResult::Canceled) => {
+                self.set_status("Listing format unchanged");
             }
             (Some(PendingDialogAction::FindSearch), DialogResult::FindSubmitted(spec)) => {
                 self.start_find_search(*spec);

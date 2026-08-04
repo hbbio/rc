@@ -45,13 +45,15 @@ pub(crate) fn read_entries_with_visibility_cancel(
         }
         let file_type = entry.file_type()?;
         let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
-        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
         let is_dir = file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
         if is_dir {
-            entries.push(FileEntry::directory(name, path, size, modified));
+            entries.push(FileEntry::directory_from_metadata(
+                name,
+                path,
+                metadata.as_ref(),
+            ));
         } else {
-            entries.push(FileEntry::file(name, path, size, modified));
+            entries.push(FileEntry::file_from_metadata(name, path, metadata.as_ref()));
         }
     }
 
@@ -235,14 +237,12 @@ fn panelized_path_entry(
     }
 
     let metadata = fs::metadata(&path).ok();
-    let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-    let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
     let name = panelized_entry_label(base_dir, &path);
     let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
     let entry = if is_dir {
-        FileEntry::directory(name, path, size, modified)
+        FileEntry::directory_from_metadata(name, path, metadata.as_ref())
     } else {
-        FileEntry::file(name, path, size, modified)
+        FileEntry::file_from_metadata(name, path, metadata.as_ref())
     };
     Ok(Some(entry))
 }

@@ -16,6 +16,7 @@ impl AppState {
             panels: [left, right],
             active_panel: ActivePanel::Left,
             panel_views: [PanelViewMode::Listing; 2],
+            panel_listing_formats: [PanelListingFormat::Full; 2],
             status_line: String::from("Press F1 for help"),
             status_expires_at: None,
             last_dialog_result: None,
@@ -121,6 +122,7 @@ impl AppState {
 
         let sort_mode = self.default_panel_sort_mode();
         let show_hidden_files = self.settings.panel_options.show_hidden_files;
+        self.panel_listing_formats = self.settings.panel_options.listing_formats;
         for panel in &mut self.panels {
             panel.sort_mode = sort_mode;
             panel.set_show_hidden_files(show_hidden_files);
@@ -140,6 +142,27 @@ impl AppState {
 
     pub fn panel_view_mode(&self, panel: ActivePanel) -> PanelViewMode {
         self.panel_views[panel.index()]
+    }
+
+    pub fn panel_listing_format(&self, panel: ActivePanel) -> PanelListingFormat {
+        self.panel_listing_formats[panel.index()]
+    }
+
+    pub(crate) fn set_panel_listing_format(
+        &mut self,
+        panel: ActivePanel,
+        format: PanelListingFormat,
+    ) {
+        self.panel_views[panel.index()] = PanelViewMode::Listing;
+        self.panel_listing_formats[panel.index()] = format;
+        self.settings.panel_options.listing_formats[panel.index()] = format;
+        self.settings.mark_dirty();
+        self.active_panel = panel;
+        self.set_status(format!(
+            "{} panel listing format: {}",
+            panel.label(),
+            format.label()
+        ));
     }
 
     pub(crate) fn set_panel_view_mode(&mut self, panel: ActivePanel, mode: PanelViewMode) {

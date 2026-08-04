@@ -1,4 +1,6 @@
-use crate::{HotlistEntry, OverwritePolicy, PanelizePreset, Settings, SortField};
+use crate::{
+    HotlistEntry, OverwritePolicy, PanelListingFormat, PanelizePreset, Settings, SortField,
+};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -427,6 +429,16 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.panel_options.sort_reverse = parsed;
                 }
             }
+            ("panel_options", "left_listing_format") => {
+                if let Some(parsed) = parse_listing_format(value) {
+                    settings.panel_options.listing_formats[0] = parsed;
+                }
+            }
+            ("panel_options", "right_listing_format") => {
+                if let Some(parsed) = parse_listing_format(value) {
+                    settings.panel_options.listing_formats[1] = parsed;
+                }
+            }
             ("confirmation", "confirm_delete") => {
                 if let Some(parsed) = parse_bool(value) {
                     settings.confirmation.confirm_delete = parsed;
@@ -611,6 +623,14 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         "sort_reverse={}",
         settings.panel_options.sort_reverse
     ));
+    lines.push(format!(
+        "left_listing_format={}",
+        settings.panel_options.listing_formats[0].title_label()
+    ));
+    lines.push(format!(
+        "right_listing_format={}",
+        settings.panel_options.listing_formats[1].title_label()
+    ));
 
     lines.push(String::new());
     lines.push(String::from("[confirmation]"));
@@ -723,6 +743,15 @@ fn sort_field_label(field: SortField) -> &'static str {
     }
 }
 
+fn parse_listing_format(value: &str) -> Option<PanelListingFormat> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "full" => Some(PanelListingFormat::Full),
+        "brief" => Some(PanelListingFormat::Brief),
+        "long" => Some(PanelListingFormat::Long),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +812,8 @@ skin=default
         ];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
         settings.panel_options.sort_field = SortField::Modified;
+        settings.panel_options.listing_formats =
+            [PanelListingFormat::Brief, PanelListingFormat::Long];
         settings.layout.status_message_timeout_seconds = 42;
         settings.confirmation.confirm_hotlist_delete = false;
 
@@ -800,6 +831,10 @@ skin=default
             OverwritePolicy::Rename
         );
         assert_eq!(parsed.panel_options.sort_field, SortField::Modified);
+        assert_eq!(
+            parsed.panel_options.listing_formats,
+            [PanelListingFormat::Brief, PanelListingFormat::Long]
+        );
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
         assert!(!parsed.confirmation.confirm_hotlist_delete);
     }

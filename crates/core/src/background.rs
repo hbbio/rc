@@ -262,13 +262,11 @@ where
         }
         let file_type = entry.file_type()?;
         let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
-        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
         let is_dir = file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
         let panel_entry = if is_dir {
-            FileEntry::directory(name, path, size, modified)
+            FileEntry::directory_from_metadata(name, path, metadata.as_ref())
         } else {
-            FileEntry::file(name, path, size, modified)
+            FileEntry::file_from_metadata(name, path, metadata.as_ref())
         };
         entries.push(panel_entry.clone());
         emitted.push(panel_entry);

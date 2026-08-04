@@ -199,6 +199,7 @@ pub enum AppCommand {
 pub enum PanelCommand {
     SetView(PanelViewMode),
     OpenTree,
+    OpenListingFormat,
     RestorePanelizedResults,
     Reread,
 }
@@ -208,6 +209,46 @@ pub enum PanelViewMode {
     #[default]
     Listing,
     Info,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum PanelListingFormat {
+    #[default]
+    Full,
+    Brief,
+    Long,
+}
+
+impl PanelListingFormat {
+    pub const ALL: [Self; 3] = [Self::Full, Self::Brief, Self::Long];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Full",
+            Self::Brief => "Brief",
+            Self::Long => "Long",
+        }
+    }
+
+    pub const fn title_label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Brief => "brief",
+            Self::Long => "long",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Full => 0,
+            Self::Brief => 1,
+            Self::Long => 2,
+        }
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -352,6 +393,7 @@ impl AppCommand {
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
+            | Self::Panel(_, PanelCommand::OpenListingFormat)
             | Self::FindDialogBrowse
             | Self::DialogAccept
             | Self::DialogCancel
@@ -475,7 +517,10 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
         ),
         MenuEntry::action("Tree", AppCommand::Panel(panel, PanelCommand::OpenTree)),
         MenuEntry::separator(),
-        MenuEntry::stub("Listing format...", ""),
+        MenuEntry::action(
+            "Listing format...",
+            AppCommand::Panel(panel, PanelCommand::OpenListingFormat),
+        ),
         MenuEntry::stub("Sort order...", ""),
         MenuEntry::stub("Filter...", ""),
         MenuEntry::stub("Encoding...", "M-e"),
@@ -742,19 +787,74 @@ pub struct FileEntry {
     pub kind: FileEntryKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub metadata: FileEntryMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileEntryMetadata {
+    pub accessed: Option<SystemTime>,
+    pub changed: Option<SystemTime>,
+    pub mode: Option<u32>,
+    pub hard_links: Option<u64>,
+    pub user_id: Option<u32>,
+    pub group_id: Option<u32>,
+    pub inode: Option<u64>,
+}
+
+impl FileEntryMetadata {
+    fn from_metadata(metadata: Option<&fs::Metadata>) -> Self {
+        let Some(metadata) = metadata else {
+            return Self::default();
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            Self {
+                accessed: metadata.accessed().ok(),
+                changed: system_time_from_unix_parts(metadata.ctime(), metadata.ctime_nsec()),
+                mode: Some(metadata.mode()),
+                hard_links: Some(metadata.nlink()),
+                user_id: Some(metadata.uid()),
+                group_id: Some(metadata.gid()),
+                inode: Some(metadata.ino()),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            Self {
+                accessed: metadata.accessed().ok(),
+                changed: metadata.created().ok(),
+                ..Self::default()
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn system_time_from_unix_parts(seconds: i64, nanoseconds: i64) -> Option<SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    let total_nanoseconds = i128::from(seconds)
+        .checked_mul(NANOS_PER_SECOND)?
+        .checked_add(i128::from(nanoseconds))?;
+    let magnitude = total_nanoseconds.unsigned_abs();
+    let duration = Duration::new(
+        u64::try_from(magnitude / NANOS_PER_SECOND as u128).ok()?,
+        u32::try_from(magnitude % NANOS_PER_SECOND as u128).ok()?,
+    );
+    if total_nanoseconds.is_negative() {
+        UNIX_EPOCH.checked_sub(duration)
+    } else {
+        UNIX_EPOCH.checked_add(duration)
+    }
 }
 
 impl FileEntry {
-    fn directory(name: String, path: PathBuf, size: u64, modified: Option<SystemTime>) -> Self {
-        Self {
-            name,
-            path,
-            kind: FileEntryKind::Directory,
-            size,
-            modified,
-        }
-    }
-
+    #[cfg(test)]
     fn file(name: String, path: PathBuf, size: u64, modified: Option<SystemTime>) -> Self {
         Self {
             name,
@@ -762,6 +862,33 @@ impl FileEntry {
             kind: FileEntryKind::File,
             size,
             modified,
+            metadata: FileEntryMetadata::default(),
+        }
+    }
+
+    fn directory_from_metadata(
+        name: String,
+        path: PathBuf,
+        metadata: Option<&fs::Metadata>,
+    ) -> Self {
+        Self {
+            name,
+            path,
+            kind: FileEntryKind::Directory,
+            size: metadata.map_or(0, fs::Metadata::len),
+            modified: metadata.and_then(|metadata| metadata.modified().ok()),
+            metadata: FileEntryMetadata::from_metadata(metadata),
+        }
+    }
+
+    fn file_from_metadata(name: String, path: PathBuf, metadata: Option<&fs::Metadata>) -> Self {
+        Self {
+            name,
+            path,
+            kind: FileEntryKind::File,
+            size: metadata.map_or(0, fs::Metadata::len),
+            modified: metadata.and_then(|metadata| metadata.modified().ok()),
+            metadata: FileEntryMetadata::from_metadata(metadata),
         }
     }
 
@@ -772,6 +899,7 @@ impl FileEntry {
             kind: FileEntryKind::Parent,
             size: 0,
             modified: None,
+            metadata: FileEntryMetadata::default(),
         }
     }
 
@@ -1446,6 +1574,9 @@ enum PendingDialogAction {
     SetSkin {
         original_skin: String,
     },
+    SetPanelListingFormat {
+        panel: ActivePanel,
+    },
     ViewerSearch {
         direction: ViewerSearchDirection,
     },
@@ -1634,6 +1765,7 @@ pub struct AppState {
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     panel_views: [PanelViewMode; 2],
+    panel_listing_formats: [PanelListingFormat; 2],
     pub status_line: String,
     status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,

@@ -135,6 +135,16 @@ impl AppState {
             ],
             SettingsCategory::PanelOptions => vec![
                 SettingsEntry::new(
+                    "Left listing format",
+                    self.settings.panel_options.listing_formats[ActivePanel::Left.index()].label(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
+                    "Right listing format",
+                    self.settings.panel_options.listing_formats[ActivePanel::Right.index()].label(),
+                    SettingsEntryAction::Info,
+                ),
+                SettingsEntry::new(
                     "Show hidden files",
                     bool_label(self.settings.panel_options.show_hidden_files),
                     SettingsEntryAction::TogglePanelShowHiddenFiles,
