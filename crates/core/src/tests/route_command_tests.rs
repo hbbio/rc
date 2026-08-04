@@ -758,6 +758,10 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::EditEntry)
     );
     assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::QuickCd),
+        Some(AppCommand::OpenQuickCd)
+    );
+    assert_eq!(
         AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::CursorUp),
         Some(AppCommand::DialogListboxUp)
     );

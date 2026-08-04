@@ -13,6 +13,7 @@ impl AppState {
         match command {
             AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
+            AppCommand::OpenQuickCd => self.start_quick_cd_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
             AppCommand::FindDialogBrowse => self.open_find_tree_picker(),
@@ -404,6 +405,12 @@ impl AppState {
             }
             (Some(PendingDialogAction::FindSearch), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
+            }
+            (Some(PendingDialogAction::QuickCd), DialogResult::InputSubmitted(value)) => {
+                self.submit_quick_cd(value);
+            }
+            (Some(PendingDialogAction::QuickCd), DialogResult::Canceled) => {
+                self.set_status("Quick cd canceled");
             }
             (
                 Some(PendingDialogAction::HotlistAdd { base_dir }),

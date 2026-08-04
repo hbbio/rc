@@ -32,6 +32,7 @@ impl AppState {
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
             panelized_result_history: [None, None],
+            previous_panel_directories: [None, None],
             panel_refresh: PanelRefreshWorkflow::default(),
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             find_pause_flags: HashMap::new(),
@@ -172,20 +173,28 @@ impl AppState {
 
     pub fn open_selected_directory(&mut self) -> bool {
         let panel = self.active_panel;
+        let previous_directory = self.active_panel().cwd.clone();
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().open_selected_directory();
-        if opened && let Some(snapshot) = snapshot {
-            self.panelized_result_history[panel.index()] = Some(snapshot);
+        if opened {
+            if let Some(snapshot) = snapshot {
+                self.panelized_result_history[panel.index()] = Some(snapshot);
+            }
+            self.remember_previous_directory(panel, previous_directory);
         }
         opened
     }
 
     pub fn go_parent_directory(&mut self) -> bool {
         let panel = self.active_panel;
+        let previous_directory = self.active_panel().cwd.clone();
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().go_parent();
-        if opened && let Some(snapshot) = snapshot {
-            self.panelized_result_history[panel.index()] = Some(snapshot);
+        if opened {
+            if let Some(snapshot) = snapshot {
+                self.panelized_result_history[panel.index()] = Some(snapshot);
+            }
+            self.remember_previous_directory(panel, previous_directory);
         }
         opened
     }

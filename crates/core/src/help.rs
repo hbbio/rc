@@ -47,6 +47,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_switch_panel}} switch panel\n\
   {{fm_open_entry}} open directory or view file\n\
   {{fm_parent}} go to parent directory\n\
+  {{fm_quick_cd}} quick cd\n\
   {{fm_find}} open find/back to find results\n\
   {{fm_tree}} open directory tree\n\
   {{fm_hotlist}} open directory hotlist\n\
@@ -543,6 +544,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_switch_panel", String::from("Tab")),
         ("fm_open_entry", String::from("Enter/F3")),
         ("fm_parent", String::from("Backspace")),
+        ("fm_quick_cd", String::from("Alt-C")),
         ("fm_find", String::from("Alt-F")),
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
@@ -660,6 +662,7 @@ mod tests {
 
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Tab switch panel"));
+        assert!(content.contains("Alt-C quick cd"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));
         assert!(content.contains("q/F10 quit"));

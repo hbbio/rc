@@ -10,6 +10,7 @@ use std::{env, fs};
 
 mod find_tests;
 mod panelize_tests;
+mod quick_cd_tests;
 mod refresh_tests;
 mod route_command_tests;
 mod viewer_tests;

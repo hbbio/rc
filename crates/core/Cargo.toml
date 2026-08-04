@@ -10,6 +10,7 @@ filetime = "0.2"
 globset = "0.4"
 rc-shell.workspace = true
 regex = "1.11"
+shlex.workspace = true
 tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]

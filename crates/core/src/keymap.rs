@@ -122,6 +122,7 @@ pub enum KeyCommand {
     OpenEntry,
     EditEntry,
     CdUp,
+    QuickCd,
     Reread,
     Forget,
     ToggleNavigation,
@@ -208,6 +209,7 @@ impl KeyCommand {
             "enter" | "view" | "viewfile" => Self::OpenEntry,
             "edit" => Self::EditEntry,
             "cdup" => Self::CdUp,
+            "cdquick" | "quickcd" => Self::QuickCd,
             "reread" => Self::Reread,
             "forget" => Self::Forget,
             "togglenavigation" | "staticdynamic" => Self::ToggleNavigation,
@@ -1336,6 +1338,24 @@ Reread = ctrl-r
     }
 
     #[test]
+    fn bundled_keymap_supports_quick_cd() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let alt_c = KeyChord {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt_c),
+            Some(&KeyCommand::QuickCd)
+        );
+    }
+
+    #[test]
     fn bundled_keymap_supports_tab_focus_switch_for_panelize_dialogs() {
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
         let tab = KeyChord::new(KeyCode::Tab);
@@ -1434,6 +1454,7 @@ Reread = ctrl-r
             "View",
             "Edit",
             "MakeDir",
+            "CdQuick",
             "Forget",
             "ToggleNavigation",
         ] {

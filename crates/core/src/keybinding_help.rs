@@ -193,6 +193,15 @@ impl AppState {
             ),
         );
         replacements.insert(
+            "fm_quick_cd",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenQuickCd,
+                "Alt-C",
+                1,
+            ),
+        );
+        replacements.insert(
             "fm_find",
             self.keybinding_joined_or_fallback(
                 KeyContext::FileManager,

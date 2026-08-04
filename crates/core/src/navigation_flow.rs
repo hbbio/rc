@@ -927,6 +927,7 @@ impl AppState {
         }
 
         let panel_index = self.active_panel.index();
+        let previous_directory = self.active_panel().cwd.clone();
         if let Some(snapshot) = self.completed_panelized_result_snapshot(self.active_panel) {
             self.panelized_result_history[panel_index] = Some(snapshot);
         }
@@ -937,6 +938,7 @@ impl AppState {
         panel.tagged.clear();
         panel.entries.clear();
         panel.loading = true;
+        self.remember_previous_directory(self.active_panel, previous_directory);
         self.queue_panel_refresh(self.active_panel);
         Ok(true)
     }

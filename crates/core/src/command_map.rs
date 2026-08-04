@@ -47,6 +47,7 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::EditEntry) => Some(Self::EditEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
+            (KeyContext::FileManager, KeyCommand::QuickCd) => Some(Self::OpenQuickCd),
             (KeyContext::FileManager, KeyCommand::Reread) => Some(Self::Reread),
             (KeyContext::FileManager, KeyCommand::OpenFindDialog) => Some(Self::OpenFindDialog),
             (KeyContext::FindResults, KeyCommand::OpenEntry) => Some(Self::FindResultsOpenEntry),

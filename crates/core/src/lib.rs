@@ -16,6 +16,7 @@ mod navigation_flow;
 mod orchestration;
 mod panel;
 mod panelize_flow;
+mod quick_cd;
 mod refresh_flow;
 mod route_flow;
 pub mod settings;
@@ -128,6 +129,7 @@ pub enum AppCommand {
     OpenEntry,
     EditEntry,
     CdUp,
+    OpenQuickCd,
     Reread,
     FindResultsOpenEntry,
     FindResultsPanelize,
@@ -314,6 +316,7 @@ impl AppCommand {
             | Self::ViewerToggleHex => CommandDomain::Viewer,
             Self::OpenConfirmDialog
             | Self::OpenInputDialog
+            | Self::OpenQuickCd
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
             | Self::FindDialogBrowse
@@ -459,7 +462,7 @@ const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("Rename/Move", "F6", AppCommand::Move),
     MenuEntry::action_with_shortcut("Mkdir", "F7", AppCommand::OpenInputDialog),
     MenuEntry::action_with_shortcut("Delete", "F8", AppCommand::Delete),
-    MenuEntry::stub("Quick cd", "M-c"),
+    MenuEntry::action_with_shortcut("Quick cd", "M-c", AppCommand::OpenQuickCd),
     MenuEntry::separator(),
     MenuEntry::stub("Select group", "+"),
     MenuEntry::stub("Unselect group", "-"),
@@ -1362,6 +1365,7 @@ enum PendingDialogAction {
     },
     ViewerGoto,
     FindSearch,
+    QuickCd,
     HotlistAdd {
         base_dir: PathBuf,
     },
@@ -1560,6 +1564,7 @@ pub struct AppState {
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
+    previous_panel_directories: [Option<PathBuf>; 2],
     panel_refresh: PanelRefreshWorkflow,
     panel_refresh_post: PanelRefreshPostWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
