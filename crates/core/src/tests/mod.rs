@@ -12,6 +12,7 @@ mod find_tests;
 mod mouse_tests;
 mod panelize_tests;
 mod quick_cd_tests;
+mod quick_view_tests;
 mod refresh_tests;
 mod route_command_tests;
 mod viewer_tests;
@@ -121,6 +122,23 @@ fn drain_background(app: &mut AppState) {
                                 ViewerState::open(path.clone()).map_err(|error| error.to_string());
                             app.handle_background_event(BackgroundEvent::ViewerLoaded {
                                 path: path.clone(),
+                                result: viewer_result.clone(),
+                            });
+                            let result = viewer_result.map(|_| ()).map_err(JobError::from_message);
+                            let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                        }
+                        JobRequest::LoadQuickView {
+                            panel,
+                            path,
+                            request_id,
+                        } => {
+                            let _ = event_tx.send(JobEvent::Started { id: job_id });
+                            let viewer_result =
+                                ViewerState::open(path.clone()).map_err(|error| error.to_string());
+                            app.handle_background_event(BackgroundEvent::QuickViewLoaded {
+                                panel: *panel,
+                                path: path.clone(),
+                                request_id: *request_id,
                                 result: viewer_result.clone(),
                             });
                             let result = viewer_result.map(|_| ()).map_err(JobError::from_message);
@@ -1246,6 +1264,20 @@ fn side_menus_match_and_options_match_mc_shape() {
             && left_labels.contains(&"Panelize")
             && left_labels.contains(&"Rescan"),
         "side menus should include MC-style panel controls"
+    );
+    assert_eq!(
+        left.entries[1].command,
+        AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::SetView(PanelViewMode::QuickView)
+        )
+    );
+    assert_eq!(
+        right.entries[1].command,
+        AppCommand::Panel(
+            ActivePanel::Right,
+            PanelCommand::SetView(PanelViewMode::QuickView)
+        )
     );
     assert_eq!(
         left.entries[2].command,

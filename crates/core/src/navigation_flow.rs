@@ -37,6 +37,7 @@ impl AppState {
                 } else {
                     let added = self.active_panel_mut().toggle_tag_on_cursor();
                     self.active_panel_mut().move_cursor(1);
+                    self.sync_quick_view_from(self.active_panel, false);
                     let count = self.active_panel().tagged_count();
                     self.set_status(if added {
                         format!("Tagged entry ({count} total)")
@@ -201,6 +202,7 @@ impl AppState {
             NavigationMotion::End => self.active_panel_mut().move_cursor_end(),
             _ => {}
         }
+        self.sync_quick_view_from(self.active_panel, false);
     }
 
     fn apply_find_results_navigation(&mut self, motion: NavigationMotion) {
@@ -619,6 +621,7 @@ impl AppState {
         }
         self.schedule_panel_refresh_revert(active_panel, revert);
         self.pause_active_find_results();
+        self.sync_quick_view_from(active_panel, false);
         self.queue_panel_refresh(active_panel);
         self.set_status(format!("Panelizing {result_count} find result(s)..."));
     }
@@ -631,6 +634,7 @@ impl AppState {
         if matches!(self.top_route(), Route::Tree(_)) {
             return;
         }
+        self.deactivate_quick_view(panel);
         self.panel_views[panel.index()] = PanelViewMode::Listing;
         self.active_panel = panel;
         let root = self.panels[panel.index()].cwd.clone();
@@ -983,6 +987,7 @@ impl AppState {
         panel.loading = true;
         self.schedule_panel_refresh_revert(self.active_panel, revert);
         self.remember_previous_directory(self.active_panel, previous_directory);
+        self.sync_quick_view_from(self.active_panel, false);
         self.queue_panel_refresh(self.active_panel);
         Ok(true)
     }

@@ -455,7 +455,7 @@ async fn run_runtime_loop(
                             JobRequest::Find { .. } | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan", true)
                             }
-                            JobRequest::LoadViewer { .. } => {
+                            JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
                                 (Arc::clone(&background_process_limit), "process", true)
                             }
                             JobRequest::RefreshPanel {
@@ -784,6 +784,19 @@ fn execute_runtime_worker_job(
             worker_event_tx,
             background_event_tx,
         ),
+        JobRequest::LoadQuickView {
+            panel,
+            path,
+            request_id,
+        } => execute_quick_view_worker_job(
+            worker_job.id,
+            panel,
+            path,
+            request_id,
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
         JobRequest::BuildTree {
             root,
             max_depth,
@@ -918,6 +931,49 @@ fn execute_viewer_worker_job(
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
+    execute_viewer_load_worker(
+        job_id,
+        path,
+        cancel_flag,
+        worker_event_tx,
+        background_event_tx,
+        |path, result| BackgroundEvent::ViewerLoaded { path, result },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_quick_view_worker_job(
+    job_id: JobId,
+    panel: rc_core::ActivePanel,
+    path: std::path::PathBuf,
+    request_id: u64,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    execute_viewer_load_worker(
+        job_id,
+        path,
+        cancel_flag,
+        worker_event_tx,
+        background_event_tx,
+        |path, result| BackgroundEvent::QuickViewLoaded {
+            panel,
+            path,
+            request_id,
+            result,
+        },
+    );
+}
+
+fn execute_viewer_load_worker(
+    job_id: JobId,
+    path: std::path::PathBuf,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+    event: impl FnOnce(std::path::PathBuf, Result<rc_core::ViewerState, String>) -> BackgroundEvent,
+) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
     if is_canceled(cancel_flag.as_ref()) {
         let _ = worker_event_tx.send(JobEvent::Finished {
@@ -926,7 +982,7 @@ fn execute_viewer_worker_job(
         });
         return;
     }
-    let viewer_result = rc_core::ViewerState::open(path.clone()).map_err(|error| error.to_string());
+    let viewer_result = rc_core::ViewerState::open_cancellable(path.clone(), cancel_flag.as_ref());
     if is_canceled(cancel_flag.as_ref()) {
         let _ = worker_event_tx.send(JobEvent::Finished {
             id: job_id,
@@ -934,11 +990,22 @@ fn execute_viewer_worker_job(
         });
         return;
     }
-    let _ = background_event_tx.send(BackgroundEvent::ViewerLoaded {
-        path,
-        result: viewer_result.clone(),
-    });
-    let result = viewer_result.map(|_| ()).map_err(JobError::from_message);
+    let (viewer_result, mut result) = match viewer_result {
+        Ok(viewer) => (Ok(viewer), Ok(())),
+        Err(error) => {
+            let error = JobError::from_io(error);
+            (Err(error.message.clone()), Err(error))
+        }
+    };
+    if background_event_tx
+        .send(event(path, viewer_result))
+        .is_err()
+        && result.is_ok()
+    {
+        result = Err(JobError::from_message(
+            "background event channel disconnected",
+        ));
+    }
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
@@ -998,7 +1065,9 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
     match command {
         WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => CommandPriority::High,
         WorkerCommand::Run(job) => match job.request {
-            JobRequest::LoadViewer { .. } => CommandPriority::High,
+            JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
+                CommandPriority::High
+            }
             JobRequest::RefreshPanel { .. } => CommandPriority::Low,
             _ => CommandPriority::Medium,
         },
@@ -1967,6 +2036,55 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn quick_view_worker_preserves_panel_and_request_identity() {
+        let root = make_temp_dir("quick-view-worker");
+        let viewer_file = root.join("preview.txt");
+        fs::write(&viewer_file, "preview payload").expect("preview file should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_quick_view_worker_job(
+            JobId(1),
+            ActivePanel::Right,
+            viewer_file.clone(),
+            42,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Started { id: JobId(1) }
+        ));
+        match background_event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("quick-view background event should arrive")
+        {
+            BackgroundEvent::QuickViewLoaded {
+                panel: ActivePanel::Right,
+                path,
+                request_id: 42,
+                result: Ok(viewer),
+            } => {
+                assert_eq!(path, viewer_file);
+                assert_eq!(viewer.content(), "preview payload");
+            }
+            other => panic!("expected quick-view completion, got {other:?}"),
+        }
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Ok(())
+            }
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
     #[test]

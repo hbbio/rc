@@ -503,3 +503,27 @@ fn opening_large_text_file_reports_preview_mode_status() {
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
+
+#[test]
+fn viewer_rejects_non_regular_files_and_honors_pre_read_cancellation() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-viewer-safe-open-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let directory_error = ViewerState::open(root.clone())
+        .expect_err("directories should be rejected before a viewer read");
+    assert_eq!(directory_error.kind(), io::ErrorKind::Unsupported);
+
+    let file_path = root.join("preview.txt");
+    fs::write(&file_path, "payload").expect("preview fixture should be writable");
+    let cancel_flag = AtomicBool::new(true);
+    let canceled = ViewerState::open_cancellable(file_path, &cancel_flag)
+        .expect_err("a canceled viewer read should stop before opening the file");
+    assert_eq!(canceled.kind(), io::ErrorKind::Interrupted);
+    assert_eq!(canceled.to_string(), JOB_CANCELED_MESSAGE);
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}

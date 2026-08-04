@@ -64,6 +64,12 @@ pub enum BackgroundEvent {
         path: PathBuf,
         result: Result<ViewerState, String>,
     },
+    QuickViewLoaded {
+        panel: ActivePanel,
+        path: PathBuf,
+        request_id: u64,
+        result: Result<ViewerState, String>,
+    },
     FindEntriesChunk {
         job_id: JobId,
         entries: Vec<FindResultEntry>,

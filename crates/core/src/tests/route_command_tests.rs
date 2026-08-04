@@ -711,6 +711,10 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::SetActivePanelView(PanelViewMode::Info))
     );
     assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::PanelQuickView),
+        Some(AppCommand::SetActivePanelView(PanelViewMode::QuickView))
+    );
+    assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorUp),
         Some(AppCommand::Navigate(
             NavigationTarget::Menu,

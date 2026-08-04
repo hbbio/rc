@@ -19,8 +19,8 @@ use rc_core::layout::{
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
-    JobStatus, MenuState, PairInputField, PanelListingFormat, PanelState, PanelViewMode, Route,
-    SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
+    JobStatus, MenuState, PairInputField, PanelListingFormat, PanelState, PanelViewMode,
+    QuickViewState, Route, SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -94,13 +94,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
     } else {
-        let uses_single_panel_layout =
-            [ActivePanel::Left, ActivePanel::Right]
+        let panels = [ActivePanel::Left, ActivePanel::Right];
+        let uses_single_panel_layout = panels
+            .into_iter()
+            .all(|panel| state.panel_view_mode(panel) == PanelViewMode::Listing)
+            && panels
                 .into_iter()
-                .any(|panel| {
-                    state.panel_view_mode(panel) == PanelViewMode::Listing
-                        && state.panel_listing_format(panel) == PanelListingFormat::Long
-                });
+                .any(|panel| state.panel_listing_format(panel) == PanelListingFormat::Long);
         if uses_single_panel_layout {
             let panel = state.active_panel;
             render_panel(
@@ -461,12 +461,26 @@ fn render_panel(
     skin: &UiSkin,
     app: &AppState,
 ) {
-    if app.panel_view_mode(panel_id) == PanelViewMode::Info {
-        render_info_panel(frame, area, panel_id, skin, app);
-        return;
+    match app.panel_view_mode(panel_id) {
+        PanelViewMode::Info => {
+            render_info_panel(frame, area, panel_id, skin, app);
+            return;
+        }
+        PanelViewMode::QuickView => {
+            render_quick_view_panel(frame, area, panel_id, skin, app);
+            return;
+        }
+        PanelViewMode::Listing => {}
     }
 
-    let format = app.panel_listing_format(panel_id);
+    let configured_format = app.panel_listing_format(panel_id);
+    let format = if configured_format == PanelListingFormat::Long
+        && app.panel_view_mode(panel_id.other()) != PanelViewMode::Listing
+    {
+        PanelListingFormat::Full
+    } else {
+        configured_format
+    };
     let title = fit_single_line(
         panel_title(panel, format),
         area.width.saturating_sub(2) as usize,
@@ -877,6 +891,76 @@ fn render_info_panel(
     );
 }
 
+fn render_quick_view_panel(
+    frame: &mut Frame,
+    area: Rect,
+    panel_id: ActivePanel,
+    skin: &UiSkin,
+    app: &AppState,
+) {
+    let state = app.quick_view_state(panel_id);
+    let title = match state.path() {
+        Some(path) => format!("Quick view | {}", path.to_string_lossy()),
+        None => format!("Quick view | {} panel selection", panel_id.other().label()),
+    };
+    let mut surface_style = skin.style("viewer", "_default_");
+    if surface_style.fg.is_none() && surface_style.bg.is_none() {
+        surface_style = viewer_theme_surface_style().unwrap_or_default();
+    }
+    let block = Block::default()
+        .title(fit_single_line(
+            title,
+            area.width.saturating_sub(2) as usize,
+        ))
+        .borders(Borders::ALL)
+        .border_set(skin.panel_border_set())
+        .border_style(skin.style("core", "_default_"))
+        .style(surface_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let placeholder = |message: String| {
+        Paragraph::new(message)
+            .style(surface_style)
+            .wrap(Wrap { trim: false })
+    };
+    match state {
+        QuickViewState::Empty => {
+            frame.render_widget(placeholder(String::from("<no selection>")), inner);
+        }
+        QuickViewState::Directory { path } => {
+            frame.render_widget(
+                placeholder(format!(
+                    "<directory>\n{}\n\nSelect a regular file to preview its contents.",
+                    path.to_string_lossy()
+                )),
+                inner,
+            );
+        }
+        QuickViewState::Loading { .. } => {
+            frame.render_widget(placeholder(String::from("<loading preview...>")), inner);
+        }
+        QuickViewState::Failed { error, .. } => {
+            frame.render_widget(
+                placeholder(format!(
+                    "<preview unavailable>\n{}",
+                    sanitize_single_line(error)
+                )),
+                inner,
+            );
+        }
+        QuickViewState::Ready(viewer) => {
+            let visible_lines = inner.height.max(1) as usize;
+            let content = viewer_window(viewer, visible_lines, inner.width as usize);
+            let mut paragraph = Paragraph::new(content).style(surface_style);
+            if viewer.wrap && !viewer.hex_mode {
+                paragraph = paragraph.wrap(Wrap { trim: false });
+            }
+            frame.render_widget(paragraph, inner);
+        }
+    }
+}
+
 fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiSkin) {
     frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
@@ -892,12 +976,7 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
         ),
         area.width.saturating_sub(2) as usize,
     );
-    let content = if viewer.hex_mode {
-        hex_viewer_window(viewer, visible_lines, content_width)
-    } else {
-        highlighted_viewer_window(viewer, visible_lines)
-            .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines, content_width))
-    };
+    let content = viewer_window(viewer, visible_lines, content_width);
     let mut surface_style = skin.style("viewer", "_default_");
     if surface_style.fg.is_none() && surface_style.bg.is_none() {
         surface_style = viewer_theme_surface_style().unwrap_or_default();
@@ -916,6 +995,15 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
         paragraph = paragraph.wrap(Wrap { trim: false });
     }
     frame.render_widget(paragraph, area);
+}
+
+fn viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize) -> Text<'static> {
+    if viewer.hex_mode {
+        hex_viewer_window(viewer, visible_lines, width)
+    } else {
+        highlighted_viewer_window(viewer, visible_lines)
+            .unwrap_or_else(|| plain_viewer_window(viewer, visible_lines, width))
+    }
 }
 
 fn highlighted_viewer_window(viewer: &ViewerState, visible_lines: usize) -> Option<Text<'static>> {
@@ -2520,6 +2608,24 @@ mod tests {
                                     viewer_result.map(|_| ()).map_err(JobError::from_message);
                                 let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                             }
+                            JobRequest::LoadQuickView {
+                                panel,
+                                path,
+                                request_id,
+                            } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let viewer_result = rc_core::ViewerState::open(path.clone())
+                                    .map_err(|error| error.to_string());
+                                state.handle_background_event(BackgroundEvent::QuickViewLoaded {
+                                    panel: *panel,
+                                    path: path.clone(),
+                                    request_id: *request_id,
+                                    result: viewer_result.clone(),
+                                });
+                                let result =
+                                    viewer_result.map(|_| ()).map_err(JobError::from_message);
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
                             JobRequest::BuildTree {
                                 root,
                                 max_depth,
@@ -2860,6 +2966,49 @@ mod tests {
         assert!(frame.contains("Name: entry.txt"));
         assert!(frame.contains("Type: file"));
         assert!(frame.contains("Size: 4b (4 bytes)"));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_quick_view_panel_uses_background_loaded_content() {
+        let root = temp_root("quick-view-panel");
+        let preview_path = root.join("preview.txt");
+        fs::write(&preview_path, "quick-view-payload\nsecond line\n")
+            .expect("preview file should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::Panel(
+            ActivePanel::Right,
+            PanelCommand::OpenListingFormat,
+        ))
+        .expect("right listing format should open");
+        app.apply(AppCommand::DialogListboxSelectAt(2))
+            .expect("long format should be selected");
+        app.apply(AppCommand::DialogAccept)
+            .expect("long format should be applied");
+        app.panels[ActivePanel::Right.index()].cursor = app.panels[ActivePanel::Right.index()]
+            .entries
+            .iter()
+            .position(|entry| entry.path == preview_path)
+            .expect("preview file should be listed");
+        app.apply(AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::SetView(PanelViewMode::QuickView),
+        ))
+        .expect("quick view should open");
+
+        let loading_frame = render_to_text(&app, 100, 24);
+        assert!(loading_frame.contains("<loading preview...>"));
+
+        drain_background(&mut app);
+        let loaded_frame = render_to_text(&app, 100, 24);
+        assert!(loaded_frame.contains("Quick view"));
+        assert!(loaded_frame.contains("preview.txt"));
+        assert!(loaded_frame.contains("quick-view-payload"));
+        assert!(
+            loaded_frame.contains("full | sort:name asc"),
+            "quick view should retain a split layout even when its source requested long format"
+        );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }

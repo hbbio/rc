@@ -35,10 +35,7 @@ impl AppState {
             JobEvent::Started { id } => {
                 let kind = self.jobs.job(id).map(|job| job.kind);
                 let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
-                let suppress_status = matches!(
-                    kind,
-                    Some(JobKind::RefreshPanel | JobKind::LoadViewer | JobKind::BuildTree)
-                );
+                let suppress_status = suppress_transient_job_status(kind);
                 tracing::debug!(job_event = "started", job_kind, job_id = %id, "job started");
                 if !suppress_status {
                     if let Some(summary) = self.jobs.job(id).map(|job| job.summary.clone()) {
@@ -94,10 +91,7 @@ impl AppState {
                     );
                     let is_persist_settings = kind == Some(JobKind::PersistSettings);
                     let is_find = kind == Some(JobKind::Find);
-                    let suppress_status = matches!(
-                        kind,
-                        Some(JobKind::RefreshPanel | JobKind::LoadViewer | JobKind::BuildTree)
-                    );
+                    let suppress_status = suppress_transient_job_status(kind);
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
@@ -148,12 +142,13 @@ impl AppState {
                     let is_find = kind == Some(JobKind::Find);
                     let is_refresh = kind == Some(JobKind::RefreshPanel);
                     let is_tree = kind == Some(JobKind::BuildTree);
-                    let suppress_status = matches!(
-                        kind,
-                        Some(JobKind::RefreshPanel | JobKind::LoadViewer | JobKind::BuildTree)
-                    );
+                    let is_quick_view = kind == Some(JobKind::LoadQuickView);
+                    let suppress_status = suppress_transient_job_status(kind);
                     if is_refresh {
                         self.clear_panel_refresh_state_for_job(id);
+                    }
+                    if is_quick_view {
+                        self.handle_quick_view_job_failure(id, &error);
                     }
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
                         results.status = if error.is_canceled() {
@@ -282,6 +277,12 @@ impl AppState {
                     self.set_status(format!("Viewer open failed: {error}"));
                 }
             },
+            BackgroundEvent::QuickViewLoaded {
+                panel,
+                path,
+                request_id,
+                result,
+            } => self.handle_quick_view_loaded(panel, path, request_id, result),
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
                 self.handle_find_entries_chunk(job_id, entries)
             }
@@ -396,6 +397,11 @@ impl AppState {
         self.queue_worker_job(worker_job)
     }
 
+    pub(crate) fn queue_transient_worker_job_request(&mut self, request: JobRequest) -> JobId {
+        let worker_job = self.jobs.enqueue(request);
+        self.queue_worker_job_with_status(worker_job, false)
+    }
+
     pub fn promote_deferred_persist_settings_request(&mut self) -> Option<JobId> {
         let request = self.deferred_persist_settings_request.take()?;
         let worker_job = self.jobs.enqueue(request);
@@ -403,6 +409,14 @@ impl AppState {
     }
 
     pub(crate) fn queue_worker_job(&mut self, worker_job: WorkerJob) -> JobId {
+        self.queue_worker_job_with_status(worker_job, true)
+    }
+
+    fn queue_worker_job_with_status(
+        &mut self,
+        worker_job: WorkerJob,
+        report_status: bool,
+    ) -> JobId {
         let job_id = worker_job.id;
         let job_kind = worker_job.request.kind().label();
         let summary = worker_job.request.summary();
@@ -416,7 +430,9 @@ impl AppState {
             summary = %summary,
             "queued worker job"
         );
-        self.set_status(format!("Queued job #{job_id}: {summary}"));
+        if report_status {
+            self.set_status(format!("Queued job #{job_id}: {summary}"));
+        }
         job_id
     }
 
@@ -448,17 +464,17 @@ impl AppState {
         None
     }
 
-    pub(crate) fn replace_pending_panel_refresh_request(
+    pub(crate) fn replace_pending_queued_job_request(
         &mut self,
         job_id: JobId,
         request: &JobRequest,
     ) -> bool {
-        if !matches!(request, JobRequest::RefreshPanel { .. }) {
-            return false;
-        }
-        if !self.jobs.job(job_id).is_some_and(|job| {
-            matches!(job.kind, JobKind::RefreshPanel) && matches!(job.status, JobStatus::Queued)
-        }) {
+        let request_kind = request.kind();
+        if !self
+            .jobs
+            .job(job_id)
+            .is_some_and(|job| job.kind == request_kind && matches!(job.status, JobStatus::Queued))
+        {
             return false;
         }
 
@@ -467,7 +483,7 @@ impl AppState {
                 command,
                 WorkerCommand::Run(job)
                     if job.id == job_id
-                        && matches!(job.request, JobRequest::RefreshPanel { .. })
+                        && job.request.kind() == request_kind
             )
         });
         let Some(run_index) = run_index else {
@@ -477,6 +493,8 @@ impl AppState {
         if let WorkerCommand::Run(job) = &mut self.pending_worker_commands[run_index] {
             job.request = request.clone();
         }
+        let metadata_replaced = self.jobs.replace_queued_request_metadata(job_id, request);
+        debug_assert!(metadata_replaced);
 
         self.remove_pending_cancel_for_job(job_id);
         let _ = self.jobs.clear_cancel_request(job_id);
@@ -510,6 +528,7 @@ impl AppState {
         if !self.jobs.request_cancel(job_id) {
             return false;
         }
+        self.handle_quick_view_cancel_requested(job_id);
         let job_kind = self
             .jobs
             .job(job_id)
@@ -550,6 +569,18 @@ impl AppState {
     pub(crate) fn queue_delete_job_from(&mut self, targets: Vec<PathBuf>, origin: OperationOrigin) {
         self.queue_filesystem_job(JobRequest::Delete { targets }, origin);
     }
+}
+
+fn suppress_transient_job_status(kind: Option<JobKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            JobKind::RefreshPanel
+                | JobKind::LoadViewer
+                | JobKind::LoadQuickView
+                | JobKind::BuildTree
+        )
+    )
 }
 
 fn tree_mutation_impacts(request: &JobRequest) -> Vec<PathBuf> {

@@ -42,6 +42,7 @@ pub enum JobKind {
     RefreshPanel,
     Find,
     LoadViewer,
+    LoadQuickView,
     BuildTree,
 }
 
@@ -57,6 +58,7 @@ impl JobKind {
             Self::RefreshPanel => "refresh-panel",
             Self::Find => "find",
             Self::LoadViewer => "load-viewer",
+            Self::LoadQuickView => "load-quick-view",
             Self::BuildTree => "build-tree",
         }
     }
@@ -121,6 +123,11 @@ pub enum JobRequest {
     LoadViewer {
         path: PathBuf,
     },
+    LoadQuickView {
+        panel: ActivePanel,
+        path: PathBuf,
+        request_id: u64,
+    },
     BuildTree {
         root: PathBuf,
         max_depth: usize,
@@ -140,6 +147,7 @@ impl JobRequest {
             Self::RefreshPanel { .. } => JobKind::RefreshPanel,
             Self::Find { .. } => JobKind::Find,
             Self::LoadViewer { .. } => JobKind::LoadViewer,
+            Self::LoadQuickView { .. } => JobKind::LoadQuickView,
             Self::BuildTree { .. } => JobKind::BuildTree,
         }
     }
@@ -155,6 +163,7 @@ impl JobRequest {
             Self::RefreshPanel { .. } => 1,
             Self::Find { .. } => 1,
             Self::LoadViewer { .. } => 1,
+            Self::LoadQuickView { .. } => 1,
             Self::BuildTree { .. } => 1,
         }
     }
@@ -228,6 +237,11 @@ impl JobRequest {
                 )
             }
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
+            Self::LoadQuickView { panel, path, .. } => format!(
+                "preview {} in {} panel",
+                path.to_string_lossy(),
+                panel.label()
+            ),
             Self::BuildTree {
                 root,
                 max_depth,
@@ -565,6 +579,21 @@ impl JobManager {
         true
     }
 
+    pub(crate) fn replace_queued_request_metadata(
+        &mut self,
+        id: JobId,
+        request: &JobRequest,
+    ) -> bool {
+        let Some(job) = self.job_mut(id) else {
+            return false;
+        };
+        if job.status != JobStatus::Queued || job.kind != request.kind() {
+            return false;
+        }
+        job.summary = request.summary();
+        true
+    }
+
     pub fn newest_cancelable_job_id(&self) -> Option<JobId> {
         self.jobs
             .iter()
@@ -896,6 +925,10 @@ fn execute_job(
         JobRequest::LoadViewer { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "viewer jobs are executed by the runtime adapter",
+        )),
+        JobRequest::LoadQuickView { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "quick-view jobs are executed by the runtime adapter",
         )),
         JobRequest::BuildTree { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1462,6 +1495,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::PersistSettings { .. }
         | JobRequest::RefreshPanel { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::LoadQuickView { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }

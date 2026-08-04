@@ -18,6 +18,7 @@ mod orchestration;
 mod panel;
 mod panelize_flow;
 mod quick_cd;
+mod quick_view_flow;
 mod refresh_flow;
 mod route_flow;
 pub mod settings;
@@ -64,6 +65,7 @@ pub(crate) use panel::{
     read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
     sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
+pub use quick_view_flow::QuickViewState;
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
@@ -85,6 +87,7 @@ pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
 use crate::panel::{read_entries_with_visibility, read_panelized_entries};
+use crate::quick_view_flow::QuickViewWorkflow;
 use crate::refresh_flow::{PanelRefreshCompletion, PanelRefreshPostWorkflow, PanelRefreshWorkflow};
 use crate::viewer::ViewerSearchDirection;
 
@@ -209,6 +212,7 @@ pub enum PanelCommand {
 pub enum PanelViewMode {
     #[default]
     Listing,
+    QuickView,
     Info,
 }
 
@@ -510,7 +514,11 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
             "File listing",
             AppCommand::Panel(panel, PanelCommand::SetView(PanelViewMode::Listing)),
         ),
-        MenuEntry::stub("Quick view", "C-x q"),
+        MenuEntry::action_with_literal_shortcut(
+            "Quick view",
+            "C-x q",
+            AppCommand::Panel(panel, PanelCommand::SetView(PanelViewMode::QuickView)),
+        ),
         MenuEntry::action_with_literal_shortcut(
             "Info",
             "C-x i",
@@ -1832,6 +1840,7 @@ pub struct AppState {
     pub active_panel: ActivePanel,
     panel_views: [PanelViewMode; 2],
     panel_listing_formats: [PanelListingFormat; 2],
+    quick_views: [QuickViewState; 2],
     pub status_line: String,
     status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,
@@ -1852,6 +1861,7 @@ pub struct AppState {
     previous_panel_directories: [Option<PathBuf>; 2],
     panel_refresh: PanelRefreshWorkflow,
     panel_refresh_post: PanelRefreshPostWorkflow,
+    quick_view: QuickViewWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
     tree_mutations: TreeMutationTracker,

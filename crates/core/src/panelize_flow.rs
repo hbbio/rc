@@ -25,6 +25,7 @@ impl AppState {
 
     pub(crate) fn restore_panelized_results_for(&mut self, panel_id: ActivePanel) {
         let panel_index = panel_id.index();
+        self.deactivate_quick_view(panel_id);
         self.panel_views[panel_index] = PanelViewMode::Listing;
         if self.panels[panel_index].source.is_panelized() {
             self.set_status(format!(
@@ -75,6 +76,7 @@ impl AppState {
         panel.tagged = tagged;
         panel.loading = false;
         panel.disk_usage = disk_usage;
+        self.sync_quick_view_from(panel_id, true);
         self.set_status(format!(
             "Restored {result_count} {source_label} result(s) in the {} panel",
             panel_id.label()
@@ -410,6 +412,7 @@ impl AppState {
             panel.loading = true;
         }
         self.schedule_panel_refresh_revert(active_panel, revert);
+        self.sync_quick_view_from(active_panel, false);
         self.queue_panel_refresh(active_panel);
         self.set_status("Panelize running...");
     }

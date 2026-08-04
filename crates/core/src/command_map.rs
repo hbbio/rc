@@ -24,6 +24,9 @@ impl AppCommand {
             (KeyContext::FileManagerXMap, KeyCommand::PanelInfo) => {
                 Some(Self::SetActivePanelView(crate::PanelViewMode::Info))
             }
+            (KeyContext::FileManagerXMap, KeyCommand::PanelQuickView) => {
+                Some(Self::SetActivePanelView(crate::PanelViewMode::QuickView))
+            }
             (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
             (KeyContext::FileManager, KeyCommand::SortNext) => Some(Self::SortNext),

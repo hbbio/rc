@@ -111,6 +111,7 @@ pub enum KeyCommand {
     Quit,
     PanelOther,
     PanelInfo,
+    PanelQuickView,
     EnterXMap,
     CursorLeft,
     CursorRight,
@@ -197,6 +198,7 @@ impl KeyCommand {
             "quit" => Self::Quit,
             "panelother" => Self::PanelOther,
             "panelinfo" => Self::PanelInfo,
+            "panelquickview" | "quickview" => Self::PanelQuickView,
             "extendedkeymap" => Self::EnterXMap,
             "left" => Self::CursorLeft,
             "right" => Self::CursorRight,
@@ -1327,6 +1329,18 @@ Reread = ctrl-r
     }
 
     #[test]
+    fn bundled_keymap_includes_quick_view_xmap_binding() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('q'))
+            ),
+            Some(&KeyCommand::PanelQuickView)
+        );
+    }
+
+    #[test]
     fn bundled_keymap_includes_hotlist_quick_add_and_edit_bindings() {
         let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
         assert_eq!(
@@ -1472,6 +1486,7 @@ Reread = ctrl-r
             "Forget",
             "ToggleNavigation",
             "PanelInfo",
+            "PanelQuickView",
         ] {
             assert!(
                 !report

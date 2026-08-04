@@ -17,6 +17,7 @@ impl AppState {
             active_panel: ActivePanel::Left,
             panel_views: [PanelViewMode::Listing; 2],
             panel_listing_formats: [PanelListingFormat::Full; 2],
+            quick_views: std::array::from_fn(|_| QuickViewState::default()),
             status_line: String::from("Press F1 for help"),
             status_expires_at: None,
             last_dialog_result: None,
@@ -37,6 +38,7 @@ impl AppState {
             previous_panel_directories: [None, None],
             panel_refresh: PanelRefreshWorkflow::default(),
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
+            quick_view: QuickViewWorkflow::default(),
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
             tree_mutations: TreeMutationTracker::default(),
@@ -146,11 +148,16 @@ impl AppState {
         self.panel_listing_formats[panel.index()]
     }
 
+    pub fn quick_view_state(&self, panel: ActivePanel) -> &QuickViewState {
+        &self.quick_views[panel.index()]
+    }
+
     pub(crate) fn set_panel_listing_format(
         &mut self,
         panel: ActivePanel,
         format: PanelListingFormat,
     ) {
+        self.deactivate_quick_view(panel);
         self.panel_views[panel.index()] = PanelViewMode::Listing;
         self.panel_listing_formats[panel.index()] = format;
         self.settings.panel_options.listing_formats[panel.index()] = format;
@@ -166,6 +173,7 @@ impl AppState {
     pub(crate) fn set_panel_view_mode(&mut self, panel: ActivePanel, mode: PanelViewMode) {
         match mode {
             PanelViewMode::Listing => {
+                self.deactivate_quick_view(panel);
                 self.panel_views[panel.index()] = PanelViewMode::Listing;
                 if self.exit_panelize_mode_for(panel) {
                     self.queue_panel_refresh(panel);
@@ -174,8 +182,11 @@ impl AppState {
                     self.set_status(format!("{} panel: file listing", panel.label()));
                 }
             }
+            PanelViewMode::QuickView => self.activate_quick_view(panel),
             PanelViewMode::Info => {
                 let source_panel = panel.other();
+                self.deactivate_quick_view(panel);
+                self.deactivate_quick_view(source_panel);
                 self.panel_views[source_panel.index()] = PanelViewMode::Listing;
                 self.panel_views[panel.index()] = PanelViewMode::Info;
                 self.active_panel = source_panel;
@@ -239,6 +250,7 @@ impl AppState {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
             self.remember_previous_directory(panel, previous_directory);
+            self.sync_quick_view_from(panel, false);
         }
         opened
     }
@@ -255,6 +267,7 @@ impl AppState {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
             self.remember_previous_directory(panel, previous_directory);
+            self.sync_quick_view_from(panel, false);
         }
         opened
     }
@@ -272,6 +285,7 @@ impl AppState {
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
+            self.sync_quick_view_from(panel, false);
         }
         exited
     }

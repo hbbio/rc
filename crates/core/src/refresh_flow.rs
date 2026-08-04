@@ -178,7 +178,7 @@ impl AppState {
             request_id,
         };
         if let Some(previous_job_id) = self.panel_refresh.take_job_id(panel) {
-            if self.replace_pending_panel_refresh_request(previous_job_id, &request) {
+            if self.replace_pending_queued_job_request(previous_job_id, &request) {
                 self.panel_refresh.set_job_id(panel, previous_job_id);
                 tracing::debug!(
                     job_event = "coalesced",
@@ -351,6 +351,7 @@ impl AppState {
         } else {
             self.set_status(format!("Loading {partial_count} entries..."));
         }
+        self.sync_quick_view_from(panel, false);
     }
 
     pub(crate) fn handle_panel_refreshed(&mut self, completion: PanelRefreshCompletion) {
@@ -450,6 +451,7 @@ impl AppState {
         } else if let Some(completion_status) = completion_status {
             self.set_status(completion_status);
         }
+        self.sync_quick_view_from(panel, true);
     }
 
     #[cfg(test)]

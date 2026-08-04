@@ -2,8 +2,11 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use crate::{FOUNDATION_SLO, VIEWER_TEXT_PREVIEW_LIMIT_BYTES};
+use crate::{FOUNDATION_SLO, JOB_CANCELED_MESSAGE, VIEWER_TEXT_PREVIEW_LIMIT_BYTES};
+
+const VIEWER_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ViewerSearchDirection {
@@ -36,16 +39,40 @@ pub struct ViewerState {
 
 impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let total_size = fs::metadata(&path)?.len();
-        Self::open_with_reported_size(path, total_size)
+        Self::open_with_cancellation(path, None)
     }
 
+    pub fn open_cancellable(path: PathBuf, cancel_flag: &AtomicBool) -> io::Result<Self> {
+        Self::open_with_cancellation(path, Some(cancel_flag))
+    }
+
+    fn open_with_cancellation(path: PathBuf, cancel_flag: Option<&AtomicBool>) -> io::Result<Self> {
+        ensure_viewer_not_canceled(cancel_flag)?;
+        let metadata = fs::metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "viewer supports regular files only",
+            ));
+        }
+        Self::open_with_reported_size_and_cancellation(path, metadata.len(), cancel_flag)
+    }
+
+    #[cfg(test)]
     fn open_with_reported_size(path: PathBuf, total_size: u64) -> io::Result<Self> {
+        Self::open_with_reported_size_and_cancellation(path, total_size, None)
+    }
+
+    fn open_with_reported_size_and_cancellation(
+        path: PathBuf,
+        total_size: u64,
+        cancel_flag: Option<&AtomicBool>,
+    ) -> io::Result<Self> {
         let path_fingerprint = fingerprint(&path);
         let text_limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let (bytes, hit_read_limit) = read_file_prefix(&path, text_limit)?;
+        let (bytes, hit_read_limit) = read_file_prefix(&path, text_limit, cancel_flag)?;
         let observed_size = if hit_read_limit {
             total_size.max(bytes.len().saturating_add(1) as u64)
         } else {
@@ -251,18 +278,42 @@ impl ViewerState {
     }
 }
 
-fn read_file_prefix(path: &Path, byte_limit: usize) -> io::Result<(Vec<u8>, bool)> {
+fn read_file_prefix(
+    path: &Path,
+    byte_limit: usize,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<(Vec<u8>, bool)> {
+    ensure_viewer_not_canceled(cancel_flag)?;
     let mut file = fs::File::open(path)?;
     let probe_limit = byte_limit.saturating_add(1);
     let mut bytes = Vec::with_capacity(byte_limit);
-    file.by_ref()
-        .take(probe_limit as u64)
-        .read_to_end(&mut bytes)?;
+    let mut buffer = [0_u8; VIEWER_READ_CHUNK_BYTES];
+    while bytes.len() < probe_limit {
+        ensure_viewer_not_canceled(cancel_flag)?;
+        let remaining = probe_limit.saturating_sub(bytes.len());
+        let chunk_len = remaining.min(VIEWER_READ_CHUNK_BYTES);
+        let read = file.read(&mut buffer[..chunk_len])?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    ensure_viewer_not_canceled(cancel_flag)?;
     let hit_read_limit = bytes.len() > byte_limit;
     if hit_read_limit {
         bytes.truncate(byte_limit);
     }
     Ok((bytes, hit_read_limit))
+}
+
+fn ensure_viewer_not_canceled(cancel_flag: Option<&AtomicBool>) -> io::Result<()> {
+    if cancel_flag.is_some_and(|flag| flag.load(AtomicOrdering::Relaxed)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            JOB_CANCELED_MESSAGE,
+        ));
+    }
+    Ok(())
 }
 
 fn compute_line_offsets(content: &str) -> Vec<usize> {
