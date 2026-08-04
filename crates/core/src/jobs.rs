@@ -1989,6 +1989,28 @@ mod tests {
             }
         }
 
+        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+        let (writer_release_tx, writer_release_rx) = mpsc::channel();
+        let writer = thread::spawn({
+            let fifo_source = fifo_source.clone();
+            move || {
+                let mut fifo = fs::OpenOptions::new()
+                    .write(true)
+                    .open(fifo_source)
+                    .expect("fifo writer should connect to active copy");
+                writer_ready_tx
+                    .send(())
+                    .expect("fifo writer should report readiness");
+                writer_release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("fifo writer should receive release signal");
+                let _ = std::io::Write::write_all(&mut fifo, b"x");
+            }
+        });
+        writer_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("active copy should open the fifo reader");
+
         command_tx
             .send(WorkerCommand::Run(Box::new(queued_job)))
             .expect("queued job command should send");
@@ -1996,48 +2018,41 @@ mod tests {
             .send(WorkerCommand::Shutdown)
             .expect("shutdown command should send");
 
+        let mut active_finished = false;
         loop {
             let event = event_rx
                 .recv_timeout(Duration::from_secs(5))
                 .expect("queued job should finish during shutdown");
             manager.handle_event(&event);
             match event {
-                JobEvent::Finished {
-                    id,
-                    result: Err(error),
-                } if id == queued_id => {
+                JobEvent::Finished { id, result } if id == queued_id => {
+                    let error = result.expect_err("queued job should not succeed during shutdown");
                     assert!(error.is_canceled(), "queued job should be canceled");
                     break;
                 }
-                JobEvent::Finished { id, .. } if id == active_id => {
-                    panic!("active job finished before queued shutdown cancellation")
+                JobEvent::Finished { id, result } if id == active_id => {
+                    let error = result.expect_err("active job should not succeed during shutdown");
+                    assert!(error.is_canceled(), "active job should be canceled");
+                    active_finished = true;
                 }
                 _ => {}
             }
         }
 
-        let writer = thread::spawn({
-            let fifo_source = fifo_source.clone();
-            move || {
-                fs::OpenOptions::new()
-                    .write(true)
-                    .open(fifo_source)
-                    .expect("fifo writer should unblock active copy");
-            }
-        });
+        writer_release_tx
+            .send(())
+            .expect("fifo writer should be released after queued cancellation");
 
-        loop {
+        while !active_finished {
             let event = event_rx
                 .recv_timeout(Duration::from_secs(5))
                 .expect("active job should finish after fifo unblocks");
             manager.handle_event(&event);
             match event {
-                JobEvent::Finished {
-                    id,
-                    result: Err(error),
-                } if id == active_id => {
+                JobEvent::Finished { id, result } if id == active_id => {
+                    let error = result.expect_err("active job should not succeed during shutdown");
                     assert!(error.is_canceled(), "active job should be canceled");
-                    break;
+                    active_finished = true;
                 }
                 JobEvent::Finished { id, .. } if id == queued_id => {
                     panic!("queued job finished more than once")

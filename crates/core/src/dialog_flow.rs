@@ -492,12 +492,7 @@ impl AppState {
                 self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
                 self.set_status(format!("Updated panelize preset: {command}"));
             }
-            (
-                Some(PendingDialogAction::PanelizePresetEdit {
-                    preset_commands: _, ..
-                }),
-                DialogResult::Canceled,
-            ) => {
+            (Some(PendingDialogAction::PanelizePresetEdit { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize preset edit canceled");
             }
             (
