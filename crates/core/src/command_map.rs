@@ -22,10 +22,10 @@ impl AppCommand {
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManagerXMap, KeyCommand::PanelInfo) => {
-                Some(Self::SetActivePanelView(crate::PanelViewMode::Info))
+                Some(Self::SetOtherPanelView(crate::PanelViewMode::Info))
             }
             (KeyContext::FileManagerXMap, KeyCommand::PanelQuickView) => {
-                Some(Self::SetActivePanelView(crate::PanelViewMode::QuickView))
+                Some(Self::SetOtherPanelView(crate::PanelViewMode::QuickView))
             }
             (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),

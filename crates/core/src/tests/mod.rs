@@ -1064,6 +1064,38 @@ fn side_menu_rescan_targets_its_named_panel() {
 }
 
 #[test]
+fn xmap_info_and_quick_view_commands_target_the_other_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-xmap-panel-view-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    assert_eq!(app.active_panel, ActivePanel::Left);
+    app.apply(AppCommand::SetOtherPanelView(PanelViewMode::Info))
+        .expect("xmap info should open");
+    assert_eq!(app.panel_view_mode(ActivePanel::Right), PanelViewMode::Info);
+    assert_eq!(app.active_panel, ActivePanel::Left);
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::SetView(PanelViewMode::Listing),
+    ))
+    .expect("right listing should be restored");
+    app.apply(AppCommand::SetOtherPanelView(PanelViewMode::QuickView))
+        .expect("xmap quick view should open");
+    assert_eq!(
+        app.panel_view_mode(ActivePanel::Right),
+        PanelViewMode::QuickView
+    );
+    assert_eq!(app.active_panel, ActivePanel::Left);
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
 fn file_listing_mode_leaves_panelized_results_recoverably() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

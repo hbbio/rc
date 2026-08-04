@@ -119,7 +119,7 @@ pub enum AppCommand {
     PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
-    SetActivePanelView(PanelViewMode),
+    SetOtherPanelView(PanelViewMode),
     Panel(ActivePanel, PanelCommand),
     Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
@@ -345,7 +345,7 @@ impl AppCommand {
                 NavigationTarget::Viewer => CommandDomain::Viewer,
             },
             Self::ToggleTag
-            | Self::SetActivePanelView(_)
+            | Self::SetOtherPanelView(_)
             | Self::Panel(
                 _,
                 PanelCommand::SetView(_)

@@ -18,8 +18,8 @@ impl AppState {
             AppCommand::Panel(panel, PanelCommand::SetView(mode)) => {
                 self.set_panel_view_mode(panel, mode);
             }
-            AppCommand::SetActivePanelView(mode) => {
-                self.set_panel_view_mode(self.active_panel, mode);
+            AppCommand::SetOtherPanelView(mode) => {
+                self.set_panel_view_mode(self.active_panel.other(), mode);
             }
             AppCommand::Panel(panel, PanelCommand::RestorePanelizedResults) => {
                 self.restore_panelized_results_for(panel);

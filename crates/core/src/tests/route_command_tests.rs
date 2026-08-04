@@ -708,11 +708,11 @@ fn app_command_mapping_is_context_aware() {
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::PanelInfo),
-        Some(AppCommand::SetActivePanelView(PanelViewMode::Info))
+        Some(AppCommand::SetOtherPanelView(PanelViewMode::Info))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::PanelQuickView),
-        Some(AppCommand::SetActivePanelView(PanelViewMode::QuickView))
+        Some(AppCommand::SetOtherPanelView(PanelViewMode::QuickView))
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorUp),
