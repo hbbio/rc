@@ -3,12 +3,12 @@ use std::time::SystemTime;
 
 use crate::{OverwritePolicy, SortField};
 
-pub const DEFAULT_PANELIZE_PRESETS: &[&str] = &[
-    "find . -type f",
-    "find . -name '*.orig'",
-    "find . -name '*.rej'",
-    "find . -name core",
-    "find . -type f -perm -4000",
+pub const DEFAULT_PANELIZE_PRESETS: &[(&str, &str)] = &[
+    ("All files", "find . -type f"),
+    ("Backup files", "find . -name '*.orig'"),
+    ("Rejected patches", "find . -name '*.rej'"),
+    ("Core files", "find . -name core"),
+    ("Setuid files", "find . -type f -perm -4000"),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +69,7 @@ pub struct ConfigurationSettings {
     pub macos_option_symbols: bool,
     pub editor_command: Option<String>,
     pub hotlist: Vec<HotlistEntry>,
-    pub panelize_presets: Vec<String>,
+    pub panelize_presets: Vec<PanelizePreset>,
     pub keymap_override: Option<PathBuf>,
 }
 
@@ -100,6 +100,31 @@ impl HotlistEntry {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PanelizePreset {
+    pub label: String,
+    pub command: String,
+}
+
+impl PanelizePreset {
+    pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            command: command.into(),
+        }
+    }
+
+    pub fn from_legacy_command(command: impl Into<String>) -> Self {
+        let command = command.into();
+        let label = DEFAULT_PANELIZE_PRESETS
+            .iter()
+            .find_map(|(label, default_command)| (*default_command == command).then_some(*label))
+            .unwrap_or(command.as_str())
+            .to_string();
+        Self { label, command }
+    }
+}
+
 impl Default for ConfigurationSettings {
     fn default() -> Self {
         Self {
@@ -109,7 +134,7 @@ impl Default for ConfigurationSettings {
             hotlist: Vec::new(),
             panelize_presets: DEFAULT_PANELIZE_PRESETS
                 .iter()
-                .map(ToString::to_string)
+                .map(|(label, command)| PanelizePreset::new(*label, *command))
                 .collect(),
             keymap_override: None,
         }

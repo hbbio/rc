@@ -235,11 +235,8 @@ fn panelize_dialog_lists_predefined_commands() {
         Some(&String::from(PANELIZE_CUSTOM_COMMAND_LABEL))
     );
     assert!(
-        listbox
-            .items
-            .iter()
-            .any(|item| item == "find . -name '*.orig'"),
-        "panelize list should include predefined commands"
+        listbox.items.iter().any(|item| item == "Backup files"),
+        "panelize list should include descriptive preset labels"
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");
@@ -350,9 +347,13 @@ fn panelize_preset_management_add_edit_remove_works() {
     let DialogKind::Listbox(listbox) = &dialog.kind else {
         panic!("panelize should return to preset list dialog");
     };
+    assert!(listbox.items.iter().any(|item| item == "echo added"));
     assert!(
-        listbox.items.iter().any(|item| item == &edited),
-        "edited preset should replace previous value"
+        app.settings()
+            .configuration
+            .panelize_presets
+            .iter()
+            .any(|preset| preset.label == "echo added" && preset.command == edited)
     );
 
     app.apply(AppCommand::PanelizePresetRemove)
@@ -364,7 +365,7 @@ fn panelize_preset_management_add_edit_remove_works() {
         panic!("panelize should return to preset list dialog");
     };
     assert!(
-        !listbox.items.iter().any(|item| item == &edited),
+        !listbox.items.iter().any(|item| item == "echo added"),
         "removed preset should no longer be listed"
     );
 

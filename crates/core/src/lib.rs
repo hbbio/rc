@@ -66,7 +66,8 @@ pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutp
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, HotlistEntry, LayoutSettings, LearnKeysSettings,
-    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, VirtualFsSettings,
+    PanelOptionsSettings, PanelizePreset, SaveSetupMetadata, Settings, SettingsCategory,
+    VirtualFsSettings,
 };
 pub use slo::{FOUNDATION_SLO, SloBudgets};
 #[cfg(test)]
@@ -1350,16 +1351,16 @@ enum PendingDialogAction {
     },
     PanelizePresetSelection {
         initial_command: String,
-        preset_commands: Vec<String>,
+        presets: Vec<PanelizePreset>,
     },
     PanelizeCommand {
-        preset_commands: Vec<String>,
+        presets: Vec<PanelizePreset>,
     },
     PanelizePresetAdd {
-        preset_commands: Vec<String>,
+        presets: Vec<PanelizePreset>,
     },
     PanelizePresetEdit {
-        preset_commands: Vec<String>,
+        presets: Vec<PanelizePreset>,
         preset_index: usize,
     },
 }

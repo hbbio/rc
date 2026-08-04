@@ -1,4 +1,4 @@
-use crate::{HotlistEntry, OverwritePolicy, Settings, SortField};
+use crate::{HotlistEntry, OverwritePolicy, PanelizePreset, Settings, SortField};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -213,15 +213,15 @@ fn parse_ini_section_name(line: &str) -> Option<&str> {
 fn render_hotlist_entry(entry: &HotlistEntry) -> String {
     format!(
         "{}\t{}",
-        escape_hotlist_field(&entry.label),
-        escape_hotlist_field(&entry.path.to_string_lossy())
+        escape_settings_field(&entry.label),
+        escape_settings_field(&entry.path.to_string_lossy())
     )
 }
 
 fn parse_hotlist_entry(value: &str) -> Option<HotlistEntry> {
     let (label, path) = value.split_once('\t')?;
-    let label = unescape_hotlist_field(label)?;
-    let path = PathBuf::from(unescape_hotlist_field(path)?);
+    let label = unescape_settings_field(label)?;
+    let path = PathBuf::from(unescape_settings_field(path)?);
     if path.as_os_str().is_empty() {
         return None;
     }
@@ -232,7 +232,25 @@ fn parse_hotlist_entry(value: &str) -> Option<HotlistEntry> {
     }
 }
 
-fn escape_hotlist_field(value: &str) -> String {
+fn render_panelize_preset(preset: &PanelizePreset) -> String {
+    format!(
+        "{}\t{}",
+        escape_settings_field(&preset.label),
+        escape_settings_field(&preset.command)
+    )
+}
+
+fn parse_panelize_preset(value: &str) -> Option<PanelizePreset> {
+    let (label, command) = value.split_once('\t')?;
+    let label = unescape_settings_field(label)?;
+    let command = unescape_settings_field(command)?;
+    if label.is_empty() || command.is_empty() {
+        return None;
+    }
+    Some(PanelizePreset::new(label, command))
+}
+
+fn escape_settings_field(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -247,7 +265,7 @@ fn escape_hotlist_field(value: &str) -> String {
     escaped
 }
 
-fn unescape_hotlist_field(value: &str) -> Option<String> {
+fn unescape_settings_field(value: &str) -> Option<String> {
     let mut unescaped = String::with_capacity(value.len());
     let mut characters = value.chars();
     while let Some(character) = characters.next() {
@@ -334,15 +352,20 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.configuration.hotlist.push(entry);
                 }
             }
-            ("configuration", "panelize_preset") => {
+            ("configuration", "panelize_preset") | ("configuration", "panelize_preset_entry") => {
                 if !saw_panelize_presets {
                     settings.configuration.panelize_presets.clear();
                     saw_panelize_presets = true;
                 }
-                settings
-                    .configuration
-                    .panelize_presets
-                    .push(value.to_string());
+                let preset = if key == "panelize_preset_entry" {
+                    parse_panelize_preset(value)
+                } else {
+                    (!value.is_empty())
+                        .then(|| PanelizePreset::from_legacy_command(value.to_string()))
+                };
+                if let Some(preset) = preset {
+                    settings.configuration.panelize_presets.push(preset);
+                }
             }
             ("layout", "show_menu_bar") => {
                 if let Some(parsed) = parse_bool(value) {
@@ -531,8 +554,11 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     for entry in &settings.configuration.hotlist {
         lines.push(format!("hotlist_entry={}", render_hotlist_entry(entry)));
     }
-    for command in &settings.configuration.panelize_presets {
-        lines.push(format!("panelize_preset={command}"));
+    for preset in &settings.configuration.panelize_presets {
+        lines.push(format!(
+            "panelize_preset_entry={}",
+            render_panelize_preset(preset)
+        ));
     }
 
     lines.push(String::new());
@@ -751,8 +777,10 @@ skin=default
             HotlistEntry::new("Temporary files", PathBuf::from("/tmp")),
             HotlistEntry::new("Variable data", PathBuf::from("/var")),
         ];
-        settings.configuration.panelize_presets =
-            vec![String::from("find . -type f"), String::from("git ls-files")];
+        settings.configuration.panelize_presets = vec![
+            PanelizePreset::new("All project files", "find . -type f"),
+            PanelizePreset::new("Git files", "git ls-files"),
+        ];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
         settings.panel_options.sort_field = SortField::Modified;
         settings.layout.status_message_timeout_seconds = 42;
@@ -815,6 +843,48 @@ skin=default
         );
         let rendered = render_hotlist_entry(&entry);
         assert_eq!(parse_hotlist_entry(&rendered), Some(entry));
+    }
+
+    #[test]
+    fn legacy_command_only_panelize_presets_migrate_to_labels() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(
+            &mut settings,
+            "[configuration]\npanelize_preset=find . -type f\npanelize_preset=git ls-files\n",
+        );
+
+        assert_eq!(
+            settings.configuration.panelize_presets,
+            [
+                PanelizePreset::new("All files", "find . -type f"),
+                PanelizePreset::new("git ls-files", "git ls-files"),
+            ]
+        );
+    }
+
+    #[test]
+    fn named_panelize_preset_encoding_round_trips_special_characters() {
+        let preset = PanelizePreset::new("Work tree\ttracked", "printf 'a b\\\\c\\n'");
+        let rendered = render_panelize_preset(&preset);
+
+        assert_eq!(parse_panelize_preset(&rendered), Some(preset));
+    }
+
+    #[test]
+    fn malformed_named_panelize_presets_are_skipped_safely() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(
+            &mut settings,
+            "[configuration]\n\
+             panelize_preset_entry=missing-separator\n\
+             panelize_preset_entry=Empty\\scommand\t\n\
+             panelize_preset_entry=Git\\sfiles\tgit\\sls-files\n",
+        );
+
+        assert_eq!(
+            settings.configuration.panelize_presets,
+            [PanelizePreset::new("Git files", "git ls-files")]
+        );
     }
 
     #[test]
@@ -902,6 +972,7 @@ skin=mc-skin
         assert!(rc_ini.contains("[configuration]"));
         assert!(rc_ini.contains("overwrite_policy=rename"));
         assert!(rc_ini.contains("hotlist_entry=Temporary\\sfiles\t/tmp"));
+        assert!(rc_ini.contains("panelize_preset_entry=All\\sfiles\tfind\\s.\\s-type\\sf"));
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
     }

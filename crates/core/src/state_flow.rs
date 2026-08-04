@@ -279,7 +279,7 @@ impl AppState {
         &self.settings.configuration.hotlist
     }
 
-    pub(crate) fn panelize_presets(&self) -> &[String] {
+    pub(crate) fn panelize_presets(&self) -> &[PanelizePreset] {
         &self.settings.configuration.panelize_presets
     }
 

@@ -434,7 +434,7 @@ impl AppState {
             (
                 Some(PendingDialogAction::PanelizePresetSelection {
                     initial_command,
-                    preset_commands,
+                    presets,
                 }),
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {
@@ -443,11 +443,14 @@ impl AppState {
                     return;
                 };
                 if index == 0 {
-                    self.open_panelize_command_input_dialog(initial_command, preset_commands);
+                    self.open_panelize_command_input_dialog(initial_command, presets);
                     self.set_status("External panelize: enter command");
                     return;
                 }
-                let Some(command) = preset_commands.get(index.saturating_sub(1)).cloned() else {
+                let Some(command) = presets
+                    .get(index.saturating_sub(1))
+                    .map(|preset| preset.command.clone())
+                else {
                     self.set_status("Panelize canceled");
                     return;
                 };
@@ -472,9 +475,7 @@ impl AppState {
                 self.set_status("Panelize canceled");
             }
             (
-                Some(PendingDialogAction::PanelizePresetAdd {
-                    mut preset_commands,
-                }),
+                Some(PendingDialogAction::PanelizePresetAdd { mut presets }),
                 DialogResult::InputSubmitted(value),
             ) => {
                 let command = value.trim();
@@ -483,27 +484,29 @@ impl AppState {
                     return;
                 }
                 let command = command.to_string();
-                if preset_commands.iter().any(|preset| preset == &command) {
+                if presets.iter().any(|preset| preset.command == command) {
                     self.set_status("Panelize preset already exists");
                     return;
                 }
 
-                preset_commands.push(command.clone());
-                self.settings.configuration.panelize_presets = preset_commands.clone();
+                let preset = PanelizePreset::from_legacy_command(command.clone());
+                let label = preset.label.clone();
+                presets.push(preset);
+                self.settings.configuration.panelize_presets = presets.clone();
                 self.settings.mark_dirty();
                 self.routes.pop();
-                self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
-                self.set_status(format!("Added panelize preset: {command}"));
+                self.open_panelize_preset_selection_dialog(command, presets);
+                self.set_status(format!("Added panelize preset: {label}"));
             }
             (
-                Some(PendingDialogAction::PanelizePresetAdd { preset_commands: _ }),
+                Some(PendingDialogAction::PanelizePresetAdd { presets: _ }),
                 DialogResult::Canceled,
             ) => {
                 self.set_status("Panelize preset add canceled");
             }
             (
                 Some(PendingDialogAction::PanelizePresetEdit {
-                    mut preset_commands,
+                    mut presets,
                     preset_index,
                 }),
                 DialogResult::InputSubmitted(value),
@@ -514,17 +517,18 @@ impl AppState {
                     return;
                 }
                 let command = command.to_string();
-                let Some(entry) = preset_commands.get_mut(preset_index) else {
+                let Some(entry) = presets.get_mut(preset_index) else {
                     self.set_status("Panelize preset edit failed: invalid selection");
                     return;
                 };
-                *entry = command.clone();
+                entry.command = command.clone();
+                let label = entry.label.clone();
 
-                self.settings.configuration.panelize_presets = preset_commands.clone();
+                self.settings.configuration.panelize_presets = presets.clone();
                 self.settings.mark_dirty();
                 self.routes.pop();
-                self.open_panelize_preset_selection_dialog(command.clone(), preset_commands);
-                self.set_status(format!("Updated panelize preset: {command}"));
+                self.open_panelize_preset_selection_dialog(command, presets);
+                self.set_status(format!("Updated panelize preset: {label}"));
             }
             (Some(PendingDialogAction::PanelizePresetEdit { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize preset edit canceled");
