@@ -52,6 +52,10 @@ pub enum BackgroundEvent {
         job_id: JobId,
         entries: Vec<FindResultEntry>,
     },
+    FindCompleted {
+        job_id: JobId,
+        report: crate::FindSearchReport,
+    },
     TreeReady {
         job_id: JobId,
         root: PathBuf,

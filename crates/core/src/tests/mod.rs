@@ -102,8 +102,11 @@ fn drain_background(app: &mut AppState) {
                                         .is_ok()
                                 },
                             )
-                            .map(|_| ())
-                            .map_err(|error| JobError::from_message(error.to_string()));
+                            .map_err(|error| JobError::from_message(error.to_string()))
+                            .map(|report| {
+                                let _ = chunk_tx
+                                    .send(BackgroundEvent::FindCompleted { job_id, report });
+                            });
                             for event in chunk_rx.try_iter() {
                                 app.handle_background_event(event);
                             }

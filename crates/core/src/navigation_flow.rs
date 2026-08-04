@@ -1,7 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use crate::*;
 
@@ -62,7 +63,13 @@ impl AppState {
                     }
                 }
             }
-            AppCommand::CancelJob => self.cancel_latest_job(),
+            AppCommand::CancelJob => {
+                if matches!(self.top_route(), Route::FindResults(_)) {
+                    self.cancel_active_find_search();
+                } else {
+                    self.cancel_latest_job();
+                }
+            }
             AppCommand::OpenEntry => {
                 if self.open_selected_directory() {
                     self.queue_panel_refresh(self.active_panel);
@@ -106,6 +113,8 @@ impl AppState {
                 self.open_selected_find_result()?;
             }
             AppCommand::FindResultsPanelize => self.panelize_find_results(),
+            AppCommand::FindResultsAgain => self.open_find_again_dialog(),
+            AppCommand::FindResultsTogglePause => self.toggle_active_find_pause(),
             AppCommand::Navigate(NavigationTarget::Tree, motion) => {
                 self.apply_tree_navigation(motion);
             }
@@ -231,11 +240,24 @@ impl AppState {
         }
     }
 
+    fn pop_find_results(&mut self) -> Option<FindResultsState> {
+        if !matches!(self.top_route(), Route::FindResults(_)) {
+            return None;
+        }
+        match self.routes.pop() {
+            Some(Route::FindResults(results)) => Some(results),
+            _ => None,
+        }
+    }
+
     fn pause_active_find_results(&mut self) -> bool {
-        let Some(Route::FindResults(results)) = self.routes.pop() else {
+        let Some(mut results) = self.pop_find_results() else {
             return false;
         };
-        self.set_find_job_paused(results.job_id, true);
+        if matches!(results.status, FindResultsStatus::Running) {
+            self.set_find_job_paused(results.job_id, true);
+            results.status = FindResultsStatus::Paused;
+        }
         self.paused_find_results = Some(results);
         true
     }
@@ -244,10 +266,13 @@ impl AppState {
         if matches!(self.top_route(), Route::FindResults(_)) {
             return true;
         }
-        let Some(results) = self.paused_find_results.take() else {
+        let Some(mut results) = self.paused_find_results.take() else {
             return false;
         };
-        self.set_find_job_paused(results.job_id, false);
+        if matches!(results.status, FindResultsStatus::Paused) {
+            self.set_find_job_paused(results.job_id, false);
+            results.status = FindResultsStatus::Running;
+        }
         self.routes.push(Route::FindResults(results));
         true
     }
@@ -258,19 +283,190 @@ impl AppState {
             return;
         }
 
-        let base_dir = self.active_panel().cwd.clone();
-        self.push_dialog(
-            DialogState::input("Find file", "Name contains:", ""),
-            PendingDialogAction::FindQuery { base_dir },
-        );
+        let spec = FindSpec::new(self.active_panel().cwd.clone());
+        self.push_find_dialog(spec);
         self.set_status("Find file");
     }
 
-    pub(crate) fn close_find_results(&mut self) {
-        if matches!(self.top_route(), Route::FindResults(_)) {
-            self.routes.pop();
-            self.set_status("Closed find results");
+    fn push_find_dialog(&mut self, spec: FindSpec) {
+        self.push_dialog(DialogState::find(&spec), PendingDialogAction::FindSearch);
+    }
+
+    pub(crate) fn start_find_search(&mut self, mut spec: FindSpec) {
+        if spec.start_dir.as_os_str().is_empty() {
+            self.push_find_dialog(spec);
+            self.set_status("Find start directory cannot be empty");
+            return;
         }
+        if spec.start_dir.is_relative() {
+            spec.start_dir = self.active_panel().cwd.join(&spec.start_dir);
+        }
+        match fs::metadata(&spec.start_dir) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                self.push_find_dialog(spec);
+                self.set_status("Find start path is not a directory");
+                return;
+            }
+            Err(error) => {
+                self.push_find_dialog(spec);
+                self.set_status(format!("Find start directory is inaccessible: {error}"));
+                return;
+            }
+        }
+        if let Err(error) = spec.validate() {
+            self.push_find_dialog(spec);
+            self.set_status(error.to_string());
+            return;
+        }
+
+        self.discard_paused_find_results();
+        let request = JobRequest::Find {
+            spec: spec.clone(),
+            max_results: self.settings.advanced.max_find_results,
+        };
+        let mut worker_job = self.jobs.enqueue(request);
+        let job_id = worker_job.id;
+        let pause_flag = Arc::new(AtomicBool::new(false));
+        self.find_pause_flags.insert(job_id, pause_flag.clone());
+        worker_job.set_find_pause_flag(pause_flag);
+        self.routes
+            .push(Route::FindResults(FindResultsState::loading(job_id, spec)));
+        self.queue_worker_job(worker_job);
+    }
+
+    fn discard_paused_find_results(&mut self) {
+        let Some(results) = self.paused_find_results.take() else {
+            return;
+        };
+        if results.is_active() {
+            let _ = self.request_cancel_for_job(results.job_id);
+        }
+    }
+
+    fn open_find_again_dialog(&mut self) {
+        let Some(results) = self.pop_find_results() else {
+            return;
+        };
+        let spec = results.spec.clone();
+        if results.is_active() {
+            let _ = self.request_cancel_for_job(results.job_id);
+        }
+        self.discard_paused_find_results();
+        self.push_find_dialog(spec);
+        self.set_status("Find again");
+    }
+
+    fn toggle_active_find_pause(&mut self) {
+        let state = match self.top_route() {
+            Route::FindResults(results) => Some((results.job_id, results.status.clone())),
+            _ => None,
+        };
+        let Some((job_id, status)) = state else {
+            return;
+        };
+        let next_status = match status {
+            FindResultsStatus::Running => {
+                self.set_find_job_paused(job_id, true);
+                FindResultsStatus::Paused
+            }
+            FindResultsStatus::Paused => {
+                self.set_find_job_paused(job_id, false);
+                FindResultsStatus::Running
+            }
+            FindResultsStatus::Canceling => {
+                self.set_status("Find cancellation is already pending");
+                return;
+            }
+            _ => {
+                self.set_status("Find is no longer running");
+                return;
+            }
+        };
+        let label = next_status.label();
+        if let Some(Route::FindResults(results)) = self.routes.last_mut() {
+            results.status = next_status;
+        }
+        self.set_status(format!("Find {label}"));
+    }
+
+    fn cancel_active_find_search(&mut self) {
+        let active = match self.top_route() {
+            Route::FindResults(results) if results.is_active() => Some(results.job_id),
+            _ => None,
+        };
+        let Some(job_id) = active else {
+            self.set_status("Find is no longer running");
+            return;
+        };
+        if self.request_cancel_for_job(job_id) {
+            if let Some(Route::FindResults(results)) = self.routes.last_mut() {
+                results.status = FindResultsStatus::Canceling;
+            }
+            self.set_status(format!("Canceling find job #{job_id}"));
+        } else {
+            self.set_status(format!("Find job #{job_id} cannot be canceled"));
+        }
+    }
+
+    pub(crate) fn open_find_tree_picker(&mut self) {
+        let form = match self.top_route() {
+            Route::Dialog(dialog) => match &dialog.kind {
+                DialogKind::Find(form) => Some(form.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(form) = form else {
+            self.set_status("Find tree picker is unavailable here");
+            return;
+        };
+        self.routes.pop();
+
+        let candidate = PathBuf::from(form.start_directory.trim());
+        let candidate = if candidate.is_relative() {
+            self.active_panel().cwd.join(candidate)
+        } else {
+            candidate
+        };
+        let root = fs::metadata(&candidate)
+            .ok()
+            .filter(fs::Metadata::is_dir)
+            .map(|_| candidate)
+            .unwrap_or_else(|| self.active_panel().cwd.clone());
+        self.pending_find_tree_picker = Some(form);
+        self.open_tree_at(root);
+        self.set_status("Choose the find start directory");
+    }
+
+    fn restore_find_tree_picker(&mut self, selected: Option<PathBuf>) -> bool {
+        let Some(mut form) = self.pending_find_tree_picker.take() else {
+            return false;
+        };
+        if let Some(selected) = selected {
+            form.start_directory = selected.to_string_lossy().into_owned();
+        }
+        self.push_dialog(
+            DialogState {
+                title: String::from("Find file"),
+                kind: DialogKind::Find(form),
+            },
+            PendingDialogAction::FindSearch,
+        );
+        true
+    }
+
+    pub(crate) fn close_find_results(&mut self) {
+        let active_job = match self.top_route() {
+            Route::FindResults(results) if results.is_active() => Some(results.job_id),
+            Route::FindResults(_) => None,
+            _ => return,
+        };
+        self.routes.pop();
+        if let Some(job_id) = active_job {
+            let _ = self.request_cancel_for_job(job_id);
+        }
+        self.set_status("Closed find results");
     }
 
     pub(crate) fn move_find_results_cursor(&mut self, delta: isize) {
@@ -350,8 +546,8 @@ impl AppState {
     pub(crate) fn panelize_find_results(&mut self) {
         let Some((query, base_dir, paths)) = (match self.top_route() {
             Route::FindResults(results) => Some((
-                results.query.clone(),
-                results.base_dir.clone(),
+                results.spec.display_pattern().to_string(),
+                results.spec.start_dir.clone(),
                 results
                     .entries
                     .iter()
@@ -394,6 +590,11 @@ impl AppState {
             return;
         }
         let root = self.active_panel().cwd.clone();
+        self.open_tree_at(root);
+        self.set_status("Loading directory tree...");
+    }
+
+    fn open_tree_at(&mut self, root: PathBuf) {
         let job_id = self.queue_worker_job_request(JobRequest::BuildTree {
             root: root.clone(),
             max_depth: self.settings.advanced.tree_max_depth,
@@ -401,7 +602,6 @@ impl AppState {
         });
         self.routes
             .push(Route::Tree(Box::new(TreeState::loading(job_id, root))));
-        self.set_status("Loading directory tree...");
     }
 
     pub(crate) fn close_tree_screen(&mut self) {
@@ -413,7 +613,11 @@ impl AppState {
         if let Some(job_id) = pending_job {
             let _ = self.request_cancel_for_job(job_id);
         }
-        self.set_status("Closed directory tree");
+        if self.restore_find_tree_picker(None) {
+            self.set_status("Find tree selection canceled");
+        } else {
+            self.set_status("Closed directory tree");
+        }
     }
 
     pub(crate) fn tree_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut TreeState> {
@@ -673,16 +877,34 @@ impl AppState {
 
     pub(crate) fn open_selected_tree_entry(&mut self) -> io::Result<()> {
         let selected = match self.top_route() {
-            Route::Tree(tree) => tree.selected_entry().cloned(),
+            Route::Tree(tree) => tree
+                .selected_entry()
+                .map(|entry| (entry.clone(), tree.scan_job_id())),
             _ => None,
         };
-        let Some(selected) = selected else {
+        let Some((selected, pending_job)) = selected else {
             self.set_status("No tree entry selected");
             return Ok(());
         };
 
+        if self.pending_find_tree_picker.is_some() {
+            self.routes.pop();
+            if let Some(job_id) = pending_job {
+                let _ = self.request_cancel_for_job(job_id);
+            }
+            self.restore_find_tree_picker(Some(selected.path.clone()));
+            self.set_status(format!(
+                "Find start directory: {}",
+                selected.path.to_string_lossy()
+            ));
+            return Ok(());
+        }
+
         if self.set_active_panel_directory(selected.path.clone())? {
             self.routes.pop();
+            if let Some(job_id) = pending_job {
+                let _ = self.request_cancel_for_job(job_id);
+            }
             self.set_status(format!(
                 "Opened directory {}",
                 selected.path.to_string_lossy()

@@ -12,7 +12,7 @@ fn find_entries_chunk_updates_results_through_background_handler() {
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.apply(AppCommand::OpenFindDialog)
         .expect("find dialog should open");
-    for ch in "needle".chars() {
+    for ch in "*needle*".chars() {
         app.apply(AppCommand::DialogInputChar(ch))
             .expect("typing find query should succeed");
     }
@@ -34,7 +34,7 @@ fn find_entries_chunk_updates_results_through_background_handler() {
     };
     assert_eq!(results.entries, vec![entry]);
     assert_eq!(results.cursor, 0);
-    assert_eq!(app.status_line, "Finding 'needle': 1 result(s)...");
+    assert_eq!(app.status_line, "Finding '*needle*': 1 result(s)...");
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -54,7 +54,7 @@ fn find_dialog_locates_selected_entry_in_panel_and_supports_resume() {
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.apply(AppCommand::OpenFindDialog)
         .expect("find dialog should open");
-    for ch in "needle".chars() {
+    for ch in "*needle*".chars() {
         app.apply(AppCommand::DialogInputChar(ch))
             .expect("typing find query should succeed");
     }
@@ -121,7 +121,7 @@ fn find_results_panelize_creates_virtual_panel_and_preserves_resume() {
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.apply(AppCommand::OpenFindDialog)
         .expect("find dialog should open");
-    for ch in "needle".chars() {
+    for ch in "*needle*".chars() {
         app.apply(AppCommand::DialogInputChar(ch))
             .expect("typing find query should succeed");
     }
@@ -719,6 +719,408 @@ fn find_reports_permission_denied_subdirectories_without_losing_results() {
             .to_ascii_lowercase()
             .contains("permission denied")
     }));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_form_captures_the_complete_search_specification() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-form-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    assert_eq!(app.key_context(), KeyContext::FindDialog);
+    for character in r"^report-[0-9]+[.]rs$".chars() {
+        app.apply(AppCommand::DialogInputChar(character))
+            .expect("filename pattern input should succeed");
+    }
+    app.apply(AppCommand::DialogFocusNext)
+        .expect("focus should move to mode");
+    app.apply(AppCommand::DialogInputChar(' '))
+        .expect("mode should toggle");
+    app.apply(AppCommand::DialogFocusNext)
+        .expect("focus should move to case sensitivity");
+    app.apply(AppCommand::DialogInputChar(' '))
+        .expect("case sensitivity should toggle");
+    app.apply(AppCommand::DialogFocusNext)
+        .expect("focus should move to content");
+    for character in "needle".chars() {
+        app.apply(AppCommand::DialogInputChar(character))
+            .expect("content pattern input should succeed");
+    }
+    app.apply(AppCommand::DialogFocusNext)
+        .expect("focus should move to whole-word option");
+    app.apply(AppCommand::DialogInputChar(' '))
+        .expect("whole-word option should toggle");
+    app.apply(AppCommand::DialogFocusNext)
+        .expect("focus should move to ignored directories");
+    for character in "target, .git".chars() {
+        app.apply(AppCommand::DialogInputChar(character))
+            .expect("ignored-directory input should succeed");
+    }
+    app.apply(AppCommand::DialogAccept)
+        .expect("find form should submit");
+
+    let request = app
+        .pending_worker_commands
+        .iter()
+        .find_map(|command| match command {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::Find { spec, .. } => Some(spec),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("find request should be queued");
+    assert_eq!(request.start_dir, root);
+    assert_eq!(request.filename_pattern, r"^report-[0-9]+[.]rs$");
+    assert_eq!(request.name_mode, FindNameMode::Regex);
+    assert!(request.case_sensitive);
+    assert_eq!(request.content_pattern.as_deref(), Some("needle"));
+    assert!(request.whole_word);
+    assert_eq!(request.ignored_directories, ["target", ".git"]);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn invalid_find_form_reopens_with_values_and_does_not_enqueue_work() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-invalid-form-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    app.apply(AppCommand::DialogInputChar('['))
+        .expect("invalid glob should be editable");
+    app.apply(AppCommand::DialogAccept)
+        .expect("invalid find form should be handled");
+
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("invalid form should reopen");
+    };
+    let DialogKind::Find(form) = &dialog.kind else {
+        panic!("invalid form should remain a find dialog");
+    };
+    assert_eq!(form.filename_pattern, "[");
+    assert!(app.status_line.contains("invalid filename pattern"));
+    assert!(app.jobs.jobs().is_empty());
+    assert!(app.pending_worker_commands.is_empty());
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_form_tree_picker_updates_start_directory_without_changing_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-tree-picker-{stamp}"));
+    let nested = root.join("nested");
+    fs::create_dir_all(&nested).expect("must create nested directory");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    app.apply(AppCommand::FindDialogBrowse)
+        .expect("tree picker should open");
+    assert!(matches!(app.top_route(), Route::Tree(_)));
+    drain_background(&mut app);
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Tree,
+        NavigationMotion::Right,
+    ))
+    .expect("tree selection should move");
+    app.apply(AppCommand::TreeOpenEntry)
+        .expect("tree selection should be accepted");
+
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("tree picker should return to the find form");
+    };
+    let DialogKind::Find(form) = &dialog.kind else {
+        panic!("returned dialog should be a find form");
+    };
+    assert_eq!(PathBuf::from(&form.start_directory), nested);
+    assert_eq!(app.active_panel().cwd, root);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_pause_continue_and_cancel_target_the_visible_search() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-targeted-cancel-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("empty pattern should start a match-all search");
+    let find_job_id = app.jobs.last_job().expect("find job should exist").id;
+
+    app.apply(AppCommand::FindResultsTogglePause)
+        .expect("find should pause");
+    assert!(matches!(
+        app.top_route(),
+        Route::FindResults(FindResultsState {
+            status: FindResultsStatus::Paused,
+            ..
+        })
+    ));
+    assert!(
+        app.find_pause_flags[&find_job_id].load(AtomicOrdering::Relaxed),
+        "pause flag should target the visible find job"
+    );
+    app.apply(AppCommand::FindResultsTogglePause)
+        .expect("find should continue");
+    assert!(!app.find_pause_flags[&find_job_id].load(AtomicOrdering::Relaxed));
+
+    let other_job_id = app.enqueue_worker_job_request(JobRequest::BuildTree {
+        root: root.clone(),
+        max_depth: 1,
+        max_entries: 16,
+    });
+    app.apply(AppCommand::CancelJob)
+        .expect("visible find cancellation should succeed");
+    assert!(matches!(
+        app.top_route(),
+        Route::FindResults(FindResultsState {
+            status: FindResultsStatus::Canceling,
+            ..
+        })
+    ));
+    let commands = app.take_pending_worker_commands();
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Cancel(id) if *id == find_job_id))
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Cancel(id) if *id == other_job_id))
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn closing_running_find_results_cancels_that_search_and_ignores_late_chunks() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-close-running-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("find should start");
+    let find_job_id = app.jobs.last_job().expect("find job should exist").id;
+
+    app.apply(AppCommand::CloseFindResults)
+        .expect("results should close");
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(
+        app.pending_worker_commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Cancel(id) if *id == find_job_id))
+    );
+    app.handle_background_event(BackgroundEvent::FindEntriesChunk {
+        job_id: find_job_id,
+        entries: vec![FindResultEntry {
+            path: root.join("late.txt"),
+            is_dir: false,
+        }],
+    });
+    assert!(matches!(app.top_route(), Route::FileManager));
+    app.handle_job_event(JobEvent::Finished {
+        id: find_job_id,
+        result: Err(JobError::canceled()),
+    });
+    assert_eq!(app.status_line, "Closed find results");
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_again_discards_and_cancels_a_paused_search() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-again-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    for character in "*.rs".chars() {
+        app.apply(AppCommand::DialogInputChar(character))
+            .expect("find pattern input should succeed");
+    }
+    app.apply(AppCommand::DialogAccept)
+        .expect("find should start");
+    let old_job_id = app.jobs.last_job().expect("find job should exist").id;
+    app.apply(AppCommand::FindResultsTogglePause)
+        .expect("find should pause");
+
+    app.apply(AppCommand::FindResultsAgain)
+        .expect("find again should open the form");
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("again should open the find form");
+    };
+    let DialogKind::Find(form) = &dialog.kind else {
+        panic!("again should preserve find form values");
+    };
+    assert_eq!(form.filename_pattern, "*.rs");
+    assert!(app.paused_find_results.is_none());
+    assert!(
+        app.pending_worker_commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Cancel(id) if *id == old_job_id))
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn streamed_find_chunks_preserve_selection_and_terminal_reports_refine_status() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-stream-state-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("find should start");
+    let job_id = app.jobs.last_job().expect("find job should exist").id;
+    let first_entries = ["a.txt", "b.txt", "c.txt"]
+        .into_iter()
+        .map(|name| FindResultEntry {
+            path: root.join(name),
+            is_dir: false,
+        })
+        .collect();
+    app.handle_background_event(BackgroundEvent::FindEntriesChunk {
+        job_id,
+        entries: first_entries,
+    });
+    let Some(Route::FindResults(results)) = app.routes.last_mut() else {
+        panic!("find results should be active");
+    };
+    results.cursor = 1;
+    let selected = results.entries[1].path.clone();
+
+    app.handle_background_event(BackgroundEvent::FindEntriesChunk {
+        job_id,
+        entries: vec![FindResultEntry {
+            path: root.join("d.txt"),
+            is_dir: false,
+        }],
+    });
+    let Route::FindResults(results) = app.top_route() else {
+        panic!("find results should remain active");
+    };
+    assert_eq!(results.cursor, 1);
+    assert_eq!(results.entries[results.cursor].path, selected);
+
+    let report = FindSearchReport {
+        matched_entries: 4,
+        issue_count: 2,
+        truncated: true,
+        ..FindSearchReport::default()
+    };
+    app.handle_job_event(JobEvent::Finished {
+        id: job_id,
+        result: Ok(()),
+    });
+    assert!(matches!(
+        app.top_route(),
+        Route::FindResults(FindResultsState {
+            status: FindResultsStatus::Completed,
+            ..
+        })
+    ));
+    app.handle_background_event(BackgroundEvent::FindCompleted { job_id, report });
+    let Route::FindResults(results) = app.top_route() else {
+        panic!("find results should remain active");
+    };
+    assert_eq!(results.status, FindResultsStatus::Partial);
+    assert!(
+        results
+            .report
+            .as_ref()
+            .is_some_and(|report| report.truncated)
+    );
+    assert!(app.status_line.contains("result limit reached"));
+    assert!(app.status_line.contains("2 read error(s)"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn find_results_distinguish_canceled_and_failed_terminal_jobs() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-find-terminal-state-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenFindDialog)
+        .expect("find dialog should open");
+    app.apply(AppCommand::DialogAccept)
+        .expect("find should start");
+    let canceled_id = app.jobs.last_job().expect("find job should exist").id;
+    app.handle_job_event(JobEvent::Finished {
+        id: canceled_id,
+        result: Err(JobError::canceled()),
+    });
+    assert!(matches!(
+        app.top_route(),
+        Route::FindResults(FindResultsState {
+            status: FindResultsStatus::Canceled,
+            ..
+        })
+    ));
+
+    app.apply(AppCommand::FindResultsAgain)
+        .expect("again should open find form");
+    app.apply(AppCommand::DialogAccept)
+        .expect("second find should start");
+    let failed_id = app
+        .jobs
+        .last_job()
+        .expect("second find job should exist")
+        .id;
+    app.handle_job_event(JobEvent::Finished {
+        id: failed_id,
+        result: Err(JobError::from_message("synthetic read failure")),
+    });
+    let Route::FindResults(results) = app.top_route() else {
+        panic!("failed find results should remain visible");
+    };
+    assert!(matches!(
+        &results.status,
+        FindResultsStatus::Failed(message) if message.contains("synthetic read failure")
+    ));
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }

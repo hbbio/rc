@@ -65,6 +65,10 @@ impl FindSpec {
             self.filename_pattern.as_str()
         }
     }
+
+    pub fn validate(&self) -> Result<(), FindSearchError> {
+        CompiledFindSpec::compile(self).map(|_| ())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

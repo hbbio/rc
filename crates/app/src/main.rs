@@ -367,7 +367,7 @@ fn handle_key(
 ) -> Result<bool> {
     let context = state.key_context();
 
-    if context == KeyContext::Input
+    if matches!(context, KeyContext::Input | KeyContext::FindDialog)
         && let Some(command) = input_char_command(&key_event)
     {
         return Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit);

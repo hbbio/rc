@@ -54,6 +54,13 @@ impl AppCommand {
                 Some(Self::FindResultsPanelize)
             }
             (KeyContext::FindResults, KeyCommand::CancelJob) => Some(Self::CancelJob),
+            (KeyContext::FindResults, KeyCommand::FindAgain) => Some(Self::FindResultsAgain),
+            (KeyContext::FindResults, KeyCommand::FindTogglePause) => {
+                Some(Self::FindResultsTogglePause)
+            }
+            (KeyContext::FindDialog, KeyCommand::OpenTree) => Some(Self::FindDialogBrowse),
+            (KeyContext::FindDialog, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
+            (KeyContext::FindDialog, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
             (KeyContext::FileManager, KeyCommand::OpenTree) => Some(Self::OpenTree),
             (KeyContext::Tree, KeyCommand::OpenEntry) => Some(Self::TreeOpenEntry),
             (KeyContext::Tree, KeyCommand::Reread) => Some(Self::TreeRescan),

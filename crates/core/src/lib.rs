@@ -38,7 +38,9 @@ pub use background::{
     BackgroundEvent, PanelRefreshStreamRequest, build_tree_ready_event, read_disk_usage,
     refresh_panel_entries, refresh_panel_event, stream_refresh_panel_entries,
 };
-pub use dialog::{DialogButtonFocus, DialogKind, DialogResult, DialogState};
+pub use dialog::{
+    DialogButtonFocus, DialogKind, DialogResult, DialogState, FindDialogField, FindDialogState,
+};
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
     FindSpec, run_find_entries, stream_find_entries,
@@ -95,6 +97,9 @@ pub enum AppCommand {
     CloseViewer,
     OpenFindDialog,
     CloseFindResults,
+    FindResultsAgain,
+    FindResultsTogglePause,
+    FindDialogBrowse,
     OpenTree,
     CloseTree,
     OpenHotlist,
@@ -277,6 +282,8 @@ impl AppCommand {
             | Self::Reread
             | Self::FindResultsOpenEntry
             | Self::FindResultsPanelize
+            | Self::FindResultsAgain
+            | Self::FindResultsTogglePause
             | Self::TreeOpenEntry
             | Self::TreeRescan
             | Self::TreeForget
@@ -302,6 +309,7 @@ impl AppCommand {
             | Self::OpenInputDialog
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
+            | Self::FindDialogBrowse
             | Self::DialogAccept
             | Self::DialogCancel
             | Self::DialogFocusNext
@@ -951,26 +959,68 @@ pub struct FindResultEntry {
     pub is_dir: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FindResultsStatus {
+    Running,
+    Paused,
+    Canceling,
+    Completed,
+    Partial,
+    Canceled,
+    Failed(String),
+}
+
+impl FindResultsStatus {
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Running => "searching",
+            Self::Paused => "paused",
+            Self::Canceling => "canceling",
+            Self::Completed => "completed",
+            Self::Partial => "partial",
+            Self::Canceled => "canceled",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    pub const fn is_active(&self) -> bool {
+        matches!(self, Self::Running | Self::Paused | Self::Canceling)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FindResultsState {
     pub job_id: JobId,
-    pub query: String,
-    pub base_dir: PathBuf,
+    pub spec: FindSpec,
     pub entries: Vec<FindResultEntry>,
     pub cursor: usize,
-    pub loading: bool,
+    pub status: FindResultsStatus,
+    pub report: Option<FindSearchReport>,
 }
 
 impl FindResultsState {
-    fn loading(job_id: JobId, query: String, base_dir: PathBuf) -> Self {
+    fn loading(job_id: JobId, spec: FindSpec) -> Self {
         Self {
             job_id,
-            query,
-            base_dir,
+            spec,
             entries: Vec::new(),
             cursor: 0,
-            loading: true,
+            status: FindResultsStatus::Running,
+            report: None,
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.status.is_active()
+    }
+
+    fn apply_report(&mut self, report: FindSearchReport) {
+        self.status = if report.is_partial() || report.truncated {
+            FindResultsStatus::Partial
+        } else {
+            FindResultsStatus::Completed
+        };
+        self.report = Some(report);
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -1280,9 +1330,7 @@ enum PendingDialogAction {
         direction: ViewerSearchDirection,
     },
     ViewerGoto,
-    FindQuery {
-        base_dir: PathBuf,
-    },
+    FindSearch,
     PanelizePresetSelection {
         initial_command: String,
         preset_commands: Vec<String>,
@@ -1384,6 +1432,7 @@ impl KeybindingHints {
             KeyContext::Hotlist,
             KeyContext::Dialog,
             KeyContext::Input,
+            KeyContext::FindDialog,
             KeyContext::Listbox,
             KeyContext::Menu,
             KeyContext::Editor,
@@ -1457,6 +1506,7 @@ pub struct AppState {
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
     paused_find_results: Option<FindResultsState>,
+    pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh: PanelRefreshWorkflow,

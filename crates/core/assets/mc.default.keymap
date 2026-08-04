@@ -539,6 +539,15 @@ Cancel = esc
 Backspace = backspace
 FocusNext = tab
 
+[finddialog]
+Ok = enter
+Cancel = esc
+Backspace = backspace
+FocusNext = tab
+Up = up
+Down = down
+OpenTree = f2
+
 [listbox]
 Up = up
 Down = down
@@ -576,6 +585,8 @@ Home = home
 End = end
 Enter = enter
 Panelize = f5
+FindAgain = f4
+FindTogglePause = f6; ctrl-s
 CancelJob = alt-j
 
 [tree]

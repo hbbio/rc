@@ -1,3 +1,4 @@
+use crate::find_flow::find_results_status_message;
 use crate::*;
 
 impl AppState {
@@ -100,8 +101,11 @@ impl AppState {
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
-                    if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
-                        results.loading = false;
+                    if is_find
+                        && let Some(results) = self.find_results_by_job_id_mut(id)
+                        && results.report.is_none()
+                    {
+                        results.status = FindResultsStatus::Completed;
                     }
                     let should_refresh = matches!(
                         kind,
@@ -118,13 +122,7 @@ impl AppState {
                     }
                     if is_find {
                         if let Some(results) = self.find_results_by_job_id(id) {
-                            self.set_status(format!(
-                                "Find '{}': {} result(s)",
-                                results.query,
-                                results.entries.len()
-                            ));
-                        } else {
-                            self.set_status(format!("Job #{id} finished"));
+                            self.set_status(find_results_status_message(results));
                         }
                     } else if !suppress_status {
                         if let Some(summary) = self.jobs.job(id).map(|job| job.summary.clone()) {
@@ -158,8 +156,18 @@ impl AppState {
                         self.clear_panel_refresh_state_for_job(id);
                     }
                     if is_find && let Some(results) = self.find_results_by_job_id_mut(id) {
-                        results.loading = false;
+                        results.status = if error.is_canceled() {
+                            FindResultsStatus::Canceled
+                        } else {
+                            FindResultsStatus::Failed(error.user_message())
+                        };
                     }
+                    let find_status = is_find
+                        .then(|| {
+                            self.find_results_by_job_id(id)
+                                .map(find_results_status_message)
+                        })
+                        .flatten();
                     if is_tree {
                         let canceled = error.is_canceled();
                         let failure = (!canceled).then(|| error.user_message());
@@ -191,8 +199,12 @@ impl AppState {
                             retry_hint = ?error.retry_hint,
                             "job canceled"
                         );
-                        if !suppress_status {
-                            self.set_status(format!("Job #{id} canceled"));
+                        if !suppress_status && (!is_find || find_status.is_some()) {
+                            self.set_status(
+                                find_status
+                                    .clone()
+                                    .unwrap_or_else(|| format!("Job #{id} canceled")),
+                            );
                         }
                     } else {
                         tracing::warn!(
@@ -205,8 +217,10 @@ impl AppState {
                             error_message = %error.message,
                             "job failed"
                         );
-                        if !suppress_status {
-                            self.set_status(format!("Job #{id} failed: {}", error.user_message()));
+                        if !suppress_status && (!is_find || find_status.is_some()) {
+                            self.set_status(find_status.unwrap_or_else(|| {
+                                format!("Job #{id} failed: {}", error.user_message())
+                            }));
                         }
                     }
                     if is_persist_settings
@@ -270,6 +284,9 @@ impl AppState {
             },
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
                 self.handle_find_entries_chunk(job_id, entries)
+            }
+            BackgroundEvent::FindCompleted { job_id, report } => {
+                self.handle_find_completed(job_id, report)
             }
             BackgroundEvent::TreeReady {
                 job_id,

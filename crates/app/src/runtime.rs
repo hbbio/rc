@@ -831,8 +831,12 @@ fn execute_find_worker_job(
                 .is_ok()
         },
     )
-    .map(|_| ())
-    .map_err(|error| JobError::from_message(error.to_string()));
+    .map_err(|error| JobError::from_message(error.to_string()))
+    .and_then(|report| {
+        background_event_tx
+            .send(BackgroundEvent::FindCompleted { job_id, report })
+            .map_err(|_| JobError::from_message("background event channel disconnected"))
+    });
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
@@ -1092,6 +1096,68 @@ mod tests {
                 queued_at: Instant::now(),
             })
             .expect("worker cancel command should send");
+    }
+
+    #[test]
+    fn runtime_bridge_streams_find_entries_and_terminal_report() {
+        let root = make_temp_dir("find-terminal-report");
+        fs::write(root.join("alpha.txt"), "alpha").expect("find fixture should be writable");
+        fs::write(root.join("ignored.log"), "ignored")
+            .expect("nonmatching fixture should be writable");
+        let (command_tx, worker_event_rx, background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let mut spec = rc_core::FindSpec::new(root.clone());
+        spec.filename_pattern = String::from("*.txt");
+        let job = manager.enqueue(JobRequest::Find {
+            spec,
+            max_results: 16,
+        });
+        let job_id = job.id;
+        send_run(&command_tx, job);
+
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(2)),
+            JobEvent::Started { id } if id == job_id
+        ));
+        let finished = recv_event(&worker_event_rx, Duration::from_secs(2));
+        assert!(matches!(
+            finished,
+            JobEvent::Finished { id, result: Ok(()) } if id == job_id
+        ));
+
+        let mut paths = Vec::new();
+        let mut terminal_report = None;
+        while terminal_report.is_none() {
+            match background_event_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(BackgroundEvent::FindEntriesChunk {
+                    job_id: id,
+                    entries,
+                }) => {
+                    assert_eq!(id, job_id);
+                    paths.extend(entries.into_iter().map(|entry| entry.path));
+                }
+                Ok(BackgroundEvent::FindCompleted { job_id: id, report }) => {
+                    assert_eq!(id, job_id);
+                    terminal_report = Some(report);
+                }
+                Ok(other) => panic!("unexpected find background event: {other:?}"),
+                Err(error) => panic!("find background event should arrive: {error}"),
+            }
+        }
+        assert_eq!(paths, [root.join("alpha.txt")]);
+        let report = terminal_report.expect("terminal report should be emitted");
+        assert_eq!(report.matched_entries, 1);
+        assert!(!report.truncated);
+        assert!(!report.is_partial());
+
+        command_tx
+            .blocking_send(RuntimeCommand::Shutdown)
+            .expect("runtime shutdown should send");
+        runtime_handle
+            .join()
+            .expect("runtime loop thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 
     fn recv_event(event_rx: &Receiver<JobEvent>, timeout: Duration) -> JobEvent {

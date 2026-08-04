@@ -1,4 +1,5 @@
 use crate::keymap::KeyContext;
+use crate::{FindNameMode, FindSpec};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogButtonFocus {
@@ -33,11 +34,158 @@ pub struct ListboxDialogState {
     pub selected: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FindDialogField {
+    #[default]
+    StartDirectory,
+    FilenamePattern,
+    NameMode,
+    CaseSensitive,
+    ContentPattern,
+    WholeWord,
+    IgnoredDirectories,
+}
+
+impl FindDialogField {
+    const ALL: [Self; 7] = [
+        Self::StartDirectory,
+        Self::FilenamePattern,
+        Self::NameMode,
+        Self::CaseSensitive,
+        Self::ContentPattern,
+        Self::WholeWord,
+        Self::IgnoredDirectories,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::StartDirectory => 0,
+            Self::FilenamePattern => 1,
+            Self::NameMode => 2,
+            Self::CaseSensitive => 3,
+            Self::ContentPattern => 4,
+            Self::WholeWord => 5,
+            Self::IgnoredDirectories => 6,
+        }
+    }
+
+    const fn is_editable(self) -> bool {
+        matches!(
+            self,
+            Self::StartDirectory
+                | Self::FilenamePattern
+                | Self::ContentPattern
+                | Self::IgnoredDirectories
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindDialogState {
+    pub start_directory: String,
+    pub filename_pattern: String,
+    pub name_mode: FindNameMode,
+    pub case_sensitive: bool,
+    pub content_pattern: String,
+    pub whole_word: bool,
+    pub ignored_directories: String,
+    pub focus: FindDialogField,
+}
+
+impl FindDialogState {
+    pub fn from_spec(spec: &FindSpec) -> Self {
+        Self {
+            start_directory: spec.start_dir.to_string_lossy().into_owned(),
+            filename_pattern: spec.filename_pattern.clone(),
+            name_mode: spec.name_mode,
+            case_sensitive: spec.case_sensitive,
+            content_pattern: spec.content_pattern.clone().unwrap_or_default(),
+            whole_word: spec.whole_word,
+            ignored_directories: spec.ignored_directories.join(", "),
+            focus: FindDialogField::FilenamePattern,
+        }
+    }
+
+    pub fn to_spec(&self) -> FindSpec {
+        FindSpec {
+            start_dir: self.start_directory.trim().into(),
+            filename_pattern: self.filename_pattern.clone(),
+            name_mode: self.name_mode,
+            case_sensitive: self.case_sensitive,
+            content_pattern: (!self.content_pattern.is_empty())
+                .then(|| self.content_pattern.clone()),
+            whole_word: self.whole_word,
+            ignored_directories: self
+                .ignored_directories
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    fn move_focus(&mut self, delta: isize) {
+        let len = FindDialogField::ALL.len();
+        let index = self.focus.index();
+        let next = if delta.is_negative() {
+            index.checked_sub(delta.unsigned_abs()).unwrap_or(len - 1)
+        } else {
+            index.saturating_add(delta as usize) % len
+        };
+        self.focus = FindDialogField::ALL[next];
+    }
+
+    fn insert(&mut self, character: char) {
+        match self.focus {
+            FindDialogField::StartDirectory => self.start_directory.push(character),
+            FindDialogField::FilenamePattern => self.filename_pattern.push(character),
+            FindDialogField::NameMode if character == ' ' => {
+                self.name_mode = match self.name_mode {
+                    FindNameMode::Glob => FindNameMode::Regex,
+                    FindNameMode::Regex => FindNameMode::Glob,
+                };
+            }
+            FindDialogField::CaseSensitive if character == ' ' => {
+                self.case_sensitive = !self.case_sensitive;
+            }
+            FindDialogField::ContentPattern => self.content_pattern.push(character),
+            FindDialogField::WholeWord if character == ' ' => {
+                self.whole_word = !self.whole_word;
+            }
+            FindDialogField::IgnoredDirectories => self.ignored_directories.push(character),
+            _ => {}
+        }
+    }
+
+    fn backspace(&mut self) {
+        if !self.focus.is_editable() {
+            return;
+        }
+        match self.focus {
+            FindDialogField::StartDirectory => {
+                self.start_directory.pop();
+            }
+            FindDialogField::FilenamePattern => {
+                self.filename_pattern.pop();
+            }
+            FindDialogField::ContentPattern => {
+                self.content_pattern.pop();
+            }
+            FindDialogField::IgnoredDirectories => {
+                self.ignored_directories.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum DialogKind {
     Confirm(ConfirmDialogState),
     Input(InputDialogState),
     Listbox(ListboxDialogState),
+    Find(FindDialogState),
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +231,13 @@ impl DialogState {
         }
     }
 
+    pub fn find(spec: &FindSpec) -> Self {
+        Self {
+            title: String::from("Find file"),
+            kind: DialogKind::Find(FindDialogState::from_spec(spec)),
+        }
+    }
+
     pub fn demo_confirm() -> Self {
         Self::confirm("Confirm", "Proceed with this action?")
     }
@@ -108,6 +263,7 @@ impl DialogState {
             DialogKind::Confirm(_) => KeyContext::Dialog,
             DialogKind::Input(_) => KeyContext::Input,
             DialogKind::Listbox(_) => KeyContext::Listbox,
+            DialogKind::Find(_) => KeyContext::FindDialog,
         }
     }
 
@@ -176,6 +332,28 @@ impl DialogState {
                 DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
                 _ => DialogTransition::Stay,
             },
+            DialogKind::Find(find) => match event {
+                DialogEvent::FocusNext | DialogEvent::MoveDown => {
+                    find.move_focus(1);
+                    DialogTransition::Stay
+                }
+                DialogEvent::MoveUp => {
+                    find.move_focus(-1);
+                    DialogTransition::Stay
+                }
+                DialogEvent::InsertChar(character) => {
+                    find.insert(character);
+                    DialogTransition::Stay
+                }
+                DialogEvent::Backspace => {
+                    find.backspace();
+                    DialogTransition::Stay
+                }
+                DialogEvent::Accept => {
+                    DialogTransition::Close(DialogResult::FindSubmitted(Box::new(find.to_spec())))
+                }
+                DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
+            },
         }
     }
 }
@@ -200,6 +378,7 @@ pub enum DialogResult {
         index: Option<usize>,
         value: Option<String>,
     },
+    FindSubmitted(Box<FindSpec>),
     Canceled,
 }
 
@@ -213,6 +392,9 @@ impl DialogResult {
                 Some(value) => format!("Listbox accepted: {value}"),
                 None => String::from("Listbox accepted: <empty>"),
             },
+            Self::FindSubmitted(spec) => {
+                format!("Find accepted: {}", spec.display_pattern())
+            }
             Self::Canceled => String::from("Dialog canceled"),
         }
     }
@@ -317,5 +499,31 @@ mod tests {
                 value: None,
             })
         );
+    }
+
+    #[test]
+    fn find_dialog_edits_fields_and_toggles_options() {
+        let spec = FindSpec::new("/tmp".into());
+        let mut dialog = DialogState::find(&spec);
+        assert_eq!(dialog.key_context(), KeyContext::FindDialog);
+
+        assert_eq!(
+            dialog.handle_event(DialogEvent::InsertChar('*')),
+            DialogTransition::Stay
+        );
+        assert_eq!(
+            dialog.handle_event(DialogEvent::MoveDown),
+            DialogTransition::Stay
+        );
+        assert_eq!(
+            dialog.handle_event(DialogEvent::InsertChar(' ')),
+            DialogTransition::Stay
+        );
+
+        let DialogKind::Find(find) = &dialog.kind else {
+            panic!("expected find dialog");
+        };
+        assert_eq!(find.filename_pattern, "*");
+        assert_eq!(find.name_mode, FindNameMode::Regex);
     }
 }

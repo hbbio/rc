@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::dialog::DialogEvent;
 use crate::*;
@@ -16,6 +15,7 @@ impl AppState {
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::FindDialogBrowse => self.open_find_tree_picker(),
             AppCommand::DialogAccept => {
                 if matches!(self.top_route(), Route::Settings(_)) {
                     self.apply_settings_entry();
@@ -399,41 +399,10 @@ impl AppState {
                 self.pending_skin_revert = Some(original_skin);
                 self.set_status("Skin unchanged");
             }
-            (
-                Some(PendingDialogAction::FindQuery { base_dir }),
-                DialogResult::InputSubmitted(value),
-            ) => {
-                let query = value.trim();
-                if query.is_empty() {
-                    self.set_status("Find canceled: empty query");
-                    return;
-                }
-
-                let query = query.to_string();
-                let mut spec = FindSpec::new(base_dir.clone());
-                spec.filename_pattern = if query.contains(['*', '?', '[']) {
-                    query.clone()
-                } else {
-                    format!("*{query}*")
-                };
-                let request = JobRequest::Find {
-                    spec,
-                    max_results: self.settings.advanced.max_find_results,
-                };
-                let mut worker_job = self.jobs.enqueue(request);
-                let job_id = worker_job.id;
-                let pause_flag = Arc::new(AtomicBool::new(false));
-                self.find_pause_flags.insert(job_id, pause_flag.clone());
-                worker_job.set_find_pause_flag(pause_flag);
-                self.routes
-                    .push(Route::FindResults(FindResultsState::loading(
-                        job_id,
-                        query.clone(),
-                        base_dir.clone(),
-                    )));
-                self.queue_worker_job(worker_job);
+            (Some(PendingDialogAction::FindSearch), DialogResult::FindSubmitted(spec)) => {
+                self.start_find_search(*spec);
             }
-            (Some(PendingDialogAction::FindQuery { .. }), DialogResult::Canceled) => {
+            (Some(PendingDialogAction::FindSearch), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
             }
             (

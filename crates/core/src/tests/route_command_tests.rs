@@ -645,6 +645,18 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::CancelJob)
     );
     assert_eq!(
+        AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::FindAgain),
+        Some(AppCommand::FindResultsAgain)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::FindTogglePause),
+        Some(AppCommand::FindResultsTogglePause)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FindDialog, &KeyCommand::OpenTree),
+        Some(AppCommand::FindDialogBrowse)
+    );
+    assert_eq!(
         AppCommand::from_key_command(KeyContext::FindResults, &KeyCommand::Quit),
         Some(AppCommand::CloseFindResults)
     );

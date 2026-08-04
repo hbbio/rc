@@ -12,6 +12,7 @@ pub enum KeyContext {
     Hotlist,
     Dialog,
     Input,
+    FindDialog,
     Listbox,
     Menu,
     Editor,
@@ -46,6 +47,7 @@ impl KeyContext {
             "hotlist" => Some(Self::Hotlist),
             "dialog" => Some(Self::Dialog),
             "input" => Some(Self::Input),
+            "finddialog" => Some(Self::FindDialog),
             "listbox" => Some(Self::Listbox),
             "menu" => Some(Self::Menu),
             "editor" => Some(Self::Editor),
@@ -134,6 +136,8 @@ pub enum KeyCommand {
     OpenJobs,
     CloseJobs,
     OpenFindDialog,
+    FindAgain,
+    FindTogglePause,
     OpenTree,
     OpenHotlist,
     OpenPanelizeDialog,
@@ -218,6 +222,8 @@ impl KeyCommand {
             "jobs" => Self::OpenJobs,
             "closejobs" | "jobsclose" => Self::CloseJobs,
             "find" | "findfile" | "openfind" | "openfinddialog" => Self::OpenFindDialog,
+            "findagain" | "again" => Self::FindAgain,
+            "findtogglepause" | "findpause" | "findcontinue" => Self::FindTogglePause,
             "tree" | "directorytree" | "opentree" => Self::OpenTree,
             "hotlist" | "directoryhotlist" | "openhotlist" => Self::OpenHotlist,
             "panelize" | "externalpanelize" | "openpanelize" | "openpanelizedialog" => {
@@ -1336,6 +1342,24 @@ Reread = ctrl-r
         assert_eq!(
             keymap.resolve(KeyContext::Listbox, KeyChord::new(KeyCode::F(8))),
             Some(&KeyCommand::Delete)
+        );
+    }
+
+    #[test]
+    fn bundled_keymap_supports_find_form_and_lifecycle_actions() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+
+        assert_eq!(
+            keymap.resolve(KeyContext::FindDialog, KeyChord::new(KeyCode::F(2))),
+            Some(&KeyCommand::OpenTree)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FindResults, KeyChord::new(KeyCode::F(4))),
+            Some(&KeyCommand::FindAgain)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FindResults, KeyChord::new(KeyCode::F(6))),
+            Some(&KeyCommand::FindTogglePause)
         );
     }
 

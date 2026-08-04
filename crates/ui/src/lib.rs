@@ -13,8 +13,9 @@ use ratatui::widgets::{
 use rc_core::keymap::KeyContext;
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
-    FindResultsState, HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PanelState, Route,
-    SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
+    FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
+    JobStatus, MenuState, PanelState, Route, SettingsScreenState, TreeLoadState, TreeState,
+    ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -176,38 +177,61 @@ fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppSt
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
     let labels: [ButtonLabel<'_>; 10] = match state.top_route() {
-        Route::FindResults(_) => [
-            (
-                "1",
-                "Help",
-                Some((KeyContext::FindResults, AppCommand::OpenHelp, Some(1))),
-            ),
-            ("2", "", None),
-            ("3", "", None),
-            ("4", "", None),
-            (
-                "5",
-                "Panelize",
-                Some((
-                    KeyContext::FindResults,
-                    AppCommand::FindResultsPanelize,
-                    Some(5),
-                )),
-            ),
-            ("6", "", None),
-            ("7", "", None),
-            ("8", "", None),
-            ("9", "", None),
-            (
-                "10",
-                "Close",
-                Some((
-                    KeyContext::FindResults,
-                    AppCommand::CloseFindResults,
-                    Some(10),
-                )),
-            ),
-        ],
+        Route::FindResults(results) => {
+            let pause_label = if matches!(results.status, FindResultsStatus::Paused) {
+                "Continue"
+            } else {
+                "Pause"
+            };
+            [
+                (
+                    "1",
+                    "Help",
+                    Some((KeyContext::FindResults, AppCommand::OpenHelp, Some(1))),
+                ),
+                ("2", "", None),
+                ("3", "", None),
+                (
+                    "4",
+                    "Again",
+                    Some((
+                        KeyContext::FindResults,
+                        AppCommand::FindResultsAgain,
+                        Some(4),
+                    )),
+                ),
+                (
+                    "5",
+                    "Panelize",
+                    Some((
+                        KeyContext::FindResults,
+                        AppCommand::FindResultsPanelize,
+                        Some(5),
+                    )),
+                ),
+                (
+                    "6",
+                    pause_label,
+                    Some((
+                        KeyContext::FindResults,
+                        AppCommand::FindResultsTogglePause,
+                        Some(6),
+                    )),
+                ),
+                ("7", "", None),
+                ("8", "", None),
+                ("9", "", None),
+                (
+                    "10",
+                    "Close",
+                    Some((
+                        KeyContext::FindResults,
+                        AppCommand::CloseFindResults,
+                        Some(10),
+                    )),
+                ),
+            ]
+        }
         Route::Help(_) => [
             (
                 "1",
@@ -914,7 +938,12 @@ fn indexed_color_rgb(index: u8) -> (u8, u8, u8) {
 }
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
-    let area = centered_rect(frame.area(), 56, 14);
+    let (width, height) = if matches!(&dialog.kind, DialogKind::Find(_)) {
+        (88, 20)
+    } else {
+        (56, 14)
+    };
+    let area = centered_rect(frame.area(), width, height);
     frame.render_widget(Clear, area);
 
     match &dialog.kind {
@@ -1054,6 +1083,100 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 layout[1],
             );
         }
+        DialogKind::Find(find) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(7), Constraint::Length(2)])
+                .split(inner);
+            let normal = skin.style("dialog", "_default_");
+            let focused = skin.style("dialog", "dfocus");
+            let input = skin.style("core", "input");
+            let row = |field: FindDialogField, label: &str, value: String| {
+                let is_focused = find.focus == field;
+                Line::from(vec![
+                    Span::styled(if is_focused { "> " } else { "  " }, focused),
+                    Span::styled(
+                        format!("{label:<21}"),
+                        if is_focused { focused } else { normal },
+                    ),
+                    Span::styled(value, if is_focused { focused } else { input }),
+                ])
+            };
+            let rows = vec![
+                row(
+                    FindDialogField::StartDirectory,
+                    "Starting directory",
+                    find.start_directory.clone(),
+                ),
+                row(
+                    FindDialogField::FilenamePattern,
+                    "Filename pattern",
+                    if find.filename_pattern.is_empty() {
+                        String::from("<all files>")
+                    } else {
+                        find.filename_pattern.clone()
+                    },
+                ),
+                row(
+                    FindDialogField::NameMode,
+                    "Pattern mode",
+                    find.name_mode.label().to_string(),
+                ),
+                row(
+                    FindDialogField::CaseSensitive,
+                    "Case sensitive",
+                    checkbox_label(find.case_sensitive),
+                ),
+                row(
+                    FindDialogField::ContentPattern,
+                    "Containing text",
+                    if find.content_pattern.is_empty() {
+                        String::from("<disabled>")
+                    } else {
+                        find.content_pattern.clone()
+                    },
+                ),
+                row(
+                    FindDialogField::WholeWord,
+                    "Whole words",
+                    checkbox_label(find.whole_word),
+                ),
+                row(
+                    FindDialogField::IgnoredDirectories,
+                    "Ignore dirs (comma)",
+                    if find.ignored_directories.is_empty() {
+                        String::from("<none>")
+                    } else {
+                        find.ignored_directories.clone()
+                    },
+                ),
+            ];
+            frame.render_widget(Paragraph::new(rows).style(normal), layout[0]);
+            frame.render_widget(
+                Paragraph::new(
+                    "Tab/Up/Down field | Space toggle | F2 tree picker\nEnter search | Esc cancel | Empty filename matches all",
+                )
+                .style(skin.style("core", "disabled")),
+                layout[1],
+            );
+        }
+    }
+}
+
+fn checkbox_label(checked: bool) -> String {
+    if checked {
+        String::from("[x]")
+    } else {
+        String::from("[ ]")
     }
 }
 
@@ -1137,11 +1260,26 @@ fn render_find_results_screen(
     let area = centered_rect(frame.area(), 96, 28);
     frame.render_widget(Clear, area);
 
+    let mut title_flags = vec![results.status.label()];
+    if results
+        .report
+        .as_ref()
+        .is_some_and(|report| report.truncated)
+    {
+        title_flags.push("limit reached");
+    }
+    if results
+        .report
+        .as_ref()
+        .is_some_and(|report| report.issue_count > 0)
+    {
+        title_flags.push("read errors");
+    }
     let title = format!(
-        "Find results: '{}' ({}){}",
-        results.query,
+        "Find results: '{}' ({}) | {}",
+        results.spec.display_pattern(),
         results.entries.len(),
-        if results.loading { " | loading..." } else { "" }
+        title_flags.join(", ")
     );
     let block = Block::default()
         .title(title)
@@ -1155,20 +1293,54 @@ fn render_find_results_screen(
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(inner);
 
-    let root = format!("Root: {}", results.base_dir.to_string_lossy());
+    let mut summary = vec![Line::from(format!(
+        "Root: {} | {} | {}",
+        results.spec.start_dir.to_string_lossy(),
+        results.spec.name_mode.label(),
+        if results.spec.case_sensitive {
+            "case-sensitive"
+        } else {
+            "case-insensitive"
+        }
+    ))];
+    let detail = match (&results.status, results.report.as_ref()) {
+        (FindResultsStatus::Failed(message), _) => format!("Error: {message}"),
+        (_, Some(report)) if report.issue_count > 0 => {
+            let first = report.issues.first().map_or_else(
+                || String::from("details unavailable"),
+                |issue| {
+                    format!(
+                        "{}: {} ({})",
+                        issue.kind.label(),
+                        issue.message,
+                        issue.path.to_string_lossy()
+                    )
+                },
+            );
+            format!("Skipped {} item(s); {first}", report.issue_count)
+        }
+        (_, Some(report)) if report.truncated => {
+            format!(
+                "Stopped at the configured {}-result limit",
+                report.matched_entries
+            )
+        }
+        _ => String::new(),
+    };
+    summary.push(Line::from(detail));
     frame.render_widget(
-        Paragraph::new(root).style(skin.style("dialog", "_default_")),
+        Paragraph::new(summary).style(skin.style("dialog", "_default_")),
         layout[0],
     );
 
     let items: Vec<ListItem<'_>> = if results.entries.is_empty() {
-        if results.loading {
+        if results.is_active() {
             vec![ListItem::new("<searching...>")]
         } else {
             vec![ListItem::new("<no matches>")]
@@ -1183,7 +1355,12 @@ fn render_find_results_screen(
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
             .map(|entry| {
-                let mut label = entry.path.to_string_lossy().into_owned();
+                let mut label = entry
+                    .path
+                    .strip_prefix(&results.spec.start_dir)
+                    .unwrap_or(&entry.path)
+                    .to_string_lossy()
+                    .into_owned();
                 if entry.is_dir && !label.ends_with('/') {
                     label.push('/');
                 }
@@ -1216,6 +1393,14 @@ fn render_find_results_screen(
         .keybinding_primary_label(KeyContext::FindResults, AppCommand::FindResultsPanelize)
         .unwrap_or("F5")
         .to_string();
+    let again = app
+        .keybinding_primary_label(KeyContext::FindResults, AppCommand::FindResultsAgain)
+        .unwrap_or("F4")
+        .to_string();
+    let pause = app
+        .keybinding_primary_label(KeyContext::FindResults, AppCommand::FindResultsTogglePause)
+        .unwrap_or("F6")
+        .to_string();
     let cancel = app
         .keybinding_joined_label(KeyContext::FindResults, AppCommand::CancelJob, " / ", 1)
         .unwrap_or_else(|| String::from("Alt-J"));
@@ -1229,7 +1414,7 @@ fn render_find_results_screen(
         .unwrap_or_else(|| String::from("Esc/q"));
     frame.render_widget(
         Paragraph::new(format!(
-            "{open} locate | {panelize} panelize | Up/Down move | PgUp/PgDn | Home/End | {cancel} cancel | {close} close"
+            "{open} locate | {again} again | {panelize} panelize | {pause} pause/continue\nUp/Down/PgUp/PgDn move | {cancel} cancel exact search | {close} close"
         ))
         .style(skin.style("core", "disabled")),
         layout[2],
@@ -2021,6 +2206,72 @@ mod tests {
         let path = env::temp_dir().join(format!("rc-ui-test-{label}-{stamp}"));
         fs::create_dir_all(&path).expect("temp root should be creatable");
         path
+    }
+
+    #[test]
+    fn render_draws_complete_find_form() {
+        let root = temp_root("find-form");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should open");
+
+        let rendered = render_to_text(&app, 120, 40);
+        assert!(rendered.contains("Find file"));
+        assert!(rendered.contains("Starting directory"));
+        assert!(rendered.contains("Filename pattern"));
+        assert!(rendered.contains("Pattern mode"));
+        assert!(rendered.contains("Case sensitive"));
+        assert!(rendered.contains("Containing text"));
+        assert!(rendered.contains("Whole words"));
+        assert!(rendered.contains("Ignore dirs (comma)"));
+        assert!(rendered.contains("F2 tree picker"));
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_find_results_surfaces_partial_and_truncated_state() {
+        let root = temp_root("find-results");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::OpenFindDialog)
+            .expect("find dialog should open");
+        for character in "*.rs".chars() {
+            app.apply(AppCommand::DialogInputChar(character))
+                .expect("find input should succeed");
+        }
+        app.apply(AppCommand::DialogAccept)
+            .expect("find should start");
+        let job_id = app.jobs.last_job().expect("find job should exist").id;
+        app.handle_background_event(BackgroundEvent::FindEntriesChunk {
+            job_id,
+            entries: vec![rc_core::FindResultEntry {
+                path: root.join("match.rs"),
+                is_dir: false,
+            }],
+        });
+        app.handle_background_event(BackgroundEvent::FindCompleted {
+            job_id,
+            report: rc_core::FindSearchReport {
+                matched_entries: 1,
+                issue_count: 1,
+                issues: vec![rc_core::FindSearchIssue {
+                    kind: rc_core::FindSearchIssueKind::ReadDirectory,
+                    path: root.join("denied"),
+                    message: String::from("permission denied"),
+                }],
+                truncated: true,
+                ..rc_core::FindSearchReport::default()
+            },
+        });
+
+        let rendered = render_to_text(&app, 120, 40);
+        assert!(rendered.contains("partial, limit reached, read errors"));
+        assert!(rendered.contains("permission denied"));
+        assert!(rendered.contains("match.rs"));
+        assert!(rendered.contains("again"));
+        assert!(rendered.contains("pause/continue"));
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 
     #[test]
