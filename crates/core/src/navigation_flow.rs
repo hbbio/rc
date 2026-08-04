@@ -978,19 +978,22 @@ impl AppState {
             .configuration
             .hotlist
             .iter()
-            .any(|entry| entry == &cwd)
+            .any(|entry| entry.path == cwd)
         {
             self.hotlist_cursor = self
                 .settings
                 .configuration
                 .hotlist
                 .iter()
-                .position(|entry| entry == &cwd)
+                .position(|entry| entry.path == cwd)
                 .unwrap_or(self.hotlist_cursor);
             self.set_status("Directory already exists in hotlist");
             return;
         }
-        self.settings.configuration.hotlist.push(cwd.clone());
+        self.settings.configuration.hotlist.push(HotlistEntry::new(
+            HotlistEntry::suggested_label(&cwd),
+            cwd.clone(),
+        ));
         self.hotlist_cursor = self.settings.configuration.hotlist.len() - 1;
         self.settings.mark_dirty();
         self.set_status(format!("Added {} to hotlist", cwd.to_string_lossy()));
@@ -1010,12 +1013,12 @@ impl AppState {
         self.settings.mark_dirty();
         self.set_status(format!(
             "Removed {} from hotlist",
-            removed.to_string_lossy()
+            removed.path.to_string_lossy()
         ));
     }
 
     pub(crate) fn open_selected_hotlist_entry(&mut self) -> io::Result<()> {
-        let Some(path) = self
+        let Some(entry) = self
             .settings
             .configuration
             .hotlist
@@ -1026,9 +1029,13 @@ impl AppState {
             return Ok(());
         };
 
-        if self.set_active_panel_directory(path.clone())? {
+        if self.set_active_panel_directory(entry.path.clone())? {
             self.routes.pop();
-            self.set_status(format!("Opened directory {}", path.to_string_lossy()));
+            self.set_status(format!(
+                "Opened {} ({})",
+                entry.label,
+                entry.path.to_string_lossy()
+            ));
         } else {
             self.set_status("Selected hotlist path is not an accessible directory");
         }

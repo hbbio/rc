@@ -1,4 +1,4 @@
-use crate::{OverwritePolicy, Settings, SortField};
+use crate::{HotlistEntry, OverwritePolicy, Settings, SortField};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -210,6 +210,63 @@ fn parse_ini_section_name(line: &str) -> Option<&str> {
     None
 }
 
+fn render_hotlist_entry(entry: &HotlistEntry) -> String {
+    format!(
+        "{}\t{}",
+        escape_hotlist_field(&entry.label),
+        escape_hotlist_field(&entry.path.to_string_lossy())
+    )
+}
+
+fn parse_hotlist_entry(value: &str) -> Option<HotlistEntry> {
+    let (label, path) = value.split_once('\t')?;
+    let label = unescape_hotlist_field(label)?;
+    let path = PathBuf::from(unescape_hotlist_field(path)?);
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if label.is_empty() {
+        Some(HotlistEntry::from_legacy_path(path))
+    } else {
+        Some(HotlistEntry::new(label, path))
+    }
+}
+
+fn escape_hotlist_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            ' ' => escaped.push_str("\\s"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn unescape_hotlist_field(value: &str) -> Option<String> {
+    let mut unescaped = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            unescaped.push(character);
+            continue;
+        }
+        match characters.next()? {
+            '\\' => unescaped.push('\\'),
+            's' => unescaped.push(' '),
+            't' => unescaped.push('\t'),
+            'n' => unescaped.push('\n'),
+            'r' => unescaped.push('\r'),
+            _ => return None,
+        }
+    }
+    Some(unescaped)
+}
+
 fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
     let mut section = String::new();
     let mut saw_configuration_section = false;
@@ -262,12 +319,20 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.configuration.keymap_override = Some(PathBuf::from(value));
                 }
             }
-            ("configuration", "hotlist") => {
+            ("configuration", "hotlist") | ("configuration", "hotlist_entry") => {
                 if !saw_hotlist {
                     settings.configuration.hotlist.clear();
                     saw_hotlist = true;
                 }
-                settings.configuration.hotlist.push(PathBuf::from(value));
+                let entry = if key == "hotlist_entry" {
+                    parse_hotlist_entry(value)
+                } else {
+                    (!value.is_empty())
+                        .then(|| HotlistEntry::from_legacy_path(PathBuf::from(value)))
+                };
+                if let Some(entry) = entry {
+                    settings.configuration.hotlist.push(entry);
+                }
             }
             ("configuration", "panelize_preset") => {
                 if !saw_panelize_presets {
@@ -458,8 +523,8 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     } else {
         lines.push(String::from("keymap_override="));
     }
-    for hotlist in &settings.configuration.hotlist {
-        lines.push(format!("hotlist={}", hotlist.to_string_lossy()));
+    for entry in &settings.configuration.hotlist {
+        lines.push(format!("hotlist_entry={}", render_hotlist_entry(entry)));
     }
     for command in &settings.configuration.panelize_presets {
         lines.push(format!("panelize_preset={command}"));
@@ -673,7 +738,10 @@ skin=default
     #[test]
     fn rc_settings_round_trip_preserves_hotlist_and_presets() {
         let mut settings = Settings::default();
-        settings.configuration.hotlist = vec![PathBuf::from("/tmp"), PathBuf::from("/var")];
+        settings.configuration.hotlist = vec![
+            HotlistEntry::new("Temporary files", PathBuf::from("/tmp")),
+            HotlistEntry::new("Variable data", PathBuf::from("/var")),
+        ];
         settings.configuration.panelize_presets =
             vec![String::from("find . -type f"), String::from("git ls-files")];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
@@ -695,6 +763,30 @@ skin=default
         );
         assert_eq!(parsed.panel_options.sort_field, SortField::Modified);
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
+    }
+
+    #[test]
+    fn legacy_path_only_hotlist_entries_migrate_to_labels() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(&mut settings, "[configuration]\nhotlist=/tmp\nhotlist=/\n");
+
+        assert_eq!(
+            settings.configuration.hotlist,
+            [
+                HotlistEntry::new("/tmp", PathBuf::from("/tmp")),
+                HotlistEntry::new("/", PathBuf::from("/")),
+            ]
+        );
+    }
+
+    #[test]
+    fn hotlist_entry_encoding_round_trips_spaces_tabs_and_backslashes() {
+        let entry = HotlistEntry::new(
+            "Work tree\tprimary",
+            PathBuf::from(r"C:\Users\Example Project"),
+        );
+        let rendered = render_hotlist_entry(&entry);
+        assert_eq!(parse_hotlist_entry(&rendered), Some(entry));
     }
 
     #[test]
@@ -760,7 +852,10 @@ skin=mc-skin
         let rc_ini_path = root.join("settings.ini");
         let mut settings = Settings::default();
         settings.appearance.skin = String::from("xoria256");
-        settings.configuration.hotlist = vec![PathBuf::from("/tmp"), PathBuf::from("/var")];
+        settings.configuration.hotlist = vec![
+            HotlistEntry::new("Temporary files", PathBuf::from("/tmp")),
+            HotlistEntry::new("Variable data", PathBuf::from("/var")),
+        ];
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
 
         save_settings(
@@ -778,7 +873,7 @@ skin=mc-skin
         assert!(mc_ini.contains("skin=xoria256"));
         assert!(rc_ini.contains("[configuration]"));
         assert!(rc_ini.contains("overwrite_policy=rename"));
-        assert!(rc_ini.contains("hotlist=/tmp"));
+        assert!(rc_ini.contains("hotlist_entry=Temporary\\sfiles\t/tmp"));
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
     }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::{OverwritePolicy, SortField};
@@ -68,9 +68,36 @@ pub struct ConfigurationSettings {
     pub default_overwrite_policy: OverwritePolicy,
     pub macos_option_symbols: bool,
     pub editor_command: Option<String>,
-    pub hotlist: Vec<PathBuf>,
+    pub hotlist: Vec<HotlistEntry>,
     pub panelize_presets: Vec<String>,
     pub keymap_override: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HotlistEntry {
+    pub label: String,
+    pub path: PathBuf,
+}
+
+impl HotlistEntry {
+    pub fn new(label: impl Into<String>, path: PathBuf) -> Self {
+        Self {
+            label: label.into(),
+            path,
+        }
+    }
+
+    pub fn from_legacy_path(path: PathBuf) -> Self {
+        let label = path.to_string_lossy().into_owned();
+        Self { label, path }
+    }
+
+    pub fn suggested_label(path: &Path) -> String {
+        path.file_name()
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    }
 }
 
 impl Default for ConfigurationSettings {

@@ -275,7 +275,7 @@ impl AppState {
         self.settings.configuration.default_overwrite_policy = policy;
     }
 
-    pub fn hotlist(&self) -> &[PathBuf] {
+    pub fn hotlist(&self) -> &[HotlistEntry] {
         &self.settings.configuration.hotlist
     }
 

@@ -1611,7 +1611,13 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
             .iter()
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
-            .map(|path| ListItem::new(path.to_string_lossy().into_owned()))
+            .map(|entry| {
+                ListItem::new(format!(
+                    "{}  —  {}",
+                    entry.label,
+                    entry.path.to_string_lossy()
+                ))
+            })
             .collect()
     };
     let list = List::new(items)

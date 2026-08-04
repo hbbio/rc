@@ -63,7 +63,7 @@ pub(crate) use panel::{
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
-    DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
+    DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, HotlistEntry, LayoutSettings, LearnKeysSettings,
     PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, VirtualFsSettings,
 };
 pub use slo::{FOUNDATION_SLO, SloBudgets};
