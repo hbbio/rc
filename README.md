@@ -160,6 +160,11 @@ Notes:
 
 ## Development
 
+Runtime tracing is written to `~/.config/rc/rc.log` instead of the terminal so
+diagnostics cannot corrupt the alternate-screen UI. Set `RC_LOG_FILE` to use a
+different path and `RUST_LOG` to change the default `warn` filter. Logs at or
+above 8 MiB are reset on the next startup.
+
 Run baseline checks locally:
 
 ```bash

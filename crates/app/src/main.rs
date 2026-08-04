@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -23,12 +24,15 @@ use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, Keyma
 use rc_core::settings_io;
 use rc_core::{AppCommand, AppState, ApplyResult, ExternalEditRequest, JobRequest, Settings};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 mod runtime;
 
 use runtime::RuntimeBridge;
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const DEFAULT_LOG_FILE_NAME: &str = "rc.log";
+const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Default)]
 struct MouseClickTracker {
@@ -100,10 +104,18 @@ struct InputCompatibility {
 }
 
 fn main() -> Result<()> {
-    init_tracing();
-
     let cli = Cli::parse();
     let settings_paths = settings_io::settings_paths();
+    let tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
+    if let Some(error) = init_tracing(tracing_log_path.as_deref())
+        && let Some(path) = tracing_log_path.as_deref()
+    {
+        eprintln!(
+            "rc: failed to open tracing log '{}': {error}; logging is disabled",
+            path.display()
+        );
+    }
+
     let mut settings = settings_io::load_settings(&settings_paths).unwrap_or_else(|error| {
         if let Some(path) = settings_paths.rc_ini_path.as_deref() {
             tracing::warn!("failed to read settings '{}': {error}", path.display());
@@ -153,13 +165,80 @@ fn main() -> Result<()> {
     )
 }
 
-fn init_tracing() {
+fn tracing_log_path(
+    settings_paths: &settings_io::SettingsPaths,
+    override_path: Option<OsString>,
+) -> Option<PathBuf> {
+    override_path
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            settings_paths
+                .rc_ini_path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(|directory| directory.join(DEFAULT_LOG_FILE_NAME))
+        })
+}
+
+fn open_tracing_log(path: &Path) -> io::Result<File> {
+    open_tracing_log_with_limit(path, MAX_LOG_FILE_BYTES)
+}
+
+fn open_tracing_log_with_limit(path: &Path, max_bytes: u64) -> io::Result<File> {
+    if max_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "tracing log size limit must be greater than zero",
+        ));
+    }
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "tracing log must be a regular file",
+        )),
+        Ok(metadata) if metadata.len() >= max_bytes => {
+            OpenOptions::new().write(true).truncate(true).open(path)
+        }
+        Ok(_) => OpenOptions::new().append(true).open(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut options = OpenOptions::new();
+            options.create_new(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            options.open(path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn init_tracing(log_path: Option<&Path>) -> Option<io::Error> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let (writer, open_error) = match log_path {
+        Some(path) => match open_tracing_log(path) {
+            Ok(file) => (BoxMakeWriter::new(Mutex::new(file)), None),
+            Err(error) => (BoxMakeWriter::new(io::sink), Some(error)),
+        },
+        None => (BoxMakeWriter::new(io::sink), None),
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(writer)
         .with_target(false)
-        .without_time()
+        .with_ansi(false)
         .try_init();
+    open_error
 }
 
 fn report_keymap_parse_report(state: &mut AppState, report: &KeymapParseReport) {
@@ -998,6 +1077,88 @@ mod tests {
 
     fn test_runtime_bridge() -> RuntimeBridge {
         runtime::test_runtime_bridge_with_capacity(4).0
+    }
+
+    #[test]
+    fn tracing_log_path_defaults_next_to_rc_settings_and_honors_override() {
+        let settings_paths = settings_io::SettingsPaths {
+            mc_ini_path: None,
+            rc_ini_path: Some(PathBuf::from("/config/rc/settings.ini")),
+        };
+
+        assert_eq!(
+            tracing_log_path(&settings_paths, None),
+            Some(PathBuf::from("/config/rc/rc.log"))
+        );
+        assert_eq!(
+            tracing_log_path(&settings_paths, Some(OsString::new())),
+            Some(PathBuf::from("/config/rc/rc.log")),
+            "an empty override should preserve the default"
+        );
+        assert_eq!(
+            tracing_log_path(
+                &settings_paths,
+                Some(OsString::from("/logs/interactive.log")),
+            ),
+            Some(PathBuf::from("/logs/interactive.log"))
+        );
+    }
+
+    #[test]
+    fn tracing_log_appends_and_resets_only_after_reaching_its_limit() {
+        use std::io::Write as _;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after the Unix epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-tracing-log-{stamp}"));
+        let path = root.join("nested/rc.log");
+
+        let mut file = open_tracing_log_with_limit(&path, 12).expect("create tracing log");
+        file.write_all(b"first\n").expect("write first log entry");
+        drop(file);
+
+        let mut file = open_tracing_log_with_limit(&path, 12).expect("reopen tracing log");
+        file.write_all(b"second\n")
+            .expect("append second log entry");
+        drop(file);
+        assert_eq!(
+            fs::read(&path).expect("read appended tracing log"),
+            b"first\nsecond\n"
+        );
+
+        drop(open_tracing_log_with_limit(&path, 12).expect("reset oversized tracing log"));
+        assert!(fs::read(&path).expect("read reset tracing log").is_empty());
+
+        fs::remove_dir_all(root).expect("remove tracing log test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracing_log_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after the Unix epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-tracing-symlink-{stamp}"));
+        fs::create_dir_all(&root).expect("create tracing log test directory");
+        let target = root.join("target.log");
+        let link = root.join("rc.log");
+        fs::write(&target, b"preserve me").expect("create tracing log target");
+        symlink(&target, &link).expect("create tracing log symlink");
+
+        let error = open_tracing_log_with_limit(&link, 1).expect_err("reject tracing log symlink");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            fs::read(&target).expect("read tracing log target"),
+            b"preserve me",
+            "rejecting the symlink must not truncate its target"
+        );
+        fs::remove_dir_all(root).expect("remove tracing log test directory");
     }
 
     #[test]
