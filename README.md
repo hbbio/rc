@@ -1,6 +1,7 @@
 # rc
 
 `rc` is an in-progress Rust TUI file manager inspired by GNU Midnight Commander.
+Already using it as a daily driver.
 
 The goal is MC-compatible behavior and keymaps, with a modern internal architecture that
 keeps the UI responsive while long operations run, without requiring a strict 1:1
@@ -8,21 +9,36 @@ reimplementation of every MC subsystem.
 
 ## Current status
 
-This repository is actively developed and already usable for core workflows.
+This repository is actively developed with AI assistance but human oversight and already
+usable for core workflows.
 
 Implemented milestones:
 
 - Milestone 0: workspace skeleton, app loop, tracing, CLI
 - Milestone 1: dual panels, navigation, sorting, tagging, dialogs
-- Milestone 2: copy/move/mkdir/delete with background jobs and cancel
+- Milestone 2: copy/move/mkdir/delete with background jobs, progress, overwrite
+  policies, and cancellation
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
-- Milestone 4 (partial): find dialog/results, tree, and hotlist
+- Milestone 4 (partial): find dialog/results, tree, hotlist, and external panelize
+  with managed presets
 - Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup
   persistence
 - External editor workflow: deterministic resolution, terminal suspend/resume, command
   templates
 - Product direction update: external-editor-first workflow, command-based diff output,
   optional FTP/SFTP support
+
+Recent foundation and reliability progress:
+
+- Explicit file-entry kinds, shared panel/settings sort types, and context-aware navigation
+  commands reduce invalid state combinations.
+- Dialog routes now carry their own action intent, while the settings model is the session
+  source of truth for skin, overwrite, hotlist, panelize, and panel defaults.
+- File jobs reject recursive copy/move destinations through normalized and symlinked paths,
+  create missing copy roots, honor active and queued cancellation, and finish queued jobs on
+  worker shutdown.
+- External panelize streams bounded process output, caps result counts, supports cancellation,
+  and handles commands that close stdout before exiting.
 
 Planned next major milestones include `mc.ext.ini`, user menu, command-based diff
 integration (`difftastic`/`diff`), optional remote VFS, and subshell integration.
@@ -97,6 +113,7 @@ Main file manager:
 - `Alt-F`, `M-?`, `Ctrl-/`: open find dialog
 - `Alt-T`: open tree
 - `Alt-H`: open hotlist
+- `Alt-P` / `Ctrl-P` or `Ctrl-X` then `!`: open external panelize
 - `q` / `Esc`: quit
 
 Viewer:
@@ -134,9 +151,10 @@ cargo --locked clippy --all-targets --all-features -- -D warnings
 cargo --locked test --all-targets --all-features
 ```
 
-Optional Phase 1 policy/perf checks (requires extra cargo tools):
+Additional local equivalents of CI policy/perf checks (requires extra cargo tools):
 
 ```bash
+cargo +1.88.0 check --workspace --all-targets --locked
 cargo --locked nextest run --workspace --all-targets --all-features
 cargo deny check bans licenses advisories sources
 cargo +nightly udeps --workspace --all-targets --all-features --locked
