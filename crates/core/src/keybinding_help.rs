@@ -194,12 +194,13 @@ impl AppState {
         );
         replacements.insert(
             "fm_quick_cd",
-            self.keybinding_joined_or_fallback(
+            self.keybinding_joined_label(
                 KeyContext::FileManager,
                 AppCommand::OpenQuickCd,
-                "Alt-C",
-                1,
-            ),
+                " or ",
+                2,
+            )
+            .unwrap_or_else(|| String::from("/ or Alt-C")),
         );
         replacements.insert(
             "fm_find",

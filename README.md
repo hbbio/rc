@@ -27,6 +27,9 @@ Implemented milestones:
   templates
 - Product direction update: external-editor-first workflow, command-based diff output,
   optional FTP/SFTP support
+- Deliberate shell-key policy: there is no always-live shell input, so file-manager
+  keys remain available; `/` opens Quick CD and `>` is reserved for a future explicit
+  shell-command prompt
 
 Recent Milestone 4 and reliability progress:
 
@@ -125,7 +128,10 @@ Main file manager:
   `nvim`, `vim`, `vi`, `emacs`)
 - `Space` / `Insert` / `Ctrl-T`: toggle selected item
 - `Backspace`: go to parent directory
-- `Alt-C`: Quick CD (`~`, Unix `~user`, relative/absolute paths, or `-` for previous)
+- `/` or `Alt-C`: Quick CD (`~`, Unix `~user`, relative/absolute paths, or `-` for
+  previous)
+- `>`: reserved for a future explicit shell-command prompt; rc has no always-live shell
+  input
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
 - `Ctrl-J`: open jobs screen
 - `Alt-J`: cancel latest/selected job

@@ -524,10 +524,12 @@ OpenInputDialog = f7
 OpenMenu = f9
 OpenSkinDialog = alt-s; ctrl-k
 OpenFindDialog = alt-f; alt-question; ctrl-slash
+CdQuick = slash; alt-c
 OpenTree = alt-t
 CycleListingFormat = alt-shift-t
 OpenHotlist = alt-h
 OpenPanelizeDialog = alt-p; ctrl-p
+# greater is reserved for rc's future explicit shell-command prompt.
 
 [dialog]
 Ok = enter

@@ -71,6 +71,10 @@ File operations:\n\
 Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
 and - for the previous directory. Quote paths containing spaces.\n\
 \n\
+rc deliberately has no always-live shell input: file-manager keys remain\n\
+available for navigation. > is reserved for a future explicit shell-command\n\
+prompt.\n\
+\n\
 More: [Panel controls](panel-controls), [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
     ),
     (
@@ -594,7 +598,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_switch_panel", String::from("Tab")),
         ("fm_open_entry", String::from("Enter/F3")),
         ("fm_parent", String::from("Backspace")),
-        ("fm_quick_cd", String::from("Alt-C")),
+        ("fm_quick_cd", String::from("/ or Alt-C")),
         ("fm_find", String::from("Alt-F")),
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
@@ -725,7 +729,8 @@ mod tests {
 
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Tab switch panel"));
-        assert!(content.contains("Alt-C quick cd"));
+        assert!(content.contains("/ or Alt-C quick cd"));
+        assert!(content.contains("> is reserved for a future explicit shell-command"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));
         assert!(content.contains("Ctrl-X i show info in the passive panel"));

@@ -1427,6 +1427,15 @@ Reread = ctrl-r
             keymap.resolve(KeyContext::FileManager, alt_c),
             Some(&KeyCommand::QuickCd)
         );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char('/'))),
+            Some(&KeyCommand::QuickCd)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char('>'))),
+            None,
+            "greater-than is reserved for the future shell-command prompt"
+        );
     }
 
     #[test]

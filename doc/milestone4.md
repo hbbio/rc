@@ -64,13 +64,15 @@ deferred; this milestone covers the standalone tree screen.
 
 ## 5. Quick CD
 
-- [x] File-menu and bundled `Alt-C`/`CdQuick` entry points.
+- [x] File-menu and bundled `/` plus `Alt-C`/`CdQuick` entry points.
 - [x] Shell-style quoting for a single path, relative and absolute paths, `.`/`..`
   lexical normalization, current/named-user home expansion on Unix, and per-panel `-`
   history.
 - [x] Invalid input reopens intact with a specific diagnostic; successful navigation
   uses the request-correlated asynchronous panel refresh path.
 - [x] Resolver, menu, keymap, dialog, history, and application dispatch tests.
+- [x] Deliberate shell-key policy: no always-live command input, leaving file-manager
+  keys available; `>` is reserved for a future explicit shell-command prompt.
 
 ## 6. Core Left/Right panel controls
 
