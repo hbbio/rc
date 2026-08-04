@@ -40,6 +40,7 @@ pub use background::{
 };
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FindDialogField, FindDialogState,
+    PairInputDialogState, PairInputField,
 };
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,

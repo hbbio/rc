@@ -14,8 +14,8 @@ use rc_core::keymap::KeyContext;
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
-    JobStatus, MenuState, PanelState, Route, SettingsScreenState, TreeLoadState, TreeState,
-    ViewerState, top_menus,
+    JobStatus, MenuState, PairInputField, PanelState, Route, SettingsScreenState, TreeLoadState,
+    TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1040,6 +1040,64 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 Paragraph::new("Type text | Enter accept | Backspace delete | Esc cancel")
                     .style(skin.style("core", "disabled")),
                 layout[2],
+            );
+        }
+        DialogKind::PairInput(input) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            let field_block = |focused| {
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(skin.panel_border_set())
+                    .border_style(if focused {
+                        skin.style("dialog", "dfocus")
+                    } else {
+                        skin.style("dialog", "_default_")
+                    })
+                    .style(skin.style("core", "input"))
+            };
+
+            frame.render_widget(
+                Paragraph::new(input.first_prompt.as_str())
+                    .style(skin.style("dialog", "_default_")),
+                layout[0],
+            );
+            frame.render_widget(
+                Paragraph::new(input.first_value.as_str())
+                    .block(field_block(input.focus == PairInputField::First)),
+                layout[1],
+            );
+            frame.render_widget(
+                Paragraph::new(input.second_prompt.as_str())
+                    .style(skin.style("dialog", "_default_")),
+                layout[2],
+            );
+            frame.render_widget(
+                Paragraph::new(input.second_value.as_str())
+                    .block(field_block(input.focus == PairInputField::Second)),
+                layout[3],
+            );
+            frame.render_widget(
+                Paragraph::new("Type text | Tab next field | Enter accept | Esc cancel")
+                    .style(skin.style("core", "disabled")),
+                layout[4],
             );
         }
         DialogKind::Listbox(listbox) => {
@@ -2085,6 +2143,10 @@ mod tests {
 
     fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
         let buffer = render_to_buffer(state, width, height);
+        buffer_to_text(&buffer)
+    }
+
+    fn buffer_to_text(buffer: &Buffer) -> String {
         let area = buffer.area;
         let mut out = String::new();
         for y in 0..area.height {
@@ -2233,6 +2295,24 @@ mod tests {
         assert!(rendered.contains("F2 tree picker"));
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_draws_pair_input_fields_and_values() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let dialog =
+            DialogState::pair_input("Edit entry", "Name:", "Documentation", "Path:", "/tmp/docs");
+        terminal
+            .draw(|frame| render_dialog(frame, &dialog, current_skin().as_ref()))
+            .expect("dialog should render");
+        let rendered = buffer_to_text(terminal.backend().buffer());
+        assert!(rendered.contains("Edit entry"));
+        assert!(rendered.contains("Name:"));
+        assert!(rendered.contains("Documentation"));
+        assert!(rendered.contains("Path:"));
+        assert!(rendered.contains("/tmp/docs"));
+        assert!(rendered.contains("Tab next field"));
     }
 
     #[test]

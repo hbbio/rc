@@ -28,6 +28,40 @@ pub struct InputDialogState {
     pub value: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PairInputField {
+    #[default]
+    First,
+    Second,
+}
+
+impl PairInputField {
+    fn toggle(&mut self) {
+        *self = match self {
+            Self::First => Self::Second,
+            Self::Second => Self::First,
+        };
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairInputDialogState {
+    pub first_prompt: String,
+    pub first_value: String,
+    pub second_prompt: String,
+    pub second_value: String,
+    pub focus: PairInputField,
+}
+
+impl PairInputDialogState {
+    fn focused_value_mut(&mut self) -> &mut String {
+        match self.focus {
+            PairInputField::First => &mut self.first_value,
+            PairInputField::Second => &mut self.second_value,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ListboxDialogState {
     pub items: Vec<String>,
@@ -184,6 +218,7 @@ impl FindDialogState {
 pub enum DialogKind {
     Confirm(ConfirmDialogState),
     Input(InputDialogState),
+    PairInput(PairInputDialogState),
     Listbox(ListboxDialogState),
     Find(FindDialogState),
 }
@@ -215,6 +250,25 @@ impl DialogState {
             kind: DialogKind::Input(InputDialogState {
                 prompt: prompt.into(),
                 value: initial_value.into(),
+            }),
+        }
+    }
+
+    pub fn pair_input(
+        title: impl Into<String>,
+        first_prompt: impl Into<String>,
+        first_value: impl Into<String>,
+        second_prompt: impl Into<String>,
+        second_value: impl Into<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            kind: DialogKind::PairInput(PairInputDialogState {
+                first_prompt: first_prompt.into(),
+                first_value: first_value.into(),
+                second_prompt: second_prompt.into(),
+                second_value: second_value.into(),
+                focus: PairInputField::First,
             }),
         }
     }
@@ -261,7 +315,7 @@ impl DialogState {
     pub fn key_context(&self) -> KeyContext {
         match self.kind {
             DialogKind::Confirm(_) => KeyContext::Dialog,
-            DialogKind::Input(_) => KeyContext::Input,
+            DialogKind::Input(_) | DialogKind::PairInput(_) => KeyContext::Input,
             DialogKind::Listbox(_) => KeyContext::Listbox,
             DialogKind::Find(_) => KeyContext::FindDialog,
         }
@@ -295,6 +349,26 @@ impl DialogState {
                 DialogEvent::Accept => {
                     DialogTransition::Close(DialogResult::InputSubmitted(input.value.clone()))
                 }
+                DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
+                _ => DialogTransition::Stay,
+            },
+            DialogKind::PairInput(input) => match event {
+                DialogEvent::FocusNext => {
+                    input.focus.toggle();
+                    DialogTransition::Stay
+                }
+                DialogEvent::InsertChar(ch) => {
+                    input.focused_value_mut().push(ch);
+                    DialogTransition::Stay
+                }
+                DialogEvent::Backspace => {
+                    input.focused_value_mut().pop();
+                    DialogTransition::Stay
+                }
+                DialogEvent::Accept => DialogTransition::Close(DialogResult::PairInputSubmitted {
+                    first: input.first_value.clone(),
+                    second: input.second_value.clone(),
+                }),
                 DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
                 _ => DialogTransition::Stay,
             },
@@ -374,6 +448,10 @@ pub enum DialogResult {
     ConfirmAccepted,
     ConfirmDeclined,
     InputSubmitted(String),
+    PairInputSubmitted {
+        first: String,
+        second: String,
+    },
     ListboxSubmitted {
         index: Option<usize>,
         value: Option<String>,
@@ -388,6 +466,9 @@ impl DialogResult {
             Self::ConfirmAccepted => String::from("Dialog accepted"),
             Self::ConfirmDeclined => String::from("Dialog canceled"),
             Self::InputSubmitted(value) => format!("Input accepted: {value}"),
+            Self::PairInputSubmitted { first, second } => {
+                format!("Input accepted: {first}, {second}")
+            }
             Self::ListboxSubmitted { index: _, value } => match value {
                 Some(value) => format!("Listbox accepted: {value}"),
                 None => String::from("Listbox accepted: <empty>"),
@@ -459,6 +540,40 @@ mod tests {
         assert_eq!(
             dialog.handle_event(DialogEvent::Accept),
             DialogTransition::Close(DialogResult::InputSubmitted(String::from("ac")))
+        );
+    }
+
+    #[test]
+    fn pair_input_dialog_edits_each_field_and_accepts_both() {
+        let mut dialog = DialogState::pair_input("Entry", "Name:", "old", "Value:", "");
+        assert_eq!(dialog.key_context(), KeyContext::Input);
+        assert_eq!(
+            dialog.handle_event(DialogEvent::InsertChar('!')),
+            DialogTransition::Stay
+        );
+        assert_eq!(
+            dialog.handle_event(DialogEvent::FocusNext),
+            DialogTransition::Stay
+        );
+        assert_eq!(
+            dialog.handle_event(DialogEvent::InsertChar('x')),
+            DialogTransition::Stay
+        );
+        assert_eq!(
+            dialog.handle_event(DialogEvent::Backspace),
+            DialogTransition::Stay
+        );
+        assert_eq!(
+            dialog.handle_event(DialogEvent::InsertChar('y')),
+            DialogTransition::Stay
+        );
+
+        assert_eq!(
+            dialog.handle_event(DialogEvent::Accept),
+            DialogTransition::Close(DialogResult::PairInputSubmitted {
+                first: String::from("old!"),
+                second: String::from("y"),
+            })
         );
     }
 
