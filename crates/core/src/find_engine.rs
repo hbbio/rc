@@ -365,8 +365,8 @@ impl CompiledFindSpec {
         if target_is_directory {
             return Ok(false);
         }
-        if !file_type.is_file()
-            && !(file_type.is_symlink()
+        if !(file_type.is_file()
+            || file_type.is_symlink()
                 && fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
         {
             return Ok(false);
