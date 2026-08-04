@@ -233,6 +233,52 @@ impl AppState {
             self.xmap_sequence_or_fallback(AppCommand::HotlistAddCurrentDirectory, "Ctrl-X H"),
         );
         replacements.insert(
+            "fm_panel_info",
+            self.xmap_sequence_or_fallback(
+                AppCommand::SetOtherPanelView(crate::PanelViewMode::Info),
+                "Ctrl-X i",
+            ),
+        );
+        replacements.insert(
+            "fm_panel_quick_view",
+            self.xmap_sequence_or_fallback(
+                AppCommand::SetOtherPanelView(crate::PanelViewMode::QuickView),
+                "Ctrl-X q",
+            ),
+        );
+        replacements.insert(
+            "fm_cycle_listing",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::CycleListingFormat,
+                "Alt-Shift-T",
+            ),
+        );
+        replacements.insert(
+            "fm_open_menu",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenMenu,
+                "F9",
+            ),
+        );
+        replacements.insert(
+            "fm_sort_next",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::SortNext,
+                "Shift-F6",
+            ),
+        );
+        replacements.insert(
+            "fm_sort_reverse",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::SortReverse,
+                "Shift-F8",
+            ),
+        );
+        replacements.insert(
             "fm_external_panelize",
             format!(
                 "{} (or {})",

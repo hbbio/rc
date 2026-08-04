@@ -20,7 +20,7 @@ Implemented milestones:
   policies, and cancellation
 - Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
 - Milestone 4: complete find workflow, directory tree, labeled hotlist, external/find
-  panelize, Quick CD, and mouse interaction
+  panelize, Quick CD, mouse interaction, and core Left/Right panel controls
 - Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup
   persistence
 - External editor workflow: deterministic resolution, terminal suspend/resume, command
@@ -44,6 +44,16 @@ Recent Milestone 4 and reliability progress:
   `cd -` history.
 - Find results, tree, hotlist, and panelize preset lists support click selection and double-click
   activation from a renderer-shared hit-test layout.
+- Left/Right menus provide targeted File listing, Quick view, Info, Tree, Panelize, and Rescan
+  actions; persisted Full/Brief/Long formats, complete sort fields, and glob/regex filters are
+  independent for each panel.
+- Quick view uses cancelable request-correlated background reads. Listing filters preserve hidden
+  tags and selection where possible, and reuse cached panelized results instead of rerunning a
+  command.
+
+The remaining inactive Left/Right entries are explicitly later work: user-defined listing
+formats in Milestone 5, FTP/SFTP in Milestone 8, Shell links in Milestone 9, and lossless legacy
+filename transcoding in Milestone 10.
 
 Planned next major milestones include `mc.ext.ini`, user menu, command-based diff
 integration (`difftastic`/`diff`), optional remote VFS, and subshell integration.
@@ -120,6 +130,10 @@ Main file manager:
 - `Alt-T`: open tree
 - `Alt-H`: open hotlist
 - `Alt-P` / `Ctrl-P` or `Ctrl-X` then `!`: open external panelize
+- `F9`: open menus; Left/Right configure either panel's view, format, sort, and filter
+- `Ctrl-X i` / `Ctrl-X q`: show Info / Quick view in the passive panel
+- `Alt-Shift-T`: cycle Full, Brief, and Long formats on the active panel
+- `Shift-F6` / `Shift-F8`: cycle sort field / toggle reverse order
 - `q` / `Esc`: quit
 
 Milestone 4 screens:

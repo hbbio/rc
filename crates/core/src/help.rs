@@ -15,6 +15,7 @@ const HELP_NODE_SPECS: &[(&str, &str, &str)] = &[
 Choose a topic:\n\
   [General movement keys](help-viewer)\n\
   [File manager](file-manager)\n\
+  [Panel controls](panel-controls)\n\
   [Options and setup](options)\n\
   [Viewer](viewer)\n\
   [Jobs screen](jobs)\n\
@@ -54,6 +55,9 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_hotlist_add}} add current directory to hotlist\n\
   {{fm_external_panelize}} open external panelize\n\
   {{fm_external_panelize_menu}} -> Command -> External panelize\n\
+  {{fm_panel_info}} show info in the passive panel\n\
+  {{fm_panel_quick_view}} quick-view the selection in the passive panel\n\
+  {{fm_cycle_listing}} cycle Full/Brief/Long listing formats\n\
   {{fm_open_jobs}} open jobs screen\n\
   {{fm_cancel_job}} cancel latest job\n\
   {{fm_skin}} open skin picker\n\
@@ -67,7 +71,35 @@ File operations:\n\
 Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
 and - for the previous directory. Quote paths containing spaces.\n\
 \n\
-More: [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
+More: [Panel controls](panel-controls), [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
+    ),
+    (
+        "panel-controls",
+        "Panel Controls",
+        "Use {{fm_open_menu}} -> Left or Right to configure either panel directly.\n\
+\n\
+Views:\n\
+  File listing returns the target panel to its current directory.\n\
+  Quick view loads the other panel's selection asynchronously.\n\
+  Info tracks metadata and filesystem data for the other selection.\n\
+  {{fm_panel_quick_view}} and {{fm_panel_info}} target the passive panel.\n\
+\n\
+Listing:\n\
+  Full, Brief, and Long formats are independent and persisted per panel.\n\
+  {{fm_cycle_listing}} cycles the active panel's format.\n\
+  Sort order supports name, version, extension, times, size, inode,\n\
+  and unsorted discovery order, with an independent reverse toggle.\n\
+  {{fm_sort_next}} cycles sort fields; {{fm_sort_reverse}} toggles reverse.\n\
+\n\
+Filter accepts a shell pattern or regular expression. Files-only mode\n\
+keeps directories visible; matching can be case-sensitive or insensitive.\n\
+Filters are independent and persisted per panel. An empty pattern disables\n\
+the filter. Cached panelized results are filtered without rerunning commands.\n\
+\n\
+Encoding and remote-link entries remain unavailable until their dedicated\n\
+path, VFS, and subshell milestones.\n\
+\n\
+Back to [File manager](file-manager) or [Panelize and VFS](panelize).",
     ),
     (
         "options",
@@ -567,6 +599,12 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
         ("fm_hotlist_add", String::from("Ctrl-X H")),
+        ("fm_panel_info", String::from("Ctrl-X i")),
+        ("fm_panel_quick_view", String::from("Ctrl-X q")),
+        ("fm_cycle_listing", String::from("Alt-Shift-T")),
+        ("fm_open_menu", String::from("F9")),
+        ("fm_sort_next", String::from("Shift-F6")),
+        ("fm_sort_reverse", String::from("Shift-F8")),
         (
             "fm_external_panelize",
             String::from("Ctrl-X ! (or Alt/Ctrl-P)"),
@@ -690,7 +728,23 @@ mod tests {
         assert!(content.contains("Alt-C quick cd"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));
+        assert!(content.contains("Ctrl-X i show info in the passive panel"));
+        assert!(content.contains("Alt-Shift-T cycle Full/Brief/Long listing formats"));
         assert!(content.contains("q/F10 quit"));
+    }
+
+    #[test]
+    fn panel_controls_help_covers_views_listing_sorting_and_filters() {
+        let mut help = HelpState::for_context(KeyContext::FileManager);
+        help.open_topic("panel-controls", false);
+
+        let content = flatten_help_lines(help.lines());
+        assert!(content.contains("F9 -> Left or Right"));
+        assert!(content.contains("Quick view loads the other panel's selection asynchronously"));
+        assert!(content.contains("Full, Brief, and Long formats"));
+        assert!(content.contains("Shift-F6 cycles sort fields"));
+        assert!(content.contains("shell pattern or regular expression"));
+        assert!(content.contains("without rerunning commands"));
     }
 
     #[test]

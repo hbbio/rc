@@ -72,7 +72,24 @@ deferred; this milestone covers the standalone tree screen.
   uses the request-correlated asynchronous panel refresh path.
 - [x] Resolver, menu, keymap, dialog, history, and application dispatch tests.
 
-## 6. Cross-cutting acceptance
+## 6. Core Left/Right panel controls
+
+- [x] Targeted File listing, Quick view, Info, Tree, Panelize restore, and Rescan actions
+  for either panel, including MC-compatible passive-panel `Ctrl-X i` and `Ctrl-X q`.
+- [x] Request-correlated, cancelable Quick view loading with coalescing and stale-result
+  rejection as the selection changes.
+- [x] Persisted Full, Brief, and Long listing formats for each panel, responsive Brief
+  columns, full-width Long metadata, and active-panel `Alt-Shift-T` cycling.
+- [x] Name, version, extension, modification/access/change time, size, inode, and
+  unsorted discovery-order sorting, with directory partitioning and reverse order.
+- [x] Persisted per-panel shell-pattern or regular-expression filters with files-only
+  and case-sensitivity controls, compiled once per refresh.
+- [x] Filtering preserves visible selection and hidden tags, rejects stale background
+  results, and filters cached panelize/find results without rerunning their source.
+- [x] Bundled and custom MC keymap actions reach listing-format, sort, and filter
+  controls without being reported as unknown.
+
+## 7. Cross-cutting acceptance
 
 - [x] Mouse click selection and double-click activation for find results, tree,
   hotlist, and panelize preset lists.
@@ -94,3 +111,13 @@ iterative and cancellation-aware; tree navigation is index-backed; panelize outp
 bounded and adaptively streamed; every asynchronous result is correlated to the request
 that owns it. Rendering and mouse hit-testing share the same geometry and visible-window
 algorithm, eliminating a common class of TUI interaction drift.
+
+## Explicitly deferred side-menu scope
+
+- User-defined listing-format grammar belongs to Milestone 5's configuration/parser
+  work; Milestone 4 includes the three fixed MC formats.
+- Per-panel legacy filename transcoding belongs to Milestone 10. It first requires a
+  lossless filename representation instead of converting OS names to `String` during
+  directory reads.
+- FTP and SFTP links remain Milestone 8 optional remote VFS work. Shell links remain
+  Milestone 9 subshell/PTY work.

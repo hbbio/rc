@@ -603,11 +603,14 @@ Pick early; it impacts packaging and contributor expectations.
 * Hotlist CRUD.
 * External panelize.
 * Quick CD, including home and previous-directory expansion.
+* Core Left/Right controls: Info and Quick view, fixed listing formats, complete sort
+  fields, and persisted per-panel filters.
 
 ### Milestone 5: Extension rules and user menu
 
 * `mc.ext.ini` engine: Open/View/Edit behaviors and scheme dispatch. ([GitHub][3])
 * `mc.menu` parser and user menu screen, macro engine, `%view{...}` piping to internal viewer. ([GitHub][4])
+* User-defined panel listing-format grammar and persistence.
 
 ### Milestone 6: External editor workflow
 
@@ -633,6 +636,8 @@ Pick early; it impacts packaging and contributor expectations.
 ### Milestone 10: Cross-platform hardening
 
 * Windows terminal support under crossterm, path and permission model differences.
+* Lossless non-UTF-8 filename representation and optional per-panel legacy-charset
+  transcoding.
 * Optional: Windows-specific shell integration.
 
 ## 16. Key modernization extras (kept off by default or behind new bindings)
