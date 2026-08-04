@@ -11,7 +11,7 @@ use rc_core::{
     PanelListingSource, PanelRefreshStreamRequest, WorkerCommand, build_tree_ready_event,
     execute_worker_job, read_disk_usage, run_find_entries, stream_refresh_panel_entries,
 };
-use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
+use tokio::sync::{Semaphore, mpsc as tokio_mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -71,6 +71,8 @@ struct WorkerTaskSpec {
     limit: Arc<Semaphore>,
     runtime_shutdown: CancellationToken,
     job_cancel: CancellationToken,
+    run_after: Option<oneshot::Receiver<()>>,
+    notify_next: Option<oneshot::Sender<()>>,
     worker_class: &'static str,
     worker_job: rc_core::WorkerJob,
     worker_event_tx: Sender<JobEvent>,
@@ -406,6 +408,7 @@ async fn run_runtime_loop(
     let background_scan_limit = Arc::new(Semaphore::new(SCAN_CONCURRENCY_LIMIT));
     let background_process_limit = Arc::new(Semaphore::new(PROCESS_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
+    let mut settings_sequence_tail = None;
     let mut worker_cancellations = HashMap::<JobId, WorkerCancellation>::new();
     let mut tasks = JoinSet::new();
 
@@ -473,6 +476,17 @@ async fn run_runtime_loop(
                         } else {
                             CancellationToken::new()
                         };
+                        let (run_after, notify_next) = if matches!(
+                            &worker_job.request,
+                            JobRequest::PersistSettings { .. }
+                        ) {
+                            let run_after = settings_sequence_tail.take();
+                            let (notify_next, next_tail) = oneshot::channel();
+                            settings_sequence_tail = Some(next_tail);
+                            (run_after, Some(notify_next))
+                        } else {
+                            (None, None)
+                        };
                         worker_cancellations.insert(
                             job_id,
                             WorkerCancellation {
@@ -487,6 +501,8 @@ async fn run_runtime_loop(
                                 limit,
                                 runtime_shutdown,
                                 job_cancel,
+                                run_after,
+                                notify_next,
                                 worker_class,
                                 worker_job,
                                 worker_event_tx: worker_event_tx.clone(),
@@ -560,6 +576,8 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
         limit,
         runtime_shutdown,
         job_cancel,
+        run_after,
+        notify_next,
         worker_class,
         worker_job,
         worker_event_tx,
@@ -569,6 +587,10 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
     let job_id = worker_job.id;
     let job_kind = worker_job.request.kind().label();
     tasks.spawn(async move {
+        let _sequence_completion = SequenceCompletion::new(notify_next);
+        if let Some(predecessor) = run_after {
+            let _ = predecessor.await;
+        }
         let permit = tokio::select! {
             _ = runtime_shutdown.cancelled() => {
                 tracing::debug!(
@@ -671,6 +693,22 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
         }
         TaskCompletion::Worker { job_id }
     });
+}
+
+struct SequenceCompletion(Option<oneshot::Sender<()>>);
+
+impl SequenceCompletion {
+    fn new(sender: Option<oneshot::Sender<()>>) -> Self {
+        Self(sender)
+    }
+}
+
+impl Drop for SequenceCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 fn execute_runtime_worker_job(
@@ -1605,12 +1643,11 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_allows_persist_settings_jobs_to_finish() {
+    fn shutdown_finishes_persist_settings_jobs_in_submission_order() {
         let root = make_temp_dir("shutdown-persist-settings");
-        let rc_ini_path = root.join("settings.ini");
         let settings_paths = settings_io::SettingsPaths {
             mc_ini_path: None,
-            rc_ini_path: Some(rc_ini_path.clone()),
+            rc_ini_path: Some(root.join("settings.ini")),
         };
 
         let state = AppState::new(root.clone()).expect("app should initialize");
@@ -1652,7 +1689,15 @@ mod tests {
                 JobEvent::Finished { id, result } => {
                     finished.insert(id, result);
                 }
-                JobEvent::Started { .. } | JobEvent::Progress { .. } => {}
+                JobEvent::Started { id } => {
+                    if id == second_job_id {
+                        assert!(
+                            finished.contains_key(&first_job_id),
+                            "serialized settings jobs must start in submission order"
+                        );
+                    }
+                }
+                JobEvent::Progress { .. } => {}
             }
         }
         assert!(
@@ -1667,7 +1712,12 @@ mod tests {
         runtime_handle
             .join()
             .expect("runtime loop thread should terminate cleanly");
-        assert!(rc_ini_path.exists(), "persisted settings file should exist");
+        let saved_settings =
+            settings_io::load_settings(&settings_paths).expect("persisted settings should load");
+        assert_eq!(
+            saved_settings.appearance.skin, second_snapshot.appearance.skin,
+            "the latest submitted settings snapshot must win"
+        );
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 
