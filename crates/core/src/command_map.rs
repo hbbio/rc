@@ -29,6 +29,14 @@ impl AppCommand {
             }
             (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
+            (KeyContext::FileManager, KeyCommand::CycleListingFormat) => {
+                Some(Self::CycleListingFormat)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenListingFormat) => {
+                Some(Self::OpenListingFormat)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenSortOrder) => Some(Self::OpenSortOrder),
+            (KeyContext::FileManager, KeyCommand::OpenPanelFilter) => Some(Self::OpenPanelFilter),
             (KeyContext::FileManager, KeyCommand::SortNext) => Some(Self::SortNext),
             (KeyContext::FileManager, KeyCommand::SortReverse) => Some(Self::SortReverse),
             (KeyContext::FileManager, KeyCommand::Copy) => Some(Self::Copy),

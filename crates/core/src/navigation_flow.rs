@@ -51,6 +51,11 @@ impl AppState {
                 let count = self.active_panel().tagged_count();
                 self.set_status(format!("Inverted tags ({count} selected)"));
             }
+            AppCommand::CycleListingFormat => {
+                let panel = self.active_panel;
+                let format = self.panel_listing_format(panel).next();
+                self.set_panel_listing_format(panel, format);
+            }
             AppCommand::SortNext => {
                 let panel = self.active_panel;
                 let mut sort_mode = self.panels[panel.index()].sort_mode;

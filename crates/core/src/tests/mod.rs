@@ -1212,6 +1212,37 @@ fn listing_format_dialog_updates_only_its_named_panel() {
 }
 
 #[test]
+fn listing_format_shortcut_cycles_the_active_panel_only() {
+    let root = env::temp_dir().join(format!(
+        "rc-listing-format-cycle-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = app_with_loaded_panels(root.clone());
+    app.active_panel = ActivePanel::Right;
+
+    for expected in [
+        PanelListingFormat::Brief,
+        PanelListingFormat::Long,
+        PanelListingFormat::Full,
+    ] {
+        app.apply(AppCommand::CycleListingFormat)
+            .expect("listing format should cycle");
+        assert_eq!(app.panel_listing_format(ActivePanel::Right), expected);
+        assert_eq!(
+            app.panel_listing_format(ActivePanel::Left),
+            PanelListingFormat::Full
+        );
+    }
+
+    assert!(app.settings().save_setup.dirty);
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
 fn sort_order_dialog_applies_field_and_reverse_to_only_its_named_panel() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

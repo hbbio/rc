@@ -129,6 +129,10 @@ pub enum AppCommand {
     Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
     InvertTags,
+    CycleListingFormat,
+    OpenListingFormat,
+    OpenSortOrder,
+    OpenPanelFilter,
     SortNext,
     SortReverse,
     Copy,
@@ -249,6 +253,14 @@ impl PanelListingFormat {
         }
     }
 
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Full => Self::Brief,
+            Self::Brief => Self::Long,
+            Self::Long => Self::Full,
+        }
+    }
+
     const fn index(self) -> usize {
         match self {
             Self::Full => 0,
@@ -359,6 +371,7 @@ impl AppCommand {
                 | PanelCommand::Reread,
             )
             | Self::InvertTags
+            | Self::CycleListingFormat
             | Self::SortNext
             | Self::SortReverse
             | Self::Copy
@@ -404,6 +417,9 @@ impl AppCommand {
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
+            | Self::OpenListingFormat
+            | Self::OpenSortOrder
+            | Self::OpenPanelFilter
             | Self::Panel(
                 _,
                 PanelCommand::OpenListingFormat

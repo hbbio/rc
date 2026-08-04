@@ -130,6 +130,10 @@ pub enum KeyCommand {
     ToggleNavigation,
     ToggleTag,
     InvertTags,
+    CycleListingFormat,
+    OpenListingFormat,
+    OpenSortOrder,
+    OpenPanelFilter,
     SortNext,
     SortReverse,
     Copy,
@@ -219,6 +223,10 @@ impl KeyCommand {
             "togglenavigation" | "staticdynamic" => Self::ToggleNavigation,
             "toggletag" | "mark" => Self::ToggleTag,
             "inverttags" | "markinverse" => Self::InvertTags,
+            "cyclelistingformat" => Self::CycleListingFormat,
+            "setuplistingformat" | "setuplistformat" => Self::OpenListingFormat,
+            "sort" => Self::OpenSortOrder,
+            "filter" => Self::OpenPanelFilter,
             "sortnext" => Self::SortNext,
             "sortreverse" => Self::SortReverse,
             "copy" | "filecopy" => Self::Copy,
@@ -1056,6 +1064,44 @@ Skin = alt-s
     }
 
     #[test]
+    fn parser_maps_panel_listing_control_actions() {
+        let source = r#"
+[panel]
+CycleListingFormat = alt-t
+SetupListingFormat = alt-l
+Sort = alt-s
+Filter = alt-f
+"#;
+
+        let keymap = Keymap::parse(source).expect("keymap should parse");
+        let alt = |ch| KeyChord {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        };
+
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('t')),
+            Some(&KeyCommand::CycleListingFormat)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('l')),
+            Some(&KeyCommand::OpenListingFormat)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('s')),
+            Some(&KeyCommand::OpenSortOrder)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, alt('f')),
+            Some(&KeyCommand::OpenPanelFilter)
+        );
+    }
+
+    #[test]
     fn parser_maps_options_action_names() {
         let source = r#"
 [filemanager]
@@ -1487,6 +1533,7 @@ Reread = ctrl-r
             "ToggleNavigation",
             "PanelInfo",
             "PanelQuickView",
+            "CycleListingFormat",
         ] {
             assert!(
                 !report

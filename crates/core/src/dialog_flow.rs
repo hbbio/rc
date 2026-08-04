@@ -16,6 +16,11 @@ impl AppState {
             AppCommand::OpenQuickCd => self.start_quick_cd_dialog(),
             AppCommand::OpenListboxDialog => self.start_overwrite_policy_dialog(),
             AppCommand::OpenSkinDialog => self.start_skin_dialog(),
+            AppCommand::OpenListingFormat => {
+                self.open_panel_listing_format_dialog(self.active_panel)
+            }
+            AppCommand::OpenSortOrder => self.open_panel_sort_order_dialog(self.active_panel),
+            AppCommand::OpenPanelFilter => self.open_panel_filter_dialog(self.active_panel),
             AppCommand::Panel(panel, PanelCommand::OpenListingFormat) => {
                 self.open_panel_listing_format_dialog(panel)
             }

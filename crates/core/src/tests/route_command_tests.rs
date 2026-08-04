@@ -798,6 +798,22 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::SortNext)
     );
     assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CycleListingFormat),
+        Some(AppCommand::CycleListingFormat)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenListingFormat),
+        Some(AppCommand::OpenListingFormat)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenSortOrder),
+        Some(AppCommand::OpenSortOrder)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenPanelFilter),
+        Some(AppCommand::OpenPanelFilter)
+    );
+    assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::Copy),
         Some(AppCommand::Copy)
     );
