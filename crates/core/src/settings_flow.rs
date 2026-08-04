@@ -75,7 +75,7 @@ impl AppState {
                 ),
                 SettingsEntry::new(
                     "Default overwrite policy",
-                    self.overwrite_policy.label(),
+                    self.overwrite_policy().label(),
                     SettingsEntryAction::CycleDefaultOverwritePolicy,
                 ),
                 SettingsEntry::new(
@@ -95,12 +95,12 @@ impl AppState {
                 ),
                 SettingsEntry::new(
                     "Hotlist entries",
-                    self.hotlist.len().to_string(),
+                    self.hotlist().len().to_string(),
                     SettingsEntryAction::Info,
                 ),
                 SettingsEntry::new(
                     "Panelize presets",
-                    self.panelize_presets.len().to_string(),
+                    self.panelize_presets().len().to_string(),
                     SettingsEntryAction::Info,
                 ),
             ],
@@ -141,11 +141,7 @@ impl AppState {
                 ),
                 SettingsEntry::new(
                     "Default sort field",
-                    match self.settings.panel_options.sort_field {
-                        SettingsSortField::Name => "name",
-                        SettingsSortField::Size => "size",
-                        SettingsSortField::Modified => "mtime",
-                    },
+                    self.settings.panel_options.sort_field.label(),
                     SettingsEntryAction::CyclePanelSortField,
                 ),
                 SettingsEntry::new(
@@ -174,7 +170,7 @@ impl AppState {
             SettingsCategory::Appearance => vec![
                 SettingsEntry::new(
                     "Skin...",
-                    self.active_skin_name.clone(),
+                    self.active_skin_name().to_string(),
                     SettingsEntryAction::OpenSkinDialog,
                 ),
                 SettingsEntry::new(
@@ -292,12 +288,12 @@ impl AppState {
 
         match entry.action {
             SettingsEntryAction::CycleDefaultOverwritePolicy => {
-                self.overwrite_policy = next_overwrite_policy(self.overwrite_policy);
-                self.settings.configuration.default_overwrite_policy = self.overwrite_policy;
+                let policy = next_overwrite_policy(self.overwrite_policy());
+                self.set_overwrite_policy(policy);
                 self.settings.mark_dirty();
                 self.set_status(format!(
                     "Default overwrite policy: {}",
-                    self.overwrite_policy.label()
+                    self.overwrite_policy().label()
                 ));
             }
             SettingsEntryAction::ToggleMacosOptionSymbols => {
@@ -368,7 +364,7 @@ impl AppState {
             }
             SettingsEntryAction::CyclePanelSortField => {
                 self.settings.panel_options.sort_field =
-                    next_settings_sort_field(self.settings.panel_options.sort_field);
+                    self.settings.panel_options.sort_field.next();
                 let sort_mode = self.default_panel_sort_mode();
                 for panel in &mut self.panels {
                     panel.sort_mode = sort_mode;
@@ -486,14 +482,6 @@ fn next_overwrite_policy(policy: OverwritePolicy) -> OverwritePolicy {
         OverwritePolicy::Overwrite => OverwritePolicy::Skip,
         OverwritePolicy::Skip => OverwritePolicy::Rename,
         OverwritePolicy::Rename => OverwritePolicy::Overwrite,
-    }
-}
-
-fn next_settings_sort_field(field: SettingsSortField) -> SettingsSortField {
-    match field {
-        SettingsSortField::Name => SettingsSortField::Size,
-        SettingsSortField::Size => SettingsSortField::Modified,
-        SettingsSortField::Modified => SettingsSortField::Name,
     }
 }
 

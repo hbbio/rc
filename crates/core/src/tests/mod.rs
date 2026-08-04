@@ -1,7 +1,6 @@
 use super::*;
 use crate::keymap::{KeyCommand, KeyModifiers};
 use std::path::Path;
-use std::process::Output;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::thread;
@@ -19,8 +18,7 @@ fn file_entry(name: &str) -> FileEntry {
     FileEntry {
         name: name.to_string(),
         path: PathBuf::from(name),
-        is_dir: false,
-        is_parent: false,
+        kind: FileEntryKind::File,
         size: 0,
         modified: None,
     }
@@ -29,13 +27,15 @@ fn file_entry(name: &str) -> FileEntry {
 struct PermissionDeniedProcessBackend;
 
 impl ProcessBackend for PermissionDeniedProcessBackend {
-    fn run_shell_command(
+    fn run_shell_command_streaming(
         &self,
         _cwd: &Path,
         _command: &str,
         _cancel_flag: Option<&AtomicBool>,
         _canceled_message: &str,
-    ) -> io::Result<Output> {
+        _limits: ProcessOutputLimits,
+        _stdout_line: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<ProcessExit> {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "permission denied",
@@ -205,8 +205,11 @@ fn move_menu_selection_to_label(app: &mut AppState, label: &str) {
         if matches_target {
             return;
         }
-        app.apply(AppCommand::MenuMoveDown)
-            .expect("menu movement should succeed");
+        app.apply(AppCommand::Navigate(
+            NavigationTarget::Menu,
+            NavigationMotion::Down,
+        ))
+        .expect("menu movement should succeed");
     }
     panic!("menu entry '{label}' should exist");
 }
@@ -266,8 +269,8 @@ fn panel_listing_prepends_parent_entry() {
     panel.refresh().expect("panel listing should load");
     let first = panel.entries.first().expect("entries should not be empty");
     assert_eq!(first.name, "..");
-    assert!(first.is_parent);
-    assert!(first.is_dir);
+    assert!(first.is_parent());
+    assert!(first.is_dir());
     assert_eq!(first.path, root);
 
     fs::remove_dir_all(&root).expect("must remove temp tree");
@@ -294,7 +297,7 @@ fn listing_marks_directory_symlinks_as_directories() {
         .find(|entry| entry.path == symlink_path)
         .expect("directory symlink should be listed");
     assert!(
-        symlink_entry.is_dir,
+        symlink_entry.is_dir(),
         "directory symlink should be classified as a directory"
     );
 
@@ -1435,7 +1438,7 @@ fn copy_command_uses_destination_and_policy_dialogs() {
             } => {
                 assert_eq!(sources, &vec![source.clone()]);
                 assert_eq!(destination_dir, &root);
-                assert_eq!(*overwrite, app.overwrite_policy);
+                assert_eq!(*overwrite, app.overwrite_policy());
             }
             _ => panic!("expected copy job request"),
         },
@@ -1468,13 +1471,16 @@ fn copy_relative_destination_is_resolved_from_active_panel() {
     app.start_copy_dialog();
     app.finish_dialog(DialogResult::InputSubmitted(String::from("dest")));
 
-    match app.pending_dialog_action.as_ref() {
-        Some(PendingDialogAction::TransferOverwrite {
-            destination_dir, ..
-        }) => {
-            assert_eq!(destination_dir, &root.join("dest"));
-        }
-        other => panic!("expected transfer overwrite action, got {other:?}"),
+    match app.top_route() {
+        Route::Dialog(dialog) => match dialog.action() {
+            Some(PendingDialogAction::TransferOverwrite {
+                destination_dir, ..
+            }) => {
+                assert_eq!(destination_dir, &root.join("dest"));
+            }
+            other => panic!("expected transfer overwrite action, got {other:?}"),
+        },
+        other => panic!("expected transfer overwrite dialog, got {other:?}"),
     }
 
     fs::remove_dir_all(&root).expect("must remove temp root");

@@ -11,23 +11,14 @@ impl AppState {
         command: AppCommand,
     ) -> io::Result<CommandOutcome> {
         match command {
-            AppCommand::MoveUp => self.move_cursor(-1),
-            AppCommand::MoveDown => self.move_cursor(1),
-            AppCommand::PageUp => {
-                let page_step = self.settings.advanced.page_step;
-                self.active_panel_mut().move_cursor_page(-1, page_step);
+            AppCommand::Navigate(NavigationTarget::FileManager, motion) => {
+                self.apply_file_manager_navigation(motion);
             }
-            AppCommand::PageDown => {
-                let page_step = self.settings.advanced.page_step;
-                self.active_panel_mut().move_cursor_page(1, page_step);
-            }
-            AppCommand::MoveHome => self.active_panel_mut().move_cursor_home(),
-            AppCommand::MoveEnd => self.active_panel_mut().move_cursor_end(),
             AppCommand::ToggleTag => {
                 let selected = self.active_panel().selected_entry();
                 if selected.is_none() {
                     self.set_status("No entry selected");
-                } else if selected.is_some_and(|entry| entry.is_parent) {
+                } else if selected.is_some_and(FileEntry::is_parent) {
                     self.set_status("Parent entry cannot be tagged");
                 } else {
                     let added = self.active_panel_mut().toggle_tag_on_cursor();
@@ -108,31 +99,22 @@ impl AppState {
                 self.refresh_active_panel();
                 self.set_status("Refreshing active panel...");
             }
-            AppCommand::FindResultsMoveUp => self.move_find_results_cursor(-1),
-            AppCommand::FindResultsMoveDown => self.move_find_results_cursor(1),
-            AppCommand::FindResultsPageUp => self.move_find_results_page(-1),
-            AppCommand::FindResultsPageDown => self.move_find_results_page(1),
-            AppCommand::FindResultsHome => self.move_find_results_home(),
-            AppCommand::FindResultsEnd => self.move_find_results_end(),
+            AppCommand::Navigate(NavigationTarget::FindResults, motion) => {
+                self.apply_find_results_navigation(motion);
+            }
             AppCommand::FindResultsOpenEntry => {
                 self.open_selected_find_result()?;
             }
             AppCommand::FindResultsPanelize => self.panelize_find_results(),
-            AppCommand::TreeMoveUp => self.move_tree_cursor(-1),
-            AppCommand::TreeMoveDown => self.move_tree_cursor(1),
-            AppCommand::TreePageUp => self.move_tree_page(-1),
-            AppCommand::TreePageDown => self.move_tree_page(1),
-            AppCommand::TreeHome => self.move_tree_home(),
-            AppCommand::TreeEnd => self.move_tree_end(),
+            AppCommand::Navigate(NavigationTarget::Tree, motion) => {
+                self.apply_tree_navigation(motion);
+            }
             AppCommand::TreeOpenEntry => {
                 self.open_selected_tree_entry()?;
             }
-            AppCommand::HotlistMoveUp => self.move_hotlist_cursor(-1),
-            AppCommand::HotlistMoveDown => self.move_hotlist_cursor(1),
-            AppCommand::HotlistPageUp => self.move_hotlist_page(-1),
-            AppCommand::HotlistPageDown => self.move_hotlist_page(1),
-            AppCommand::HotlistHome => self.move_hotlist_home(),
-            AppCommand::HotlistEnd => self.move_hotlist_end(),
+            AppCommand::Navigate(NavigationTarget::Hotlist, motion) => {
+                self.apply_hotlist_navigation(motion);
+            }
             AppCommand::HotlistOpenEntry => {
                 self.open_selected_hotlist_entry()?;
             }
@@ -144,6 +126,60 @@ impl AppState {
         }
 
         Ok(CommandOutcome::Continue)
+    }
+
+    fn apply_file_manager_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_cursor(-1),
+            NavigationMotion::Down => self.move_cursor(1),
+            NavigationMotion::PageUp => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(-1, page_step);
+            }
+            NavigationMotion::PageDown => {
+                let page_step = self.settings.advanced.page_step;
+                self.active_panel_mut().move_cursor_page(1, page_step);
+            }
+            NavigationMotion::Home => self.active_panel_mut().move_cursor_home(),
+            NavigationMotion::End => self.active_panel_mut().move_cursor_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_find_results_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_find_results_cursor(-1),
+            NavigationMotion::Down => self.move_find_results_cursor(1),
+            NavigationMotion::PageUp => self.move_find_results_page(-1),
+            NavigationMotion::PageDown => self.move_find_results_page(1),
+            NavigationMotion::Home => self.move_find_results_home(),
+            NavigationMotion::End => self.move_find_results_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_tree_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_tree_cursor(-1),
+            NavigationMotion::Down => self.move_tree_cursor(1),
+            NavigationMotion::PageUp => self.move_tree_page(-1),
+            NavigationMotion::PageDown => self.move_tree_page(1),
+            NavigationMotion::Home => self.move_tree_home(),
+            NavigationMotion::End => self.move_tree_end(),
+            _ => {}
+        }
+    }
+
+    fn apply_hotlist_navigation(&mut self, motion: NavigationMotion) {
+        match motion {
+            NavigationMotion::Up => self.move_hotlist_cursor(-1),
+            NavigationMotion::Down => self.move_hotlist_cursor(1),
+            NavigationMotion::PageUp => self.move_hotlist_page(-1),
+            NavigationMotion::PageDown => self.move_hotlist_page(1),
+            NavigationMotion::Home => self.move_hotlist_home(),
+            NavigationMotion::End => self.move_hotlist_end(),
+            _ => {}
+        }
     }
 
     pub(crate) fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
@@ -211,12 +247,10 @@ impl AppState {
         }
 
         let base_dir = self.active_panel().cwd.clone();
-        self.pending_dialog_action = Some(PendingDialogAction::FindQuery { base_dir });
-        self.routes.push(Route::Dialog(DialogState::input(
-            "Find file",
-            "Name contains:",
-            "",
-        )));
+        self.push_dialog(
+            DialogState::input("Find file", "Name contains:", ""),
+            PendingDialogAction::FindQuery { base_dir },
+        );
         self.set_status("Find file");
     }
 
@@ -431,19 +465,21 @@ impl AppState {
     }
 
     fn clamp_hotlist_cursor(&mut self) {
-        if self.hotlist.is_empty() {
+        let len = self.settings.configuration.hotlist.len();
+        if len == 0 {
             self.hotlist_cursor = 0;
-        } else if self.hotlist_cursor >= self.hotlist.len() {
-            self.hotlist_cursor = self.hotlist.len() - 1;
+        } else if self.hotlist_cursor >= len {
+            self.hotlist_cursor = len - 1;
         }
     }
 
     pub(crate) fn move_hotlist_cursor(&mut self, delta: isize) {
-        if self.hotlist.is_empty() {
+        let len = self.settings.configuration.hotlist.len();
+        if len == 0 {
             self.hotlist_cursor = 0;
             return;
         }
-        let last = self.hotlist.len() - 1;
+        let last = len - 1;
         let next = if delta.is_negative() {
             self.hotlist_cursor.saturating_sub(delta.unsigned_abs())
         } else {
@@ -461,17 +497,26 @@ impl AppState {
     }
 
     pub(crate) fn move_hotlist_end(&mut self) {
-        if self.hotlist.is_empty() {
+        let len = self.settings.configuration.hotlist.len();
+        if len == 0 {
             self.hotlist_cursor = 0;
         } else {
-            self.hotlist_cursor = self.hotlist.len() - 1;
+            self.hotlist_cursor = len - 1;
         }
     }
 
     pub(crate) fn add_current_directory_to_hotlist(&mut self) {
         let cwd = self.active_panel().cwd.clone();
-        if self.hotlist.iter().any(|entry| entry == &cwd) {
+        if self
+            .settings
+            .configuration
+            .hotlist
+            .iter()
+            .any(|entry| entry == &cwd)
+        {
             self.hotlist_cursor = self
+                .settings
+                .configuration
                 .hotlist
                 .iter()
                 .position(|entry| entry == &cwd)
@@ -479,21 +524,23 @@ impl AppState {
             self.set_status("Directory already exists in hotlist");
             return;
         }
-        self.hotlist.push(cwd.clone());
-        self.hotlist_cursor = self.hotlist.len() - 1;
-        self.settings.configuration.hotlist = self.hotlist.clone();
+        self.settings.configuration.hotlist.push(cwd.clone());
+        self.hotlist_cursor = self.settings.configuration.hotlist.len() - 1;
         self.settings.mark_dirty();
         self.set_status(format!("Added {} to hotlist", cwd.to_string_lossy()));
     }
 
     pub(crate) fn remove_selected_hotlist_entry(&mut self) {
-        if self.hotlist.is_empty() {
+        if self.settings.configuration.hotlist.is_empty() {
             self.set_status("Hotlist is empty");
             return;
         }
-        let removed = self.hotlist.remove(self.hotlist_cursor);
+        let removed = self
+            .settings
+            .configuration
+            .hotlist
+            .remove(self.hotlist_cursor);
         self.clamp_hotlist_cursor();
-        self.settings.configuration.hotlist = self.hotlist.clone();
         self.settings.mark_dirty();
         self.set_status(format!(
             "Removed {} from hotlist",
@@ -502,7 +549,13 @@ impl AppState {
     }
 
     pub(crate) fn open_selected_hotlist_entry(&mut self) -> io::Result<()> {
-        let Some(path) = self.hotlist.get(self.hotlist_cursor).cloned() else {
+        let Some(path) = self
+            .settings
+            .configuration
+            .hotlist
+            .get(self.hotlist_cursor)
+            .cloned()
+        else {
             self.set_status("No hotlist entry selected");
             return Ok(());
         };

@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use filetime::FileTime;
 #[cfg(unix)]
@@ -642,28 +644,148 @@ impl FsBackend for LocalFsBackend {
 }
 
 pub fn run_worker(command_rx: Receiver<WorkerCommand>, event_tx: Sender<JobEvent>) {
-    let fs_backend = LocalFsBackend;
+    let mut queued_jobs = VecDeque::new();
     let mut queued_cancellations = HashSet::new();
-    while let Ok(command) = command_rx.recv() {
+    let mut active_worker: Option<ActiveWorker> = None;
+
+    loop {
+        reap_finished_worker(&mut active_worker);
+        if active_worker.is_none()
+            && let Some(mut job) = queued_jobs.pop_front()
+        {
+            apply_queued_cancellation(&mut job, &mut queued_cancellations);
+            active_worker = Some(spawn_active_worker(job, event_tx.clone()));
+            continue;
+        }
+
+        let command = if active_worker.is_some() {
+            match command_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(command) => command,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match command_rx.recv() {
+                Ok(command) => command,
+                Err(_) => break,
+            }
+        };
+
         match command {
             WorkerCommand::Run(job) => {
-                let job = *job;
-                if queued_cancellations.remove(&job.id) {
-                    job.cancel_flag.store(true, Ordering::Relaxed);
+                let mut job = *job;
+                apply_queued_cancellation(&mut job, &mut queued_cancellations);
+                if active_worker.is_some() {
+                    queued_jobs.push_back(job);
+                } else {
+                    active_worker = Some(spawn_active_worker(job, event_tx.clone()));
                 }
-                run_single_job(job, &event_tx, &fs_backend);
             }
             WorkerCommand::Cancel(id) => {
-                queued_cancellations.insert(id);
+                if !cancel_active_or_queued_worker(id, &active_worker, &queued_jobs) {
+                    queued_cancellations.insert(id);
+                }
             }
-            WorkerCommand::Shutdown => break,
+            WorkerCommand::Shutdown => {
+                cancel_all_worker_jobs(&active_worker, &queued_jobs);
+                break;
+            }
         }
+    }
+
+    cancel_all_worker_jobs(&active_worker, &queued_jobs);
+    finish_canceled_queued_worker_jobs(&mut queued_jobs, &event_tx);
+    if let Some(worker) = active_worker {
+        let _ = worker.handle.join();
     }
 }
 
 pub fn execute_worker_job(job: WorkerJob, event_tx: &Sender<JobEvent>) {
     let fs_backend = LocalFsBackend;
     run_single_job(job, event_tx, &fs_backend);
+}
+
+struct ActiveWorker {
+    id: JobId,
+    cancel_flag: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+fn spawn_active_worker(job: WorkerJob, event_tx: Sender<JobEvent>) -> ActiveWorker {
+    let id = job.id;
+    let cancel_flag = Arc::clone(&job.cancel_flag);
+    let handle = thread::spawn(move || {
+        let fs_backend = LocalFsBackend;
+        run_single_job(job, &event_tx, &fs_backend);
+    });
+    ActiveWorker {
+        id,
+        cancel_flag,
+        handle,
+    }
+}
+
+fn reap_finished_worker(active_worker: &mut Option<ActiveWorker>) {
+    let is_finished = active_worker
+        .as_ref()
+        .is_some_and(|worker| worker.handle.is_finished());
+    if is_finished && let Some(worker) = active_worker.take() {
+        let _ = worker.handle.join();
+    }
+}
+
+fn apply_queued_cancellation(
+    job: &mut WorkerJob,
+    queued_cancellations: &mut HashSet<JobId>,
+) -> bool {
+    if queued_cancellations.remove(&job.id) {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+fn cancel_active_or_queued_worker(
+    id: JobId,
+    active_worker: &Option<ActiveWorker>,
+    queued_jobs: &VecDeque<WorkerJob>,
+) -> bool {
+    let mut canceled = false;
+    if let Some(worker) = active_worker
+        && worker.id == id
+    {
+        worker.cancel_flag.store(true, Ordering::Relaxed);
+        canceled = true;
+    }
+    for job in queued_jobs {
+        if job.id == id {
+            job.cancel_flag.store(true, Ordering::Relaxed);
+            canceled = true;
+        }
+    }
+    canceled
+}
+
+fn cancel_all_worker_jobs(active_worker: &Option<ActiveWorker>, queued_jobs: &VecDeque<WorkerJob>) {
+    if let Some(worker) = active_worker {
+        worker.cancel_flag.store(true, Ordering::Relaxed);
+    }
+    for job in queued_jobs {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+    }
+}
+
+fn finish_canceled_queued_worker_jobs(
+    queued_jobs: &mut VecDeque<WorkerJob>,
+    event_tx: &Sender<JobEvent>,
+) {
+    while let Some(job) = queued_jobs.pop_front() {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        let _ = event_tx.send(JobEvent::Finished {
+            id: job.id,
+            result: Err(JobError::canceled()),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -865,22 +987,13 @@ fn copy_path(
     }
 
     if metadata.is_dir() {
+        validate_directory_destination_not_inside_source(source, destination, "copy")?;
+
         if destination.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(
                     "destination already exists: {}",
-                    destination.to_string_lossy()
-                ),
-            ));
-        }
-
-        if destination.starts_with(source) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "cannot copy directory into itself: {} -> {}",
-                    source.to_string_lossy(),
                     destination.to_string_lossy()
                 ),
             ));
@@ -1082,17 +1195,71 @@ fn renamed_destination(destination: &Path) -> PathBuf {
 
 fn validate_move_destination(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
-    if metadata.is_dir() && destination.starts_with(source) {
+    if metadata.is_dir() {
+        validate_directory_destination_not_inside_source(source, destination, "move")?;
+    }
+    Ok(())
+}
+
+fn validate_directory_destination_not_inside_source(
+    source: &Path,
+    destination: &Path,
+    operation: &str,
+) -> io::Result<()> {
+    if destination_parent_is_inside_source(source, destination)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "cannot move directory into itself: {} -> {}",
+                "cannot {operation} directory into itself: {} -> {}",
                 source.to_string_lossy(),
                 destination.to_string_lossy()
             ),
         ));
     }
     Ok(())
+}
+
+fn destination_parent_is_inside_source(source: &Path, destination: &Path) -> io::Result<bool> {
+    let source = fs::canonicalize(source)?;
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let destination_parent = canonicalize_allowing_missing_tail(destination_parent)?;
+    Ok(destination_parent == source || destination_parent.starts_with(&source))
+}
+
+fn canonicalize_allowing_missing_tail(path: &Path) -> io::Result<PathBuf> {
+    for ancestor in path.ancestors() {
+        let candidate = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match fs::canonicalize(candidate) {
+            Ok(mut resolved) => {
+                let tail = path
+                    .strip_prefix(ancestor)
+                    .unwrap_or_else(|_| Path::new(""));
+                push_normalized_tail(&mut resolved, tail);
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    fs::canonicalize(path)
+}
+
+fn push_normalized_tail(base: &mut PathBuf, tail: &Path) {
+    for component in tail.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                base.pop();
+            }
+            Component::Normal(part) => base.push(part),
+            Component::Prefix(_) | Component::RootDir => base.push(component.as_os_str()),
+        }
+    }
 }
 
 fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
@@ -1751,6 +1918,224 @@ mod tests {
     }
 
     #[test]
+    fn worker_shutdown_finishes_queued_jobs_as_canceled() {
+        let root = make_temp_dir("shutdown-queued-cancel");
+        let mut manager = JobManager::new();
+        let first_job = manager.enqueue(JobRequest::Mkdir {
+            path: root.join("one"),
+        });
+        let second_job = manager.enqueue(JobRequest::Mkdir {
+            path: root.join("two"),
+        });
+        let mut queued_jobs = VecDeque::from([first_job, second_job]);
+        let (event_tx, event_rx) = mpsc::channel();
+
+        finish_canceled_queued_worker_jobs(&mut queued_jobs, &event_tx);
+        drop(event_tx);
+
+        assert!(queued_jobs.is_empty(), "queued jobs should be drained");
+        for event in event_rx {
+            manager.handle_event(&event);
+        }
+
+        assert_eq!(manager.status_counts().canceled, 2);
+        assert_eq!(manager.status_counts().queued, 0);
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_worker_shutdown_finishes_active_and_queued_jobs_as_canceled() {
+        use nix::sys::stat::Mode;
+
+        let root = make_temp_dir("shutdown-active-and-queued-cancel");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let fifo_source = source_dir.join("blocked.pipe");
+        nix::unistd::mkfifo(&fifo_source, Mode::S_IRUSR | Mode::S_IWUSR)
+            .expect("fifo source should be creatable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let active_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![fifo_source.clone()],
+            destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
+        });
+        let active_id = active_job.id;
+        let queued_job = manager.enqueue(JobRequest::Mkdir {
+            path: root.join("queued"),
+        });
+        let queued_id = queued_job.id;
+
+        command_tx
+            .send(WorkerCommand::Run(Box::new(active_job)))
+            .expect("active job command should send");
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("active worker should emit a start event");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Started { id } if id == active_id => break,
+                JobEvent::Finished { .. } => panic!("active job finished before shutdown"),
+                _ => {}
+            }
+        }
+
+        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+        let (writer_release_tx, writer_release_rx) = mpsc::channel();
+        let writer = thread::spawn({
+            let fifo_source = fifo_source.clone();
+            move || {
+                let mut fifo = fs::OpenOptions::new()
+                    .write(true)
+                    .open(fifo_source)
+                    .expect("fifo writer should connect to active copy");
+                writer_ready_tx
+                    .send(())
+                    .expect("fifo writer should report readiness");
+                writer_release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("fifo writer should receive release signal");
+                let _ = std::io::Write::write_all(&mut fifo, b"x");
+            }
+        });
+        writer_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("active copy should open the fifo reader");
+
+        command_tx
+            .send(WorkerCommand::Run(Box::new(queued_job)))
+            .expect("queued job command should send");
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown command should send");
+
+        let mut active_finished = false;
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("queued job should finish during shutdown");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Finished { id, result } if id == queued_id => {
+                    let error = result.expect_err("queued job should not succeed during shutdown");
+                    assert!(error.is_canceled(), "queued job should be canceled");
+                    break;
+                }
+                JobEvent::Finished { id, result } if id == active_id => {
+                    let error = result.expect_err("active job should not succeed during shutdown");
+                    assert!(error.is_canceled(), "active job should be canceled");
+                    active_finished = true;
+                }
+                _ => {}
+            }
+        }
+
+        writer_release_tx
+            .send(())
+            .expect("fifo writer should be released after queued cancellation");
+
+        while !active_finished {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("active job should finish after fifo unblocks");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Finished { id, result } if id == active_id => {
+                    let error = result.expect_err("active job should not succeed during shutdown");
+                    assert!(error.is_canceled(), "active job should be canceled");
+                    active_finished = true;
+                }
+                JobEvent::Finished { id, .. } if id == queued_id => {
+                    panic!("queued job finished more than once")
+                }
+                _ => {}
+            }
+        }
+
+        writer.join().expect("fifo writer should finish");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+
+        let counts = manager.status_counts();
+        assert_eq!(counts.canceled, 2);
+        assert_eq!(counts.queued, 0);
+        assert_eq!(counts.running, 0);
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn worker_cancel_command_cancels_active_job() {
+        let root = make_temp_dir("active-cancel-command");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("source dir should exist");
+        fs::create_dir_all(&destination).expect("destination dir should exist");
+
+        let payload = vec![9_u8; 32 * 1024 * 1024];
+        let source_file = source_dir.join("blob.bin");
+        fs::write(&source_file, payload).expect("source payload should be writable");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_file],
+            destination_dir: destination,
+            overwrite: OverwritePolicy::Skip,
+        });
+        let copy_id = copy_job.id;
+        command_tx
+            .send(WorkerCommand::Run(Box::new(copy_job)))
+            .expect("copy command should send");
+
+        loop {
+            let event = event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker should emit a start event");
+            manager.handle_event(&event);
+            match event {
+                JobEvent::Started { id } if id == copy_id => {
+                    command_tx
+                        .send(WorkerCommand::Cancel(copy_id))
+                        .expect("cancel command should send");
+                    break;
+                }
+                JobEvent::Finished { .. } => panic!("copy finished before active cancel was sent"),
+                _ => {}
+            }
+        }
+
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => assert!(error.is_canceled(), "finished error should be cancellation"),
+            _ => panic!("job should finish with a cancellation error"),
+        }
+        assert_eq!(manager.status_counts().canceled, 1);
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
     fn measure_request_totals_stops_when_cancel_is_requested() {
         let root = make_temp_dir("measure-cancel");
         let source_file = root.join("source.bin");
@@ -1915,6 +2300,129 @@ mod tests {
         worker
             .join()
             .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_rejects_destination_inside_source_via_symlink_alias() {
+        let root = make_temp_dir("copy-self-symlink");
+        let source_root = root.join("source");
+        let source_alias = root.join("source-alias");
+        fs::create_dir_all(source_root.join("child")).expect("source tree should exist");
+        fs::write(source_root.join("child/data.txt"), "x").expect("source file should exist");
+        std::os::unix::fs::symlink(&source_root, &source_alias)
+            .expect("source symlink should be creatable");
+
+        let (event_tx, _event_rx) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals { items: 2, bytes: 1 },
+            &event_tx,
+            cancel_flag,
+        );
+        let error = copy_path(
+            &source_root,
+            &source_alias.join("nested-copy"),
+            &mut progress,
+        )
+        .expect_err("copy through source symlink alias should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot copy directory into itself"),
+            "copy should fail with self-copy validation"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_directory_allows_missing_destination_root() {
+        let root = make_temp_dir("copy-directory-missing-root");
+        let source_root = root.join("source");
+        let destination_root = root.join("new-destination");
+        fs::create_dir_all(&source_root).expect("source tree should exist");
+        fs::write(source_root.join("data.txt"), "payload").expect("source file should exist");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
+
+        let mut manager = JobManager::new();
+        let copy_job = manager.enqueue(JobRequest::Copy {
+            sources: vec![source_root.clone()],
+            destination_dir: destination_root.clone(),
+            overwrite: OverwritePolicy::Skip,
+        });
+        command_tx
+            .send(WorkerCommand::Run(Box::new(copy_job)))
+            .expect("copy command should send");
+        let finished = recv_until_finished(&event_rx, &mut manager);
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "directory copy should create missing destination roots"
+        );
+
+        let copied_payload = fs::read_to_string(destination_root.join("source/data.txt"))
+            .expect("copied file should be readable");
+        assert_eq!(copied_payload, "payload");
+
+        command_tx
+            .send(WorkerCommand::Shutdown)
+            .expect("shutdown should send");
+        worker
+            .join()
+            .expect("worker thread should terminate cleanly");
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn copy_directory_rejects_missing_destination_parent_inside_source() {
+        let root = make_temp_dir("copy-directory-missing-parent-inside-source");
+        let source_root = root.join("source");
+        fs::create_dir_all(&source_root).expect("source tree should exist");
+        fs::write(source_root.join("data.txt"), "payload").expect("source file should exist");
+
+        let (event_tx, _event_rx) = mpsc::channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals { items: 2, bytes: 7 },
+            &event_tx,
+            cancel_flag,
+        );
+        let error = copy_path(
+            &source_root,
+            &source_root.join("missing-parent/source"),
+            &mut progress,
+        )
+        .expect_err("copy into missing parent below source should be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("cannot copy directory into itself"),
+            "copy should fail with self-copy validation"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn move_validation_allows_normalized_sibling_destination_path() {
+        let root = make_temp_dir("move-sibling-dotdot");
+        let source_root = root.join("source");
+        fs::create_dir_all(&source_root).expect("source tree should exist");
+        let sibling_destination = source_root.join("..").join("moved");
+
+        validate_move_destination(&source_root, &sibling_destination)
+            .expect("normalized sibling destination should not be treated as self-move");
+
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
 

@@ -19,25 +19,21 @@ impl AppState {
             status_expires_at: None,
             last_dialog_result: None,
             jobs: JobManager::new(),
-            overwrite_policy: settings.configuration.default_overwrite_policy,
             jobs_cursor: 0,
-            hotlist: settings.configuration.hotlist.clone(),
             hotlist_cursor: 0,
             available_skins: Vec::new(),
-            active_skin_name: settings.appearance.skin.clone(),
+            preview_skin_name: None,
             pending_skin_change: None,
             pending_skin_preview: None,
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
             paused_find_results: None,
-            pending_dialog_action: None,
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
             panel_refresh: PanelRefreshWorkflow::default(),
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
-            panelize_presets: settings.configuration.panelize_presets.clone(),
             keybinding_hints: KeybindingHints::default(),
             keymap_unknown_actions: 0,
             keymap_invalid_bindings: 0,
@@ -57,12 +53,7 @@ impl AppState {
     }
 
     pub fn persisted_settings_snapshot(&self) -> Settings {
-        let mut settings = self.settings.clone();
-        settings.configuration.default_overwrite_policy = self.overwrite_policy;
-        settings.configuration.hotlist = self.hotlist.clone();
-        settings.configuration.panelize_presets = self.panelize_presets.clone();
-        settings.appearance.skin = self.active_skin_name.clone();
-        settings
+        self.settings.clone()
     }
 
     pub fn mark_settings_saved(&mut self, saved_at: SystemTime) {
@@ -114,13 +105,10 @@ impl AppState {
 
     pub fn replace_settings(&mut self, settings: Settings) {
         self.settings = settings;
-        self.overwrite_policy = self.settings.configuration.default_overwrite_policy;
-        self.hotlist = self.settings.configuration.hotlist.clone();
         self.hotlist_cursor = self
             .hotlist_cursor
-            .min(self.hotlist.len().saturating_sub(1));
-        self.panelize_presets = self.settings.configuration.panelize_presets.clone();
-        self.active_skin_name = self.settings.appearance.skin.clone();
+            .min(self.settings.configuration.hotlist.len().saturating_sub(1));
+        self.preview_skin_name = None;
         self.status_expires_at = self
             .status_message_timeout()
             .and_then(|timeout| Instant::now().checked_add(timeout))
@@ -136,7 +124,7 @@ impl AppState {
 
     pub(crate) fn default_panel_sort_mode(&self) -> SortMode {
         SortMode {
-            field: SortField::from_settings(self.settings.panel_options.sort_field),
+            field: self.settings.panel_options.sort_field,
             reverse: self.settings.panel_options.sort_reverse,
         }
     }
@@ -204,7 +192,7 @@ impl AppState {
     ) -> EditSelectionResult {
         let Some((path, is_dir)) = self
             .selected_non_parent_entry()
-            .map(|entry| (entry.path.clone(), entry.is_dir))
+            .map(|entry| (entry.path.clone(), entry.is_dir()))
         else {
             return EditSelectionResult::NoEntrySelected;
         };
@@ -256,8 +244,41 @@ impl AppState {
     }
 
     pub fn set_active_skin_name(&mut self, skin_name: impl Into<String>) {
-        self.active_skin_name = skin_name.into();
+        self.settings.appearance.skin = skin_name.into();
+        self.preview_skin_name = None;
         self.refresh_settings_entries();
+    }
+
+    pub fn set_preview_skin_name(&mut self, skin_name: impl Into<String>) {
+        self.preview_skin_name = Some(skin_name.into());
+        self.refresh_settings_entries();
+    }
+
+    pub fn clear_preview_skin_name(&mut self) {
+        self.preview_skin_name = None;
+        self.refresh_settings_entries();
+    }
+
+    pub fn active_skin_name(&self) -> &str {
+        self.preview_skin_name
+            .as_deref()
+            .unwrap_or(self.settings.appearance.skin.as_str())
+    }
+
+    pub fn overwrite_policy(&self) -> OverwritePolicy {
+        self.settings.configuration.default_overwrite_policy
+    }
+
+    pub(crate) fn set_overwrite_policy(&mut self, policy: OverwritePolicy) {
+        self.settings.configuration.default_overwrite_policy = policy;
+    }
+
+    pub fn hotlist(&self) -> &[PathBuf] {
+        &self.settings.configuration.hotlist
+    }
+
+    pub(crate) fn panelize_presets(&self) -> &[String] {
+        &self.settings.configuration.panelize_presets
     }
 
     pub fn take_pending_skin_change(&mut self) -> Option<String> {
@@ -366,7 +387,7 @@ impl AppState {
 
         self.active_panel()
             .selected_entry()
-            .filter(|entry| !entry.is_parent)
+            .filter(|entry| !entry.is_parent())
             .map(|entry| vec![entry.path.clone()])
             .unwrap_or_default()
     }
@@ -374,6 +395,6 @@ impl AppState {
     pub(crate) fn selected_non_parent_entry(&self) -> Option<&FileEntry> {
         self.active_panel()
             .selected_entry()
-            .filter(|entry| !entry.is_parent)
+            .filter(|entry| !entry.is_parent())
     }
 }

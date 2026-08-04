@@ -411,7 +411,7 @@ fn render_panel(
     let title = fit_single_line(panel_title(panel), area.width.saturating_sub(2) as usize);
     let selected_tagged = panel
         .selected_entry()
-        .is_some_and(|entry| !entry.is_parent && panel.is_tagged(&entry.path));
+        .is_some_and(|entry| !entry.is_parent() && panel.is_tagged(&entry.path));
     let highlight_style = if !active {
         skin.style("core", "_default_")
     } else if selected_tagged {
@@ -460,20 +460,20 @@ fn render_panel(
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
             .map(|entry| {
-                let tagged = !entry.is_parent && panel.is_tagged(&entry.path);
+                let tagged = !entry.is_parent() && panel.is_tagged(&entry.path);
                 let mut entry_style = if tagged {
                     skin.style("core", "marked")
                 } else {
                     skin.style("core", "_default_")
                 };
-                if entry.is_dir {
+                if entry.is_dir() {
                     entry_style = entry_style.patch(skin.style("filehighlight", "directory"));
                 }
 
                 let marker = if tagged { "*" } else { " " };
-                let label = if entry.is_parent {
+                let label = if entry.is_parent() {
                     String::from("/..")
-                } else if entry.is_dir {
+                } else if entry.is_dir() {
                     format!("/{}/", entry.name)
                 } else {
                     entry.name.clone()
@@ -1327,7 +1327,8 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
     let area = centered_rect(frame.area(), 88, 22);
     frame.render_widget(Clear, area);
 
-    let title = format!("Directory hotlist ({})", app.hotlist.len());
+    let hotlist = app.hotlist();
+    let title = format!("Directory hotlist ({})", hotlist.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -1342,13 +1343,13 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem<'_>> = if app.hotlist.is_empty() {
+    let items: Vec<ListItem<'_>> = if hotlist.is_empty() {
         vec![ListItem::new("<empty hotlist>")]
     } else {
         let viewport_rows = layout[0].height.max(1) as usize;
         let (window_start, window_end) =
-            visible_window(app.hotlist.len(), app.hotlist_cursor, viewport_rows);
-        app.hotlist
+            visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
+        hotlist
             .iter()
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
@@ -1361,10 +1362,10 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .highlight_symbol(">> ");
 
     let mut state = ListState::default();
-    if !app.hotlist.is_empty() {
+    if !hotlist.is_empty() {
         let viewport_rows = layout[0].height.max(1) as usize;
         let (window_start, window_end) =
-            visible_window(app.hotlist.len(), app.hotlist_cursor, viewport_rows);
+            visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
         let selected_row = app
             .hotlist_cursor
             .saturating_sub(window_start)
@@ -1605,7 +1606,7 @@ fn render_help_screen(frame: &mut Frame, app: &AppState, help: &HelpState, skin:
 }
 
 fn panel_entry_size_label(entry: &FileEntry) -> String {
-    if entry.is_parent {
+    if entry.is_parent() {
         return String::from("UP--DIR");
     }
     format_human_size_compact(entry.size)
@@ -1620,7 +1621,7 @@ fn panel_selected_totals(panel: &PanelState) -> (usize, u64) {
     let mut size = 0u64;
 
     for entry in &panel.entries {
-        if entry.is_parent || !panel.is_tagged(&entry.path) {
+        if entry.is_parent() || !panel.is_tagged(&entry.path) {
             continue;
         }
         count = count.saturating_add(1);

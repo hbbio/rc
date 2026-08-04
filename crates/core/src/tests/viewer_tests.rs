@@ -58,7 +58,7 @@ fn open_entry_on_directory_symlink_descends_into_directory() {
         .position(|entry| entry.path == symlink_path)
         .expect("directory symlink should be visible");
     assert!(
-        app.active_panel().entries[symlink_index].is_dir,
+        app.active_panel().entries[symlink_index].is_dir(),
         "directory symlink should be treated as a directory entry"
     );
     app.active_panel_mut().cursor = symlink_index;
@@ -193,8 +193,11 @@ fn viewer_supports_scroll_search_goto_and_wrap() {
         .expect("open entry should open viewer");
     drain_background(&mut app);
 
-    app.apply(AppCommand::ViewerMoveDown)
-        .expect("viewer should move down");
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Viewer,
+        NavigationMotion::Down,
+    ))
+    .expect("viewer should move down");
     let Route::Viewer(viewer) = app.top_route() else {
         panic!("top route should be viewer");
     };
@@ -289,8 +292,11 @@ fn viewer_hex_mode_switches_context_and_navigation_model() {
         "48 bytes should render as 3 hex rows"
     );
 
-    app.apply(AppCommand::ViewerMoveDown)
-        .expect("viewer should move by hex row");
+    app.apply(AppCommand::Navigate(
+        NavigationTarget::Viewer,
+        NavigationMotion::Down,
+    ))
+    .expect("viewer should move by hex row");
     let Route::Viewer(viewer) = app.top_route() else {
         panic!("top route should be viewer");
     };

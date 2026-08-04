@@ -28,6 +28,7 @@ mod viewer_flow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
@@ -54,12 +55,11 @@ pub(crate) use panel::{
     read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
     sort_file_entries,
 };
-pub use rc_shell::{LocalProcessBackend, ProcessBackend};
+pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
 pub use settings::{
     AdvancedSettings, AppearanceSettings, ConfigurationSettings, ConfirmationSettings,
     DEFAULT_PANELIZE_PRESETS, DisplayBitsSettings, LayoutSettings, LearnKeysSettings,
-    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, SettingsSortField,
-    VirtualFsSettings,
+    PanelOptionsSettings, SaveSetupMetadata, Settings, SettingsCategory, VirtualFsSettings,
 };
 pub use slo::{FOUNDATION_SLO, SloBudgets};
 #[cfg(test)]
@@ -96,12 +96,7 @@ pub enum AppCommand {
     PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
-    MoveUp,
-    MoveDown,
-    PageUp,
-    PageDown,
-    MoveHome,
-    MoveEnd,
+    Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
     InvertTags,
     SortNext,
@@ -112,33 +107,13 @@ pub enum AppCommand {
     CancelJob,
     OpenJobsScreen,
     CloseJobsScreen,
-    JobsMoveUp,
-    JobsMoveDown,
     OpenEntry,
     EditEntry,
     CdUp,
     Reread,
-    FindResultsMoveUp,
-    FindResultsMoveDown,
-    FindResultsPageUp,
-    FindResultsPageDown,
-    FindResultsHome,
-    FindResultsEnd,
     FindResultsOpenEntry,
     FindResultsPanelize,
-    TreeMoveUp,
-    TreeMoveDown,
-    TreePageUp,
-    TreePageDown,
-    TreeHome,
-    TreeEnd,
     TreeOpenEntry,
-    HotlistMoveUp,
-    HotlistMoveDown,
-    HotlistPageUp,
-    HotlistPageDown,
-    HotlistHome,
-    HotlistEnd,
     HotlistOpenEntry,
     HotlistAddCurrentDirectory,
     HotlistRemoveSelected,
@@ -155,22 +130,8 @@ pub enum AppCommand {
     OpenOptionsLearnKeys,
     OpenOptionsVirtualFs,
     SaveSetup,
-    MenuMoveUp,
-    MenuMoveDown,
-    MenuMoveLeft,
-    MenuMoveRight,
-    MenuHome,
-    MenuEnd,
     MenuAccept,
     MenuSelectAt(usize),
-    HelpMoveUp,
-    HelpMoveDown,
-    HelpPageUp,
-    HelpPageDown,
-    HelpHalfPageUp,
-    HelpHalfPageDown,
-    HelpHome,
-    HelpEnd,
     HelpFollowLink,
     HelpBack,
     HelpIndex,
@@ -185,12 +146,6 @@ pub enum AppCommand {
     DialogInputChar(char),
     DialogListboxUp,
     DialogListboxDown,
-    ViewerMoveUp,
-    ViewerMoveDown,
-    ViewerPageUp,
-    ViewerPageDown,
-    ViewerHome,
-    ViewerEnd,
     ViewerSearchForward,
     ViewerSearchBackward,
     ViewerSearchContinue,
@@ -200,6 +155,32 @@ pub enum AppCommand {
     ViewerToggleHex,
     MenuNoop,
     MenuNotImplemented(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NavigationTarget {
+    FileManager,
+    Jobs,
+    Menu,
+    Help,
+    FindResults,
+    Tree,
+    Hotlist,
+    Viewer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NavigationMotion {
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+    Home,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,24 +223,8 @@ impl AppCommand {
             | Self::SwitchPanel
             | Self::OpenJobsScreen
             | Self::CloseJobsScreen
-            | Self::JobsMoveUp
-            | Self::JobsMoveDown
-            | Self::MenuMoveUp
-            | Self::MenuMoveDown
-            | Self::MenuMoveLeft
-            | Self::MenuMoveRight
-            | Self::MenuHome
-            | Self::MenuEnd
             | Self::MenuAccept
             | Self::MenuSelectAt(_)
-            | Self::HelpMoveUp
-            | Self::HelpMoveDown
-            | Self::HelpPageUp
-            | Self::HelpPageDown
-            | Self::HelpHalfPageUp
-            | Self::HelpHalfPageDown
-            | Self::HelpHome
-            | Self::HelpEnd
             | Self::HelpFollowLink
             | Self::HelpBack
             | Self::HelpIndex
@@ -269,13 +234,17 @@ impl AppCommand {
             | Self::HelpNodePrev
             | Self::MenuNoop
             | Self::MenuNotImplemented(_) => CommandDomain::Route,
-            Self::MoveUp
-            | Self::MoveDown
-            | Self::PageUp
-            | Self::PageDown
-            | Self::MoveHome
-            | Self::MoveEnd
-            | Self::ToggleTag
+            Self::Navigate(target, _) => match target {
+                NavigationTarget::Jobs | NavigationTarget::Menu | NavigationTarget::Help => {
+                    CommandDomain::Route
+                }
+                NavigationTarget::FileManager
+                | NavigationTarget::FindResults
+                | NavigationTarget::Tree
+                | NavigationTarget::Hotlist => CommandDomain::Navigation,
+                NavigationTarget::Viewer => CommandDomain::Viewer,
+            },
+            Self::ToggleTag
             | Self::InvertTags
             | Self::SortNext
             | Self::SortReverse
@@ -287,37 +256,13 @@ impl AppCommand {
             | Self::EditEntry
             | Self::CdUp
             | Self::Reread
-            | Self::FindResultsMoveUp
-            | Self::FindResultsMoveDown
-            | Self::FindResultsPageUp
-            | Self::FindResultsPageDown
-            | Self::FindResultsHome
-            | Self::FindResultsEnd
             | Self::FindResultsOpenEntry
             | Self::FindResultsPanelize
-            | Self::TreeMoveUp
-            | Self::TreeMoveDown
-            | Self::TreePageUp
-            | Self::TreePageDown
-            | Self::TreeHome
-            | Self::TreeEnd
             | Self::TreeOpenEntry
-            | Self::HotlistMoveUp
-            | Self::HotlistMoveDown
-            | Self::HotlistPageUp
-            | Self::HotlistPageDown
-            | Self::HotlistHome
-            | Self::HotlistEnd
             | Self::HotlistOpenEntry
             | Self::HotlistAddCurrentDirectory
             | Self::HotlistRemoveSelected => CommandDomain::Navigation,
-            Self::ViewerMoveUp
-            | Self::ViewerMoveDown
-            | Self::ViewerPageUp
-            | Self::ViewerPageDown
-            | Self::ViewerHome
-            | Self::ViewerEnd
-            | Self::ViewerSearchForward
+            Self::ViewerSearchForward
             | Self::ViewerSearchBackward
             | Self::ViewerSearchContinue
             | Self::ViewerSearchContinueBackward
@@ -601,14 +546,6 @@ impl SortField {
             Self::Modified => "mtime",
         }
     }
-
-    fn from_settings(field: SettingsSortField) -> Self {
-        match field {
-            SettingsSortField::Name => Self::Name,
-            SettingsSortField::Size => Self::Size,
-            SettingsSortField::Modified => Self::Modified,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -648,12 +585,28 @@ impl ActivePanel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileEntryKind {
+    Parent,
+    Directory,
+    File,
+}
+
+impl FileEntryKind {
+    pub const fn is_dir(self) -> bool {
+        matches!(self, Self::Parent | Self::Directory)
+    }
+
+    pub const fn is_parent(self) -> bool {
+        matches!(self, Self::Parent)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
     pub name: String,
     pub path: PathBuf,
-    pub is_dir: bool,
-    pub is_parent: bool,
+    pub kind: FileEntryKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
 }
@@ -663,8 +616,7 @@ impl FileEntry {
         Self {
             name,
             path,
-            is_dir: true,
-            is_parent: false,
+            kind: FileEntryKind::Directory,
             size,
             modified,
         }
@@ -674,8 +626,7 @@ impl FileEntry {
         Self {
             name,
             path,
-            is_dir: false,
-            is_parent: false,
+            kind: FileEntryKind::File,
             size,
             modified,
         }
@@ -685,11 +636,18 @@ impl FileEntry {
         Self {
             name: String::from(".."),
             path,
-            is_dir: true,
-            is_parent: true,
+            kind: FileEntryKind::Parent,
             size: 0,
             modified: None,
         }
+    }
+
+    pub const fn is_dir(&self) -> bool {
+        self.kind.is_dir()
+    }
+
+    pub const fn is_parent(&self) -> bool {
+        self.kind.is_parent()
     }
 }
 
@@ -768,7 +726,7 @@ impl PanelState {
         self.tagged.retain(|tag| {
             self.entries
                 .iter()
-                .any(|entry| !entry.is_parent && entry.path == *tag)
+                .any(|entry| !entry.is_parent() && entry.path == *tag)
         });
         if self.entries.is_empty() {
             self.cursor = 0;
@@ -829,7 +787,7 @@ impl PanelState {
         let Some(entry) = self.selected_entry() else {
             return false;
         };
-        if entry.is_parent {
+        if entry.is_parent() {
             return false;
         }
         let path = entry.path.clone();
@@ -846,7 +804,7 @@ impl PanelState {
     pub fn invert_tags(&mut self) {
         let mut next_tags = HashSet::new();
         for entry in &self.entries {
-            if entry.is_parent {
+            if entry.is_parent() {
                 continue;
             }
             if !self.tagged.contains(&entry.path) {
@@ -859,7 +817,7 @@ impl PanelState {
     pub fn tagged_paths_in_display_order(&self) -> Vec<PathBuf> {
         self.entries
             .iter()
-            .filter(|entry| !entry.is_parent && self.tagged.contains(&entry.path))
+            .filter(|entry| !entry.is_parent() && self.tagged.contains(&entry.path))
             .map(|entry| entry.path.clone())
             .collect()
     }
@@ -887,7 +845,7 @@ impl PanelState {
     pub fn open_selected_directory(&mut self) -> bool {
         let Some((path, is_dir_hint)) = self
             .selected_entry()
-            .map(|entry| (entry.path.clone(), entry.is_dir))
+            .map(|entry| (entry.path.clone(), entry.is_dir()))
         else {
             return false;
         };
@@ -1311,20 +1269,6 @@ enum SettingsEntryAction {
     Info,
 }
 
-#[derive(Clone, Debug)]
-pub enum Route {
-    FileManager,
-    Help(HelpState),
-    Menu(MenuState),
-    Settings(SettingsScreenState),
-    Jobs,
-    Viewer(ViewerState),
-    FindResults(FindResultsState),
-    Tree(TreeState),
-    Hotlist,
-    Dialog(DialogState),
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransferKind {
     Copy,
@@ -1372,14 +1316,63 @@ enum PendingDialogAction {
         preset_commands: Vec<String>,
     },
     PanelizePresetAdd {
-        initial_command: String,
         preset_commands: Vec<String>,
     },
     PanelizePresetEdit {
-        initial_command: String,
         preset_commands: Vec<String>,
         preset_index: usize,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct DialogRoute {
+    pub state: DialogState,
+    action: Option<PendingDialogAction>,
+}
+
+impl DialogRoute {
+    fn new(state: DialogState, action: PendingDialogAction) -> Self {
+        Self {
+            state,
+            action: Some(action),
+        }
+    }
+
+    fn take_action(&mut self) -> Option<PendingDialogAction> {
+        self.action.take()
+    }
+
+    fn action(&self) -> Option<&PendingDialogAction> {
+        self.action.as_ref()
+    }
+}
+
+impl Deref for DialogRoute {
+    type Target = DialogState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for DialogRoute {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Route {
+    FileManager,
+    Help(HelpState),
+    Menu(MenuState),
+    Settings(SettingsScreenState),
+    Jobs,
+    Viewer(ViewerState),
+    FindResults(FindResultsState),
+    Tree(TreeState),
+    Hotlist,
+    Dialog(DialogRoute),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1480,25 +1473,21 @@ pub struct AppState {
     status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
-    pub overwrite_policy: OverwritePolicy,
     pub jobs_cursor: usize,
-    pub hotlist: Vec<PathBuf>,
     pub hotlist_cursor: usize,
     available_skins: Vec<String>,
-    active_skin_name: String,
+    preview_skin_name: Option<String>,
     pending_skin_change: Option<String>,
     pending_skin_preview: Option<String>,
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
     paused_find_results: Option<FindResultsState>,
-    pending_dialog_action: Option<PendingDialogAction>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panel_refresh: PanelRefreshWorkflow,
     panel_refresh_post: PanelRefreshPostWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
-    panelize_presets: Vec<String>,
     keybinding_hints: KeybindingHints,
     keymap_unknown_actions: usize,
     keymap_invalid_bindings: usize,
