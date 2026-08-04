@@ -15,6 +15,19 @@ impl AppState {
             AppCommand::Navigate(NavigationTarget::FileManager, motion) => {
                 self.apply_file_manager_navigation(motion);
             }
+            AppCommand::Panel(panel, PanelCommand::SetView(mode)) => {
+                self.set_panel_view_mode(panel, mode);
+            }
+            AppCommand::SetActivePanelView(mode) => {
+                self.set_panel_view_mode(self.active_panel, mode);
+            }
+            AppCommand::Panel(panel, PanelCommand::RestorePanelizedResults) => {
+                self.restore_panelized_results_for(panel);
+            }
+            AppCommand::Panel(panel, PanelCommand::Reread) => {
+                self.queue_panel_refresh(panel);
+                self.set_status(format!("Refreshing {} panel...", panel.label()));
+            }
             AppCommand::ToggleTag => {
                 let selected = self.active_panel().selected_entry();
                 if selected.is_none() {
@@ -605,10 +618,16 @@ impl AppState {
     }
 
     pub(crate) fn open_tree_screen(&mut self) {
+        self.open_tree_screen_for(self.active_panel);
+    }
+
+    pub(crate) fn open_tree_screen_for(&mut self, panel: ActivePanel) {
         if matches!(self.top_route(), Route::Tree(_)) {
             return;
         }
-        let root = self.active_panel().cwd.clone();
+        self.panel_views[panel.index()] = PanelViewMode::Listing;
+        self.active_panel = panel;
+        let root = self.panels[panel.index()].cwd.clone();
         self.open_tree_at(root);
         self.set_status("Loading directory tree...");
     }

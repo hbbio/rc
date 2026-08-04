@@ -19,8 +19,8 @@ use rc_core::layout::{
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
-    JobStatus, MenuState, PairInputField, PanelState, Route, SettingsScreenState, TreeLoadState,
-    TreeState, ViewerState, top_menus,
+    JobStatus, MenuState, PairInputField, PanelState, PanelViewMode, Route, SettingsScreenState,
+    TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -102,6 +102,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_panel(
             frame,
             panel_areas[0],
+            ActivePanel::Left,
             &state.panels[0],
             state.active_panel == ActivePanel::Left,
             skin.as_ref(),
@@ -110,6 +111,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_panel(
             frame,
             panel_areas[1],
+            ActivePanel::Right,
             &state.panels[1],
             state.active_panel == ActivePanel::Right,
             skin.as_ref(),
@@ -432,11 +434,17 @@ fn sanitize_single_line(text: &str) -> String {
 fn render_panel(
     frame: &mut Frame,
     area: Rect,
+    panel_id: ActivePanel,
     panel: &PanelState,
     active: bool,
     skin: &UiSkin,
     app: &AppState,
 ) {
+    if app.panel_view_mode(panel_id) == PanelViewMode::Info {
+        render_info_panel(frame, area, panel_id, skin, app);
+        return;
+    }
+
     let title = fit_single_line(panel_title(panel), area.width.saturating_sub(2) as usize);
     let selected_tagged = panel
         .selected_entry()
@@ -574,6 +582,72 @@ fn render_panel(
             .style(footer_style)
             .alignment(Alignment::Right),
         footer_layout[1],
+    );
+}
+
+fn render_info_panel(
+    frame: &mut Frame,
+    area: Rect,
+    panel_id: ActivePanel,
+    skin: &UiSkin,
+    app: &AppState,
+) {
+    let source_id = panel_id.other();
+    let source = &app.panels[source_id.index()];
+    let title = format!("Info | {} panel selection", source_id.label());
+    let block = Block::default()
+        .title(fit_single_line(
+            title,
+            area.width.saturating_sub(2) as usize,
+        ))
+        .borders(Borders::ALL)
+        .border_set(skin.panel_border_set())
+        .border_style(skin.style("core", "_default_"))
+        .style(skin.style("core", "_default_"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut rows = vec![
+        format!("Directory: {}", source.cwd.to_string_lossy()),
+        format!("Sort: {}", source.sort_label()),
+        format!("Tagged: {}", source.tagged_count()),
+        String::new(),
+    ];
+    match source.selected_entry() {
+        Some(entry) => {
+            let entry_type = if entry.is_parent() {
+                "parent directory"
+            } else if entry.is_dir() {
+                "directory"
+            } else {
+                "file"
+            };
+            rows.extend([
+                format!("Name: {}", entry.name),
+                format!("Type: {entry_type}"),
+                format!("Path: {}", entry.path.to_string_lossy()),
+                format!(
+                    "Size: {} ({} bytes)",
+                    format_human_size(entry.size),
+                    entry.size
+                ),
+                format!("Modified: {}", format_modified(entry.modified)),
+            ]);
+        }
+        None if source.loading => rows.push(String::from("Selection: loading...")),
+        None => rows.push(String::from("Selection: <none>")),
+    }
+    rows.push(String::new());
+    rows.push(format!("Filesystem: {}", panel_disk_summary(source, app)));
+
+    let width = inner.width as usize;
+    let lines: Vec<Line<'_>> = rows
+        .into_iter()
+        .map(|row| Line::raw(fit_single_line(row, width)))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).style(skin.style("core", "_default_")),
+        inner,
     );
 }
 
@@ -2120,8 +2194,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use rc_core::{
-        AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, WorkerCommand,
-        build_tree_ready_event, execute_worker_job, refresh_panel_event,
+        AppCommand, AppState, BackgroundEvent, JobError, JobEvent, JobRequest, PanelCommand,
+        WorkerCommand, build_tree_ready_event, execute_worker_job, refresh_panel_event,
     };
     use std::env;
     use std::fs;
@@ -2449,6 +2523,28 @@ mod tests {
             frame.contains("entry.txt"),
             "frame should include panel entry names"
         );
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_info_panel_tracks_the_other_panel_selection() {
+        let root = temp_root("info-panel");
+        fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.active_panel = ActivePanel::Right;
+        app.move_cursor(1);
+        app.apply(AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::SetView(PanelViewMode::Info),
+        ))
+        .expect("left info panel should open");
+
+        let frame = render_to_text(&app, 120, 30);
+        assert!(frame.contains("Info | right panel selection"));
+        assert!(frame.contains("Name: entry.txt"));
+        assert!(frame.contains("Type: file"));
+        assert!(frame.contains("Size: 4b (4 bytes)"));
+
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 

@@ -15,6 +15,7 @@ impl AppState {
             settings: settings.clone(),
             panels: [left, right],
             active_panel: ActivePanel::Left,
+            panel_views: [PanelViewMode::Listing; 2],
             status_line: String::from("Press F1 for help"),
             status_expires_at: None,
             last_dialog_result: None,
@@ -137,6 +138,35 @@ impl AppState {
         &self.panels[self.active_panel.index()]
     }
 
+    pub fn panel_view_mode(&self, panel: ActivePanel) -> PanelViewMode {
+        self.panel_views[panel.index()]
+    }
+
+    pub(crate) fn set_panel_view_mode(&mut self, panel: ActivePanel, mode: PanelViewMode) {
+        match mode {
+            PanelViewMode::Listing => {
+                self.panel_views[panel.index()] = PanelViewMode::Listing;
+                if self.exit_panelize_mode_for(panel) {
+                    self.queue_panel_refresh(panel);
+                    self.set_status(format!("{} panel: loading file listing...", panel.label()));
+                } else {
+                    self.set_status(format!("{} panel: file listing", panel.label()));
+                }
+            }
+            PanelViewMode::Info => {
+                let source_panel = panel.other();
+                self.panel_views[source_panel.index()] = PanelViewMode::Listing;
+                self.panel_views[panel.index()] = PanelViewMode::Info;
+                self.active_panel = source_panel;
+                self.set_status(format!(
+                    "{} panel: info for {} panel selection",
+                    panel.label(),
+                    source_panel.label()
+                ));
+            }
+        }
+    }
+
     pub fn active_panel_mut(&mut self) -> &mut PanelState {
         let index = self.active_panel.index();
         &mut self.panels[index]
@@ -154,8 +184,13 @@ impl AppState {
         }
     }
 
-    pub fn toggle_active_panel(&mut self) {
-        self.active_panel.toggle();
+    pub fn toggle_active_panel(&mut self) -> bool {
+        let next = self.active_panel.other();
+        if self.panel_view_mode(next) != PanelViewMode::Listing {
+            return false;
+        }
+        self.active_panel = next;
+        true
     }
 
     pub fn refresh_active_panel(&mut self) {
@@ -204,10 +239,13 @@ impl AppState {
     }
 
     pub fn exit_panelize_mode(&mut self) -> bool {
-        let panel = self.active_panel;
+        self.exit_panelize_mode_for(self.active_panel)
+    }
+
+    fn exit_panelize_mode_for(&mut self, panel: ActivePanel) -> bool {
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
-        let exited = self.active_panel_mut().exit_panelize();
+        let exited = self.panels[panel.index()].exit_panelize();
         if exited {
             self.schedule_panel_refresh_revert(panel, revert);
             if let Some(snapshot) = snapshot {

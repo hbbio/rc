@@ -116,6 +116,8 @@ pub enum AppCommand {
     PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
+    SetActivePanelView(PanelViewMode),
+    Panel(ActivePanel, PanelCommand),
     Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
     InvertTags,
@@ -194,6 +196,21 @@ pub enum AppCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PanelCommand {
+    SetView(PanelViewMode),
+    OpenTree,
+    RestorePanelizedResults,
+    Reread,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum PanelViewMode {
+    #[default]
+    Listing,
+    Info,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NavigationTarget {
     FileManager,
     Jobs,
@@ -257,6 +274,7 @@ impl AppCommand {
             | Self::PanelizePresetRemove
             | Self::EnterXMap
             | Self::SwitchPanel
+            | Self::Panel(_, PanelCommand::OpenTree)
             | Self::OpenJobsScreen
             | Self::CloseJobsScreen
             | Self::MenuAccept
@@ -281,6 +299,13 @@ impl AppCommand {
                 NavigationTarget::Viewer => CommandDomain::Viewer,
             },
             Self::ToggleTag
+            | Self::SetActivePanelView(_)
+            | Self::Panel(
+                _,
+                PanelCommand::SetView(_)
+                | PanelCommand::RestorePanelizedResults
+                | PanelCommand::Reread,
+            )
             | Self::InvertTags
             | Self::SortNext
             | Self::SortReverse
@@ -436,24 +461,43 @@ pub struct MenuBarItem {
     pub end_x: u16,
 }
 
-const SIDE_MENU_ENTRIES: [MenuEntry; 16] = [
-    MenuEntry::stub("File listing", ""),
-    MenuEntry::stub("Quick view", "C-x q"),
-    MenuEntry::stub("Info", "C-x i"),
-    MenuEntry::action("Tree", AppCommand::OpenTree),
-    MenuEntry::separator(),
-    MenuEntry::stub("Listing format...", ""),
-    MenuEntry::stub("Sort order...", ""),
-    MenuEntry::stub("Filter...", ""),
-    MenuEntry::stub("Encoding...", "M-e"),
-    MenuEntry::separator(),
-    MenuEntry::stub("FTP link...", ""),
-    MenuEntry::stub("Shell link...", ""),
-    MenuEntry::stub("SFTP link...", ""),
-    MenuEntry::action("Panelize", AppCommand::RestorePanelizedResults),
-    MenuEntry::separator(),
-    MenuEntry::action_with_shortcut("Rescan", "C-r", AppCommand::Reread),
-];
+const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
+    [
+        MenuEntry::action(
+            "File listing",
+            AppCommand::Panel(panel, PanelCommand::SetView(PanelViewMode::Listing)),
+        ),
+        MenuEntry::stub("Quick view", "C-x q"),
+        MenuEntry::action_with_literal_shortcut(
+            "Info",
+            "C-x i",
+            AppCommand::Panel(panel, PanelCommand::SetView(PanelViewMode::Info)),
+        ),
+        MenuEntry::action("Tree", AppCommand::Panel(panel, PanelCommand::OpenTree)),
+        MenuEntry::separator(),
+        MenuEntry::stub("Listing format...", ""),
+        MenuEntry::stub("Sort order...", ""),
+        MenuEntry::stub("Filter...", ""),
+        MenuEntry::stub("Encoding...", "M-e"),
+        MenuEntry::separator(),
+        MenuEntry::stub("FTP link...", ""),
+        MenuEntry::stub("Shell link...", ""),
+        MenuEntry::stub("SFTP link...", ""),
+        MenuEntry::action(
+            "Panelize",
+            AppCommand::Panel(panel, PanelCommand::RestorePanelizedResults),
+        ),
+        MenuEntry::separator(),
+        MenuEntry::action_with_shortcut(
+            "Rescan",
+            "C-r",
+            AppCommand::Panel(panel, PanelCommand::Reread),
+        ),
+    ]
+}
+
+const LEFT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::Left);
+const RIGHT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::Right);
 
 const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("View", "F3", AppCommand::OpenEntry),
@@ -522,7 +566,7 @@ const OPTIONS_MENU_ENTRIES: [MenuEntry; 9] = [
 const TOP_MENUS: [TopMenu; 5] = [
     TopMenu {
         title: "Left",
-        entries: &SIDE_MENU_ENTRIES,
+        entries: &LEFT_SIDE_MENU_ENTRIES,
     },
     TopMenu {
         title: "File",
@@ -538,7 +582,7 @@ const TOP_MENUS: [TopMenu; 5] = [
     },
     TopMenu {
         title: "Right",
-        entries: &SIDE_MENU_ENTRIES,
+        entries: &RIGHT_SIDE_MENU_ENTRIES,
     },
 ];
 
@@ -641,7 +685,7 @@ impl Default for SortMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ActivePanel {
     Left,
     Right,
@@ -656,10 +700,21 @@ impl ActivePanel {
     }
 
     pub fn toggle(&mut self) {
-        *self = match self {
+        *self = self.other();
+    }
+
+    pub const fn other(self) -> Self {
+        match self {
             Self::Left => Self::Right,
             Self::Right => Self::Left,
-        };
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
     }
 }
 
@@ -1578,6 +1633,7 @@ pub struct AppState {
     settings: Settings,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
+    panel_views: [PanelViewMode; 2],
     pub status_line: String,
     status_expires_at: Option<Instant>,
     pub last_dialog_result: Option<DialogResult>,

@@ -21,6 +21,9 @@ impl AppCommand {
             (KeyContext::Tree, KeyCommand::Quit) => Some(Self::CloseTree),
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
+            (KeyContext::FileManagerXMap, KeyCommand::PanelInfo) => {
+                Some(Self::SetActivePanelView(crate::PanelViewMode::Info))
+            }
             (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
             (KeyContext::FileManager, KeyCommand::SortNext) => Some(Self::SortNext),

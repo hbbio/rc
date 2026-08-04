@@ -20,14 +20,24 @@ impl AppState {
     }
 
     pub(crate) fn restore_panelized_results(&mut self) {
-        let panel_id = self.active_panel;
+        self.restore_panelized_results_for(self.active_panel);
+    }
+
+    pub(crate) fn restore_panelized_results_for(&mut self, panel_id: ActivePanel) {
         let panel_index = panel_id.index();
+        self.panel_views[panel_index] = PanelViewMode::Listing;
         if self.panels[panel_index].source.is_panelized() {
-            self.set_status("Panelized results are already active");
+            self.set_status(format!(
+                "{} panelized results are already active",
+                panel_id.label()
+            ));
             return;
         }
         let Some(snapshot) = self.panelized_result_history[panel_index].clone() else {
-            self.set_status("No panelized results to restore for this panel");
+            self.set_status(format!(
+                "No panelized results to restore for the {} panel",
+                panel_id.label()
+            ));
             return;
         };
 
@@ -66,7 +76,8 @@ impl AppState {
         panel.loading = false;
         panel.disk_usage = disk_usage;
         self.set_status(format!(
-            "Restored {result_count} {source_label} panelized result(s)"
+            "Restored {result_count} {source_label} result(s) in the {} panel",
+            panel_id.label()
         ));
     }
 

@@ -832,6 +832,7 @@ fn menu_stub_action_reports_not_implemented_status() {
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.apply(AppCommand::OpenMenuAt(0))
         .expect("left menu should open");
+    move_menu_selection_to_label(&mut app, "Encoding...");
     app.apply(AppCommand::MenuAccept)
         .expect("accepting stub menu action should succeed");
     assert_eq!(app.key_context(), KeyContext::FileManager);
@@ -841,6 +842,140 @@ fn menu_stub_action_reports_not_implemented_status() {
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn side_menu_info_mode_targets_its_named_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-side-info-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    app.active_panel = ActivePanel::Right;
+    app.apply(AppCommand::OpenMenuAt(0))
+        .expect("left menu should open");
+    move_menu_selection_to_label(&mut app, "Info");
+    app.apply(AppCommand::MenuAccept)
+        .expect("left info mode should open");
+
+    assert_eq!(app.panel_view_mode(ActivePanel::Left), PanelViewMode::Info);
+    assert_eq!(
+        app.panel_view_mode(ActivePanel::Right),
+        PanelViewMode::Listing
+    );
+    assert_eq!(
+        app.active_panel,
+        ActivePanel::Right,
+        "the listing that drives info should remain active"
+    );
+    assert!(
+        !app.toggle_active_panel(),
+        "file-manager focus must not enter an info-only panel"
+    );
+    assert_eq!(app.active_panel, ActivePanel::Right);
+
+    app.apply(AppCommand::OpenMenuAt(0))
+        .expect("left menu should reopen");
+    move_menu_selection_to_label(&mut app, "File listing");
+    app.apply(AppCommand::MenuAccept)
+        .expect("left file listing should be restored");
+    assert_eq!(
+        app.panel_view_mode(ActivePanel::Left),
+        PanelViewMode::Listing
+    );
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn side_menu_rescan_targets_its_named_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-side-rescan-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.active_panel = ActivePanel::Left;
+    app.apply(AppCommand::OpenMenuAt(4))
+        .expect("right menu should open");
+    move_menu_selection_to_label(&mut app, "Rescan");
+    app.apply(AppCommand::MenuAccept)
+        .expect("right rescan should be accepted");
+
+    let requests = app.take_pending_worker_commands();
+    assert!(requests.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Run(job)
+            if matches!(job.request, JobRequest::RefreshPanel {
+                panel: ActivePanel::Right,
+                ..
+            })
+    )));
+    assert_eq!(
+        app.active_panel,
+        ActivePanel::Left,
+        "rescan should not steal focus from the active panel"
+    );
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn file_listing_mode_leaves_panelized_results_recoverably() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-side-file-listing-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    let result = file_entry("result.txt");
+    let result_path = result.path.clone();
+    {
+        let panel = &mut app.panels[ActivePanel::Left.index()];
+        panel.source = PanelListingSource::Panelize {
+            command: String::from("find . -type f"),
+        };
+        panel.entries = vec![result];
+        panel.cursor = 0;
+        panel.loading = false;
+    }
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::SetView(PanelViewMode::Listing),
+    ))
+    .expect("file listing mode should be restored");
+
+    assert_eq!(
+        app.panels[ActivePanel::Left.index()].source,
+        PanelListingSource::Directory
+    );
+    assert!(app.panels[ActivePanel::Left.index()].loading);
+    let stored = app.panelized_result_history[ActivePanel::Left.index()]
+        .as_ref()
+        .expect("panelized results should remain recoverable");
+    assert_eq!(stored.entries[0].path, result_path);
+    assert!(
+        app.take_pending_worker_commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                WorkerCommand::Run(job)
+                    if matches!(job.request, JobRequest::RefreshPanel {
+                        panel: ActivePanel::Left,
+                        ..
+                    })
+            ))
+    );
+
+    fs::remove_dir_all(root).expect("must remove temp root");
 }
 
 #[test]
@@ -878,6 +1013,20 @@ fn side_menus_match_and_options_match_mc_shape() {
             && left_labels.contains(&"Panelize")
             && left_labels.contains(&"Rescan"),
         "side menus should include MC-style panel controls"
+    );
+    assert_eq!(
+        left.entries[2].command,
+        AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::SetView(PanelViewMode::Info)
+        )
+    );
+    assert_eq!(
+        right.entries[2].command,
+        AppCommand::Panel(
+            ActivePanel::Right,
+            PanelCommand::SetView(PanelViewMode::Info)
+        )
     );
 
     let file_labels: Vec<&str> = file.entries.iter().map(|entry| entry.label).collect();

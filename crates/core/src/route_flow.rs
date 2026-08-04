@@ -28,6 +28,7 @@ impl AppState {
             AppCommand::OpenFindDialog => self.open_find_dialog(),
             AppCommand::CloseFindResults => self.close_find_results(),
             AppCommand::OpenTree => self.open_tree_screen(),
+            AppCommand::Panel(panel, PanelCommand::OpenTree) => self.open_tree_screen_for(panel),
             AppCommand::CloseTree => self.close_tree_screen(),
             AppCommand::OpenHotlist => self.open_hotlist_screen(),
             AppCommand::CloseHotlist => self.close_hotlist_screen(),
@@ -40,14 +41,11 @@ impl AppState {
                 self.set_status("Extended keymap mode");
             }
             AppCommand::SwitchPanel => {
-                self.toggle_active_panel();
-                self.set_status(format!(
-                    "Active panel: {}",
-                    match self.active_panel {
-                        ActivePanel::Left => "left",
-                        ActivePanel::Right => "right",
-                    }
-                ));
+                if self.toggle_active_panel() {
+                    self.set_status(format!("Active panel: {}", self.active_panel.label()));
+                } else {
+                    self.set_status("The other panel is not a file listing");
+                }
             }
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
