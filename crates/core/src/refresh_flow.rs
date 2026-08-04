@@ -303,7 +303,9 @@ impl AppState {
         let panel_state = &mut self.panels[panel_index];
         if is_first_chunk {
             panel_state.entries.clear();
-            if let Some(parent) = cwd.parent() {
+            if matches!(source, PanelListingSource::Directory)
+                && let Some(parent) = cwd.parent()
+            {
                 panel_state
                     .entries
                     .push(FileEntry::parent(parent.to_path_buf()));
@@ -314,7 +316,11 @@ impl AppState {
             panel_state.cursor = 0;
         }
         panel_state.loading = true;
-        self.set_status(format!("Loading {} entries...", partial_count));
+        if source.is_panelized() {
+            self.set_status(format!("Panelize: {partial_count} result(s) received..."));
+        } else {
+            self.set_status(format!("Loading {partial_count} entries..."));
+        }
     }
 
     pub(crate) fn handle_panel_refreshed(&mut self, completion: PanelRefreshCompletion) {
@@ -339,17 +345,37 @@ impl AppState {
         }
 
         let focus_target = self.panel_refresh_post.focus_target_for_panel(panel);
+        let has_streamed_entries = !self.panel_refresh_is_first_chunk(panel);
         let mut clear_focus_target = false;
         let mut focus_status = None;
+        let mut completion_status = None;
         {
             let panel_state = &mut self.panels[panel.index()];
             panel_state.loading = false;
             panel_state.disk_usage = disk_usage;
             match result {
                 Ok(entries) => {
+                    let entry_count = entries.len();
+                    let streamed_selection = if source.is_panelized() && has_streamed_entries {
+                        panel_state.selected_entry().map(|entry| entry.path.clone())
+                    } else {
+                        None
+                    };
                     panel_state.apply_entries(entries);
+                    if let Some(selected_path) = streamed_selection
+                        && let Some(index) = panel_state
+                            .entries
+                            .iter()
+                            .position(|entry| entry.path == selected_path)
+                    {
+                        panel_state.cursor = index;
+                    }
                     self.panel_refresh_post
                         .clear_panelize_revert_for_panel(panel);
+                    if source.is_panelized() {
+                        completion_status =
+                            Some(format!("Panelize complete: {entry_count} result(s)"));
+                    }
                     if let Some(target_path) = focus_target {
                         clear_focus_target = true;
                         if let Some(index) = panel_state
@@ -377,13 +403,14 @@ impl AppState {
                         revert_snapshot.loading = false;
                         *panel_state = revert_snapshot;
                     }
-                    if error != PANEL_REFRESH_CANCELED_MESSAGE {
-                        if is_panelize {
-                            self.set_status(format!("Panelize failed: {error}"));
-                        } else {
-                            self.set_status(format!("Panel refresh failed: {error}"));
+                    completion_status = match (is_panelize, error.as_str()) {
+                        (true, PANEL_REFRESH_CANCELED_MESSAGE) => {
+                            Some(String::from("Panelize canceled"))
                         }
-                    }
+                        (true, _) => Some(format!("Panelize failed: {error}")),
+                        (false, PANEL_REFRESH_CANCELED_MESSAGE) => None,
+                        (false, _) => Some(format!("Panel refresh failed: {error}")),
+                    };
                 }
             }
         }
@@ -393,6 +420,8 @@ impl AppState {
         }
         if let Some(focus_status) = focus_status {
             self.set_status(focus_status);
+        } else if let Some(completion_status) = completion_status {
+            self.set_status(completion_status);
         }
     }
 

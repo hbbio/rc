@@ -2025,6 +2025,127 @@ mod tests {
         fs::remove_dir_all(&root).expect("temp root should be removable");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn refresh_worker_streams_panelize_entries_in_adaptive_chunks() {
+        let root = make_temp_dir("refresh-panelize-streaming");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_refresh_worker_job(
+            JobId(8),
+            ActivePanel::Left,
+            root.clone(),
+            PanelListingSource::Panelize {
+                command: String::from(
+                    "printf 'delta.txt\\nalpha.txt\\ncharlie.txt\\nbravo.txt\\n'",
+                ),
+            },
+            SortMode::default(),
+            true,
+            12,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let events: Vec<BackgroundEvent> = background_event_rx.try_iter().collect();
+        let chunk_sizes: Vec<usize> = events
+            .iter()
+            .filter_map(|event| match event {
+                BackgroundEvent::PanelEntriesChunk { entries, .. } => Some(entries.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunk_sizes,
+            vec![1, 2, 1],
+            "small early chunks should minimize latency before growing toward the cap"
+        );
+        let final_entries = events.iter().find_map(|event| match event {
+            BackgroundEvent::PanelRefreshed {
+                request_id,
+                result: Ok(entries),
+                ..
+            } => {
+                assert_eq!(*request_id, 12);
+                Some(entries)
+            }
+            _ => None,
+        });
+        let final_names: Vec<&str> = final_entries
+            .expect("panelize refresh should emit a successful final event")
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            final_names,
+            vec!["alpha.txt", "bravo.txt", "charlie.txt", "delta.txt"],
+            "the authoritative final result should still be sorted"
+        );
+        assert!(
+            matches!(
+                worker_event_rx.try_iter().last(),
+                Some(JobEvent::Finished {
+                    id: JobId(8),
+                    result: Ok(())
+                })
+            ),
+            "streamed panelize refresh should finish successfully"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_panelize_worker_emits_partial_chunk_before_terminal_error() {
+        let root = make_temp_dir("refresh-panelize-partial-failure");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_refresh_worker_job(
+            JobId(9),
+            ActivePanel::Right,
+            root.clone(),
+            PanelListingSource::Panelize {
+                command: String::from("printf 'partial.txt\\n'; printf 'boom\\n' >&2; exit 7"),
+            },
+            SortMode::default(),
+            true,
+            13,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let events: Vec<BackgroundEvent> = background_event_rx.try_iter().collect();
+        assert!(matches!(
+            events.first(),
+            Some(BackgroundEvent::PanelEntriesChunk { entries, .. })
+                if entries.iter().any(|entry| entry.name == "partial.txt")
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(BackgroundEvent::PanelRefreshed {
+                request_id: 13,
+                result: Err(error),
+                ..
+            }) if error.contains("boom")
+        ));
+        assert!(matches!(
+            worker_event_rx.try_iter().last(),
+            Some(JobEvent::Finished {
+                id: JobId(9),
+                result: Err(_)
+            })
+        ));
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
     #[test]
     fn refresh_outcomes_map_permission_denied_to_elevated_retry_hint() {
         let cancel_flag = AtomicBool::new(false);

@@ -87,12 +87,48 @@ pub(crate) fn read_panelized_entries_with_cancel(
     )
 }
 
+pub(crate) fn stream_panelized_entries_with_cancel(
+    base_dir: &Path,
+    command: &str,
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+    emit_entry: &mut dyn FnMut(&FileEntry) -> io::Result<()>,
+) -> io::Result<Vec<FileEntry>> {
+    let process_backend = LocalProcessBackend;
+    read_panelized_entries_with_process_backend_and_emit(
+        base_dir,
+        command,
+        sort_mode,
+        cancel_flag,
+        &process_backend,
+        emit_entry,
+    )
+}
+
 pub(crate) fn read_panelized_entries_with_process_backend(
     base_dir: &Path,
     command: &str,
     sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
     process_backend: &dyn ProcessBackend,
+) -> io::Result<Vec<FileEntry>> {
+    read_panelized_entries_with_process_backend_and_emit(
+        base_dir,
+        command,
+        sort_mode,
+        cancel_flag,
+        process_backend,
+        &mut |_| Ok(()),
+    )
+}
+
+fn read_panelized_entries_with_process_backend_and_emit(
+    base_dir: &Path,
+    command: &str,
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+    process_backend: &dyn ProcessBackend,
+    emit_entry: &mut dyn FnMut(&FileEntry) -> io::Result<()>,
 ) -> io::Result<Vec<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
     let mut seen = HashSet::new();
@@ -107,7 +143,17 @@ pub(crate) fn read_panelized_entries_with_process_backend(
             stderr_bytes: PANELIZE_STDERR_LIMIT_BYTES,
         },
         &mut |raw_line| {
-            append_panelized_stdout_line(base_dir, raw_line, &mut seen, &mut entries, cancel_flag)
+            let Some(entry) = panelized_stdout_entry(base_dir, raw_line, &mut seen, cancel_flag)?
+            else {
+                return Ok(());
+            };
+            entries.push(entry);
+            if entries.len() > PANELIZE_MAX_ENTRIES {
+                return Err(io::Error::other(format!(
+                    "panelize produced more than {PANELIZE_MAX_ENTRIES} entries"
+                )));
+            }
+            emit_entry(entries.last().expect("entry was just appended"))
         },
     )?;
     if !output.success {
@@ -125,28 +171,21 @@ pub(crate) fn read_panelized_entries_with_process_backend(
     Ok(entries)
 }
 
-fn append_panelized_stdout_line(
+fn panelized_stdout_entry(
     base_dir: &Path,
     raw_line: &[u8],
     seen: &mut HashSet<PathBuf>,
-    entries: &mut Vec<FileEntry>,
     cancel_flag: Option<&AtomicBool>,
-) -> io::Result<()> {
+) -> io::Result<Option<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
     let line = String::from_utf8_lossy(raw_line);
     let line = line.strip_suffix('\n').unwrap_or(line.as_ref());
     let line = line.strip_suffix('\r').unwrap_or(line);
     if line.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
-    append_panelized_path_entry(base_dir, PathBuf::from(line), seen, entries, cancel_flag)?;
-    if entries.len() > PANELIZE_MAX_ENTRIES {
-        return Err(io::Error::other(format!(
-            "panelize produced more than {PANELIZE_MAX_ENTRIES} entries"
-        )));
-    }
-    Ok(())
+    panelized_path_entry(base_dir, PathBuf::from(line), seen, cancel_flag)
 }
 
 pub(crate) fn read_panelized_paths(
@@ -155,22 +194,36 @@ pub(crate) fn read_panelized_paths(
     sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
-    let mut seen = HashSet::new();
-    let mut entries = Vec::new();
+    stream_panelized_paths_with_cancel(base_dir, paths, sort_mode, cancel_flag, &mut |_| Ok(()))
+}
+
+pub(crate) fn stream_panelized_paths_with_cancel(
+    base_dir: &Path,
+    paths: &[PathBuf],
+    sort_mode: SortMode,
+    cancel_flag: Option<&AtomicBool>,
+    emit_entry: &mut dyn FnMut(&FileEntry) -> io::Result<()>,
+) -> io::Result<Vec<FileEntry>> {
+    let mut seen = HashSet::with_capacity(paths.len());
+    let mut entries = Vec::with_capacity(paths.len());
     for path in paths {
-        append_panelized_path_entry(base_dir, path.clone(), &mut seen, &mut entries, cancel_flag)?;
+        let Some(entry) = panelized_path_entry(base_dir, path.clone(), &mut seen, cancel_flag)?
+        else {
+            continue;
+        };
+        entries.push(entry);
+        emit_entry(entries.last().expect("entry was just appended"))?;
     }
     sort_file_entries(&mut entries, sort_mode);
     Ok(entries)
 }
 
-fn append_panelized_path_entry(
+fn panelized_path_entry(
     base_dir: &Path,
     input_path: PathBuf,
     seen: &mut HashSet<PathBuf>,
-    entries: &mut Vec<FileEntry>,
     cancel_flag: Option<&AtomicBool>,
-) -> io::Result<()> {
+) -> io::Result<Option<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
     let path = if input_path.is_absolute() {
         input_path
@@ -178,7 +231,7 @@ fn append_panelized_path_entry(
         base_dir.join(input_path)
     };
     if !seen.insert(path.clone()) {
-        return Ok(());
+        return Ok(None);
     }
 
     let metadata = fs::metadata(&path).ok();
@@ -186,12 +239,12 @@ fn append_panelized_path_entry(
     let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
     let name = panelized_entry_label(base_dir, &path);
     let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
-    if is_dir {
-        entries.push(FileEntry::directory(name, path, size, modified));
+    let entry = if is_dir {
+        FileEntry::directory(name, path, size, modified)
     } else {
-        entries.push(FileEntry::file(name, path, size, modified));
-    }
-    Ok(())
+        FileEntry::file(name, path, size, modified)
+    };
+    Ok(Some(entry))
 }
 
 pub(crate) fn ensure_panel_refresh_not_canceled(

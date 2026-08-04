@@ -530,12 +530,14 @@ fn failed_panelize_refresh_restores_the_complete_previous_panel_state() {
             None,
         )],
     });
-    assert!(
+    assert_eq!(
         app.active_panel()
             .entries
             .iter()
-            .any(|entry| entry.path == root.join("partial.txt")),
-        "precondition: a progressive chunk should replace the visible listing"
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
+        vec![root.join("partial.txt")],
+        "a panelize chunk should replace the listing without a directory parent entry"
     );
 
     app.handle_background_event(BackgroundEvent::PanelRefreshed {
@@ -556,6 +558,74 @@ fn failed_panelize_refresh_restores_the_complete_previous_panel_state() {
     assert_eq!(restored.tagged, previous.tagged);
     assert_eq!(restored.disk_usage, previous.disk_usage);
     assert!(!restored.loading);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn completed_panelize_stream_preserves_the_selected_path_across_final_sort() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-panelize-selection-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.start_panelize_command(String::from("streaming command"));
+    let request = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            let JobRequest::RefreshPanel {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                request_id,
+                ..
+            } = job.request
+            else {
+                return None;
+            };
+            Some((panel, cwd, source, sort_mode, request_id))
+        })
+        .expect("panelize refresh should be queued");
+    let (panel, cwd, source, sort_mode, request_id) = request;
+    let zulu = FileEntry::file(String::from("zulu.txt"), root.join("zulu.txt"), 0, None);
+    let alpha = FileEntry::file(String::from("alpha.txt"), root.join("alpha.txt"), 0, None);
+    app.handle_background_event(BackgroundEvent::PanelEntriesChunk {
+        panel,
+        cwd: cwd.clone(),
+        source: source.clone(),
+        sort_mode,
+        request_id,
+        entries: vec![zulu.clone(), alpha.clone()],
+    });
+    assert_eq!(
+        app.active_panel().selected_entry().map(|entry| &entry.path),
+        Some(&zulu.path)
+    );
+
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        request_id,
+        disk_usage: None,
+        result: Ok(vec![alpha, zulu.clone()]),
+    });
+
+    assert_eq!(
+        app.active_panel().selected_entry().map(|entry| &entry.path),
+        Some(&zulu.path),
+        "the final sorted vector should retain the user's streamed selection"
+    );
+    assert!(app.status_line.contains("Panelize complete: 2 result(s)"));
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
