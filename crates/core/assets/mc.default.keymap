@@ -541,6 +541,8 @@ Ok = enter
 Cancel = esc
 Backspace = backspace
 FocusNext = tab
+Up = up
+Down = down
 
 [finddialog]
 Ok = enter

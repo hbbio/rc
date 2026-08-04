@@ -109,7 +109,11 @@ impl AppState {
                     );
                     let is_persist_settings = kind == Some(JobKind::PersistSettings);
                     let is_find = kind == Some(JobKind::Find);
+                    let is_quick_cd_search = kind == Some(JobKind::QuickCdSearch);
                     let suppress_status = suppress_transient_job_status(kind);
+                    if is_quick_cd_search {
+                        self.handle_quick_cd_search_job_finished(id);
+                    }
                     if is_persist_settings {
                         self.mark_settings_saved(SystemTime::now());
                     }
@@ -165,6 +169,7 @@ impl AppState {
                     let is_find = kind == Some(JobKind::Find);
                     let is_refresh = kind == Some(JobKind::RefreshPanel);
                     let is_tree = kind == Some(JobKind::BuildTree);
+                    let is_quick_cd_search = kind == Some(JobKind::QuickCdSearch);
                     let is_quick_view = kind == Some(JobKind::LoadQuickView);
                     let is_selection_size = kind == Some(JobKind::MeasureSelection);
                     let suppress_status = suppress_transient_job_status(kind);
@@ -173,6 +178,9 @@ impl AppState {
                     }
                     if is_quick_view {
                         self.handle_quick_view_job_failure(id, &error);
+                    }
+                    if is_quick_cd_search {
+                        self.handle_quick_cd_search_job_failure(id, &error);
                     }
                     if is_selection_size {
                         self.handle_selection_size_job_failure(id, &error);
@@ -324,6 +332,10 @@ impl AppState {
                 request_id,
                 report,
             } => self.handle_selection_size_measured(panel, request_id, report),
+            BackgroundEvent::QuickCdSearchUpdated {
+                request_id,
+                snapshot,
+            } => self.handle_quick_cd_search_snapshot(request_id, snapshot),
             BackgroundEvent::FindEntriesChunk { job_id, entries } => {
                 self.handle_find_entries_chunk(job_id, entries)
             }
@@ -626,6 +638,7 @@ impl AppState {
             return false;
         }
         self.handle_quick_view_cancel_requested(job_id);
+        self.handle_quick_cd_search_cancel_requested(job_id);
         self.handle_selection_size_cancel_requested(job_id);
         let job_kind = self
             .jobs
@@ -676,6 +689,7 @@ fn suppress_transient_job_status(kind: Option<JobKind>) -> bool {
             JobKind::RefreshPanel
                 | JobKind::LoadViewer
                 | JobKind::LoadQuickView
+                | JobKind::QuickCdSearch
                 | JobKind::MeasureSelection
                 | JobKind::BuildTree
         )

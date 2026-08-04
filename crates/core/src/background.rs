@@ -88,6 +88,10 @@ pub enum BackgroundEvent {
         request_id: u64,
         report: crate::SelectionSizeReport,
     },
+    QuickCdSearchUpdated {
+        request_id: u64,
+        snapshot: crate::QuickCdSearchSnapshot,
+    },
     FindEntriesChunk {
         job_id: JobId,
         entries: Vec<FindResultEntry>,

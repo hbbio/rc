@@ -17,7 +17,9 @@ use nix::unistd::{Gid, Uid, chown};
 
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
-use crate::{ActivePanel, FileEntry, FindSpec, PanelFilter, PanelListingSource, SortMode};
+use crate::{
+    ActivePanel, FileEntry, FindSpec, PanelFilter, PanelListingSource, QuickCdSearchSpec, SortMode,
+};
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
@@ -41,6 +43,7 @@ pub enum JobKind {
     PersistSettings,
     RefreshPanel,
     Find,
+    QuickCdSearch,
     LoadViewer,
     LoadQuickView,
     MeasureSelection,
@@ -58,6 +61,7 @@ impl JobKind {
             Self::PersistSettings => "persist-settings",
             Self::RefreshPanel => "refresh-panel",
             Self::Find => "find",
+            Self::QuickCdSearch => "quick-cd-search",
             Self::LoadViewer => "load-viewer",
             Self::LoadQuickView => "load-quick-view",
             Self::MeasureSelection => "measure-selection",
@@ -124,6 +128,10 @@ pub enum JobRequest {
         spec: FindSpec,
         max_results: usize,
     },
+    QuickCdSearch {
+        spec: QuickCdSearchSpec,
+        request_id: u64,
+    },
     LoadViewer {
         path: PathBuf,
     },
@@ -155,6 +163,7 @@ impl JobRequest {
             Self::PersistSettings { .. } => JobKind::PersistSettings,
             Self::RefreshPanel { .. } => JobKind::RefreshPanel,
             Self::Find { .. } => JobKind::Find,
+            Self::QuickCdSearch { .. } => JobKind::QuickCdSearch,
             Self::LoadViewer { .. } => JobKind::LoadViewer,
             Self::LoadQuickView { .. } => JobKind::LoadQuickView,
             Self::MeasureSelection { .. } => JobKind::MeasureSelection,
@@ -172,6 +181,7 @@ impl JobRequest {
             Self::PersistSettings { .. } => 1,
             Self::RefreshPanel { .. } => 1,
             Self::Find { .. } => 1,
+            Self::QuickCdSearch { .. } => 1,
             Self::LoadViewer { .. } => 1,
             Self::LoadQuickView { .. } => 1,
             Self::MeasureSelection { paths, .. } => paths.len(),
@@ -247,6 +257,13 @@ impl JobRequest {
                     spec.start_dir.to_string_lossy()
                 )
             }
+            Self::QuickCdSearch {
+                spec, request_id, ..
+            } => format!(
+                "quick cd '{}' from {} (request #{request_id})",
+                spec.query,
+                spec.cwd.to_string_lossy()
+            ),
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
             Self::LoadQuickView { panel, path, .. } => format!(
                 "preview {} in {} panel",
@@ -938,6 +955,10 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "find jobs are executed by the runtime adapter",
         )),
+        JobRequest::QuickCdSearch { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "quick-cd search jobs are executed by the runtime adapter",
+        )),
         JobRequest::LoadViewer { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "viewer jobs are executed by the runtime adapter",
@@ -1514,6 +1535,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::Rename { .. }
         | JobRequest::PersistSettings { .. }
         | JobRequest::RefreshPanel { .. }
+        | JobRequest::QuickCdSearch { .. }
         | JobRequest::LoadViewer { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }

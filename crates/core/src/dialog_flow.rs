@@ -51,10 +51,20 @@ impl AppState {
                     self.handle_dialog_event(DialogEvent::FocusNext);
                 }
             }
-            AppCommand::DialogBackspace => self.handle_dialog_event(DialogEvent::Backspace),
+            AppCommand::DialogBackspace => {
+                let quick_cd_changed = self.quick_cd_dialog_is_active();
+                self.handle_dialog_event(DialogEvent::Backspace);
+                if quick_cd_changed {
+                    self.sync_quick_cd_search();
+                }
+            }
             AppCommand::DialogInputChar(ch) => {
                 if ch != ' ' || !self.toggle_panel_sort_dialog_reverse() {
+                    let quick_cd_changed = self.quick_cd_dialog_is_active();
                     self.handle_dialog_event(DialogEvent::InsertChar(ch));
+                    if quick_cd_changed {
+                        self.sync_quick_cd_search();
+                    }
                 }
             }
             AppCommand::DialogListboxUp => {
@@ -314,6 +324,9 @@ impl AppState {
             },
             _ => None,
         };
+        if matches!(pending.as_ref(), Some(PendingDialogAction::QuickCd)) {
+            self.stop_quick_cd_search();
+        }
         match (pending, result) {
             (None, result) => self.set_status(result.status_line()),
             (
@@ -556,8 +569,14 @@ impl AppState {
             (Some(PendingDialogAction::FindSearch), DialogResult::Canceled) => {
                 self.set_status("Find canceled");
             }
-            (Some(PendingDialogAction::QuickCd), DialogResult::InputSubmitted(value)) => {
-                self.submit_quick_cd(value);
+            (
+                Some(PendingDialogAction::QuickCd),
+                DialogResult::QuickCdSubmitted {
+                    input,
+                    selected_path,
+                },
+            ) => {
+                self.submit_quick_cd(input, selected_path);
             }
             (Some(PendingDialogAction::QuickCd), DialogResult::Canceled) => {
                 self.set_status("Quick cd canceled");
@@ -742,6 +761,15 @@ impl AppState {
                 self.finish_dialog(result);
             }
         }
+    }
+
+    fn quick_cd_dialog_is_active(&self) -> bool {
+        matches!(
+            self.routes.last(),
+            Some(Route::Dialog(dialog))
+                if matches!(dialog.action(), Some(PendingDialogAction::QuickCd))
+                    && matches!(dialog.kind, DialogKind::QuickCd(_))
+        )
     }
 }
 

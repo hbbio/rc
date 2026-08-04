@@ -169,7 +169,7 @@ impl RuntimeBridge {
                                 self.mark_command_dispatched(pending_key);
                                 finalize_backpressure_drop(state, command);
                                 state.set_status(
-                                    "runtime queue saturated; dropped low-priority refresh",
+                                    "runtime queue saturated; dropped low-priority background job",
                                 );
                                 tracing::warn!(
                                     runtime_event = "queue_drop",
@@ -454,6 +454,7 @@ async fn run_runtime_loop(
                                 (Arc::clone(&fs_mutation_limit), "fs_mutation", true)
                             }
                             JobRequest::Find { .. }
+                            | JobRequest::QuickCdSearch { .. }
                             | JobRequest::MeasureSelection { .. }
                             | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan", true)
@@ -790,6 +791,14 @@ fn execute_runtime_worker_job(
             spec,
             max_results,
         ),
+        JobRequest::QuickCdSearch { spec, request_id } => execute_quick_cd_search_worker_job(
+            worker_job.id,
+            spec,
+            request_id,
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
         JobRequest::LoadViewer { path } => execute_viewer_worker_job(
             worker_job.id,
             path,
@@ -930,6 +939,28 @@ fn execute_find_worker_job(
             .send(BackgroundEvent::FindCompleted { job_id, report })
             .map_err(|_| JobError::from_message("background event channel disconnected"))
     });
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
+fn execute_quick_cd_search_worker_job(
+    job_id: JobId,
+    spec: rc_core::QuickCdSearchSpec,
+    request_id: u64,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let result = rc_core::run_quick_cd_search(&spec, cancel_flag.as_ref(), |snapshot| {
+        background_event_tx
+            .send(BackgroundEvent::QuickCdSearchUpdated {
+                request_id,
+                snapshot,
+            })
+            .is_ok()
+    })
+    .map(|_| ())
+    .map_err(|error| JobError::from_message(error.to_string()));
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
@@ -1126,9 +1157,9 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
             JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
                 CommandPriority::High
             }
-            JobRequest::RefreshPanel { .. } | JobRequest::MeasureSelection { .. } => {
-                CommandPriority::Low
-            }
+            JobRequest::RefreshPanel { .. }
+            | JobRequest::QuickCdSearch { .. }
+            | JobRequest::MeasureSelection { .. } => CommandPriority::Low,
             _ => CommandPriority::Medium,
         },
     }
@@ -1195,7 +1226,7 @@ fn finalize_backpressure_drop(state: &mut AppState, command: WorkerCommand) {
         WorkerCommand::Run(job) => {
             state.handle_job_dispatch_failure(
                 job.id,
-                JobError::dispatch("runtime queue saturated; dropped low-priority refresh"),
+                JobError::dispatch("runtime queue saturated; dropped low-priority background job"),
             );
         }
         WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => {
@@ -1690,7 +1721,9 @@ mod tests {
             "low-priority refresh should be dropped instead of requeued"
         );
         assert!(
-            state.status_line.contains("dropped low-priority refresh"),
+            state
+                .status_line
+                .contains("dropped low-priority background job"),
             "status should explain backpressure drop behavior"
         );
         assert!(
@@ -2208,6 +2241,65 @@ mod tests {
                 },
             }
         ));
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Ok(())
+            }
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn quick_cd_worker_streams_ranked_snapshots_with_request_identity() {
+        let root = make_temp_dir("quick-cd-worker");
+        let target = root.join("Project-Needle");
+        fs::create_dir_all(&target).expect("matching directory should be creatable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_quick_cd_search_worker_job(
+            JobId(1),
+            rc_core::QuickCdSearchSpec {
+                query: String::from("needle"),
+                cwd: root.clone(),
+                home: Some(root.clone()),
+                root: root.clone(),
+                previous_directory: None,
+                max_results: 8,
+                max_directories: 32,
+            },
+            91,
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Started { id: JobId(1) }
+        ));
+        let mut final_snapshot = None;
+        while let Ok(event) = background_event_rx.try_recv() {
+            match event {
+                BackgroundEvent::QuickCdSearchUpdated {
+                    request_id: 91,
+                    snapshot,
+                } if snapshot.complete => final_snapshot = Some(snapshot),
+                BackgroundEvent::QuickCdSearchUpdated { request_id: 91, .. } => {}
+                other => panic!("unexpected quick-cd background event: {other:?}"),
+            }
+        }
+        let final_snapshot = final_snapshot.expect("final quick-cd snapshot should be emitted");
+        assert!(
+            final_snapshot
+                .suggestions
+                .iter()
+                .any(|suggestion| suggestion.path == target)
+        );
         assert!(matches!(
             recv_event(&worker_event_rx, Duration::from_secs(1)),
             JobEvent::Finished {

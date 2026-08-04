@@ -130,6 +130,23 @@ fn drain_background(app: &mut AppState) {
                             }
                             let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                         }
+                        JobRequest::QuickCdSearch { spec, request_id } => {
+                            let _ = event_tx.send(JobEvent::Started { id: job_id });
+                            let cancel_flag = job.cancel_flag();
+                            let result =
+                                run_quick_cd_search(spec, cancel_flag.as_ref(), |snapshot| {
+                                    app.handle_background_event(
+                                        BackgroundEvent::QuickCdSearchUpdated {
+                                            request_id: *request_id,
+                                            snapshot,
+                                        },
+                                    );
+                                    true
+                                })
+                                .map(|_| ())
+                                .map_err(|error| JobError::from_message(error.to_string()));
+                            let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                        }
                         JobRequest::LoadViewer { path } => {
                             let _ = event_tx.send(JobEvent::Started { id: job_id });
                             let viewer_result =
@@ -1060,6 +1077,28 @@ Copy = ctrl-y
     assert_eq!(app.menu_entry_shortcut_label(view_entry), "F11");
     assert_eq!(app.menu_entry_shortcut_label(edit_entry), "F12");
     assert_eq!(app.menu_entry_shortcut_label(copy_entry), "Ctrl-y");
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn quick_cd_menu_prefers_the_portable_slash_shortcut() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-quick-cd-menu-shortcut-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+    app.set_keybinding_hints_from_keymap(&keymap);
+    let quick_cd = FILE_MENU_ENTRIES
+        .iter()
+        .find(|entry| entry.command == AppCommand::OpenQuickCd)
+        .expect("Quick cd entry should exist");
+
+    assert_eq!(app.menu_entry_shortcut_label(quick_cd), "/");
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }

@@ -48,6 +48,8 @@ impl AppCommand {
             (KeyContext::Jobs, KeyCommand::CancelJob) => Some(Self::CancelJob),
             (KeyContext::Listbox, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
             (KeyContext::Listbox, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
+            (KeyContext::Input, KeyCommand::CursorUp) => Some(Self::DialogListboxUp),
+            (KeyContext::Input, KeyCommand::CursorDown) => Some(Self::DialogListboxDown),
             (KeyContext::Listbox, KeyCommand::OpenInputDialog) => Some(Self::PanelizePresetAdd),
             (KeyContext::Listbox, KeyCommand::OpenConfirmDialog) => Some(Self::PanelizePresetEdit),
             (KeyContext::Listbox, KeyCommand::Delete) => Some(Self::PanelizePresetRemove),

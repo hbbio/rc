@@ -19,6 +19,7 @@ mod panel;
 mod panel_filter;
 mod panelize_flow;
 mod quick_cd;
+mod quick_cd_search;
 mod quick_view_flow;
 mod refresh_flow;
 mod route_flow;
@@ -47,7 +48,8 @@ pub use background::{
 };
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
-    FindDialogField, FindDialogState, PairInputDialogState, PairInputField,
+    FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
+    QuickCdSearchStatus,
 };
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
@@ -69,6 +71,10 @@ pub(crate) use panel::{
     sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
 pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
+pub use quick_cd_search::{
+    DEFAULT_QUICK_CD_MAX_DIRECTORIES, DEFAULT_QUICK_CD_MAX_RESULTS, QuickCdSearchError,
+    QuickCdSearchSnapshot, QuickCdSearchSpec, QuickCdSuggestion, run_quick_cd_search,
+};
 pub use quick_view_flow::QuickViewState;
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
 pub use selection_size::{
@@ -96,6 +102,7 @@ pub use viewer::ViewerState;
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
 use crate::panel::read_entries_with_visibility;
 use crate::panel_filter::apply_panel_filter;
+use crate::quick_cd::QuickCdSearchWorkflow;
 use crate::quick_view_flow::QuickViewWorkflow;
 use crate::refresh_flow::{
     PanelEntriesChunk, PanelRefreshCompletion, PanelRefreshPostWorkflow, PanelRefreshWorkflow,
@@ -1959,6 +1966,7 @@ pub struct AppState {
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
     previous_panel_directories: [Option<PathBuf>; 2],
+    quick_cd_search: QuickCdSearchWorkflow,
     panel_refresh: PanelRefreshWorkflow,
     panel_refresh_post: PanelRefreshPostWorkflow,
     quick_view: QuickViewWorkflow,

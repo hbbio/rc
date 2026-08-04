@@ -70,6 +70,9 @@ File operations:\n\
 \n\
 Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
 and - for the previous directory. Quote paths containing spaces.\n\
+Any other text starts a case-insensitive directory search from the current\n\
+directory, home, and filesystem root. Results are ranked and streamed from a\n\
+bounded background scan; use Up/Down to choose one and Enter to open it.\n\
 \n\
 rc deliberately has no always-live shell input: file-manager keys remain\n\
 available for navigation. > is reserved for a future explicit shell-command\n\
@@ -730,6 +733,8 @@ mod tests {
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Tab switch panel"));
         assert!(content.contains("/ or Alt-C quick cd"));
+        assert!(content.contains("case-insensitive directory search"));
+        assert!(content.contains("use Up/Down to choose one"));
         assert!(content.contains("> is reserved for a future explicit shell-command"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));

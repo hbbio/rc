@@ -1451,6 +1451,14 @@ Reread = ctrl-r
             keymap.resolve(KeyContext::Listbox, tab),
             Some(&KeyCommand::DialogFocusNext)
         );
+        assert_eq!(
+            keymap.resolve(KeyContext::Input, KeyChord::new(KeyCode::Up)),
+            Some(&KeyCommand::CursorUp)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Input, KeyChord::new(KeyCode::Down)),
+            Some(&KeyCommand::CursorDown)
+        );
     }
 
     #[test]

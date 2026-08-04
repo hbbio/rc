@@ -44,7 +44,9 @@ Recent Milestone 4 and reliability progress:
 - External panelize uses named presets, bounded adaptive streaming, exact-job cancellation, and
   per-panel result history; find results use the same virtual-panel layer.
 - Quick CD supports quoted relative/absolute paths, `~`, Unix `~user`, and per-panel
-  `cd -` history.
+  `cd -` history. Arbitrary case-insensitive substrings search directories from the
+  current directory, home, and filesystem root in a bounded, cancelable background scan;
+  ranked results stream into an arrow-selectable list.
 - Find results, tree, hotlist, and panelize preset lists support click selection and double-click
   activation from a renderer-shared hit-test layout.
 - Left/Right menus provide targeted File listing, Quick view, Info, Tree, Panelize, and Rescan
@@ -128,8 +130,9 @@ Main file manager:
   `nvim`, `vim`, `vi`, `emacs`)
 - `Space` / `Insert` / `Ctrl-T`: toggle selected item
 - `Backspace`: go to parent directory
-- `/` or `Alt-C`: Quick CD (`~`, Unix `~user`, relative/absolute paths, or `-` for
-  previous)
+- `/` or `Alt-C`: Quick CD; enter an exact path (`~`, Unix `~user`, relative,
+  absolute, or `-` for previous) or any substring, then choose ranked matches with
+  `Up`/`Down`
 - `>`: reserved for a future explicit shell-command prompt; rc has no always-live shell
   input
 - `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move

@@ -70,6 +70,14 @@ deferred; this milestone covers the standalone tree screen.
   history.
 - [x] Invalid input reopens intact with a specific diagnostic; successful navigation
   uses the request-correlated asynchronous panel refresh path.
+- [x] Case-insensitive substring discovery across prioritized current-directory, home,
+  and filesystem-root anchors, with exact paths ranked first and compact `./`, `~/`,
+  and absolute result labels.
+- [x] Bounded, iterative, symlink-safe background traversal with overlapping-root
+  deduplication, fixed-size best-match heap, cancel/coalesce and stale-result protection,
+  progressive result snapshots, and explicit partial-scan state.
+- [x] Dedicated input-plus-results dialog with stable ranked selection and
+  `Up`/`Down`/Enter navigation.
 - [x] Resolver, menu, keymap, dialog, history, and application dispatch tests.
 - [x] Deliberate shell-key policy: no always-live command input, leaving file-manager
   keys available; `>` is reserved for a future explicit shell-command prompt.

@@ -20,8 +20,8 @@ use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FilterDialogField, FindDialogField, FindNameMode, FindResultsState, FindResultsStatus,
     HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PairInputField, PanelListingFormat,
-    PanelState, PanelViewMode, QuickViewState, Route, SelectionSizeState, SettingsScreenState,
-    TreeLoadState, TreeState, ViewerState, top_menus,
+    PanelState, PanelViewMode, QuickCdSearchStatus, QuickViewState, Route, SelectionSizeState,
+    SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1333,7 +1333,7 @@ fn indexed_color_rgb(index: u8) -> (u8, u8, u8) {
 }
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
-    let (width, height) = if matches!(&dialog.kind, DialogKind::Find(_)) {
+    let (width, height) = if matches!(&dialog.kind, DialogKind::Find(_) | DialogKind::QuickCd(_)) {
         (FIND_DIALOG_WIDTH, FIND_DIALOG_HEIGHT)
     } else {
         (STANDARD_DIALOG_WIDTH, STANDARD_DIALOG_HEIGHT)
@@ -1435,6 +1435,108 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 Paragraph::new("Type text | Enter accept | Backspace delete | Esc cancel")
                     .style(skin.style("core", "disabled")),
                 layout[2],
+            );
+        }
+        DialogKind::QuickCd(quick_cd) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Min(3),
+                    Constraint::Length(2),
+                ])
+                .split(inner);
+            frame.render_widget(
+                Paragraph::new("Path or substring:").style(skin.style("dialog", "_default_")),
+                layout[0],
+            );
+            frame.render_widget(
+                Paragraph::new(quick_cd.value.as_str()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(skin.panel_border_set())
+                        .border_style(skin.style("dialog", "dfocus"))
+                        .style(skin.style("core", "input")),
+                ),
+                layout[1],
+            );
+
+            let list_area = layout[2];
+            let item_width = list_area.width.saturating_sub(3) as usize;
+            let viewport_rows = list_area.height.max(1) as usize;
+            let (window_start, window_end) =
+                visible_window(quick_cd.suggestions.len(), quick_cd.selected, viewport_rows);
+            let items: Vec<ListItem<'_>> = if quick_cd.suggestions.is_empty() {
+                vec![ListItem::new(match &quick_cd.search_status {
+                    QuickCdSearchStatus::Idle => {
+                        "Type to search the current directory, home, and filesystem root"
+                    }
+                    QuickCdSearchStatus::Searching { .. } => "<searching for directories...>",
+                    QuickCdSearchStatus::Complete { .. } => "<no matching directories>",
+                    QuickCdSearchStatus::Failed(_) => "<directory search unavailable>",
+                })]
+            } else {
+                quick_cd
+                    .suggestions
+                    .iter()
+                    .skip(window_start)
+                    .take(window_end.saturating_sub(window_start))
+                    .map(|suggestion| {
+                        ListItem::new(fit_single_line(&suggestion.display, item_width))
+                    })
+                    .collect()
+            };
+            let list = List::new(items)
+                .style(skin.style("dialog", "_default_"))
+                .highlight_style(skin.style("dialog", "dfocus"))
+                .highlight_symbol(">> ");
+            let mut state = ListState::default();
+            if !quick_cd.suggestions.is_empty() {
+                state.select(Some(
+                    quick_cd
+                        .selected
+                        .saturating_sub(window_start)
+                        .min(window_end.saturating_sub(window_start).saturating_sub(1)),
+                ));
+            }
+            frame.render_stateful_widget(list, list_area, &mut state);
+
+            let search_summary = match &quick_cd.search_status {
+                QuickCdSearchStatus::Idle => String::from("Enter path or search text"),
+                QuickCdSearchStatus::Searching {
+                    visited_directories,
+                    skipped_directories,
+                } => {
+                    format!("Searching: {visited_directories} dirs, {skipped_directories} skipped")
+                }
+                QuickCdSearchStatus::Complete {
+                    visited_directories,
+                    skipped_directories,
+                    truncated,
+                } => format!(
+                    "{} match(es) · {visited_directories} dirs, {skipped_directories} skipped{}",
+                    quick_cd.suggestions.len(),
+                    if *truncated { " · bounded" } else { "" }
+                ),
+                QuickCdSearchStatus::Failed(error) => format!("Search failed: {error}"),
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{search_summary}\nUp/Down choose | Enter open | Esc cancel"
+                ))
+                .style(skin.style("core", "disabled"))
+                .wrap(Wrap { trim: false }),
+                layout[3],
             );
         }
         DialogKind::PairInput(input) => {
@@ -2702,6 +2804,26 @@ mod tests {
                                     viewer_result.map(|_| ()).map_err(JobError::from_message);
                                 let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
                             }
+                            JobRequest::QuickCdSearch { spec, request_id } => {
+                                let _ = event_tx.send(JobEvent::Started { id: job_id });
+                                let cancel_flag = job.cancel_flag();
+                                let result = rc_core::run_quick_cd_search(
+                                    spec,
+                                    cancel_flag.as_ref(),
+                                    |snapshot| {
+                                        state.handle_background_event(
+                                            BackgroundEvent::QuickCdSearchUpdated {
+                                                request_id: *request_id,
+                                                snapshot,
+                                            },
+                                        );
+                                        true
+                                    },
+                                )
+                                .map(|_| ())
+                                .map_err(|error| JobError::from_message(error.to_string()));
+                                let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                            }
                             JobRequest::LoadQuickView {
                                 panel,
                                 path,
@@ -2836,6 +2958,45 @@ mod tests {
         assert!(rendered.contains("Path:"));
         assert!(rendered.contains("/tmp/docs"));
         assert!(rendered.contains("Tab next field"));
+    }
+
+    #[test]
+    fn render_draws_quick_cd_query_ranked_results_and_search_state() {
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut dialog = DialogState::quick_cd("project");
+        let DialogKind::QuickCd(quick_cd) = &mut dialog.kind else {
+            panic!("quick-cd dialog should be constructed");
+        };
+        quick_cd.apply_search_snapshot(rc_core::QuickCdSearchSnapshot {
+            suggestions: vec![
+                rc_core::QuickCdSuggestion {
+                    path: "/work/project".into(),
+                    display: String::from("./project"),
+                },
+                rc_core::QuickCdSuggestion {
+                    path: "/home/user/archive-project".into(),
+                    display: String::from("~/archive-project"),
+                },
+            ],
+            visited_directories: 418,
+            skipped_directories: 3,
+            truncated: true,
+            complete: true,
+        });
+        quick_cd.selected = 1;
+
+        terminal
+            .draw(|frame| render_dialog(frame, &dialog, current_skin().as_ref()))
+            .expect("dialog should render");
+        let rendered = buffer_to_text(terminal.backend().buffer());
+        assert!(rendered.contains("Quick cd"));
+        assert!(rendered.contains("Path or substring:"));
+        assert!(rendered.contains("project"));
+        assert!(rendered.contains("./project"));
+        assert!(rendered.contains("~/archive-project"));
+        assert!(rendered.contains("2 match(es) · 418 dirs, 3 skipped · bounded"));
+        assert!(rendered.contains("Up/Down choose"));
     }
 
     #[test]

@@ -437,6 +437,8 @@ fn run_event_loop(
 
     loop {
         runtime.drain_events(state);
+        state.poll_deferred_work();
+        runtime.dispatch_pending_commands(state);
         state.expire_status_line();
         dispatch_pending_external_edit_requests(terminal, state);
 
@@ -445,6 +447,9 @@ fn run_event_loop(
             .context("failed to draw frame")?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
+        let timeout = state
+            .deferred_work_delay()
+            .map_or(timeout, |delay| timeout.min(delay));
         if event::poll(timeout).context("failed to poll input")? {
             let viewport = terminal.size().context("failed to read terminal size")?;
             let input_event = event::read().context("failed to read input event")?;
@@ -1731,12 +1736,12 @@ mod tests {
     }
 
     #[test]
-    fn alt_c_submits_quick_cd_and_dispatches_the_refresh() {
+    fn slash_submits_quick_cd_and_dispatches_the_refresh() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
             .as_nanos();
-        let root = env::temp_dir().join(format!("rc-alt-c-quick-cd-{stamp}"));
+        let root = env::temp_dir().join(format!("rc-slash-quick-cd-{stamp}"));
         let child = root.join("d");
         fs::create_dir_all(&child).expect("must create child directory");
         let mut state = AppState::new(root.clone()).expect("app should initialize");
@@ -1753,12 +1758,12 @@ mod tests {
         handle_key(
             &mut state,
             &keymap,
-            KeyEvent::new(CrosstermKeyCode::Char('c'), KeyModifiers::ALT),
+            KeyEvent::new(CrosstermKeyCode::Char('/'), KeyModifiers::NONE),
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
         )
-        .expect("alt-c should open quick cd");
+        .expect("slash should open quick cd");
         assert_eq!(state.key_context(), KeyContext::Input);
 
         handle_key(

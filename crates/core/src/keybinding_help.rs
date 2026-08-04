@@ -16,6 +16,20 @@ impl AppState {
             .and_then(|labels| labels.first().map(String::as_str))
     }
 
+    fn keybinding_preferred_label(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        preferred: &str,
+    ) -> Option<&str> {
+        let labels = self.keybinding_labels(context, command)?;
+        labels
+            .iter()
+            .find(|label| label.as_str() == preferred)
+            .or_else(|| labels.first())
+            .map(String::as_str)
+    }
+
     pub fn keybinding_joined_label(
         &self,
         context: KeyContext,
@@ -36,8 +50,12 @@ impl AppState {
         if entry.literal_shortcut && !entry.shortcut.is_empty() {
             return entry.shortcut.to_string();
         }
-        if let Some(dynamic) = self.keybinding_primary_label(KeyContext::FileManager, entry.command)
-        {
+        let dynamic = if entry.command == AppCommand::OpenQuickCd {
+            self.keybinding_preferred_label(KeyContext::FileManager, entry.command, "/")
+        } else {
+            self.keybinding_primary_label(KeyContext::FileManager, entry.command)
+        };
+        if let Some(dynamic) = dynamic {
             return dynamic.to_string();
         }
         entry.shortcut.to_string()
@@ -82,6 +100,31 @@ impl AppState {
     ) -> String {
         self.keybinding_joined_label(context, command, " / ", limit)
             .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn keybinding_joined_preferred_or_fallback(
+        &self,
+        context: KeyContext,
+        command: AppCommand,
+        preferred: &str,
+        fallback: &str,
+        limit: usize,
+    ) -> String {
+        let Some(labels) = self.keybinding_labels(context, command) else {
+            return fallback.to_string();
+        };
+        let mut ordered = Vec::with_capacity(labels.len());
+        if let Some(label) = labels.iter().find(|label| label.as_str() == preferred) {
+            ordered.push(label.as_str());
+        }
+        ordered.extend(
+            labels
+                .iter()
+                .map(String::as_str)
+                .filter(|label| *label != preferred),
+        );
+        ordered.truncate(limit);
+        ordered.join(" or ")
     }
 
     fn xmap_sequence_or_fallback(&self, command: AppCommand, fallback: &str) -> String {
@@ -194,13 +237,13 @@ impl AppState {
         );
         replacements.insert(
             "fm_quick_cd",
-            self.keybinding_joined_label(
+            self.keybinding_joined_preferred_or_fallback(
                 KeyContext::FileManager,
                 AppCommand::OpenQuickCd,
-                " or ",
+                "/",
+                "/ or Alt-C",
                 2,
-            )
-            .unwrap_or_else(|| String::from("/ or Alt-C")),
+            ),
         );
         replacements.insert(
             "fm_find",

@@ -37,6 +37,7 @@ impl AppState {
             pending_external_edit_requests: Vec::new(),
             panelized_result_history: [None, None],
             previous_panel_directories: [None, None],
+            quick_cd_search: QuickCdSearchWorkflow::default(),
             panel_refresh: PanelRefreshWorkflow::default(),
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             quick_view: QuickViewWorkflow::default(),

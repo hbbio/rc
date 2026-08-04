@@ -1,5 +1,5 @@
 use crate::keymap::KeyContext;
-use crate::{FindNameMode, FindSpec, PanelFilter};
+use crate::{FindNameMode, FindSpec, PanelFilter, QuickCdSearchSnapshot, QuickCdSuggestion};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogButtonFocus {
@@ -26,6 +26,108 @@ pub struct ConfirmDialogState {
 pub struct InputDialogState {
     pub prompt: String,
     pub value: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum QuickCdSearchStatus {
+    #[default]
+    Idle,
+    Searching {
+        visited_directories: usize,
+        skipped_directories: usize,
+    },
+    Complete {
+        visited_directories: usize,
+        skipped_directories: usize,
+        truncated: bool,
+    },
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct QuickCdDialogState {
+    pub value: String,
+    pub suggestions: Vec<QuickCdSuggestion>,
+    pub selected: usize,
+    pub search_status: QuickCdSearchStatus,
+}
+
+impl QuickCdDialogState {
+    pub fn begin_search(&mut self) {
+        self.suggestions.clear();
+        self.selected = 0;
+        self.search_status = QuickCdSearchStatus::Searching {
+            visited_directories: 0,
+            skipped_directories: 0,
+        };
+    }
+
+    pub fn apply_search_snapshot(&mut self, snapshot: QuickCdSearchSnapshot) {
+        let selected_path = self
+            .suggestions
+            .get(self.selected)
+            .map(|suggestion| suggestion.path.clone());
+        self.suggestions = snapshot.suggestions;
+        self.selected = selected_path
+            .and_then(|path| {
+                self.suggestions
+                    .iter()
+                    .position(|suggestion| suggestion.path == path)
+            })
+            .unwrap_or(0)
+            .min(self.suggestions.len().saturating_sub(1));
+        self.search_status = if snapshot.complete {
+            QuickCdSearchStatus::Complete {
+                visited_directories: snapshot.visited_directories,
+                skipped_directories: snapshot.skipped_directories,
+                truncated: snapshot.truncated,
+            }
+        } else {
+            QuickCdSearchStatus::Searching {
+                visited_directories: snapshot.visited_directories,
+                skipped_directories: snapshot.skipped_directories,
+            }
+        };
+    }
+
+    pub fn fail_search(&mut self, error: impl Into<String>) {
+        self.search_status = QuickCdSearchStatus::Failed(error.into());
+    }
+
+    pub fn clear_search(&mut self) {
+        self.suggestions.clear();
+        self.selected = 0;
+        self.search_status = QuickCdSearchStatus::Idle;
+    }
+
+    fn insert(&mut self, character: char) {
+        self.value.push(character);
+        self.clear_search();
+    }
+
+    fn backspace(&mut self) {
+        self.value.pop();
+        self.clear_search();
+    }
+
+    fn move_up(&mut self) {
+        if self.suggestions.is_empty() {
+            self.selected = 0;
+        } else {
+            self.selected = self.selected.saturating_sub(1);
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.suggestions.is_empty() {
+            self.selected = 0;
+        } else {
+            self.selected = self
+                .selected
+                .saturating_add(1)
+                .min(self.suggestions.len() - 1);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -306,6 +408,7 @@ impl FilterDialogState {
 pub enum DialogKind {
     Confirm(ConfirmDialogState),
     Input(InputDialogState),
+    QuickCd(QuickCdDialogState),
     PairInput(PairInputDialogState),
     Listbox(ListboxDialogState),
     Find(FindDialogState),
@@ -339,6 +442,16 @@ impl DialogState {
             kind: DialogKind::Input(InputDialogState {
                 prompt: prompt.into(),
                 value: initial_value.into(),
+            }),
+        }
+    }
+
+    pub fn quick_cd(initial_value: impl Into<String>) -> Self {
+        Self {
+            title: String::from("Quick cd"),
+            kind: DialogKind::QuickCd(QuickCdDialogState {
+                value: initial_value.into(),
+                ..QuickCdDialogState::default()
             }),
         }
     }
@@ -433,7 +546,9 @@ impl DialogState {
     pub fn key_context(&self) -> KeyContext {
         match self.kind {
             DialogKind::Confirm(_) => KeyContext::Dialog,
-            DialogKind::Input(_) | DialogKind::PairInput(_) => KeyContext::Input,
+            DialogKind::Input(_) | DialogKind::QuickCd(_) | DialogKind::PairInput(_) => {
+                KeyContext::Input
+            }
             DialogKind::Listbox(_) => KeyContext::Listbox,
             DialogKind::Find(_) | DialogKind::Filter(_) => KeyContext::FindDialog,
         }
@@ -469,6 +584,33 @@ impl DialogState {
                 }
                 DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
                 _ => DialogTransition::Stay,
+            },
+            DialogKind::QuickCd(quick_cd) => match event {
+                DialogEvent::InsertChar(character) => {
+                    quick_cd.insert(character);
+                    DialogTransition::Stay
+                }
+                DialogEvent::Backspace => {
+                    quick_cd.backspace();
+                    DialogTransition::Stay
+                }
+                DialogEvent::MoveUp => {
+                    quick_cd.move_up();
+                    DialogTransition::Stay
+                }
+                DialogEvent::MoveDown => {
+                    quick_cd.move_down();
+                    DialogTransition::Stay
+                }
+                DialogEvent::Accept => DialogTransition::Close(DialogResult::QuickCdSubmitted {
+                    input: quick_cd.value.clone(),
+                    selected_path: quick_cd
+                        .suggestions
+                        .get(quick_cd.selected)
+                        .map(|suggestion| suggestion.path.clone()),
+                }),
+                DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
+                DialogEvent::FocusNext => DialogTransition::Stay,
             },
             DialogKind::PairInput(input) => match event {
                 DialogEvent::FocusNext => {
@@ -590,6 +732,10 @@ pub enum DialogResult {
     ConfirmAccepted,
     ConfirmDeclined,
     InputSubmitted(String),
+    QuickCdSubmitted {
+        input: String,
+        selected_path: Option<std::path::PathBuf>,
+    },
     PairInputSubmitted {
         first: String,
         second: String,
@@ -609,6 +755,13 @@ impl DialogResult {
             Self::ConfirmAccepted => String::from("Dialog accepted"),
             Self::ConfirmDeclined => String::from("Dialog canceled"),
             Self::InputSubmitted(value) => format!("Input accepted: {value}"),
+            Self::QuickCdSubmitted {
+                input,
+                selected_path,
+            } => selected_path.as_ref().map_or_else(
+                || format!("Quick cd accepted: {input}"),
+                |path| format!("Quick cd accepted: {}", path.to_string_lossy()),
+            ),
             Self::PairInputSubmitted { first, second } => {
                 format!("Input accepted: {first}, {second}")
             }

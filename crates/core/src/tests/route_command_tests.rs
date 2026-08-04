@@ -779,6 +779,14 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::DialogListboxUp)
     );
     assert_eq!(
+        AppCommand::from_key_command(KeyContext::Input, &KeyCommand::CursorUp),
+        Some(AppCommand::DialogListboxUp)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Input, &KeyCommand::CursorDown),
+        Some(AppCommand::DialogListboxDown)
+    );
+    assert_eq!(
         AppCommand::from_key_command(KeyContext::Listbox, &KeyCommand::OpenInputDialog),
         Some(AppCommand::PanelizePresetAdd)
     );
