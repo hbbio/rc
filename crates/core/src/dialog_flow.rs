@@ -167,7 +167,7 @@ impl AppState {
             sources,
             source_base_dir,
             destination_dir,
-            OperationOrigin::Panel,
+            OperationOrigin::Panel(self.active_panel),
         );
     }
 
@@ -206,7 +206,10 @@ impl AppState {
             return;
         }
 
-        self.start_delete_confirmation_for_targets(targets, OperationOrigin::Panel);
+        self.start_delete_confirmation_for_targets(
+            targets,
+            OperationOrigin::Panel(self.active_panel),
+        );
     }
 
     pub(crate) fn start_delete_confirmation_for_targets(
@@ -263,7 +266,7 @@ impl AppState {
 
     pub(crate) fn start_mkdir_dialog(&mut self) {
         let base_dir = self.active_panel().cwd.clone();
-        self.start_mkdir_dialog_at(base_dir, OperationOrigin::Panel);
+        self.start_mkdir_dialog_at(base_dir, OperationOrigin::Panel(self.active_panel));
     }
 
     pub(crate) fn start_mkdir_dialog_at(&mut self, base_dir: PathBuf, origin: OperationOrigin) {

@@ -41,6 +41,7 @@ impl AppState {
             quick_view: QuickViewWorkflow::default(),
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
+            panel_mkdirs: PanelMkdirTracker::default(),
             tree_mutations: TreeMutationTracker::default(),
             keybinding_hints: KeybindingHints::default(),
             keymap_unknown_actions: 0,

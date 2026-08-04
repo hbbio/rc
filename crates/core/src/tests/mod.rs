@@ -674,6 +674,17 @@ fn toggle_tag_advances_cursor_to_next_entry() {
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 
+fn submit_mkdir_dialog(app: &mut AppState, name: &str) {
+    app.apply(AppCommand::OpenInputDialog)
+        .expect("mkdir dialog should open");
+    for ch in name.chars() {
+        app.apply(AppCommand::DialogInputChar(ch))
+            .expect("typing should be accepted");
+    }
+    app.apply(AppCommand::DialogAccept)
+        .expect("mkdir dialog should submit");
+}
+
 #[test]
 fn mkdir_dialog_queues_mkdir_job() {
     let stamp = SystemTime::now()
@@ -684,14 +695,7 @@ fn mkdir_dialog_queues_mkdir_job() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = app_with_loaded_panels(root.clone());
-    app.apply(AppCommand::OpenInputDialog)
-        .expect("mkdir dialog should open");
-    for ch in "newdir".chars() {
-        app.apply(AppCommand::DialogInputChar(ch))
-            .expect("typing should be accepted");
-    }
-    app.apply(AppCommand::DialogAccept)
-        .expect("mkdir dialog should submit");
+    submit_mkdir_dialog(&mut app, "newdir");
 
     let pending = app.take_pending_worker_commands();
     assert_eq!(pending.len(), 1, "mkdir should enqueue one worker command");
@@ -704,6 +708,129 @@ fn mkdir_dialog_queues_mkdir_job() {
         },
         _ => panic!("expected worker run command"),
     }
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn completed_panel_mkdir_enters_the_directory_in_its_originating_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-mkdir-enter-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_mkdir_dialog(&mut app, "newdir");
+
+    app.apply(AppCommand::SwitchPanel)
+        .expect("the user may switch panels while mkdir runs");
+    drain_background(&mut app);
+
+    let created = root.join("newdir");
+    assert!(created.is_dir(), "mkdir job should create the directory");
+    assert_eq!(
+        app.panels[ActivePanel::Left.index()].cwd,
+        created,
+        "the panel that started mkdir should enter the created directory"
+    );
+    assert_eq!(
+        app.active_panel,
+        ActivePanel::Right,
+        "job completion should not steal focus after the user switches panels"
+    );
+    assert_eq!(app.active_panel().cwd, root);
+    assert!(app.status_line.contains("entered it in the left panel"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn failed_panel_mkdir_does_not_change_directories() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-mkdir-failure-{stamp}"));
+    fs::create_dir_all(root.join("existing")).expect("must create existing directory");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_mkdir_dialog(&mut app, "existing");
+    drain_background(&mut app);
+
+    assert_eq!(app.active_panel().cwd, root);
+    assert!(app.status_line.contains("failed"));
+    assert!(app.panel_mkdirs.pending.is_empty());
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn superseded_panel_mkdir_completion_cannot_override_the_latest_destination() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-mkdir-order-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_mkdir_dialog(&mut app, "first");
+    submit_mkdir_dialog(&mut app, "latest");
+
+    let jobs = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .filter_map(|command| match command {
+            WorkerCommand::Run(job) => Some(*job),
+            WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(jobs.len(), 2);
+    for job in &jobs {
+        let JobRequest::Mkdir { path } = &job.request else {
+            panic!("expected mkdir request");
+        };
+        fs::create_dir(path).expect("must create requested directory");
+    }
+
+    for job in jobs.iter().rev() {
+        app.handle_job_event(JobEvent::Started { id: job.id });
+        app.handle_job_event(JobEvent::Finished {
+            id: job.id,
+            result: Ok(()),
+        });
+    }
+
+    assert_eq!(app.active_panel().cwd, root.join("latest"));
+    assert!(app.panel_mkdirs.pending.is_empty());
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn completed_panel_mkdir_cannot_override_newer_navigation_in_the_same_panel() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-mkdir-navigation-{stamp}"));
+    let newer_destination = root.join("newer-destination");
+    fs::create_dir_all(&newer_destination).expect("must create navigation fixture");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    submit_mkdir_dialog(&mut app, "created");
+    assert!(
+        app.set_active_panel_directory(newer_destination.clone())
+            .expect("newer navigation should be valid")
+    );
+
+    drain_background(&mut app);
+
+    assert!(root.join("created").is_dir());
+    assert_eq!(app.active_panel().cwd, newer_destination);
+    assert!(app.status_line.contains("kept the newer left panel state"));
+
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 

@@ -970,6 +970,14 @@ impl AppState {
     }
 
     pub(crate) fn set_active_panel_directory(&mut self, destination: PathBuf) -> io::Result<bool> {
+        self.set_panel_directory(self.active_panel, destination)
+    }
+
+    pub(crate) fn set_panel_directory(
+        &mut self,
+        panel_id: ActivePanel,
+        destination: PathBuf,
+    ) -> io::Result<bool> {
         let metadata = match fs::metadata(&destination) {
             Ok(metadata) => metadata,
             Err(_) => return Ok(false),
@@ -978,13 +986,13 @@ impl AppState {
             return Ok(false);
         }
 
-        let panel_index = self.active_panel.index();
-        let previous_directory = self.active_panel().cwd.clone();
-        let revert = self.panel_refresh_revert_snapshot(self.active_panel);
-        if let Some(snapshot) = self.completed_panelized_result_snapshot(self.active_panel) {
+        let panel_index = panel_id.index();
+        let previous_directory = self.panels[panel_index].cwd.clone();
+        let revert = self.panel_refresh_revert_snapshot(panel_id);
+        if let Some(snapshot) = self.completed_panelized_result_snapshot(panel_id) {
             self.panelized_result_history[panel_index] = Some(snapshot);
         }
-        let panel = self.active_panel_mut();
+        let panel = &mut self.panels[panel_index];
         panel.cwd = destination;
         panel.cursor = 0;
         panel.source = PanelListingSource::Directory;
@@ -992,10 +1000,10 @@ impl AppState {
         panel.tagged.clear();
         panel.entries.clear();
         panel.loading = true;
-        self.schedule_panel_refresh_revert(self.active_panel, revert);
-        self.remember_previous_directory(self.active_panel, previous_directory);
-        self.sync_quick_view_from(self.active_panel, false);
-        self.queue_panel_refresh(self.active_panel);
+        self.schedule_panel_refresh_revert(panel_id, revert);
+        self.remember_previous_directory(panel_id, previous_directory);
+        self.sync_quick_view_from(panel_id, false);
+        self.queue_panel_refresh(panel_id);
         Ok(true)
     }
 }

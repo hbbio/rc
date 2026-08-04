@@ -1675,8 +1675,22 @@ enum TransferKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationOrigin {
-    Panel,
+    Panel(ActivePanel),
     Tree,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingPanelMkdir {
+    panel: ActivePanel,
+    path: PathBuf,
+    origin_cwd: PathBuf,
+    origin_source: PanelListingSource,
+}
+
+#[derive(Debug, Default)]
+struct PanelMkdirTracker {
+    pending: HashMap<JobId, PendingPanelMkdir>,
+    latest_job_ids: [Option<JobId>; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -1936,6 +1950,7 @@ pub struct AppState {
     quick_view: QuickViewWorkflow,
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
+    panel_mkdirs: PanelMkdirTracker,
     tree_mutations: TreeMutationTracker,
     keybinding_hints: KeybindingHints,
     keymap_unknown_actions: usize,

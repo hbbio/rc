@@ -331,6 +331,11 @@ fn tree_filesystem_actions_use_existing_jobs_and_refresh_the_cache() {
         app.top_route(),
         Route::Tree(tree) if tree.entries().iter().any(|entry| entry.path == created)
     ));
+    assert_eq!(
+        app.active_panel().cwd,
+        root,
+        "tree mkdir should update the tree without navigating the underlying panel"
+    );
 
     select_tree_path(&mut app, &delete_target);
     app.apply(AppCommand::TreeDelete)

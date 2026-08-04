@@ -1,6 +1,23 @@
 use crate::find_flow::find_results_status_message;
 use crate::*;
 
+impl PanelMkdirTracker {
+    fn track(&mut self, job_id: JobId, pending: PendingPanelMkdir) {
+        self.latest_job_ids[pending.panel.index()] = Some(job_id);
+        self.pending.insert(job_id, pending);
+    }
+
+    fn finish(&mut self, job_id: JobId, succeeded: bool) -> Option<PendingPanelMkdir> {
+        let pending = self.pending.remove(&job_id)?;
+        let latest_job_id = &mut self.latest_job_ids[pending.panel.index()];
+        if *latest_job_id != Some(job_id) {
+            return None;
+        }
+        *latest_job_id = None;
+        succeeded.then_some(pending)
+    }
+}
+
 impl AppState {
     pub fn take_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
         std::mem::take(&mut self.pending_worker_commands)
@@ -79,6 +96,7 @@ impl AppState {
             }
             JobEvent::Finished { id, result } => match result {
                 Ok(()) => {
+                    let panel_mkdir = self.panel_mkdirs.finish(id, true);
                     let tree_impacts = self.tree_mutations.finish(id, true);
                     let kind = self.jobs.job(id).map(|job| job.kind);
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
@@ -111,13 +129,17 @@ impl AppState {
                                 | JobKind::Rename
                         )
                     );
-                    if should_refresh {
+                    let panel_mkdir_status =
+                        panel_mkdir.map(|pending| self.complete_panel_mkdir(pending));
+                    if should_refresh && panel_mkdir_status.is_none() {
                         self.refresh_panels();
                     }
                     if is_find {
                         if let Some(results) = self.find_results_by_job_id(id) {
                             self.set_status(find_results_status_message(results));
                         }
+                    } else if let Some(status) = panel_mkdir_status {
+                        self.set_status(status);
                     } else if !suppress_status {
                         if let Some(summary) = self.jobs.job(id).map(|job| job.summary.clone()) {
                             self.set_status(format!("Job #{id} finished: {summary}"));
@@ -135,6 +157,7 @@ impl AppState {
                     }
                 }
                 Err(error) => {
+                    self.panel_mkdirs.finish(id, false);
                     let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
@@ -361,12 +384,27 @@ impl AppState {
         request: JobRequest,
         origin: OperationOrigin,
     ) -> JobId {
+        let pending_panel_mkdir = match (&request, origin) {
+            (JobRequest::Mkdir { path }, OperationOrigin::Panel(panel)) => {
+                let panel_state = &self.panels[panel.index()];
+                Some(PendingPanelMkdir {
+                    panel,
+                    path: path.clone(),
+                    origin_cwd: panel_state.cwd.clone(),
+                    origin_source: panel_state.source.clone(),
+                })
+            }
+            _ => None,
+        };
         let impacts = if origin == OperationOrigin::Tree {
             tree_mutation_impacts(&request)
         } else {
             Vec::new()
         };
         let job_id = self.queue_worker_job_request(request);
+        if let Some(pending) = pending_panel_mkdir {
+            self.panel_mkdirs.track(job_id, pending);
+        }
         if origin == OperationOrigin::Tree {
             self.tree_mutations.track(job_id, impacts);
         }
@@ -404,6 +442,47 @@ impl AppState {
         }
         let worker_job = self.jobs.enqueue(request);
         self.queue_worker_job(worker_job)
+    }
+
+    fn complete_panel_mkdir(&mut self, pending: PendingPanelMkdir) -> String {
+        let PendingPanelMkdir {
+            panel,
+            path,
+            origin_cwd,
+            origin_source,
+        } = pending;
+        let path_label = path.to_string_lossy().into_owned();
+        let panel_state = &self.panels[panel.index()];
+        let context_is_current = self.panel_view_mode(panel) == PanelViewMode::Listing
+            && panel_state.cwd == origin_cwd
+            && panel_state.source == origin_source;
+        if !context_is_current {
+            self.refresh_panels();
+            return format!(
+                "Created {path_label}; kept the newer {} panel state",
+                panel.label()
+            );
+        }
+
+        match self.set_panel_directory(panel, path) {
+            Ok(true) => {
+                // The target panel already queued its new listing. Refresh the other panel so a
+                // sibling view of the parent directory also observes the new entry.
+                self.queue_panel_refresh(panel.other());
+                format!(
+                    "Created {path_label} and entered it in the {} panel",
+                    panel.label()
+                )
+            }
+            Ok(false) => {
+                self.refresh_panels();
+                format!("Created {path_label}, but it is no longer accessible")
+            }
+            Err(error) => {
+                self.refresh_panels();
+                format!("Created {path_label}, but opening it failed: {error}")
+            }
+        }
     }
 
     pub(crate) fn queue_transient_worker_job_request(&mut self, request: JobRequest) -> JobId {
@@ -572,7 +651,7 @@ impl AppState {
     }
 
     pub(crate) fn queue_delete_job(&mut self, targets: Vec<PathBuf>) {
-        self.queue_delete_job_from(targets, OperationOrigin::Panel);
+        self.queue_delete_job_from(targets, OperationOrigin::Panel(self.active_panel));
     }
 
     pub(crate) fn queue_delete_job_from(&mut self, targets: Vec<PathBuf>, origin: OperationOrigin) {
