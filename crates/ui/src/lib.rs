@@ -18,9 +18,10 @@ use rc_core::layout::{
 };
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
-    FindDialogField, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord,
-    JobStatus, MenuState, PairInputField, PanelListingFormat, PanelState, PanelViewMode,
-    QuickViewState, Route, SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
+    FilterDialogField, FindDialogField, FindNameMode, FindResultsState, FindResultsStatus,
+    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PairInputField, PanelListingFormat,
+    PanelState, PanelViewMode, QuickViewState, Route, SettingsScreenState, TreeLoadState,
+    TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -407,10 +408,16 @@ fn panel_title(panel: &PanelState, format: PanelListingFormat) -> String {
     } else {
         ""
     };
+    let filter_suffix = if panel.filter().is_active() {
+        format!(" | filter:{}", panel.filter().display_pattern())
+    } else {
+        String::new()
+    };
     format!(
-        "{} | sort:{} | {}{} | tagged:{}{}",
+        "{} | sort:{}{} | {}{} | tagged:{}{}",
         format.title_label(),
         panel.sort_label(),
+        filter_suffix,
         panel.cwd.to_string_lossy(),
         panelize_suffix,
         panel.tagged_count(),
@@ -843,6 +850,7 @@ fn render_info_panel(
     let mut rows = vec![
         format!("Directory: {}", source.cwd.to_string_lossy()),
         format!("Sort: {}", source.sort_label()),
+        format!("Filter: {}", source.filter().display_pattern()),
         format!("Tagged: {}", source.tagged_count()),
         String::new(),
     ];
@@ -1633,6 +1641,70 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
             frame.render_widget(
                 Paragraph::new(
                     "Tab/Up/Down field | Space toggle | F2 tree picker\nEnter search | Esc cancel | Empty filename matches all",
+                )
+                .style(skin.style("core", "disabled")),
+                layout[1],
+            );
+        }
+        DialogKind::Filter(filter) => {
+            let block = Block::default()
+                .title(dialog.title.as_str())
+                .borders(Borders::ALL)
+                .border_set(skin.dialog_border_set())
+                .border_style(skin.style("dialog", "_default_"))
+                .style(skin.style("dialog", "_default_"));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(4), Constraint::Length(2)])
+                .split(inner);
+            let normal = skin.style("dialog", "_default_");
+            let focused = skin.style("dialog", "dfocus");
+            let input = skin.style("core", "input");
+            let row = |field: FilterDialogField, label: &str, value: String| {
+                let is_focused = filter.focus == field;
+                Line::from(vec![
+                    Span::styled(if is_focused { "> " } else { "  " }, focused),
+                    Span::styled(
+                        format!("{label:<17}"),
+                        if is_focused { focused } else { normal },
+                    ),
+                    Span::styled(value, if is_focused { focused } else { input }),
+                ])
+            };
+            let pattern = if filter.pattern.is_empty() {
+                String::from("<disabled>")
+            } else {
+                filter.pattern.clone()
+            };
+            let mode = match filter.name_mode {
+                FindNameMode::Glob => "shell pattern",
+                FindNameMode::Regex => "regular expression",
+            };
+            let rows = vec![
+                row(FilterDialogField::Pattern, "Pattern", pattern),
+                row(
+                    FilterDialogField::FilesOnly,
+                    "Files only",
+                    checkbox_label(filter.files_only),
+                ),
+                row(
+                    FilterDialogField::NameMode,
+                    "Pattern mode",
+                    mode.to_string(),
+                ),
+                row(
+                    FilterDialogField::CaseSensitive,
+                    "Case sensitive",
+                    checkbox_label(filter.case_sensitive),
+                ),
+            ];
+            frame.render_widget(Paragraph::new(rows).style(normal), layout[0]);
+            frame.render_widget(
+                Paragraph::new(
+                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Empty pattern disables",
                 )
                 .style(skin.style("core", "disabled")),
                 layout[1],
@@ -2577,18 +2649,24 @@ mod tests {
                                 cwd,
                                 source,
                                 sort_mode,
+                                filter,
                                 show_hidden_files,
+                                cached_panelized_entries,
                                 request_id,
                             } => {
                                 let _ = event_tx.send(JobEvent::Started { id: job_id });
                                 let cancel_flag = job.cancel_flag();
                                 state.handle_background_event(refresh_panel_event(
-                                    *panel,
-                                    cwd.clone(),
-                                    source.clone(),
-                                    *sort_mode,
-                                    *show_hidden_files,
-                                    *request_id,
+                                    rc_core::PanelRefreshStreamRequest {
+                                        panel: *panel,
+                                        cwd: cwd.clone(),
+                                        source: source.clone(),
+                                        sort_mode: *sort_mode,
+                                        filter: filter.clone(),
+                                        show_hidden_files: *show_hidden_files,
+                                        cached_panelized_entries: cached_panelized_entries.clone(),
+                                        request_id: *request_id,
+                                    },
                                     cancel_flag.as_ref(),
                                 ));
                                 let _ = event_tx.send(JobEvent::Finished {
@@ -2856,6 +2934,36 @@ mod tests {
             frame.contains("entry.txt"),
             "frame should include panel entry names"
         );
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_draws_filter_form_and_marks_the_filtered_panel_title() {
+        let root = temp_root("filter-dialog");
+        fs::write(root.join("main.rs"), "fn main() {}").expect("fixture should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::Panel(
+            ActivePanel::Left,
+            PanelCommand::OpenFilter,
+        ))
+        .expect("filter dialog should open");
+        for character in "*.rs".chars() {
+            app.apply(AppCommand::DialogInputChar(character))
+                .expect("filter input should succeed");
+        }
+
+        let dialog_frame = render_to_text(&app, 100, 30);
+        assert!(dialog_frame.contains("Pattern"));
+        assert!(dialog_frame.contains("*.rs"));
+        assert!(dialog_frame.contains("Files only"));
+        assert!(dialog_frame.contains("shell pattern"));
+
+        app.apply(AppCommand::DialogAccept)
+            .expect("filter should apply");
+        drain_background(&mut app);
+        let panel_frame = render_to_text(&app, 120, 30);
+        assert!(panel_frame.contains("filter:*.rs"));
+
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 

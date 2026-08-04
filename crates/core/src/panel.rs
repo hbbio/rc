@@ -65,14 +65,6 @@ pub(crate) fn read_entries_with_visibility_cancel(
     Ok(entries)
 }
 
-pub(super) fn read_panelized_entries(
-    base_dir: &Path,
-    command: &str,
-    sort_mode: SortMode,
-) -> io::Result<Vec<FileEntry>> {
-    read_panelized_entries_with_cancel(base_dir, command, sort_mode, None)
-}
-
 pub(crate) fn read_panelized_entries_with_cancel(
     base_dir: &Path,
     command: &str,
@@ -92,7 +84,6 @@ pub(crate) fn read_panelized_entries_with_cancel(
 pub(crate) fn stream_panelized_entries_with_cancel(
     base_dir: &Path,
     command: &str,
-    sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
     emit_entry: &mut dyn FnMut(&FileEntry) -> io::Result<()>,
 ) -> io::Result<Vec<FileEntry>> {
@@ -100,7 +91,6 @@ pub(crate) fn stream_panelized_entries_with_cancel(
     read_panelized_entries_with_process_backend_and_emit(
         base_dir,
         command,
-        sort_mode,
         cancel_flag,
         &process_backend,
         emit_entry,
@@ -114,20 +104,20 @@ pub(crate) fn read_panelized_entries_with_process_backend(
     cancel_flag: Option<&AtomicBool>,
     process_backend: &dyn ProcessBackend,
 ) -> io::Result<Vec<FileEntry>> {
-    read_panelized_entries_with_process_backend_and_emit(
+    let mut entries = read_panelized_entries_with_process_backend_and_emit(
         base_dir,
         command,
-        sort_mode,
         cancel_flag,
         process_backend,
         &mut |_| Ok(()),
-    )
+    )?;
+    sort_file_entries(&mut entries, sort_mode);
+    Ok(entries)
 }
 
 fn read_panelized_entries_with_process_backend_and_emit(
     base_dir: &Path,
     command: &str,
-    sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
     process_backend: &dyn ProcessBackend,
     emit_entry: &mut dyn FnMut(&FileEntry) -> io::Result<()>,
@@ -169,7 +159,6 @@ fn read_panelized_entries_with_process_backend_and_emit(
         return Err(io::Error::other(format!("command failed: {detail}")));
     }
 
-    sort_file_entries(&mut entries, sort_mode);
     Ok(entries)
 }
 
@@ -196,13 +185,15 @@ pub(crate) fn read_panelized_paths(
     sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Vec<FileEntry>> {
-    stream_panelized_paths_with_cancel(base_dir, paths, sort_mode, cancel_flag, &mut |_| Ok(()))
+    let mut entries =
+        stream_panelized_paths_with_cancel(base_dir, paths, cancel_flag, &mut |_| Ok(()))?;
+    sort_file_entries(&mut entries, sort_mode);
+    Ok(entries)
 }
 
 pub(crate) fn stream_panelized_paths_with_cancel(
     base_dir: &Path,
     paths: &[PathBuf],
-    sort_mode: SortMode,
     cancel_flag: Option<&AtomicBool>,
     emit_entry: &mut dyn FnMut(&FileEntry) -> io::Result<()>,
 ) -> io::Result<Vec<FileEntry>> {
@@ -216,7 +207,6 @@ pub(crate) fn stream_panelized_paths_with_cancel(
         entries.push(entry);
         emit_entry(entries.last().expect("entry was just appended"))?;
     }
-    sort_file_entries(&mut entries, sort_mode);
     Ok(entries)
 }
 

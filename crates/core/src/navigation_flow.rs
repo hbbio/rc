@@ -615,6 +615,7 @@ impl AppState {
                 base_dir,
                 paths,
             };
+            panel.panelized_entries = None;
             panel.cursor = 0;
             panel.tagged.clear();
             panel.loading = true;
@@ -982,6 +983,7 @@ impl AppState {
         panel.cwd = destination;
         panel.cursor = 0;
         panel.source = PanelListingSource::Directory;
+        panel.panelized_entries = None;
         panel.tagged.clear();
         panel.entries.clear();
         panel.loading = true;

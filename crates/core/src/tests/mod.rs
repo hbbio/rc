@@ -28,6 +28,13 @@ fn file_entry(name: &str) -> FileEntry {
     }
 }
 
+fn panel_refresh_result(entries: Vec<FileEntry>) -> PanelRefreshResult {
+    PanelRefreshResult {
+        entries,
+        panelized_entries: None,
+    }
+}
+
 struct PermissionDeniedProcessBackend;
 
 impl ProcessBackend for PermissionDeniedProcessBackend {
@@ -67,18 +74,24 @@ fn drain_background(app: &mut AppState) {
                             cwd,
                             source,
                             sort_mode,
+                            filter,
                             show_hidden_files,
+                            cached_panelized_entries,
                             request_id,
                         } => {
                             let _ = event_tx.send(JobEvent::Started { id: job_id });
                             let cancel_flag = job.cancel_flag();
                             app.handle_background_event(refresh_panel_event(
-                                *panel,
-                                cwd.clone(),
-                                source.clone(),
-                                *sort_mode,
-                                *show_hidden_files,
-                                *request_id,
+                                PanelRefreshStreamRequest {
+                                    panel: *panel,
+                                    cwd: cwd.clone(),
+                                    source: source.clone(),
+                                    sort_mode: *sort_mode,
+                                    filter: filter.clone(),
+                                    show_hidden_files: *show_hidden_files,
+                                    cached_panelized_entries: cached_panelized_entries.clone(),
+                                    request_id: *request_id,
+                                },
                                 cancel_flag.as_ref(),
                             ));
                             let _ = event_tx.send(JobEvent::Finished {
@@ -260,8 +273,10 @@ fn move_cursor_stays_in_bounds() {
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
         sort_mode: SortMode::default(),
+        filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
+        panelized_entries: None,
         tagged: HashSet::new(),
         loading: false,
         disk_usage: None,
@@ -414,8 +429,10 @@ fn toggle_and_invert_tags_work_for_non_parent_entries() {
         ],
         cursor: 0,
         sort_mode: SortMode::default(),
+        filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
+        panelized_entries: None,
         tagged: HashSet::new(),
         loading: false,
         disk_usage: None,
@@ -451,8 +468,10 @@ fn page_home_end_navigation_stays_bounded() {
         entries,
         cursor: 1,
         sort_mode: SortMode::default(),
+        filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
+        panelized_entries: None,
         tagged: HashSet::new(),
         loading: false,
         disk_usage: None,
@@ -478,8 +497,10 @@ fn sort_mode_cycles_and_toggles_direction() {
         entries: Vec::new(),
         cursor: 0,
         sort_mode: SortMode::default(),
+        filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
+        panelized_entries: None,
         tagged: HashSet::new(),
         loading: false,
         disk_usage: None,
@@ -1256,6 +1277,308 @@ fn sort_order_dialog_applies_field_and_reverse_to_only_its_named_panel() {
         app.active_panel,
         ActivePanel::Left,
         "sorting a named panel should not steal focus"
+    );
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn filter_dialog_updates_only_its_named_panel_and_queues_that_filter() {
+    let root = env::temp_dir().join(format!(
+        "rc-filter-dialog-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = app_with_loaded_panels(root.clone());
+    let filter = PanelFilter {
+        pattern: String::from("^README\\.md$"),
+        files_only: false,
+        name_mode: FindNameMode::Regex,
+        case_sensitive: false,
+    };
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::OpenFilter,
+    ))
+    .expect("filter dialog should open");
+    assert!(matches!(
+        app.top_route(),
+        Route::Dialog(dialog) if matches!(dialog.kind, DialogKind::Filter(_))
+    ));
+    app.finish_dialog(DialogResult::FilterSubmitted(filter.clone()));
+
+    assert_eq!(app.panels[ActivePanel::Right.index()].filter(), &filter);
+    assert_eq!(
+        app.panels[ActivePanel::Left.index()].filter(),
+        &PanelFilter::default()
+    );
+    assert_eq!(app.settings().panel_options.filters[1], filter);
+    assert!(app.settings().save_setup.dirty);
+    assert!(app.pending_worker_commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Run(job)
+            if matches!(&job.request, JobRequest::RefreshPanel {
+                panel: ActivePanel::Right,
+                filter: queued_filter,
+                ..
+            } if queued_filter == &filter)
+    )));
+    assert_eq!(app.active_panel, ActivePanel::Left);
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn invalid_filter_reopens_the_dialog_without_mutating_panel_settings() {
+    let root = env::temp_dir().join(format!(
+        "rc-invalid-filter-dialog-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = app_with_loaded_panels(root.clone());
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenFilter,
+    ))
+    .expect("filter dialog should open");
+    let invalid = PanelFilter {
+        pattern: String::from("["),
+        ..PanelFilter::default()
+    };
+
+    app.finish_dialog(DialogResult::FilterSubmitted(invalid.clone()));
+
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("invalid filter should reopen its dialog");
+    };
+    let DialogKind::Filter(form) = &dialog.kind else {
+        panic!("filter form should be restored");
+    };
+    assert_eq!(form.to_filter(), invalid);
+    assert_eq!(
+        app.active_panel().filter(),
+        &PanelFilter::default(),
+        "invalid input must not change the live filter"
+    );
+    assert!(app.status_line.contains("Filter not applied"));
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn filtering_preserves_the_selected_path_and_tags_hidden_entries_non_destructively() {
+    let root = env::temp_dir().join(format!(
+        "rc-filter-selection-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("must create temp root");
+    for name in ["alpha.rs", "notes.txt", "zulu.rs"] {
+        fs::write(root.join(name), name).expect("fixture should be written");
+    }
+    let mut app = app_with_loaded_panels(root.clone());
+    let notes_path = root.join("notes.txt");
+    let zulu_path = root.join("zulu.rs");
+    app.active_panel_mut().cursor = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == notes_path)
+        .expect("text fixture should be listed");
+    assert!(app.active_panel_mut().toggle_tag_on_cursor());
+    app.active_panel_mut().cursor = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == zulu_path)
+        .expect("selected fixture should be listed");
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenFilter,
+    ))
+    .expect("filter dialog should open");
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter {
+        pattern: String::from("*.rs"),
+        ..PanelFilter::default()
+    }));
+    drain_background(&mut app);
+
+    assert_eq!(
+        app.active_panel().selected_entry().map(|entry| &entry.path),
+        Some(&zulu_path),
+        "filtering should retain the selected path when it remains visible"
+    );
+    assert!(
+        app.active_panel().is_tagged(&notes_path),
+        "a view filter must not destructively clear hidden tags"
+    );
+    assert!(
+        app.active_panel()
+            .tagged_paths_in_display_order()
+            .is_empty()
+    );
+    app.active_panel_mut().invert_tags();
+    assert!(
+        app.active_panel().is_tagged(&notes_path),
+        "inverting the filtered view must preserve tags on hidden entries"
+    );
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenFilter,
+    ))
+    .expect("filter dialog should reopen");
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter::default()));
+    drain_background(&mut app);
+    assert!(app.active_panel().is_tagged(&notes_path));
+    assert_eq!(
+        app.active_panel().tagged_paths_in_display_order(),
+        [root.join("alpha.rs"), notes_path, zulu_path]
+    );
+
+    fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn changing_a_panelized_filter_reuses_cached_results_without_rerunning_the_command() {
+    let root = env::temp_dir().join(format!(
+        "rc-cached-panel-filter-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("must create temp root");
+    fs::write(root.join("alpha.rs"), "alpha").expect("Rust fixture should be written");
+    fs::write(root.join("notes.txt"), "notes").expect("text fixture should be written");
+    let marker = root.join("panelize-runs.log");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.start_panelize_command(String::from(
+        "printf 'notes.txt\\nalpha.rs\\n'; printf x >> panelize-runs.log",
+    ));
+    drain_background(&mut app);
+    assert_eq!(
+        fs::read_to_string(&marker).expect("marker should exist"),
+        "x"
+    );
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenFilter,
+    ))
+    .expect("filter dialog should open");
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter {
+        pattern: String::from("*.rs"),
+        files_only: false,
+        ..PanelFilter::default()
+    }));
+    assert!(app.pending_worker_commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Run(job)
+            if matches!(&job.request, JobRequest::RefreshPanel {
+                cached_panelized_entries: Some(_),
+                ..
+            })
+    )));
+    drain_background(&mut app);
+
+    assert_eq!(
+        fs::read_to_string(&marker).expect("marker should remain"),
+        "x"
+    );
+    assert_eq!(
+        app.active_panel()
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha.rs"]
+    );
+
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenFilter,
+    ))
+    .expect("filter dialog should reopen");
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter::default()));
+    drain_background(&mut app);
+    assert_eq!(
+        fs::read_to_string(&marker).expect("marker should remain"),
+        "x"
+    );
+    assert_eq!(app.active_panel().entries.len(), 2);
+    assert!(app.active_panel().panelized_entries.is_some());
+
+    app.set_panel_sort_mode(
+        ActivePanel::Left,
+        SortMode {
+            field: SortField::Unsorted,
+            reverse: false,
+        },
+    );
+    app.queue_panel_refresh(ActivePanel::Left);
+    drain_background(&mut app);
+    assert_eq!(
+        app.active_panel()
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["notes.txt", "alpha.rs"],
+        "cached panelize data should retain the source command's discovery order"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).expect("marker should remain"),
+        "x",
+        "changing to unsorted order must not rerun the panelize command"
+    );
+
+    app.set_panel_sort_mode(
+        ActivePanel::Left,
+        SortMode {
+            field: SortField::Name,
+            reverse: false,
+        },
+    );
+    app.queue_panel_refresh(ActivePanel::Left);
+    drain_background(&mut app);
+    app.set_active_panel_directory(root.join(".."))
+        .expect("parent should be inspectable");
+    drain_background(&mut app);
+    app.restore_panelized_results_for(ActivePanel::Left);
+    app.set_panel_sort_mode(
+        ActivePanel::Left,
+        SortMode {
+            field: SortField::Unsorted,
+            reverse: false,
+        },
+    );
+    app.queue_panel_refresh(ActivePanel::Left);
+    drain_background(&mut app);
+    assert_eq!(
+        app.active_panel()
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["notes.txt", "alpha.rs"],
+        "restored panelize data should retain the source command's discovery order"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).expect("marker should remain"),
+        "x",
+        "sorting restored results must not rerun the panelize command"
     );
 
     fs::remove_dir_all(root).expect("must remove temp root");

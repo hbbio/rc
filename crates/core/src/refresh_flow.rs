@@ -5,6 +5,7 @@ pub(crate) struct PanelRefreshWorkflow {
     job_ids: [Option<JobId>; 2],
     request_ids: [u64; 2],
     partial_entry_count: [usize; 2],
+    selection_targets: [Option<PathBuf>; 2],
     next_request_id: u64,
 }
 
@@ -26,9 +27,20 @@ pub(crate) struct PanelRefreshCompletion {
     pub(crate) cwd: PathBuf,
     pub(crate) source: PanelListingSource,
     pub(crate) sort_mode: SortMode,
+    pub(crate) filter: PanelFilter,
     pub(crate) request_id: u64,
     pub(crate) disk_usage: Option<DiskUsageSummary>,
-    pub(crate) result: Result<Vec<FileEntry>, String>,
+    pub(crate) result: Result<PanelRefreshResult, String>,
+}
+
+pub(crate) struct PanelEntriesChunk {
+    pub(crate) panel: ActivePanel,
+    pub(crate) cwd: PathBuf,
+    pub(crate) source: PanelListingSource,
+    pub(crate) sort_mode: SortMode,
+    pub(crate) filter: PanelFilter,
+    pub(crate) request_id: u64,
+    pub(crate) entries: Vec<FileEntry>,
 }
 
 impl Default for PanelRefreshWorkflow {
@@ -37,18 +49,20 @@ impl Default for PanelRefreshWorkflow {
             job_ids: [None; 2],
             request_ids: [0; 2],
             partial_entry_count: [0; 2],
+            selection_targets: [None, None],
             next_request_id: 1,
         }
     }
 }
 
 impl PanelRefreshWorkflow {
-    fn begin_request(&mut self, panel: ActivePanel) -> u64 {
+    fn begin_request(&mut self, panel: ActivePanel, selection_target: Option<PathBuf>) -> u64 {
         let panel_index = panel.index();
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.request_ids[panel_index] = request_id;
         self.partial_entry_count[panel_index] = 0;
+        self.selection_targets[panel_index] = selection_target;
         request_id
     }
 
@@ -81,7 +95,7 @@ impl PanelRefreshWorkflow {
 
     fn invalidate_request(&mut self, panel: ActivePanel) -> Option<JobId> {
         let job_id = self.take_job_id(panel);
-        self.begin_request(panel);
+        self.begin_request(panel, None);
         self.clear_panel(panel);
         job_id
     }
@@ -90,6 +104,11 @@ impl PanelRefreshWorkflow {
         let panel_index = panel.index();
         self.job_ids[panel_index] = None;
         self.partial_entry_count[panel_index] = 0;
+        self.selection_targets[panel_index] = None;
+    }
+
+    fn selection_target(&self, panel: ActivePanel) -> Option<PathBuf> {
+        self.selection_targets[panel.index()].clone()
     }
 
     fn panel_for_job_id(&self, id: JobId) -> Option<ActivePanel> {
@@ -155,10 +174,21 @@ impl AppState {
         if self.panels[panel_index].source.is_panelized() {
             let snapshot = self.panel_refresh_revert_snapshot(panel);
             self.panel_refresh_post.ensure_revert(panel, snapshot);
+            let panel_state = &mut self.panels[panel_index];
+            if !panel_state.loading
+                && panel_state.panelized_entries.is_none()
+                && !panel_state.filter.is_active()
+            {
+                panel_state.panelized_entries =
+                    Some(Arc::<[FileEntry]>::from(panel_state.entries.clone()));
+            }
         }
-        let request_id = self.panel_refresh.begin_request(panel);
+        let selection_target = self.panels[panel_index]
+            .selected_entry()
+            .map(|entry| entry.path.clone());
+        let request_id = self.panel_refresh.begin_request(panel, selection_target);
 
-        let (cwd, source, sort_mode, show_hidden_files) = {
+        let (cwd, source, sort_mode, filter, show_hidden_files, cached_panelized_entries) = {
             let panel_state = &mut self.panels[panel_index];
             panel_state.loading = true;
             panel_state.disk_usage = None;
@@ -166,7 +196,9 @@ impl AppState {
                 panel_state.cwd.clone(),
                 panel_state.source.clone(),
                 panel_state.sort_mode,
+                panel_state.filter.clone(),
                 panel_state.show_hidden_files,
+                panel_state.panelized_entries.clone(),
             )
         };
         let request = JobRequest::RefreshPanel {
@@ -174,7 +206,9 @@ impl AppState {
             cwd,
             source,
             sort_mode,
+            filter,
             show_hidden_files,
+            cached_panelized_entries,
             request_id,
         };
         if let Some(previous_job_id) = self.panel_refresh.take_job_id(panel) {
@@ -304,22 +338,24 @@ impl AppState {
         self.panels[panel.index()].loading = false;
     }
 
-    pub(crate) fn handle_panel_entries_chunk(
-        &mut self,
-        panel: ActivePanel,
-        cwd: PathBuf,
-        source: PanelListingSource,
-        sort_mode: SortMode,
-        request_id: u64,
-        entries: Vec<FileEntry>,
-    ) {
+    pub(crate) fn handle_panel_entries_chunk(&mut self, chunk: PanelEntriesChunk) {
+        let PanelEntriesChunk {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            filter,
+            request_id,
+            entries,
+        } = chunk;
         if !self.panel_refresh_is_current_request(panel, request_id) {
             return;
         }
         let panel_state = &self.panels[panel.index()];
         let still_current = panel_state.cwd == cwd
             && panel_state.source == source
-            && panel_state.sort_mode == sort_mode;
+            && panel_state.sort_mode == sort_mode
+            && panel_state.filter == filter;
         if !still_current {
             return;
         }
@@ -360,6 +396,7 @@ impl AppState {
             cwd,
             source,
             sort_mode,
+            filter,
             request_id,
             disk_usage,
             result,
@@ -370,12 +407,14 @@ impl AppState {
         let panel_state = &self.panels[panel.index()];
         let still_current = panel_state.cwd == cwd
             && panel_state.source == source
-            && panel_state.sort_mode == sort_mode;
+            && panel_state.sort_mode == sort_mode
+            && panel_state.filter == filter;
         if !still_current {
             return;
         }
 
         let focus_target = self.panel_refresh_post.focus_target_for_panel(panel);
+        let selection_target = self.panel_refresh.selection_target(panel);
         let has_streamed_entries = !self.panel_refresh_is_first_chunk(panel);
         let refresh_failed = result.is_err();
         let mut clear_focus_target = false;
@@ -386,14 +425,22 @@ impl AppState {
             panel_state.loading = false;
             panel_state.disk_usage = disk_usage;
             match result {
-                Ok(entries) => {
+                Ok(refresh) => {
+                    let PanelRefreshResult {
+                        entries,
+                        panelized_entries,
+                    } = refresh;
                     let entry_count = entries.len();
-                    let streamed_selection = if source.is_panelized() && has_streamed_entries {
+                    let streamed_selection = if source.is_panelized()
+                        && has_streamed_entries
+                        && panel_state.panelized_entries.is_none()
+                    {
                         panel_state.selected_entry().map(|entry| entry.path.clone())
                     } else {
-                        None
+                        selection_target
                     };
                     panel_state.apply_entries(entries);
+                    panel_state.panelized_entries = panelized_entries;
                     if let Some(selected_path) = streamed_selection
                         && let Some(index) = panel_state
                             .entries

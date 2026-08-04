@@ -17,7 +17,7 @@ use nix::unistd::{Gid, Uid, chown};
 
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
-use crate::{ActivePanel, FindSpec, PanelListingSource, SortMode};
+use crate::{ActivePanel, FileEntry, FindSpec, PanelFilter, PanelListingSource, SortMode};
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
@@ -113,7 +113,9 @@ pub enum JobRequest {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        filter: PanelFilter,
         show_hidden_files: bool,
+        cached_panelized_entries: Option<Arc<[FileEntry]>>,
         request_id: u64,
     },
     Find {

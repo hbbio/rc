@@ -121,9 +121,10 @@ fn stale_panel_refresh_event_is_ignored() {
         cwd: cwd.clone(),
         source: source.clone(),
         sort_mode,
+        filter: PanelFilter::default(),
         request_id: stale_request_id,
         disk_usage: None,
-        result: Ok(Vec::new()),
+        result: Ok(panel_refresh_result(Vec::new())),
     });
     assert!(
         app.panels[panel.index()].loading,
@@ -135,9 +136,10 @@ fn stale_panel_refresh_event_is_ignored() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id: latest_request_id,
         disk_usage: None,
-        result: Ok(Vec::new()),
+        result: Ok(panel_refresh_result(Vec::new())),
     });
     assert!(
         !app.panels[panel.index()].loading,
@@ -201,6 +203,7 @@ fn panel_refresh_clears_stale_disk_usage_while_loading_and_after_failure() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
         result: Err(String::from("permission denied")),
@@ -272,6 +275,7 @@ fn failed_directory_transition_restores_the_complete_previous_panel_state() {
         cwd: cwd.clone(),
         source: source.clone(),
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         entries: vec![FileEntry::file(
             String::from("partial.txt"),
@@ -285,6 +289,7 @@ fn failed_directory_transition_restores_the_complete_previous_panel_state() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
         result: Err(String::from("permission denied")),
@@ -399,6 +404,7 @@ fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
         cwd: cwd.clone(),
         source: source.clone(),
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         entries: vec![FileEntry::file(
             String::from("beta.txt"),
@@ -419,9 +425,10 @@ fn panel_refresh_chunks_preserve_existing_tags_until_final_result() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
-        result: Ok(final_entries),
+        result: Ok(panel_refresh_result(final_entries)),
     });
     assert!(
         app.active_panel().is_tagged(&alpha_path),
@@ -481,6 +488,7 @@ fn panel_refresh_chunks_preserve_cursor_until_final_listing() {
         cwd: cwd.clone(),
         source: source.clone(),
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         entries: vec![FileEntry::file(
             String::from("a.txt"),
@@ -502,9 +510,10 @@ fn panel_refresh_chunks_preserve_cursor_until_final_listing() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
-        result: Ok(final_entries),
+        result: Ok(panel_refresh_result(final_entries)),
     });
     assert_eq!(
         app.active_panel().cursor,
@@ -565,6 +574,7 @@ fn panelize_revert_policy_stays_scoped_to_its_panel() {
         cwd: right_cwd,
         source: right_source,
         sort_mode: right_sort_mode,
+        filter: PanelFilter::default(),
         request_id: right_request_id,
         disk_usage: None,
         result: Err(String::from("right refresh failed")),
@@ -582,6 +592,7 @@ fn panelize_revert_policy_stays_scoped_to_its_panel() {
         cwd: left_cwd,
         source: left_source,
         sort_mode: left_sort_mode,
+        filter: PanelFilter::default(),
         request_id: left_request_id,
         disk_usage: None,
         result: Err(String::from("left panelize failed")),
@@ -652,6 +663,7 @@ fn failed_panelize_refresh_restores_the_complete_previous_panel_state() {
         cwd: cwd.clone(),
         source: source.clone(),
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         entries: vec![FileEntry::file(
             String::from("partial.txt"),
@@ -675,6 +687,7 @@ fn failed_panelize_refresh_restores_the_complete_previous_panel_state() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
         result: Err(String::from("command failed after output")),
@@ -732,6 +745,7 @@ fn completed_panelize_stream_preserves_the_selected_path_across_final_sort() {
         cwd: cwd.clone(),
         source: source.clone(),
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         entries: vec![zulu.clone(), alpha.clone()],
     });
@@ -745,9 +759,10 @@ fn completed_panelize_stream_preserves_the_selected_path_across_final_sort() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
-        result: Ok(vec![alpha, zulu.clone()]),
+        result: Ok(panel_refresh_result(vec![alpha, zulu.clone()])),
     });
 
     assert_eq!(

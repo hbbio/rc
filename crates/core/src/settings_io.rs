@@ -1,5 +1,6 @@
 use crate::{
-    HotlistEntry, OverwritePolicy, PanelListingFormat, PanelizePreset, Settings, SortField,
+    FindNameMode, HotlistEntry, OverwritePolicy, PanelListingFormat, PanelizePreset, Settings,
+    SortField,
 };
 use std::fs;
 use std::io::{self, Write};
@@ -463,6 +464,46 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.panel_options.listing_formats[1] = parsed;
                 }
             }
+            ("panel_options", "left_filter_pattern") => {
+                if let Some(parsed) = unescape_settings_field(value) {
+                    settings.panel_options.filters[0].pattern = parsed;
+                }
+            }
+            ("panel_options", "left_filter_files_only") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.panel_options.filters[0].files_only = parsed;
+                }
+            }
+            ("panel_options", "left_filter_mode") => {
+                if let Some(parsed) = parse_filter_mode(value) {
+                    settings.panel_options.filters[0].name_mode = parsed;
+                }
+            }
+            ("panel_options", "left_filter_case_sensitive") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.panel_options.filters[0].case_sensitive = parsed;
+                }
+            }
+            ("panel_options", "right_filter_pattern") => {
+                if let Some(parsed) = unescape_settings_field(value) {
+                    settings.panel_options.filters[1].pattern = parsed;
+                }
+            }
+            ("panel_options", "right_filter_files_only") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.panel_options.filters[1].files_only = parsed;
+                }
+            }
+            ("panel_options", "right_filter_mode") => {
+                if let Some(parsed) = parse_filter_mode(value) {
+                    settings.panel_options.filters[1].name_mode = parsed;
+                }
+            }
+            ("panel_options", "right_filter_case_sensitive") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.panel_options.filters[1].case_sensitive = parsed;
+                }
+            }
             ("confirmation", "confirm_delete") => {
                 if let Some(parsed) = parse_bool(value) {
                     settings.confirmation.confirm_delete = parsed;
@@ -561,6 +602,16 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
 
     if saw_configuration_section && !saw_panelize_presets {
         settings.configuration.panelize_presets.clear();
+    }
+    for (panel_index, filter) in settings.panel_options.filters.iter_mut().enumerate() {
+        if let Err(error) = filter.validate() {
+            tracing::warn!(
+                panel_index,
+                error = %error,
+                "ignored invalid persisted panel filter"
+            );
+            filter.pattern.clear();
+        }
     }
 }
 
@@ -663,6 +714,21 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         "right_listing_format={}",
         settings.panel_options.listing_formats[1].title_label()
     ));
+    for (prefix, filter) in ["left", "right"]
+        .into_iter()
+        .zip(&settings.panel_options.filters)
+    {
+        lines.push(format!(
+            "{prefix}_filter_pattern={}",
+            escape_settings_field(&filter.pattern)
+        ));
+        lines.push(format!("{prefix}_filter_files_only={}", filter.files_only));
+        lines.push(format!("{prefix}_filter_mode={}", filter.name_mode.label()));
+        lines.push(format!(
+            "{prefix}_filter_case_sensitive={}",
+            filter.case_sensitive
+        ));
+    }
 
     lines.push(String::new());
     lines.push(String::from("[confirmation]"));
@@ -786,6 +852,14 @@ fn parse_listing_format(value: &str) -> Option<PanelListingFormat> {
     }
 }
 
+fn parse_filter_mode(value: &str) -> Option<FindNameMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "glob" | "shell" | "shell-pattern" => Some(FindNameMode::Glob),
+        "regex" | "regexp" => Some(FindNameMode::Regex),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,6 +931,20 @@ skin=default
         ];
         settings.panel_options.listing_formats =
             [PanelListingFormat::Brief, PanelListingFormat::Long];
+        settings.panel_options.filters = [
+            crate::PanelFilter {
+                pattern: String::from("*.rs"),
+                files_only: true,
+                name_mode: FindNameMode::Glob,
+                case_sensitive: false,
+            },
+            crate::PanelFilter {
+                pattern: String::from(r"^release notes\\d+$"),
+                files_only: false,
+                name_mode: FindNameMode::Regex,
+                case_sensitive: true,
+            },
+        ];
         settings.layout.status_message_timeout_seconds = 42;
         settings.confirmation.confirm_hotlist_delete = false;
 
@@ -881,6 +969,7 @@ skin=default
             parsed.panel_options.listing_formats,
             [PanelListingFormat::Brief, PanelListingFormat::Long]
         );
+        assert_eq!(parsed.panel_options.filters, settings.panel_options.filters);
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
         assert!(!parsed.confirmation.confirm_hotlist_delete);
     }
@@ -898,6 +987,18 @@ skin=default
             reverse: true,
         };
         assert_eq!(settings.panel_options.sort_modes, [expected; 2]);
+    }
+
+    #[test]
+    fn invalid_persisted_filter_is_safely_disabled() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(
+            &mut settings,
+            "[panel_options]\nleft_filter_pattern=[\nleft_filter_files_only=false\n",
+        );
+
+        assert!(!settings.panel_options.filters[0].is_active());
+        assert!(!settings.panel_options.filters[0].files_only);
     }
 
     #[test]

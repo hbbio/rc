@@ -1,14 +1,16 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use crate::{
-    ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JobId, PanelListingSource, SortMode,
-    TreeBuildResult, ViewerState, build_tree_entries, ensure_panel_refresh_not_canceled,
-    read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
-    sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
+    ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JobId, PanelFilter,
+    PanelListingSource, SortMode, TreeBuildResult, ViewerState, build_tree_entries,
+    ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
+    read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
+    stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
 
 #[cfg(unix)]
@@ -23,8 +25,16 @@ pub struct PanelRefreshStreamRequest {
     pub cwd: PathBuf,
     pub source: PanelListingSource,
     pub sort_mode: SortMode,
+    pub filter: PanelFilter,
     pub show_hidden_files: bool,
+    pub cached_panelized_entries: Option<Arc<[FileEntry]>>,
     pub request_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PanelRefreshResult {
+    pub entries: Vec<FileEntry>,
+    pub panelized_entries: Option<Arc<[FileEntry]>>,
 }
 
 impl PanelRefreshStreamRequest {
@@ -34,6 +44,7 @@ impl PanelRefreshStreamRequest {
             cwd: self.cwd.clone(),
             source: self.source.clone(),
             sort_mode: self.sort_mode,
+            filter: self.filter.clone(),
             request_id: self.request_id,
             disk_usage: None,
             result: Err(String::from(crate::PANEL_REFRESH_CANCELED_MESSAGE)),
@@ -48,6 +59,7 @@ pub enum BackgroundEvent {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        filter: PanelFilter,
         request_id: u64,
         entries: Vec<FileEntry>,
     },
@@ -56,9 +68,10 @@ pub enum BackgroundEvent {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        filter: PanelFilter,
         request_id: u64,
         disk_usage: Option<DiskUsageSummary>,
-        result: Result<Vec<FileEntry>, String>,
+        result: Result<PanelRefreshResult, String>,
     },
     ViewerLoaded {
         path: PathBuf,
@@ -86,26 +99,22 @@ pub enum BackgroundEvent {
 }
 
 pub fn refresh_panel_event(
-    panel: ActivePanel,
-    cwd: PathBuf,
-    source: PanelListingSource,
-    sort_mode: SortMode,
-    show_hidden_files: bool,
-    request_id: u64,
+    request: PanelRefreshStreamRequest,
     cancel_flag: &AtomicBool,
 ) -> BackgroundEvent {
-    let result = refresh_panel_entries(&cwd, &source, sort_mode, show_hidden_files, cancel_flag)
+    let result = stream_refresh_panel_entries(&request, cancel_flag, |_| true)
         .map_err(|error| error.to_string());
     let disk_usage = result
         .as_ref()
         .ok()
-        .and_then(|_| read_disk_usage(cwd.as_path()));
+        .and_then(|_| read_disk_usage(request.cwd.as_path()));
     BackgroundEvent::PanelRefreshed {
-        panel,
-        cwd,
-        source,
-        sort_mode,
-        request_id,
+        panel: request.panel,
+        cwd: request.cwd,
+        source: request.source,
+        sort_mode: request.sort_mode,
+        filter: request.filter,
+        request_id: request.request_id,
         disk_usage,
         result,
     }
@@ -153,7 +162,7 @@ pub fn stream_refresh_panel_entries<F>(
     request: &PanelRefreshStreamRequest,
     cancel_flag: &AtomicBool,
     mut emit_chunk: F,
-) -> io::Result<Vec<FileEntry>>
+) -> io::Result<PanelRefreshResult>
 where
     F: FnMut(BackgroundEvent) -> bool,
 {
@@ -171,14 +180,40 @@ fn stream_panelized_source_entries<F>(
     request: &PanelRefreshStreamRequest,
     cancel_flag: &AtomicBool,
     emit_chunk: &mut F,
-) -> io::Result<Vec<FileEntry>>
+) -> io::Result<PanelRefreshResult>
 where
     F: FnMut(BackgroundEvent) -> bool,
 {
+    let matcher = request
+        .filter
+        .compile()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if let Some(cached_entries) = request.cached_panelized_entries.clone() {
+        let mut entries = Vec::new();
+        for entry in cached_entries.iter() {
+            ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+            if matcher.matches(entry) {
+                entries.push(entry.clone());
+            }
+        }
+        sort_file_entries(&mut entries, request.sort_mode);
+        for chunk in entries.chunks(PANEL_EVENT_CHUNK_SIZE) {
+            let mut chunk = chunk.to_vec();
+            emit_panel_entries_chunk(request, &mut chunk, emit_chunk)?;
+        }
+        return Ok(PanelRefreshResult {
+            entries,
+            panelized_entries: Some(cached_entries),
+        });
+    }
+
     let mut pending = Vec::with_capacity(1);
     let mut next_chunk_size = 1_usize;
     let mut last_emit = None::<Instant>;
     let mut emit_entry = |entry: &FileEntry| {
+        if !matcher.matches(entry) {
+            return Ok(());
+        }
         pending.push(entry.clone());
         let flush_interval_elapsed =
             last_emit.is_some_and(|emitted_at| emitted_at.elapsed() >= PANEL_EVENT_FLUSH_INTERVAL);
@@ -194,27 +229,32 @@ where
         Ok(())
     };
 
-    let entries = match &request.source {
+    let discovered_entries = match &request.source {
         PanelListingSource::Panelize { command } => stream_panelized_entries_with_cancel(
             &request.cwd,
             command,
-            request.sort_mode,
             Some(cancel_flag),
             &mut emit_entry,
         ),
         PanelListingSource::FindResults {
             base_dir, paths, ..
-        } => stream_panelized_paths_with_cancel(
-            base_dir,
-            paths,
-            request.sort_mode,
-            Some(cancel_flag),
-            &mut emit_entry,
-        ),
+        } => {
+            stream_panelized_paths_with_cancel(base_dir, paths, Some(cancel_flag), &mut emit_entry)
+        }
         PanelListingSource::Directory => unreachable!("directory sources use directory streaming"),
     }?;
     emit_panel_entries_chunk(request, &mut pending, emit_chunk)?;
-    Ok(entries)
+    let panelized_entries = Arc::<[FileEntry]>::from(discovered_entries);
+    let mut visible_entries = panelized_entries
+        .iter()
+        .filter(|entry| matcher.matches(entry))
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_file_entries(&mut visible_entries, request.sort_mode);
+    Ok(PanelRefreshResult {
+        entries: visible_entries,
+        panelized_entries: Some(panelized_entries),
+    })
 }
 
 fn emit_panel_entries_chunk<F>(
@@ -233,6 +273,7 @@ where
         cwd: request.cwd.clone(),
         source: request.source.clone(),
         sort_mode: request.sort_mode,
+        filter: request.filter.clone(),
         request_id: request.request_id,
         entries: std::mem::take(entries),
     });
@@ -249,12 +290,16 @@ fn stream_directory_entries<F>(
     request: &PanelRefreshStreamRequest,
     cancel_flag: &AtomicBool,
     emit_chunk: &mut F,
-) -> io::Result<Vec<FileEntry>>
+) -> io::Result<PanelRefreshResult>
 where
     F: FnMut(BackgroundEvent) -> bool,
 {
     let cwd = request.cwd.as_path();
     ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+    let matcher = request
+        .filter
+        .compile()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let mut entries = Vec::new();
     let mut emitted = Vec::new();
 
@@ -274,6 +319,9 @@ where
         } else {
             FileEntry::file_from_metadata(name, path, metadata.as_ref())
         };
+        if !matcher.matches(&panel_entry) {
+            continue;
+        }
         entries.push(panel_entry.clone());
         emitted.push(panel_entry);
 
@@ -283,6 +331,7 @@ where
                 cwd: request.cwd.clone(),
                 source: request.source.clone(),
                 sort_mode: request.sort_mode,
+                filter: request.filter.clone(),
                 request_id: request.request_id,
                 entries: std::mem::take(&mut emitted),
             });
@@ -301,6 +350,7 @@ where
             cwd: request.cwd.clone(),
             source: request.source.clone(),
             sort_mode: request.sort_mode,
+            filter: request.filter.clone(),
             request_id: request.request_id,
             entries: emitted,
         });
@@ -316,7 +366,10 @@ where
     if let Some(parent) = cwd.parent() {
         entries.insert(0, FileEntry::parent(parent.to_path_buf()));
     }
-    Ok(entries)
+    Ok(PanelRefreshResult {
+        entries,
+        panelized_entries: None,
+    })
 }
 
 pub fn read_disk_usage(path: &Path) -> Option<DiskUsageSummary> {
@@ -351,6 +404,20 @@ fn bytes_from_blocks(blocks: u64, block_size: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{FileEntryKind, FileEntryMetadata, FindNameMode};
+    use std::env;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn cached_entry(name: &str, kind: FileEntryKind) -> FileEntry {
+        FileEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            kind,
+            size: 0,
+            modified: None,
+            metadata: FileEntryMetadata::default(),
+        }
+    }
 
     #[test]
     fn find_panelized_stream_uses_bounded_chunks_without_losing_entries() {
@@ -366,7 +433,9 @@ mod tests {
                 paths,
             },
             sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
             show_hidden_files: true,
+            cached_panelized_entries: None,
             request_id: 41,
         };
         let cancel_flag = AtomicBool::new(false);
@@ -395,6 +464,89 @@ mod tests {
             "no streamed chunk may exceed the event bound"
         );
         assert_eq!(chunk_sizes.iter().sum::<usize>(), 300);
-        assert_eq!(final_entries.len(), 300);
+        assert_eq!(final_entries.entries.len(), 300);
+    }
+
+    #[test]
+    fn directory_stream_filters_files_but_keeps_navigation_directories() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panel-filter-stream-{stamp}"));
+        fs::create_dir_all(root.join("docs")).expect("directory fixture should be created");
+        fs::write(root.join("main.rs"), "fn main() {}").expect("Rust fixture should be written");
+        fs::write(root.join("notes.txt"), "notes").expect("text fixture should be written");
+        let request = PanelRefreshStreamRequest {
+            panel: ActivePanel::Left,
+            cwd: root.clone(),
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            filter: PanelFilter {
+                pattern: String::from("*.rs"),
+                ..PanelFilter::default()
+            },
+            show_hidden_files: true,
+            cached_panelized_entries: None,
+            request_id: 42,
+        };
+
+        let result = stream_refresh_panel_entries(&request, &AtomicBool::new(false), |_| true)
+            .expect("filtered directory should stream");
+        let names = result
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&".."));
+        assert!(names.contains(&"docs"));
+        assert!(names.contains(&"main.rs"));
+        assert!(!names.contains(&"notes.txt"));
+        fs::remove_dir_all(root).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn cached_panelized_filter_does_not_execute_the_source_command() {
+        let cached = Arc::<[FileEntry]>::from(vec![
+            cached_entry("main.rs", FileEntryKind::File),
+            cached_entry("notes.txt", FileEntryKind::File),
+            cached_entry("src", FileEntryKind::Directory),
+        ]);
+        let request = PanelRefreshStreamRequest {
+            panel: ActivePanel::Right,
+            cwd: PathBuf::from("."),
+            source: PanelListingSource::Panelize {
+                command: String::from("this-command-must-never-run"),
+            },
+            sort_mode: SortMode::default(),
+            filter: PanelFilter {
+                pattern: String::from("^main\\.rs$"),
+                files_only: false,
+                name_mode: FindNameMode::Regex,
+                case_sensitive: true,
+            },
+            show_hidden_files: true,
+            cached_panelized_entries: Some(Arc::clone(&cached)),
+            request_id: 43,
+        };
+
+        let result = stream_refresh_panel_entries(&request, &AtomicBool::new(false), |_| true)
+            .expect("cached entries should bypass the panelize command");
+
+        assert_eq!(
+            result
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["main.rs"]
+        );
+        assert!(
+            result
+                .panelized_entries
+                .as_ref()
+                .is_some_and(|entries| Arc::ptr_eq(entries, &cached))
+        );
     }
 }

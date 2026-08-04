@@ -46,7 +46,8 @@ impl AppState {
         let PanelizedResultSnapshot {
             cwd,
             source,
-            mut entries,
+            entries,
+            unfiltered_entries,
             cursor,
             tagged,
             disk_usage,
@@ -60,6 +61,16 @@ impl AppState {
             }
         };
         let selected_path = entries.get(cursor).map(|entry| entry.path.clone());
+        let raw_entries = unfiltered_entries
+            .as_deref()
+            .map(<[FileEntry]>::to_vec)
+            .unwrap_or(entries);
+        let filter = self.panels[panel_index].filter.clone();
+        let panelized_entries = Arc::<[FileEntry]>::from(raw_entries);
+        let Ok(mut entries) = apply_panel_filter(panelized_entries.to_vec(), &filter) else {
+            self.set_status("Stored panelized results have an invalid filter");
+            return;
+        };
         let sort_mode = self.panels[panel_index].sort_mode;
         sort_file_entries(&mut entries, sort_mode);
         let restored_cursor = selected_path
@@ -71,6 +82,7 @@ impl AppState {
         let panel = &mut self.panels[panel_index];
         panel.cwd = cwd;
         panel.source = source;
+        panel.panelized_entries = Some(panelized_entries);
         panel.entries = entries;
         panel.cursor = restored_cursor;
         panel.tagged = tagged;
@@ -407,6 +419,7 @@ impl AppState {
         {
             let panel = self.active_panel_mut();
             panel.source = PanelListingSource::Panelize { command };
+            panel.panelized_entries = None;
             panel.cursor = 0;
             panel.tagged.clear();
             panel.loading = true;

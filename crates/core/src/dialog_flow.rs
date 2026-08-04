@@ -22,6 +22,9 @@ impl AppState {
             AppCommand::Panel(panel, PanelCommand::OpenSortOrder) => {
                 self.open_panel_sort_order_dialog(panel)
             }
+            AppCommand::Panel(panel, PanelCommand::OpenFilter) => {
+                self.open_panel_filter_dialog(panel)
+            }
             AppCommand::FindDialogBrowse => self.open_find_tree_picker(),
             AppCommand::DialogAccept => {
                 if matches!(self.top_route(), Route::Settings(_)) {
@@ -113,6 +116,15 @@ impl AppState {
             },
         );
         self.set_status(format!("{} panel: choose sort order", panel.label()));
+    }
+
+    fn open_panel_filter_dialog(&mut self, panel: ActivePanel) {
+        let filter = self.panels[panel.index()].filter().clone();
+        self.push_dialog(
+            DialogState::filter(&filter),
+            PendingDialogAction::SetPanelFilter { panel },
+        );
+        self.set_status(format!("{} panel: edit listing filter", panel.label()));
     }
 
     fn toggle_panel_sort_dialog_reverse(&mut self) -> bool {
@@ -500,6 +512,35 @@ impl AppState {
             }
             (Some(PendingDialogAction::SetPanelSortOrder { .. }), DialogResult::Canceled) => {
                 self.set_status("Sort order unchanged");
+            }
+            (
+                Some(PendingDialogAction::SetPanelFilter { panel }),
+                DialogResult::FilterSubmitted(filter),
+            ) => {
+                if let Err(error) = filter.validate() {
+                    self.push_dialog(
+                        DialogState::filter(&filter),
+                        PendingDialogAction::SetPanelFilter { panel },
+                    );
+                    self.set_status(format!("Filter not applied: {error}"));
+                    return;
+                }
+                if self.panels[panel.index()].filter() == &filter {
+                    self.set_status("Filter unchanged");
+                    return;
+                }
+
+                let affects_listing =
+                    self.panels[panel.index()].filter().is_active() || filter.is_active();
+                let label = filter.display_pattern().to_string();
+                self.set_panel_filter(panel, filter);
+                if affects_listing {
+                    self.queue_panel_refresh(panel);
+                }
+                self.set_status(format!("{} panel filter: {label}", panel.label()));
+            }
+            (Some(PendingDialogAction::SetPanelFilter { .. }), DialogResult::Canceled) => {
+                self.set_status("Filter unchanged");
             }
             (Some(PendingDialogAction::FindSearch), DialogResult::FindSubmitted(spec)) => {
                 self.start_find_search(*spec);

@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use rc_core::{
     AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
-    PanelListingSource, PanelRefreshStreamRequest, WorkerCommand, build_tree_ready_event,
-    execute_worker_job, read_disk_usage, run_find_entries, stream_refresh_panel_entries,
+    PanelListingSource, PanelRefreshResult, PanelRefreshStreamRequest, WorkerCommand,
+    build_tree_ready_event, execute_worker_job, read_disk_usage, run_find_entries,
+    stream_refresh_panel_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -708,7 +709,9 @@ fn finish_canceled_worker_before_start(
         cwd,
         source,
         sort_mode,
+        filter,
         show_hidden_files,
+        cached_panelized_entries,
         request_id,
     } = &worker_job.request
     {
@@ -717,7 +720,9 @@ fn finish_canceled_worker_before_start(
             cwd: cwd.clone(),
             source: source.clone(),
             sort_mode: *sort_mode,
+            filter: filter.clone(),
             show_hidden_files: *show_hidden_files,
+            cached_panelized_entries: cached_panelized_entries.clone(),
             request_id: *request_id,
         };
         let _ = background_event_tx.send(request.canceled_event());
@@ -756,16 +761,22 @@ fn execute_runtime_worker_job(
             cwd,
             source,
             sort_mode,
+            filter,
             show_hidden_files,
+            cached_panelized_entries,
             request_id,
         } => execute_refresh_worker_job(
             worker_job.id,
-            panel,
-            cwd,
-            source,
-            sort_mode,
-            show_hidden_files,
-            request_id,
+            PanelRefreshStreamRequest {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                filter,
+                show_hidden_files,
+                cached_panelized_entries,
+                request_id,
+            },
             cancel_flag,
             worker_event_tx,
             background_event_tx,
@@ -814,43 +825,29 @@ fn execute_runtime_worker_job(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn execute_refresh_worker_job(
     job_id: JobId,
-    panel: rc_core::ActivePanel,
-    cwd: std::path::PathBuf,
-    source: PanelListingSource,
-    sort_mode: rc_core::SortMode,
-    show_hidden_files: bool,
-    request_id: u64,
+    request: PanelRefreshStreamRequest,
     cancel_flag: Arc<AtomicBool>,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let stream_request = PanelRefreshStreamRequest {
-        panel,
-        cwd: cwd.clone(),
-        source: source.clone(),
-        sort_mode,
-        show_hidden_files,
-        request_id,
-    };
-    let refresh_result =
-        stream_refresh_panel_entries(&stream_request, cancel_flag.as_ref(), |event| {
-            background_event_tx.send(event).is_ok()
-        });
+    let refresh_result = stream_refresh_panel_entries(&request, cancel_flag.as_ref(), |event| {
+        background_event_tx.send(event).is_ok()
+    });
     let (event_result, result) = refresh_outcomes(refresh_result, cancel_flag.as_ref());
     let disk_usage = event_result
         .as_ref()
         .ok()
-        .and_then(|_| read_disk_usage(cwd.as_path()));
+        .and_then(|_| read_disk_usage(request.cwd.as_path()));
     let event = BackgroundEvent::PanelRefreshed {
-        panel,
-        cwd,
-        source,
-        sort_mode,
-        request_id,
+        panel: request.panel,
+        cwd: request.cwd,
+        source: request.source,
+        sort_mode: request.sort_mode,
+        filter: request.filter,
+        request_id: request.request_id,
         disk_usage,
         result: event_result,
     };
@@ -866,12 +863,9 @@ fn execute_refresh_worker_job(
 }
 
 fn refresh_outcomes(
-    refresh_result: std::io::Result<Vec<rc_core::FileEntry>>,
+    refresh_result: std::io::Result<PanelRefreshResult>,
     cancel_flag: &AtomicBool,
-) -> (
-    Result<Vec<rc_core::FileEntry>, String>,
-    Result<(), JobError>,
-) {
+) -> (Result<PanelRefreshResult, String>, Result<(), JobError>) {
     match refresh_result {
         Ok(entries) => {
             if is_canceled(cancel_flag) {
@@ -1161,7 +1155,7 @@ mod tests {
     use super::*;
     use rc_core::{
         ActivePanel, AppState, JobErrorCode, JobId, JobManager, JobRequest, JobRetryHint,
-        JobStatus, PanelListingSource, SortMode, settings_io,
+        JobStatus, PanelFilter, PanelListingSource, SortMode, settings_io,
     };
     use std::env;
     use std::fs;
@@ -1179,6 +1173,24 @@ mod tests {
         let root = env::temp_dir().join(format!("rc-runtime-tests-{label}-{stamp}"));
         fs::create_dir_all(&root).expect("temp root should be creatable");
         root
+    }
+
+    fn refresh_request(
+        panel: ActivePanel,
+        cwd: PathBuf,
+        source: PanelListingSource,
+        request_id: u64,
+    ) -> PanelRefreshStreamRequest {
+        PanelRefreshStreamRequest {
+            panel,
+            cwd,
+            source,
+            sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
+            show_hidden_files: true,
+            cached_panelized_entries: None,
+            request_id,
+        }
     }
 
     fn spawn_runtime_loop_thread() -> (
@@ -1526,7 +1538,9 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             source: PanelListingSource::Directory,
             sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
             show_hidden_files: true,
+            cached_panelized_entries: None,
             request_id: 99,
         });
         let high_job = manager.enqueue(JobRequest::LoadViewer {
@@ -1581,7 +1595,9 @@ mod tests {
             cwd: root.clone(),
             source: PanelListingSource::Directory,
             sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
             show_hidden_files: true,
+            cached_panelized_entries: None,
             request_id: 7,
         });
         let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
@@ -2135,12 +2151,12 @@ mod tests {
 
         execute_refresh_worker_job(
             JobId(1),
-            ActivePanel::Left,
-            root.clone(),
-            PanelListingSource::Directory,
-            SortMode::default(),
-            true,
-            1,
+            refresh_request(
+                ActivePanel::Left,
+                root.clone(),
+                PanelListingSource::Directory,
+                1,
+            ),
             cancel_flag,
             &worker_event_tx,
             &background_event_tx,
@@ -2178,7 +2194,9 @@ mod tests {
             cwd: root.clone(),
             source: PanelListingSource::Directory,
             sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
             show_hidden_files: true,
+            cached_panelized_entries: None,
             request_id: 17,
         });
         let job_id = job.id;
@@ -2218,12 +2236,12 @@ mod tests {
 
         execute_refresh_worker_job(
             JobId(7),
-            ActivePanel::Left,
-            root.clone(),
-            PanelListingSource::Directory,
-            SortMode::default(),
-            true,
-            11,
+            refresh_request(
+                ActivePanel::Left,
+                root.clone(),
+                PanelListingSource::Directory,
+                11,
+            ),
             cancel_flag,
             &worker_event_tx,
             &background_event_tx,
@@ -2274,16 +2292,16 @@ mod tests {
 
         execute_refresh_worker_job(
             JobId(8),
-            ActivePanel::Left,
-            root.clone(),
-            PanelListingSource::Panelize {
-                command: String::from(
-                    "printf 'delta.txt\\nalpha.txt\\ncharlie.txt\\nbravo.txt\\n'",
-                ),
-            },
-            SortMode::default(),
-            true,
-            12,
+            refresh_request(
+                ActivePanel::Left,
+                root.clone(),
+                PanelListingSource::Panelize {
+                    command: String::from(
+                        "printf 'delta.txt\\nalpha.txt\\ncharlie.txt\\nbravo.txt\\n'",
+                    ),
+                },
+                12,
+            ),
             cancel_flag,
             &worker_event_tx,
             &background_event_tx,
@@ -2315,6 +2333,7 @@ mod tests {
         });
         let final_names: Vec<&str> = final_entries
             .expect("panelize refresh should emit a successful final event")
+            .entries
             .iter()
             .map(|entry| entry.name.as_str())
             .collect();
@@ -2347,14 +2366,14 @@ mod tests {
 
         execute_refresh_worker_job(
             JobId(9),
-            ActivePanel::Right,
-            root.clone(),
-            PanelListingSource::Panelize {
-                command: String::from("printf 'partial.txt\\n'; printf 'boom\\n' >&2; exit 7"),
-            },
-            SortMode::default(),
-            true,
-            13,
+            refresh_request(
+                ActivePanel::Right,
+                root.clone(),
+                PanelListingSource::Panelize {
+                    command: String::from("printf 'partial.txt\\n'; printf 'boom\\n' >&2; exit 7"),
+                },
+                13,
+            ),
             cancel_flag,
             &worker_event_tx,
             &background_event_tx,

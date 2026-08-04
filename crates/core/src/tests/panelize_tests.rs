@@ -259,14 +259,15 @@ fn restoring_panelize_history_invalidates_an_older_directory_refresh() {
         cwd,
         source,
         sort_mode,
+        filter: PanelFilter::default(),
         request_id,
         disk_usage: None,
-        result: Ok(vec![FileEntry::file(
+        result: Ok(panel_refresh_result(vec![FileEntry::file(
             String::from("stale.txt"),
             root.join("stale.txt"),
             0,
             None,
-        )]),
+        )])),
     });
 
     assert!(app.active_panel().is_panelized());

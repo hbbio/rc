@@ -238,16 +238,24 @@ impl AppState {
                 cwd,
                 source,
                 sort_mode,
+                filter,
                 request_id,
                 entries,
-            } => {
-                self.handle_panel_entries_chunk(panel, cwd, source, sort_mode, request_id, entries)
-            }
+            } => self.handle_panel_entries_chunk(PanelEntriesChunk {
+                panel,
+                cwd,
+                source,
+                sort_mode,
+                filter,
+                request_id,
+                entries,
+            }),
             BackgroundEvent::PanelRefreshed {
                 panel,
                 cwd,
                 source,
                 sort_mode,
+                filter,
                 request_id,
                 disk_usage,
                 result,
@@ -256,6 +264,7 @@ impl AppState {
                 cwd,
                 source,
                 sort_mode,
+                filter,
                 request_id,
                 disk_usage,
                 result,

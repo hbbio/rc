@@ -16,6 +16,7 @@ pub mod layout;
 mod navigation_flow;
 mod orchestration;
 mod panel;
+mod panel_filter;
 mod panelize_flow;
 mod quick_cd;
 mod quick_view_flow;
@@ -39,12 +40,12 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
 pub use background::{
-    BackgroundEvent, PanelRefreshStreamRequest, build_tree_ready_event, read_disk_usage,
-    refresh_panel_entries, refresh_panel_event, stream_refresh_panel_entries,
+    BackgroundEvent, PanelRefreshResult, PanelRefreshStreamRequest, build_tree_ready_event,
+    read_disk_usage, refresh_panel_entries, refresh_panel_event, stream_refresh_panel_entries,
 };
 pub use dialog::{
-    DialogButtonFocus, DialogKind, DialogResult, DialogState, FindDialogField, FindDialogState,
-    PairInputDialogState, PairInputField,
+    DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
+    FindDialogField, FindDialogState, PairInputDialogState, PairInputField,
 };
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
@@ -65,6 +66,7 @@ pub(crate) use panel::{
     read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
     sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
+pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
 pub use quick_view_flow::QuickViewState;
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
 pub use settings::{
@@ -86,9 +88,12 @@ pub(crate) use tree::{
 pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
-use crate::panel::{read_entries_with_visibility, read_panelized_entries};
+use crate::panel::read_entries_with_visibility;
+use crate::panel_filter::apply_panel_filter;
 use crate::quick_view_flow::QuickViewWorkflow;
-use crate::refresh_flow::{PanelRefreshCompletion, PanelRefreshPostWorkflow, PanelRefreshWorkflow};
+use crate::refresh_flow::{
+    PanelEntriesChunk, PanelRefreshCompletion, PanelRefreshPostWorkflow, PanelRefreshWorkflow,
+};
 use crate::viewer::ViewerSearchDirection;
 
 const MAX_STATUS_LINE_CHARS: usize = 1024;
@@ -204,6 +209,7 @@ pub enum PanelCommand {
     OpenTree,
     OpenListingFormat,
     OpenSortOrder,
+    OpenFilter,
     RestorePanelizedResults,
     Reread,
 }
@@ -398,7 +404,12 @@ impl AppCommand {
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
-            | Self::Panel(_, PanelCommand::OpenListingFormat | PanelCommand::OpenSortOrder)
+            | Self::Panel(
+                _,
+                PanelCommand::OpenListingFormat
+                | PanelCommand::OpenSortOrder
+                | PanelCommand::OpenFilter,
+            )
             | Self::FindDialogBrowse
             | Self::DialogAccept
             | Self::DialogCancel
@@ -534,7 +545,10 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
             "Sort order...",
             AppCommand::Panel(panel, PanelCommand::OpenSortOrder),
         ),
-        MenuEntry::stub("Filter...", ""),
+        MenuEntry::action(
+            "Filter...",
+            AppCommand::Panel(panel, PanelCommand::OpenFilter),
+        ),
         MenuEntry::stub("Encoding...", "M-e"),
         MenuEntry::separator(),
         MenuEntry::stub("FTP link...", ""),
@@ -1016,6 +1030,7 @@ struct PanelizedResultSnapshot {
     cwd: PathBuf,
     source: PanelListingSource,
     entries: Vec<FileEntry>,
+    unfiltered_entries: Option<Arc<[FileEntry]>>,
     cursor: usize,
     tagged: HashSet<PathBuf>,
     disk_usage: Option<DiskUsageSummary>,
@@ -1027,6 +1042,7 @@ impl PanelizedResultSnapshot {
             cwd: panel.cwd.clone(),
             source: panel.source.clone(),
             entries: panel.entries.clone(),
+            unfiltered_entries: panel.panelized_entries.clone(),
             cursor: panel.cursor,
             tagged: panel.tagged.clone(),
             disk_usage: panel.disk_usage,
@@ -1040,8 +1056,10 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    filter: PanelFilter,
     show_hidden_files: bool,
     source: PanelListingSource,
+    panelized_entries: Option<Arc<[FileEntry]>>,
     tagged: HashSet<PathBuf>,
     pub loading: bool,
     pub disk_usage: Option<DiskUsageSummary>,
@@ -1054,8 +1072,10 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
             show_hidden_files: true,
             source: PanelListingSource::Directory,
+            panelized_entries: None,
             tagged: HashSet::new(),
             loading: false,
             disk_usage: None,
@@ -1063,17 +1083,39 @@ impl PanelState {
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
-        let entries = match &self.source {
+        let (entries, panelized_entries) = match &self.source {
             PanelListingSource::Directory => {
-                read_entries_with_visibility(&self.cwd, self.sort_mode, self.show_hidden_files)?
+                let entries = read_entries_with_visibility(
+                    &self.cwd,
+                    self.sort_mode,
+                    self.show_hidden_files,
+                )?;
+                (entries, None)
             }
             PanelListingSource::Panelize { command } => {
-                read_panelized_entries(&self.cwd, command, self.sort_mode)?
+                let discovered_entries = stream_panelized_entries_with_cancel(
+                    &self.cwd,
+                    command,
+                    None,
+                    &mut |_| Ok(()),
+                )?;
+                let mut entries = discovered_entries.clone();
+                sort_file_entries(&mut entries, self.sort_mode);
+                (entries, Some(Arc::<[FileEntry]>::from(discovered_entries)))
             }
             PanelListingSource::FindResults {
                 base_dir, paths, ..
-            } => read_panelized_paths(base_dir, paths, self.sort_mode, None)?,
+            } => {
+                let discovered_entries =
+                    stream_panelized_paths_with_cancel(base_dir, paths, None, &mut |_| Ok(()))?;
+                let mut entries = discovered_entries.clone();
+                sort_file_entries(&mut entries, self.sort_mode);
+                (entries, Some(Arc::<[FileEntry]>::from(discovered_entries)))
+            }
         };
+        let entries = apply_panel_filter(entries, &self.filter)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.panelized_entries = panelized_entries;
         self.apply_entries(entries);
         self.loading = false;
         Ok(())
@@ -1081,11 +1123,14 @@ impl PanelState {
 
     fn apply_entries(&mut self, entries: Vec<FileEntry>) {
         self.entries = entries;
-        self.tagged.retain(|tag| {
-            self.entries
-                .iter()
-                .any(|entry| !entry.is_parent() && entry.path == *tag)
-        });
+        // Filters are views: tags hidden by a filter must reappear when it is cleared.
+        if !self.filter.is_active() {
+            self.tagged.retain(|tag| {
+                self.entries
+                    .iter()
+                    .any(|entry| !entry.is_parent() && entry.path == *tag)
+            });
+        }
         if self.entries.is_empty() {
             self.cursor = 0;
         } else if self.cursor >= self.entries.len() {
@@ -1115,6 +1160,10 @@ impl PanelState {
 
     pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) {
         self.show_hidden_files = show_hidden_files;
+    }
+
+    pub fn filter(&self) -> &PanelFilter {
+        &self.filter
     }
 
     pub fn move_cursor_home(&mut self) {
@@ -1160,16 +1209,14 @@ impl PanelState {
     }
 
     pub fn invert_tags(&mut self) {
-        let mut next_tags = HashSet::new();
         for entry in &self.entries {
             if entry.is_parent() {
                 continue;
             }
-            if !self.tagged.contains(&entry.path) {
-                next_tags.insert(entry.path.clone());
+            if !self.tagged.insert(entry.path.clone()) {
+                self.tagged.remove(&entry.path);
             }
         }
-        self.tagged = next_tags;
     }
 
     pub fn tagged_paths_in_display_order(&self) -> Vec<PathBuf> {
@@ -1207,6 +1254,7 @@ impl PanelState {
         self.cwd = path;
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
+        self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
         self.loading = true;
@@ -1221,6 +1269,7 @@ impl PanelState {
         self.cwd = parent.to_path_buf();
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
+        self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
         self.loading = true;
@@ -1234,6 +1283,7 @@ impl PanelState {
 
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
+        self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
         self.loading = true;
@@ -1242,12 +1292,15 @@ impl PanelState {
 
     pub fn panelize_with_command(&mut self, command: String) -> io::Result<usize> {
         let previous_source = self.source.clone();
+        let previous_panelized_entries = self.panelized_entries.clone();
         self.source = PanelListingSource::Panelize { command };
+        self.panelized_entries = None;
         self.cursor = 0;
         self.tagged.clear();
 
         if let Err(error) = self.refresh() {
             self.source = previous_source;
+            self.panelized_entries = previous_panelized_entries;
             return Err(error);
         }
 
@@ -1646,6 +1699,9 @@ enum PendingDialogAction {
     SetPanelSortOrder {
         panel: ActivePanel,
         reverse: bool,
+    },
+    SetPanelFilter {
+        panel: ActivePanel,
     },
     ViewerSearch {
         direction: ViewerSearchDirection,

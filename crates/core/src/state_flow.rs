@@ -126,6 +126,7 @@ impl AppState {
         self.panel_listing_formats = self.settings.panel_options.listing_formats;
         for (index, panel) in self.panels.iter_mut().enumerate() {
             panel.sort_mode = self.settings.panel_options.sort_modes[index];
+            panel.filter = self.settings.panel_options.filters[index].clone();
             panel.set_show_hidden_files(show_hidden_files);
         }
     }
@@ -133,6 +134,23 @@ impl AppState {
     pub(crate) fn set_panel_sort_mode(&mut self, panel: ActivePanel, sort_mode: SortMode) {
         self.panels[panel.index()].sort_mode = sort_mode;
         self.settings.panel_options.sort_modes[panel.index()] = sort_mode;
+        self.settings.mark_dirty();
+    }
+
+    pub(crate) fn set_panel_filter(&mut self, panel: ActivePanel, filter: PanelFilter) {
+        let panel_index = panel.index();
+        let panel_state = &mut self.panels[panel_index];
+        if panel_state.source.is_panelized()
+            && !panel_state.loading
+            && panel_state.panelized_entries.is_none()
+            && !panel_state.filter.is_active()
+            && filter.is_active()
+        {
+            panel_state.panelized_entries =
+                Some(Arc::<[FileEntry]>::from(panel_state.entries.clone()));
+        }
+        panel_state.filter = filter.clone();
+        self.settings.panel_options.filters[panel_index] = filter;
         self.settings.mark_dirty();
     }
 

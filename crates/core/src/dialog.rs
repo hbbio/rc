@@ -1,5 +1,5 @@
 use crate::keymap::KeyContext;
-use crate::{FindNameMode, FindSpec};
+use crate::{FindNameMode, FindSpec, PanelFilter};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogButtonFocus {
@@ -215,6 +215,93 @@ impl FindDialogState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FilterDialogField {
+    #[default]
+    Pattern,
+    FilesOnly,
+    NameMode,
+    CaseSensitive,
+}
+
+impl FilterDialogField {
+    const ALL: [Self; 4] = [
+        Self::Pattern,
+        Self::FilesOnly,
+        Self::NameMode,
+        Self::CaseSensitive,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Pattern => 0,
+            Self::FilesOnly => 1,
+            Self::NameMode => 2,
+            Self::CaseSensitive => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilterDialogState {
+    pub pattern: String,
+    pub files_only: bool,
+    pub name_mode: FindNameMode,
+    pub case_sensitive: bool,
+    pub focus: FilterDialogField,
+}
+
+impl FilterDialogState {
+    pub fn from_filter(filter: &PanelFilter) -> Self {
+        Self {
+            pattern: filter.pattern.clone(),
+            files_only: filter.files_only,
+            name_mode: filter.name_mode,
+            case_sensitive: filter.case_sensitive,
+            focus: FilterDialogField::Pattern,
+        }
+    }
+
+    pub fn to_filter(&self) -> PanelFilter {
+        PanelFilter {
+            pattern: self.pattern.clone(),
+            files_only: self.files_only,
+            name_mode: self.name_mode,
+            case_sensitive: self.case_sensitive,
+        }
+    }
+
+    fn move_focus(&mut self, delta: isize) {
+        let len = FilterDialogField::ALL.len();
+        let index = self.focus.index();
+        let next = if delta.is_negative() {
+            index.checked_sub(delta.unsigned_abs()).unwrap_or(len - 1)
+        } else {
+            index.saturating_add(delta as usize) % len
+        };
+        self.focus = FilterDialogField::ALL[next];
+    }
+
+    fn insert(&mut self, character: char) {
+        match self.focus {
+            FilterDialogField::Pattern => self.pattern.push(character),
+            FilterDialogField::FilesOnly if character == ' ' => {
+                self.files_only = !self.files_only;
+            }
+            FilterDialogField::NameMode if character == ' ' => {
+                self.name_mode = match self.name_mode {
+                    FindNameMode::Glob => FindNameMode::Regex,
+                    FindNameMode::Regex => FindNameMode::Glob,
+                };
+            }
+            FilterDialogField::CaseSensitive if character == ' ' => {
+                self.case_sensitive = !self.case_sensitive;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum DialogKind {
     Confirm(ConfirmDialogState),
@@ -222,6 +309,7 @@ pub enum DialogKind {
     PairInput(PairInputDialogState),
     Listbox(ListboxDialogState),
     Find(FindDialogState),
+    Filter(FilterDialogState),
 }
 
 #[derive(Clone, Debug)]
@@ -315,6 +403,13 @@ impl DialogState {
         }
     }
 
+    pub fn filter(filter: &PanelFilter) -> Self {
+        Self {
+            title: String::from("Filter"),
+            kind: DialogKind::Filter(FilterDialogState::from_filter(filter)),
+        }
+    }
+
     pub fn demo_confirm() -> Self {
         Self::confirm("Confirm", "Proceed with this action?")
     }
@@ -340,7 +435,7 @@ impl DialogState {
             DialogKind::Confirm(_) => KeyContext::Dialog,
             DialogKind::Input(_) | DialogKind::PairInput(_) => KeyContext::Input,
             DialogKind::Listbox(_) => KeyContext::Listbox,
-            DialogKind::Find(_) => KeyContext::FindDialog,
+            DialogKind::Find(_) | DialogKind::Filter(_) => KeyContext::FindDialog,
         }
     }
 
@@ -451,6 +546,30 @@ impl DialogState {
                 }
                 DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
             },
+            DialogKind::Filter(filter) => match event {
+                DialogEvent::FocusNext | DialogEvent::MoveDown => {
+                    filter.move_focus(1);
+                    DialogTransition::Stay
+                }
+                DialogEvent::MoveUp => {
+                    filter.move_focus(-1);
+                    DialogTransition::Stay
+                }
+                DialogEvent::InsertChar(character) => {
+                    filter.insert(character);
+                    DialogTransition::Stay
+                }
+                DialogEvent::Backspace => {
+                    if filter.focus == FilterDialogField::Pattern {
+                        filter.pattern.pop();
+                    }
+                    DialogTransition::Stay
+                }
+                DialogEvent::Accept => {
+                    DialogTransition::Close(DialogResult::FilterSubmitted(filter.to_filter()))
+                }
+                DialogEvent::Cancel => DialogTransition::Close(DialogResult::Canceled),
+            },
         }
     }
 }
@@ -480,6 +599,7 @@ pub enum DialogResult {
         value: Option<String>,
     },
     FindSubmitted(Box<FindSpec>),
+    FilterSubmitted(PanelFilter),
     Canceled,
 }
 
@@ -498,6 +618,9 @@ impl DialogResult {
             },
             Self::FindSubmitted(spec) => {
                 format!("Find accepted: {}", spec.display_pattern())
+            }
+            Self::FilterSubmitted(filter) => {
+                format!("Filter accepted: {}", filter.display_pattern())
             }
             Self::Canceled => String::from("Dialog canceled"),
         }
@@ -664,5 +787,38 @@ mod tests {
         };
         assert_eq!(find.filename_pattern, "*");
         assert_eq!(find.name_mode, FindNameMode::Regex);
+    }
+
+    #[test]
+    fn filter_dialog_edits_pattern_and_toggles_each_option() {
+        let mut dialog = DialogState::filter(&PanelFilter::default());
+        assert_eq!(dialog.key_context(), KeyContext::FindDialog);
+
+        for character in "*.RS".chars() {
+            assert_eq!(
+                dialog.handle_event(DialogEvent::InsertChar(character)),
+                DialogTransition::Stay
+            );
+        }
+        for _ in 0..3 {
+            assert_eq!(
+                dialog.handle_event(DialogEvent::MoveDown),
+                DialogTransition::Stay
+            );
+            assert_eq!(
+                dialog.handle_event(DialogEvent::InsertChar(' ')),
+                DialogTransition::Stay
+            );
+        }
+
+        assert_eq!(
+            dialog.handle_event(DialogEvent::Accept),
+            DialogTransition::Close(DialogResult::FilterSubmitted(PanelFilter {
+                pattern: String::from("*.RS"),
+                files_only: false,
+                name_mode: FindNameMode::Regex,
+                case_sensitive: false,
+            }))
+        );
     }
 }
