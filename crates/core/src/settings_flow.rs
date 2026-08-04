@@ -166,6 +166,11 @@ impl AppState {
                     bool_label(self.settings.confirmation.confirm_quit),
                     SettingsEntryAction::ToggleConfirmQuit,
                 ),
+                SettingsEntry::new(
+                    "Confirm hotlist deletion",
+                    bool_label(self.settings.confirmation.confirm_hotlist_delete),
+                    SettingsEntryAction::ToggleConfirmHotlistDelete,
+                ),
             ],
             SettingsCategory::Appearance => vec![
                 SettingsEntry::new(
@@ -411,6 +416,15 @@ impl AppState {
                 self.set_status(format!(
                     "Confirm quit: {}",
                     bool_label(self.settings.confirmation.confirm_quit)
+                ));
+            }
+            SettingsEntryAction::ToggleConfirmHotlistDelete => {
+                self.settings.confirmation.confirm_hotlist_delete =
+                    !self.settings.confirmation.confirm_hotlist_delete;
+                self.settings.mark_dirty();
+                self.set_status(format!(
+                    "Confirm hotlist deletion: {}",
+                    bool_label(self.settings.confirmation.confirm_hotlist_delete)
                 ));
             }
             SettingsEntryAction::OpenSkinDialog => self.start_skin_dialog(),

@@ -50,6 +50,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_find}} open find/back to find results\n\
   {{fm_tree}} open directory tree\n\
   {{fm_hotlist}} open directory hotlist\n\
+  {{fm_hotlist_add}} add current directory to hotlist\n\
   {{fm_external_panelize}} open external panelize\n\
   {{fm_external_panelize_menu}} -> Command -> External panelize\n\
   {{fm_open_jobs}} open jobs screen\n\
@@ -166,6 +167,7 @@ See also [Directory hotlist](hotlist) and [File manager](file-manager).",
 Keys:\n\
   {{hotlist_open}} open selected directory\n\
   {{hotlist_add}} add current directory\n\
+  {{hotlist_edit}} edit selected entry\n\
   {{hotlist_remove}} remove selected entry\n\
   {{hotlist_close}} close\n\
 \n\
@@ -544,6 +546,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_find", String::from("Alt-F")),
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
+        ("fm_hotlist_add", String::from("Ctrl-X H")),
         (
             "fm_external_panelize",
             String::from("Ctrl-X ! (or Alt/Ctrl-P)"),
@@ -594,6 +597,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("tree_close", String::from("Esc/q")),
         ("hotlist_open", String::from("Enter")),
         ("hotlist_add", String::from("a")),
+        ("hotlist_edit", String::from("e/F4")),
         ("hotlist_remove", String::from("d/delete")),
         ("hotlist_close", String::from("Esc/q")),
     ])

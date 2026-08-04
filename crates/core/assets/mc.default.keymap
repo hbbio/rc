@@ -614,6 +614,7 @@ Home = home
 End = end
 Enter = enter
 AddHotlist = a
+EditHotlist = e; f4
 RemoveHotlist = d; delete
 
 [editor]

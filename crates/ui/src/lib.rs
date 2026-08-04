@@ -1663,6 +1663,7 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         vec![ListItem::new("<empty hotlist>")]
     } else {
         let viewport_rows = layout[0].height.max(1) as usize;
+        let viewport_width = layout[0].width.saturating_sub(3) as usize;
         let (window_start, window_end) =
             visible_window(hotlist.len(), app.hotlist_cursor, viewport_rows);
         hotlist
@@ -1670,10 +1671,9 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
             .skip(window_start)
             .take(window_end.saturating_sub(window_start))
             .map(|entry| {
-                ListItem::new(format!(
-                    "{}  —  {}",
-                    entry.label,
-                    entry.path.to_string_lossy()
+                ListItem::new(fit_single_line(
+                    format!("{}  —  {}", entry.label, entry.path.to_string_lossy()),
+                    viewport_width,
                 ))
             })
             .collect()
@@ -1704,6 +1704,14 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .keybinding_primary_label(KeyContext::Hotlist, AppCommand::HotlistAddCurrentDirectory)
         .unwrap_or("a")
         .to_string();
+    let edit = app
+        .keybinding_joined_label(
+            KeyContext::Hotlist,
+            AppCommand::HotlistEditSelected,
+            " / ",
+            2,
+        )
+        .unwrap_or_else(|| String::from("e / F4"));
     let remove = app
         .keybinding_joined_label(
             KeyContext::Hotlist,
@@ -1717,7 +1725,7 @@ fn render_hotlist_screen(frame: &mut Frame, app: &AppState, skin: &UiSkin) {
         .unwrap_or_else(|| String::from("Esc/q"));
     frame.render_widget(
         Paragraph::new(format!(
-            "{open} open | {add} add current dir | {remove} remove | {close} close"
+            "{open} open | {add} add | {edit} edit | {remove} remove | {close} close"
         ))
         .style(skin.style("core", "disabled")),
         layout[1],
@@ -2313,6 +2321,30 @@ mod tests {
         assert!(rendered.contains("Path:"));
         assert!(rendered.contains("/tmp/docs"));
         assert!(rendered.contains("Tab next field"));
+    }
+
+    #[test]
+    fn render_hotlist_shows_labels_paths_and_crud_hints() {
+        let root = temp_root("hotlist");
+        let docs = std::path::PathBuf::from("/tmp/docs");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.settings_mut().configuration.hotlist = vec![
+            rc_core::HotlistEntry::new("Documentation", docs.clone()),
+            rc_core::HotlistEntry::new("Injected\nlabel", "/tmp".into()),
+        ];
+        app.apply(AppCommand::OpenHotlist)
+            .expect("hotlist should open");
+
+        let rendered = render_to_text(&app, 120, 40);
+        assert!(rendered.contains("Directory hotlist (2)"));
+        assert!(rendered.contains("Documentation"));
+        assert!(rendered.contains(docs.to_string_lossy().as_ref()));
+        assert!(rendered.contains("Injected label"));
+        assert!(rendered.contains("add"));
+        assert!(rendered.contains("edit"));
+        assert!(rendered.contains("remove"));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
     #[test]

@@ -142,6 +142,7 @@ pub enum KeyCommand {
     OpenHotlist,
     OpenPanelizeDialog,
     AddHotlist,
+    EditHotlist,
     RemoveHotlist,
     OpenConfirmDialog,
     OpenInputDialog,
@@ -230,6 +231,7 @@ impl KeyCommand {
                 Self::OpenPanelizeDialog
             }
             "addhotlist" | "hotlistadd" => Self::AddHotlist,
+            "edithotlist" | "hotlistedit" => Self::EditHotlist,
             "removehotlist" | "hotlistremove" | "deletehotlist" => Self::RemoveHotlist,
             "openconfirmdialog" | "democonfirmdialog" => Self::OpenConfirmDialog,
             "openinputdialog" | "demoinputdialog" | "makedir" | "mkdir" => Self::OpenInputDialog,
@@ -605,6 +607,7 @@ Quit = q
 [hotlist]
 OpenHotlist = h
 AddHotlist = a
+EditHotlist = e
 RemoveHotlist = d
 "#;
 
@@ -636,6 +639,10 @@ RemoveHotlist = d
         assert_eq!(
             keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('a'))),
             Some(&KeyCommand::AddHotlist)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('e'))),
+            Some(&KeyCommand::EditHotlist)
         );
         assert_eq!(
             keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::Char('d'))),
@@ -1300,6 +1307,22 @@ Reread = ctrl-r
                 KeyChord::new(KeyCode::Char('!'))
             ),
             Some(&KeyCommand::OpenPanelizeDialog)
+        );
+    }
+
+    #[test]
+    fn bundled_keymap_includes_hotlist_quick_add_and_edit_bindings() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('h'))
+            ),
+            Some(&KeyCommand::AddHotlist)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::Hotlist, KeyChord::new(KeyCode::F(4))),
+            Some(&KeyCommand::EditHotlist)
         );
     }
 

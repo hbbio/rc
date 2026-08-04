@@ -419,6 +419,11 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.confirmation.confirm_quit = parsed;
                 }
             }
+            ("confirmation", "confirm_hotlist_delete") => {
+                if let Some(parsed) = parse_bool(value) {
+                    settings.confirmation.confirm_hotlist_delete = parsed;
+                }
+            }
             ("appearance", "skin") if !value.is_empty() => {
                 settings.appearance.skin = value.to_string();
             }
@@ -595,6 +600,10 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         "confirm_quit={}",
         settings.confirmation.confirm_quit
     ));
+    lines.push(format!(
+        "confirm_hotlist_delete={}",
+        settings.confirmation.confirm_hotlist_delete
+    ));
 
     lines.push(String::new());
     lines.push(String::from("[appearance]"));
@@ -747,6 +756,7 @@ skin=default
         settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
         settings.panel_options.sort_field = SortField::Modified;
         settings.layout.status_message_timeout_seconds = 42;
+        settings.confirmation.confirm_hotlist_delete = false;
 
         let source = render_rc_settings_ini(&settings);
         let mut parsed = Settings::default();
@@ -763,6 +773,7 @@ skin=default
         );
         assert_eq!(parsed.panel_options.sort_field, SortField::Modified);
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
+        assert!(!parsed.confirmation.confirm_hotlist_delete);
     }
 
     #[test]
@@ -777,6 +788,23 @@ skin=default
                 HotlistEntry::new("/", PathBuf::from("/")),
             ]
         );
+        assert!(
+            settings.confirmation.confirm_hotlist_delete,
+            "legacy settings should retain the safe confirmation default"
+        );
+    }
+
+    #[test]
+    fn hotlist_delete_confirmation_setting_round_trips() {
+        let mut settings = Settings::default();
+        settings.confirmation.confirm_hotlist_delete = false;
+
+        let source = render_rc_settings_ini(&settings);
+        assert!(source.contains("confirm_hotlist_delete=false"));
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &source);
+
+        assert!(!parsed.confirmation.confirm_hotlist_delete);
     }
 
     #[test]

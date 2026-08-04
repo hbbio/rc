@@ -137,7 +137,8 @@ impl AppState {
             AppCommand::HotlistOpenEntry => {
                 self.open_selected_hotlist_entry()?;
             }
-            AppCommand::HotlistAddCurrentDirectory => self.add_current_directory_to_hotlist(),
+            AppCommand::HotlistAddCurrentDirectory => self.start_hotlist_add_dialog(),
+            AppCommand::HotlistEditSelected => self.start_hotlist_edit_dialog(),
             AppCommand::HotlistRemoveSelected => self.remove_selected_hotlist_entry(),
             _ => {
                 unreachable!("non-navigation command dispatched to navigation handler: {command:?}")
@@ -915,134 +916,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn open_hotlist_screen(&mut self) {
-        if !matches!(self.top_route(), Route::Hotlist) {
-            self.routes.push(Route::Hotlist);
-        }
-        self.clamp_hotlist_cursor();
-        self.set_status("Opened directory hotlist");
-    }
-
-    pub(crate) fn close_hotlist_screen(&mut self) {
-        if matches!(self.top_route(), Route::Hotlist) {
-            self.routes.pop();
-            self.set_status("Closed directory hotlist");
-        }
-    }
-
-    fn clamp_hotlist_cursor(&mut self) {
-        let len = self.settings.configuration.hotlist.len();
-        if len == 0 {
-            self.hotlist_cursor = 0;
-        } else if self.hotlist_cursor >= len {
-            self.hotlist_cursor = len - 1;
-        }
-    }
-
-    pub(crate) fn move_hotlist_cursor(&mut self, delta: isize) {
-        let len = self.settings.configuration.hotlist.len();
-        if len == 0 {
-            self.hotlist_cursor = 0;
-            return;
-        }
-        let last = len - 1;
-        let next = if delta.is_negative() {
-            self.hotlist_cursor.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.hotlist_cursor.saturating_add(delta as usize).min(last)
-        };
-        self.hotlist_cursor = next;
-    }
-
-    pub(crate) fn move_hotlist_page(&mut self, pages: isize) {
-        self.move_hotlist_cursor(pages.saturating_mul(self.settings.advanced.page_step as isize));
-    }
-
-    pub(crate) fn move_hotlist_home(&mut self) {
-        self.hotlist_cursor = 0;
-    }
-
-    pub(crate) fn move_hotlist_end(&mut self) {
-        let len = self.settings.configuration.hotlist.len();
-        if len == 0 {
-            self.hotlist_cursor = 0;
-        } else {
-            self.hotlist_cursor = len - 1;
-        }
-    }
-
-    pub(crate) fn add_current_directory_to_hotlist(&mut self) {
-        let cwd = self.active_panel().cwd.clone();
-        if self
-            .settings
-            .configuration
-            .hotlist
-            .iter()
-            .any(|entry| entry.path == cwd)
-        {
-            self.hotlist_cursor = self
-                .settings
-                .configuration
-                .hotlist
-                .iter()
-                .position(|entry| entry.path == cwd)
-                .unwrap_or(self.hotlist_cursor);
-            self.set_status("Directory already exists in hotlist");
-            return;
-        }
-        self.settings.configuration.hotlist.push(HotlistEntry::new(
-            HotlistEntry::suggested_label(&cwd),
-            cwd.clone(),
-        ));
-        self.hotlist_cursor = self.settings.configuration.hotlist.len() - 1;
-        self.settings.mark_dirty();
-        self.set_status(format!("Added {} to hotlist", cwd.to_string_lossy()));
-    }
-
-    pub(crate) fn remove_selected_hotlist_entry(&mut self) {
-        if self.settings.configuration.hotlist.is_empty() {
-            self.set_status("Hotlist is empty");
-            return;
-        }
-        let removed = self
-            .settings
-            .configuration
-            .hotlist
-            .remove(self.hotlist_cursor);
-        self.clamp_hotlist_cursor();
-        self.settings.mark_dirty();
-        self.set_status(format!(
-            "Removed {} from hotlist",
-            removed.path.to_string_lossy()
-        ));
-    }
-
-    pub(crate) fn open_selected_hotlist_entry(&mut self) -> io::Result<()> {
-        let Some(entry) = self
-            .settings
-            .configuration
-            .hotlist
-            .get(self.hotlist_cursor)
-            .cloned()
-        else {
-            self.set_status("No hotlist entry selected");
-            return Ok(());
-        };
-
-        if self.set_active_panel_directory(entry.path.clone())? {
-            self.routes.pop();
-            self.set_status(format!(
-                "Opened {} ({})",
-                entry.label,
-                entry.path.to_string_lossy()
-            ));
-        } else {
-            self.set_status("Selected hotlist path is not an accessible directory");
-        }
-        Ok(())
-    }
-
-    fn set_active_panel_directory(&mut self, destination: PathBuf) -> io::Result<bool> {
+    pub(crate) fn set_active_panel_directory(&mut self, destination: PathBuf) -> io::Result<bool> {
         let metadata = match fs::metadata(&destination) {
             Ok(metadata) => metadata,
             Err(_) => return Ok(false),

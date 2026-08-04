@@ -406,6 +406,32 @@ impl AppState {
                 self.set_status("Find canceled");
             }
             (
+                Some(PendingDialogAction::HotlistAdd { base_dir }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_hotlist_add(base_dir, first, second),
+            (
+                Some(PendingDialogAction::HotlistEdit {
+                    base_dir,
+                    index,
+                    original,
+                }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_hotlist_edit(base_dir, index, original, first, second),
+            (
+                Some(PendingDialogAction::HotlistRemove { index, entry }),
+                DialogResult::ConfirmAccepted,
+            ) => self.remove_hotlist_entry(index, &entry),
+            (Some(PendingDialogAction::HotlistAdd { .. }), DialogResult::Canceled) => {
+                self.set_status("Hotlist entry add canceled");
+            }
+            (Some(PendingDialogAction::HotlistEdit { .. }), DialogResult::Canceled) => {
+                self.set_status("Hotlist entry edit canceled");
+            }
+            (Some(PendingDialogAction::HotlistRemove { .. }), DialogResult::ConfirmDeclined)
+            | (Some(PendingDialogAction::HotlistRemove { .. }), DialogResult::Canceled) => {
+                self.set_status("Hotlist entry removal canceled");
+            }
+            (
                 Some(PendingDialogAction::PanelizePresetSelection {
                     initial_command,
                     preset_commands,

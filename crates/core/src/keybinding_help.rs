@@ -220,6 +220,10 @@ impl AppState {
             ),
         );
         replacements.insert(
+            "fm_hotlist_add",
+            self.xmap_sequence_or_fallback(AppCommand::HotlistAddCurrentDirectory, "Ctrl-X H"),
+        );
+        replacements.insert(
             "fm_external_panelize",
             format!(
                 "{} (or {})",
@@ -529,6 +533,15 @@ impl AppState {
                 KeyContext::Hotlist,
                 AppCommand::HotlistAddCurrentDirectory,
                 "a",
+            ),
+        );
+        replacements.insert(
+            "hotlist_edit",
+            self.keybinding_joined_or_fallback(
+                KeyContext::Hotlist,
+                AppCommand::HotlistEditSelected,
+                "e/F4",
+                2,
             ),
         );
         replacements.insert(

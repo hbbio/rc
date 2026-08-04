@@ -1301,6 +1301,31 @@ fn confirm_quit_setting_requires_dialog_before_quit() {
 }
 
 #[test]
+fn confirmation_options_toggle_hotlist_deletion_prompt() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-confirm-hotlist-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenOptionsConfirmation)
+        .expect("confirmation options should open");
+    for _ in 0..3 {
+        app.apply(AppCommand::DialogListboxDown)
+            .expect("selection should move down");
+    }
+    app.apply(AppCommand::DialogAccept)
+        .expect("hotlist confirmation should toggle");
+
+    assert!(!app.settings().confirmation.confirm_hotlist_delete);
+    assert!(app.status_line.contains("Confirm hotlist deletion: off"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn command_menu_external_panelize_opens_dialog() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

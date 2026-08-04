@@ -167,6 +167,7 @@ pub struct ConfirmationSettings {
     pub confirm_delete: bool,
     pub confirm_overwrite: bool,
     pub confirm_quit: bool,
+    pub confirm_hotlist_delete: bool,
 }
 
 impl Default for ConfirmationSettings {
@@ -175,6 +176,7 @@ impl Default for ConfirmationSettings {
             confirm_delete: true,
             confirm_overwrite: true,
             confirm_quit: false,
+            confirm_hotlist_delete: true,
         }
     }
 }

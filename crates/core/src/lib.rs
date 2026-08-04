@@ -8,6 +8,7 @@ mod dialog_flow;
 mod find_engine;
 mod find_flow;
 pub mod help;
+mod hotlist_flow;
 pub mod jobs;
 mod keybinding_help;
 pub mod keymap;
@@ -141,6 +142,7 @@ pub enum AppCommand {
     TreeSearchAppend(char),
     HotlistOpenEntry,
     HotlistAddCurrentDirectory,
+    HotlistEditSelected,
     HotlistRemoveSelected,
     OpenConfirmDialog,
     OpenInputDialog,
@@ -298,6 +300,7 @@ impl AppCommand {
             | Self::TreeSearchAppend(_)
             | Self::HotlistOpenEntry
             | Self::HotlistAddCurrentDirectory
+            | Self::HotlistEditSelected
             | Self::HotlistRemoveSelected => CommandDomain::Navigation,
             Self::ViewerSearchForward
             | Self::ViewerSearchBackward
@@ -1274,6 +1277,7 @@ enum SettingsEntryAction {
     ToggleConfirmDelete,
     ToggleConfirmOverwrite,
     ToggleConfirmQuit,
+    ToggleConfirmHotlistDelete,
     OpenSkinDialog,
     ToggleUtf8Output,
     ToggleEightBitInput,
@@ -1332,6 +1336,18 @@ enum PendingDialogAction {
     },
     ViewerGoto,
     FindSearch,
+    HotlistAdd {
+        base_dir: PathBuf,
+    },
+    HotlistEdit {
+        base_dir: PathBuf,
+        index: usize,
+        original: HotlistEntry,
+    },
+    HotlistRemove {
+        index: usize,
+        entry: HotlistEntry,
+    },
     PanelizePresetSelection {
         initial_command: String,
         preset_commands: Vec<String>,

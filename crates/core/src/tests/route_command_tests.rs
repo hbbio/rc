@@ -374,8 +374,15 @@ fn tree_destructive_actions_protect_the_scan_root() {
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 
+fn submit_hotlist_entry(app: &mut AppState, label: &str, path: &Path) {
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: label.to_string(),
+        second: path.to_string_lossy().into_owned(),
+    });
+}
+
 #[test]
-fn hotlist_supports_add_remove_and_open() {
+fn hotlist_supports_add_edit_confirmed_remove_and_open() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -389,12 +396,12 @@ fn hotlist_supports_add_remove_and_open() {
         .expect("hotlist should open");
     app.apply(AppCommand::HotlistAddCurrentDirectory)
         .expect("hotlist add should succeed");
+    assert_eq!(app.key_context(), KeyContext::Input);
+    submit_hotlist_entry(&mut app, "Project root", &root);
+    let canonical_root = fs::canonicalize(&root).expect("root should canonicalize");
     assert_eq!(
         app.hotlist(),
-        std::slice::from_ref(&HotlistEntry::new(
-            HotlistEntry::suggested_label(&root),
-            root.clone(),
-        ))
+        std::slice::from_ref(&HotlistEntry::new("Project root", canonical_root.clone()))
     );
 
     {
@@ -404,30 +411,189 @@ fn hotlist_supports_add_remove_and_open() {
     }
     app.apply(AppCommand::HotlistAddCurrentDirectory)
         .expect("hotlist add should succeed");
+    submit_hotlist_entry(&mut app, "Branch", &branch);
+    let canonical_branch = fs::canonicalize(&branch).expect("branch should canonicalize");
     assert_eq!(
         app.hotlist(),
         &[
-            HotlistEntry::new(HotlistEntry::suggested_label(&root), root.clone()),
-            HotlistEntry::new(HotlistEntry::suggested_label(&branch), branch.clone()),
+            HotlistEntry::new("Project root", canonical_root.clone()),
+            HotlistEntry::new("Branch", canonical_branch.clone()),
         ]
     );
 
     app.hotlist_cursor = 0;
+    app.apply(AppCommand::HotlistEditSelected)
+        .expect("hotlist edit should open");
+    submit_hotlist_entry(&mut app, "Workspace", &root);
+    assert_eq!(app.hotlist()[0].label, "Workspace");
+
     app.apply(AppCommand::HotlistRemoveSelected)
-        .expect("hotlist remove should succeed");
+        .expect("hotlist removal confirmation should open");
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.finish_dialog(DialogResult::ConfirmDeclined);
+    assert_eq!(app.hotlist().len(), 2);
+    app.apply(AppCommand::HotlistRemoveSelected)
+        .expect("hotlist removal confirmation should reopen");
+    app.finish_dialog(DialogResult::ConfirmAccepted);
     assert_eq!(
         app.hotlist(),
-        std::slice::from_ref(&HotlistEntry::new(
-            HotlistEntry::suggested_label(&branch),
-            branch.clone(),
-        ))
+        std::slice::from_ref(&HotlistEntry::new("Branch", canonical_branch.clone()))
     );
+    assert_eq!(app.hotlist_cursor, 0);
 
     app.hotlist_cursor = 0;
     app.apply(AppCommand::HotlistOpenEntry)
         .expect("hotlist open should succeed");
     assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert_eq!(app.active_panel().cwd, branch);
+    assert_eq!(app.active_panel().cwd, canonical_branch);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn hotlist_rejects_duplicate_labels_paths_and_invalid_directories() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-hotlist-validation-{stamp}"));
+    let branch = root.join("branch");
+    let file = root.join("file.txt");
+    fs::create_dir_all(&branch).expect("must create temp tree");
+    fs::write(&file, "not a directory").expect("must create file fixture");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenHotlist)
+        .expect("hotlist should open");
+    app.apply(AppCommand::HotlistAddCurrentDirectory)
+        .expect("hotlist add should open");
+    submit_hotlist_entry(&mut app, "Alpha", &root);
+    assert_eq!(app.hotlist().len(), 1);
+
+    app.apply(AppCommand::HotlistAddCurrentDirectory)
+        .expect("second add should open");
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("   "),
+        second: branch.to_string_lossy().into_owned(),
+    });
+    assert!(app.status_line.contains("label cannot be empty"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("Beta"),
+        second: String::from("  "),
+    });
+    assert!(app.status_line.contains("directory cannot be empty"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+
+    submit_hotlist_entry(&mut app, " alpha ", &branch);
+    assert!(app.status_line.contains("label already exists"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+    assert_eq!(app.hotlist().len(), 1);
+
+    submit_hotlist_entry(&mut app, "Beta", &root.join("."));
+    assert!(app.status_line.contains("directory already exists"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+
+    submit_hotlist_entry(&mut app, "Beta", &root.join("missing"));
+    assert!(app.status_line.contains("does not exist"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+
+    submit_hotlist_entry(&mut app, "Beta", &file);
+    assert!(app.status_line.contains("not a directory"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+
+    submit_hotlist_entry(&mut app, "Beta", &branch);
+    assert_eq!(app.key_context(), KeyContext::Hotlist);
+    assert_eq!(app.hotlist().len(), 2);
+
+    app.hotlist_cursor = 1;
+    app.apply(AppCommand::HotlistEditSelected)
+        .expect("hotlist edit should open");
+    submit_hotlist_entry(&mut app, "ALPHA", &branch);
+    assert!(app.status_line.contains("label already exists"));
+    assert_eq!(app.key_context(), KeyContext::Input);
+    submit_hotlist_entry(&mut app, "Beta", &branch);
+    assert_eq!(app.key_context(), KeyContext::Hotlist);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn hotlist_removal_can_skip_confirmation_and_clamps_cursor() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-hotlist-remove-{stamp}"));
+    let first = root.join("first");
+    let second = root.join("second");
+    fs::create_dir_all(&first).expect("must create first directory");
+    fs::create_dir_all(&second).expect("must create second directory");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.settings_mut().configuration.hotlist = vec![
+        HotlistEntry::new("First", first),
+        HotlistEntry::new("Second", second),
+    ];
+    app.settings_mut().confirmation.confirm_hotlist_delete = false;
+    app.apply(AppCommand::OpenHotlist)
+        .expect("hotlist should open");
+    app.hotlist_cursor = 1;
+    app.apply(AppCommand::HotlistRemoveSelected)
+        .expect("hotlist removal should succeed");
+
+    assert_eq!(app.hotlist().len(), 1);
+    assert_eq!(app.hotlist_cursor, 0);
+    assert_eq!(app.key_context(), KeyContext::Hotlist);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn opening_missing_hotlist_entry_keeps_route_and_explains_failure() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-hotlist-open-missing-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.settings_mut().configuration.hotlist =
+        vec![HotlistEntry::new("Missing", root.join("missing"))];
+    app.apply(AppCommand::OpenHotlist)
+        .expect("hotlist should open");
+    app.apply(AppCommand::HotlistOpenEntry)
+        .expect("hotlist open should report failure");
+
+    assert!(app.status_line.contains("does not exist"));
+    assert_eq!(app.key_context(), KeyContext::Hotlist);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn stale_hotlist_edit_cannot_overwrite_a_changed_entry() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-hotlist-stale-edit-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.settings_mut().configuration.hotlist = vec![HotlistEntry::new("Original", root.clone())];
+    app.apply(AppCommand::OpenHotlist)
+        .expect("hotlist should open");
+    app.apply(AppCommand::HotlistEditSelected)
+        .expect("hotlist editor should open");
+    app.settings_mut().configuration.hotlist[0].label = String::from("Externally changed");
+    submit_hotlist_entry(&mut app, "Replacement", &root);
+
+    assert_eq!(app.hotlist()[0].label, "Externally changed");
+    assert!(app.status_line.contains("selection changed"));
+    assert_eq!(app.key_context(), KeyContext::Hotlist);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -759,6 +925,14 @@ fn app_command_mapping_is_context_aware() {
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::AddHotlist),
         Some(AppCommand::HotlistAddCurrentDirectory)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::AddHotlist),
+        Some(AppCommand::HotlistAddCurrentDirectory)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::EditHotlist),
+        Some(AppCommand::HotlistEditSelected)
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Hotlist, &KeyCommand::RemoveHotlist),

@@ -77,9 +77,15 @@ impl AppCommand {
                 Some(Self::OpenPanelizeDialog)
             }
             (KeyContext::FileManager, KeyCommand::EnterXMap) => Some(Self::EnterXMap),
+            (KeyContext::FileManagerXMap, KeyCommand::AddHotlist) => {
+                Some(Self::HotlistAddCurrentDirectory)
+            }
             (KeyContext::Hotlist, KeyCommand::OpenEntry) => Some(Self::HotlistOpenEntry),
             (KeyContext::Hotlist, KeyCommand::OpenHotlist) => Some(Self::OpenHotlist),
             (KeyContext::Hotlist, KeyCommand::AddHotlist) => Some(Self::HotlistAddCurrentDirectory),
+            (KeyContext::Hotlist, KeyCommand::EditHotlist | KeyCommand::EditEntry) => {
+                Some(Self::HotlistEditSelected)
+            }
             (KeyContext::Hotlist, KeyCommand::RemoveHotlist) => Some(Self::HotlistRemoveSelected),
             (KeyContext::ViewerHex, KeyCommand::Quit) => Some(Self::CloseViewer),
             (KeyContext::Viewer, KeyCommand::Search) => Some(Self::ViewerSearchForward),

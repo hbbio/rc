@@ -1312,6 +1312,50 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_x_h_opens_hotlist_quick_add_editor() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-ctrlx-hotlist-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("ctrl-x should enter xmap mode");
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('h'), KeyModifiers::NONE),
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("ctrl-x h should open hotlist quick-add");
+
+        assert_eq!(state.key_context(), KeyContext::Input);
+        assert!(state.status_line.contains("Add hotlist entry"));
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
     fn ctrl_x_exclamation_opens_external_panelize_dialog() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
