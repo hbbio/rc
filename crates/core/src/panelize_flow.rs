@@ -20,8 +20,9 @@ impl AppState {
         let mut items = vec![String::from(PANELIZE_CUSTOM_COMMAND_LABEL)];
         items.extend(presets.iter().map(|preset| preset.label.clone()));
         let selected = panelize_preset_selected_index(&initial_command, &presets);
+        let footer = self.panelize_preset_footer();
         self.push_dialog(
-            DialogState::listbox("External panelize", items, selected),
+            DialogState::listbox_with_hint("External panelize", items, selected, footer),
             PendingDialogAction::PanelizePresetSelection {
                 initial_command,
                 presets,
@@ -77,18 +78,29 @@ impl AppState {
     }
 
     pub(crate) fn start_panelize_preset_add(&mut self) {
-        let Some((_, presets, _)) = self.active_panelize_preset_selection() else {
+        let Some((initial_command, presets, _)) = self.active_panelize_preset_selection() else {
             return;
         };
         self.push_dialog(
-            DialogState::input("Add panelize command", "Command:", ""),
-            PendingDialogAction::PanelizePresetAdd { presets },
+            DialogState::pair_input(
+                "Add panelize preset",
+                "Label:",
+                "",
+                "Command (stdout paths):",
+                "",
+            ),
+            PendingDialogAction::PanelizePresetAdd {
+                initial_command,
+                presets,
+            },
         );
-        self.set_status("Panelize preset: add command");
+        self.set_status("Panelize preset: add label and command");
     }
 
     pub(crate) fn start_panelize_preset_edit(&mut self) {
-        let Some((_, presets, selected_index)) = self.active_panelize_preset_selection() else {
+        let Some((initial_command, presets, selected_index)) =
+            self.active_panelize_preset_selection()
+        else {
             return;
         };
         if selected_index == 0 {
@@ -96,25 +108,29 @@ impl AppState {
             return;
         }
         let preset_index = selected_index - 1;
-        let Some(existing_command) = presets
-            .get(preset_index)
-            .map(|preset| preset.command.clone())
-        else {
+        let Some(existing) = presets.get(preset_index).cloned() else {
             self.set_status("Panelize preset selection is invalid");
             return;
         };
         self.push_dialog(
-            DialogState::input("Edit panelize command", "Command:", existing_command),
+            DialogState::pair_input(
+                "Edit panelize preset",
+                "Label:",
+                existing.label,
+                "Command (stdout paths):",
+                existing.command,
+            ),
             PendingDialogAction::PanelizePresetEdit {
+                initial_command,
                 presets,
                 preset_index,
             },
         );
-        self.set_status("Panelize preset: edit command");
+        self.set_status("Panelize preset: edit label or command");
     }
 
     pub(crate) fn remove_panelize_preset(&mut self) {
-        let Some((initial_command, mut presets, selected_index)) =
+        let Some((initial_command, presets, selected_index)) =
             self.active_panelize_preset_selection()
         else {
             return;
@@ -124,15 +140,123 @@ impl AppState {
             return;
         }
         let preset_index = selected_index - 1;
-        let Some(removed) = (preset_index < presets.len()).then(|| presets.remove(preset_index))
-        else {
+        let Some(preset) = presets.get(preset_index).cloned() else {
             self.set_status("Panelize preset selection is invalid");
             return;
         };
+        self.push_dialog(
+            DialogState::confirm(
+                "Remove panelize preset",
+                format!("Remove '{}' ({})?", preset.label, preset.command),
+            ),
+            PendingDialogAction::PanelizePresetRemove {
+                initial_command,
+                presets,
+                preset_index,
+            },
+        );
+        self.set_status("Confirm panelize preset removal");
+    }
 
-        self.settings.configuration.panelize_presets = presets.clone();
-        self.settings.mark_dirty();
-        self.routes.pop();
+    pub(crate) fn submit_panelize_preset_add(
+        &mut self,
+        initial_command: String,
+        presets: Vec<PanelizePreset>,
+        label: String,
+        command: String,
+    ) {
+        if !self.panelize_presets_are_current(&presets) {
+            self.restore_current_panelize_presets(initial_command);
+            self.set_status("Panelize preset add canceled: presets changed");
+            return;
+        }
+        let preset = match validate_panelize_preset(&label, &command, &presets, None) {
+            Ok(preset) => preset,
+            Err(error) => {
+                self.reopen_panelize_preset_editor(
+                    "Add panelize preset",
+                    label,
+                    command,
+                    PendingDialogAction::PanelizePresetAdd {
+                        initial_command,
+                        presets,
+                    },
+                    error,
+                );
+                return;
+            }
+        };
+
+        let label = preset.label.clone();
+        let command = preset.command.clone();
+        let mut updated = presets;
+        updated.push(preset);
+        self.commit_panelize_presets(command, updated);
+        self.set_status(format!("Added panelize preset: {label}"));
+    }
+
+    pub(crate) fn submit_panelize_preset_edit(
+        &mut self,
+        initial_command: String,
+        presets: Vec<PanelizePreset>,
+        preset_index: usize,
+        label: String,
+        command: String,
+    ) {
+        if !self.panelize_presets_are_current(&presets) {
+            self.restore_current_panelize_presets(initial_command);
+            self.set_status("Panelize preset edit canceled: presets changed");
+            return;
+        }
+        if preset_index >= presets.len() {
+            self.restore_current_panelize_presets(initial_command);
+            self.set_status("Panelize preset edit failed: invalid selection");
+            return;
+        }
+        let preset = match validate_panelize_preset(&label, &command, &presets, Some(preset_index))
+        {
+            Ok(preset) => preset,
+            Err(error) => {
+                self.reopen_panelize_preset_editor(
+                    "Edit panelize preset",
+                    label,
+                    command,
+                    PendingDialogAction::PanelizePresetEdit {
+                        initial_command,
+                        presets,
+                        preset_index,
+                    },
+                    error,
+                );
+                return;
+            }
+        };
+
+        let label = preset.label.clone();
+        let command = preset.command.clone();
+        let mut updated = presets;
+        updated[preset_index] = preset;
+        self.commit_panelize_presets(command, updated);
+        self.set_status(format!("Updated panelize preset: {label}"));
+    }
+
+    pub(crate) fn confirm_panelize_preset_remove(
+        &mut self,
+        initial_command: String,
+        mut presets: Vec<PanelizePreset>,
+        preset_index: usize,
+    ) {
+        if !self.panelize_presets_are_current(&presets) {
+            self.restore_current_panelize_presets(initial_command);
+            self.set_status("Panelize preset removal canceled: presets changed");
+            return;
+        }
+        if preset_index >= presets.len() {
+            self.restore_current_panelize_presets(initial_command);
+            self.set_status("Panelize preset removal failed: invalid selection");
+            return;
+        }
+        let removed = presets.remove(preset_index);
         let next_initial = if initial_command == removed.command {
             presets
                 .first()
@@ -141,8 +265,58 @@ impl AppState {
         } else {
             initial_command
         };
-        self.open_panelize_preset_selection_dialog(next_initial, presets);
+        self.commit_panelize_presets(next_initial, presets);
         self.set_status(format!("Removed panelize preset: {}", removed.label));
+    }
+
+    fn panelize_presets_are_current(&self, expected: &[PanelizePreset]) -> bool {
+        self.settings.configuration.panelize_presets == expected
+    }
+
+    fn panelize_preset_footer(&self) -> String {
+        let binding = |command, fallback: &str| {
+            self.keybinding_primary_label(KeyContext::Listbox, command)
+                .unwrap_or(fallback)
+                .to_string()
+        };
+        let tab = binding(AppCommand::DialogFocusNext, "Tab");
+        let add = binding(AppCommand::PanelizePresetAdd, "F2");
+        let edit = binding(AppCommand::PanelizePresetEdit, "F4");
+        let remove = binding(AppCommand::PanelizePresetRemove, "F8");
+        let run = binding(AppCommand::DialogAccept, "Enter");
+        let cancel = binding(AppCommand::DialogCancel, "Esc");
+        format!(
+            "Up/Down select | {tab} command | {add} add | {edit} edit\n\
+             {remove} remove | {run} run | {cancel} cancel"
+        )
+    }
+
+    fn commit_panelize_presets(&mut self, selected_command: String, presets: Vec<PanelizePreset>) {
+        self.settings.configuration.panelize_presets = presets.clone();
+        self.settings.mark_dirty();
+        self.routes.pop();
+        self.open_panelize_preset_selection_dialog(selected_command, presets);
+    }
+
+    fn restore_current_panelize_presets(&mut self, selected_command: String) {
+        let presets = self.settings.configuration.panelize_presets.clone();
+        self.routes.pop();
+        self.open_panelize_preset_selection_dialog(selected_command, presets);
+    }
+
+    fn reopen_panelize_preset_editor(
+        &mut self,
+        title: &str,
+        label: String,
+        command: String,
+        action: PendingDialogAction,
+        error: String,
+    ) {
+        self.push_dialog(
+            DialogState::pair_input(title, "Label:", label, "Command (stdout paths):", command),
+            action,
+        );
+        self.set_status(error);
     }
 
     pub(crate) fn start_panelize_command(&mut self, command: String) {
@@ -183,4 +357,47 @@ fn panelize_preset_selected_index(initial_command: &str, presets: &[PanelizePres
         .iter()
         .position(|preset| preset.command == initial_command)
         .map_or(0, |index| index.saturating_add(1))
+}
+
+fn validate_panelize_preset(
+    label: &str,
+    command: &str,
+    presets: &[PanelizePreset],
+    edited_index: Option<usize>,
+) -> Result<PanelizePreset, String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(String::from("Panelize preset label cannot be empty"));
+    }
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(String::from("Panelize preset command cannot be empty"));
+    }
+
+    let normalized_candidate: String = label.chars().flat_map(char::to_lowercase).collect();
+    for (index, existing) in presets.iter().enumerate() {
+        if Some(index) == edited_index {
+            continue;
+        }
+        let normalized_existing: String = existing
+            .label
+            .trim()
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect();
+        if normalized_existing == normalized_candidate {
+            return Err(format!(
+                "Panelize preset label already exists: {}",
+                existing.label
+            ));
+        }
+        if existing.command.trim() == command {
+            return Err(format!(
+                "Panelize preset command already exists as '{}'",
+                existing.label
+            ));
+        }
+    }
+
+    Ok(PanelizePreset::new(label, command))
 }

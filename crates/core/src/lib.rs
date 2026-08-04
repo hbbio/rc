@@ -1357,9 +1357,16 @@ enum PendingDialogAction {
         presets: Vec<PanelizePreset>,
     },
     PanelizePresetAdd {
+        initial_command: String,
         presets: Vec<PanelizePreset>,
     },
     PanelizePresetEdit {
+        initial_command: String,
+        presets: Vec<PanelizePreset>,
+        preset_index: usize,
+    },
+    PanelizePresetRemove {
+        initial_command: String,
         presets: Vec<PanelizePreset>,
         preset_index: usize,
     },

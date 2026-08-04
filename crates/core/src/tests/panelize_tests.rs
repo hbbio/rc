@@ -313,12 +313,14 @@ fn panelize_preset_management_add_edit_remove_works() {
     app.open_panelize_dialog();
     app.apply(AppCommand::PanelizePresetAdd)
         .expect("F2 add should open preset input");
-    for ch in "echo added".chars() {
-        app.apply(AppCommand::DialogInputChar(ch))
-            .expect("typing preset command should succeed");
-    }
-    app.apply(AppCommand::DialogAccept)
-        .expect("submitting new preset should succeed");
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("panelize preset editor should open");
+    };
+    assert!(matches!(dialog.kind, DialogKind::PairInput(_)));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("Tracked files"),
+        second: String::from("git ls-files"),
+    });
 
     let Route::Dialog(dialog) = app.top_route() else {
         panic!("panelize should remain in preset list dialog");
@@ -327,37 +329,50 @@ fn panelize_preset_management_add_edit_remove_works() {
         panic!("panelize should return to preset list dialog");
     };
     assert!(
-        listbox.items.iter().any(|item| item == "echo added"),
+        listbox.items.iter().any(|item| item == "Tracked files"),
         "added preset should appear in list"
     );
 
     app.apply(AppCommand::PanelizePresetEdit)
         .expect("F4 edit should open preset input");
-    for ch in " updated".chars() {
-        app.apply(AppCommand::DialogInputChar(ch))
-            .expect("typing edit suffix should succeed");
-    }
-    app.apply(AppCommand::DialogAccept)
-        .expect("submitting edited preset should succeed");
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("Repository files"),
+        second: String::from("git ls-files --cached"),
+    });
 
-    let edited = String::from("echo added updated");
     let Route::Dialog(dialog) = app.top_route() else {
         panic!("panelize should remain in preset list dialog");
     };
     let DialogKind::Listbox(listbox) = &dialog.kind else {
         panic!("panelize should return to preset list dialog");
     };
-    assert!(listbox.items.iter().any(|item| item == "echo added"));
+    assert!(listbox.items.iter().any(|item| item == "Repository files"));
     assert!(
         app.settings()
             .configuration
             .panelize_presets
             .iter()
-            .any(|preset| preset.label == "echo added" && preset.command == edited)
+            .any(|preset| {
+                preset.label == "Repository files" && preset.command == "git ls-files --cached"
+            })
     );
 
     app.apply(AppCommand::PanelizePresetRemove)
-        .expect("F8 remove should delete selected preset");
+        .expect("F8 remove should request confirmation");
+    assert!(
+        matches!(app.top_route(), Route::Dialog(dialog) if matches!(dialog.kind, DialogKind::Confirm(_)))
+    );
+    app.finish_dialog(DialogResult::ConfirmDeclined);
+    assert!(
+        app.settings()
+            .configuration
+            .panelize_presets
+            .iter()
+            .any(|preset| preset.label == "Repository files")
+    );
+    app.apply(AppCommand::PanelizePresetRemove)
+        .expect("F8 remove should request confirmation again");
+    app.finish_dialog(DialogResult::ConfirmAccepted);
     let Route::Dialog(dialog) = app.top_route() else {
         panic!("panelize should remain in preset list dialog");
     };
@@ -365,8 +380,111 @@ fn panelize_preset_management_add_edit_remove_works() {
         panic!("panelize should return to preset list dialog");
     };
     assert!(
-        !listbox.items.iter().any(|item| item == "echo added"),
+        !listbox.items.iter().any(|item| item == "Repository files"),
         "removed preset should no longer be listed"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn panelize_preset_editor_rejects_empty_and_duplicate_fields() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-preset-validate-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.open_panelize_dialog();
+    app.apply(AppCommand::PanelizePresetAdd)
+        .expect("preset add should open");
+
+    for (label, command, expected) in [
+        ("  ", "echo unique", "label cannot be empty"),
+        ("Unique", "  ", "command cannot be empty"),
+        (" all FILES ", "echo unique", "label already exists"),
+        ("Unique", "find . -type f", "command already exists"),
+    ] {
+        app.finish_dialog(DialogResult::PairInputSubmitted {
+            first: label.to_string(),
+            second: command.to_string(),
+        });
+        assert!(app.status_line.contains(expected), "{}", app.status_line);
+        assert!(
+            matches!(app.top_route(), Route::Dialog(dialog) if matches!(dialog.kind, DialogKind::PairInput(_)))
+        );
+    }
+
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("Unique"),
+        second: String::from("echo unique"),
+    });
+    assert!(
+        app.settings()
+            .configuration
+            .panelize_presets
+            .iter()
+            .any(|preset| preset.label == "Unique" && preset.command == "echo unique")
+    );
+
+    app.apply(AppCommand::PanelizePresetEdit)
+        .expect("new preset should be editable");
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("BACKUP FILES"),
+        second: String::from("echo changed"),
+    });
+    assert!(app.status_line.contains("label already exists"));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("Changed"),
+        second: String::from("find . -name '*.orig'"),
+    });
+    assert!(app.status_line.contains("command already exists"));
+    app.finish_dialog(DialogResult::Canceled);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn stale_panelize_preset_editor_cannot_overwrite_changed_settings() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-preset-stale-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.open_panelize_dialog();
+    app.apply(AppCommand::PanelizePresetAdd)
+        .expect("preset add should open");
+    app.settings_mut()
+        .configuration
+        .panelize_presets
+        .push(PanelizePreset::new("External", "echo external"));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: String::from("Submitted"),
+        second: String::from("echo submitted"),
+    });
+
+    assert!(app.status_line.contains("presets changed"));
+    assert!(
+        app.settings()
+            .configuration
+            .panelize_presets
+            .iter()
+            .any(|preset| preset.label == "External")
+    );
+    assert!(
+        !app.settings()
+            .configuration
+            .panelize_presets
+            .iter()
+            .any(|preset| preset.label == "Submitted")
+    );
+    assert!(
+        matches!(app.top_route(), Route::Dialog(dialog) if matches!(dialog.kind, DialogKind::Listbox(_)))
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");

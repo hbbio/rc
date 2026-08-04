@@ -1112,16 +1112,20 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
 
             let layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(if listbox.footer_hint.is_some() { 2 } else { 1 }),
+                ])
                 .split(inner);
 
             let items: Vec<ListItem<'_>> = if listbox.items.is_empty() {
                 vec![ListItem::new("<empty>")]
             } else {
+                let item_width = layout[0].width.saturating_sub(3) as usize;
                 listbox
                     .items
                     .iter()
-                    .map(|item| ListItem::new(item.as_str()))
+                    .map(|item| ListItem::new(fit_single_line(item, item_width)))
                     .collect()
             };
             let list = List::new(items)
@@ -1136,8 +1140,14 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
             frame.render_stateful_widget(list, layout[0], &mut state);
 
             frame.render_widget(
-                Paragraph::new("Up/Down move | Enter accept | Esc cancel")
-                    .style(skin.style("core", "disabled")),
+                Paragraph::new(
+                    listbox
+                        .footer_hint
+                        .as_deref()
+                        .unwrap_or("Up/Down move | Enter accept | Esc cancel"),
+                )
+                .style(skin.style("core", "disabled"))
+                .wrap(Wrap { trim: false }),
                 layout[1],
             );
         }
@@ -2343,6 +2353,24 @@ mod tests {
         assert!(rendered.contains("add"));
         assert!(rendered.contains("edit"));
         assert!(rendered.contains("remove"));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_panelize_presets_shows_names_and_management_hints() {
+        let root = temp_root("panelize-presets");
+        let mut app = app_with_loaded_panels(root.clone());
+        app.apply(AppCommand::OpenPanelizeDialog)
+            .expect("panelize dialog should open");
+
+        let rendered = render_to_text(&app, 100, 30);
+        assert!(rendered.contains("External panelize"));
+        assert!(rendered.contains("All files"));
+        assert!(rendered.contains("Tab command"));
+        assert!(rendered.contains("F2 add"));
+        assert!(rendered.contains("F4 edit"));
+        assert!(rendered.contains("F8 remove"));
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }

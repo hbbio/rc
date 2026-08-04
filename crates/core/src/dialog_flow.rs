@@ -475,63 +475,46 @@ impl AppState {
                 self.set_status("Panelize canceled");
             }
             (
-                Some(PendingDialogAction::PanelizePresetAdd { mut presets }),
-                DialogResult::InputSubmitted(value),
-            ) => {
-                let command = value.trim();
-                if command.is_empty() {
-                    self.set_status("Panelize preset add canceled: empty command");
-                    return;
-                }
-                let command = command.to_string();
-                if presets.iter().any(|preset| preset.command == command) {
-                    self.set_status("Panelize preset already exists");
-                    return;
-                }
-
-                let preset = PanelizePreset::from_legacy_command(command.clone());
-                let label = preset.label.clone();
-                presets.push(preset);
-                self.settings.configuration.panelize_presets = presets.clone();
-                self.settings.mark_dirty();
-                self.routes.pop();
-                self.open_panelize_preset_selection_dialog(command, presets);
-                self.set_status(format!("Added panelize preset: {label}"));
-            }
-            (
-                Some(PendingDialogAction::PanelizePresetAdd { presets: _ }),
-                DialogResult::Canceled,
-            ) => {
+                Some(PendingDialogAction::PanelizePresetAdd {
+                    initial_command,
+                    presets,
+                }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_panelize_preset_add(initial_command, presets, first, second),
+            (Some(PendingDialogAction::PanelizePresetAdd { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize preset add canceled");
             }
             (
                 Some(PendingDialogAction::PanelizePresetEdit {
-                    mut presets,
+                    initial_command,
+                    presets,
                     preset_index,
                 }),
-                DialogResult::InputSubmitted(value),
-            ) => {
-                let command = value.trim();
-                if command.is_empty() {
-                    self.set_status("Panelize preset edit canceled: empty command");
-                    return;
-                }
-                let command = command.to_string();
-                let Some(entry) = presets.get_mut(preset_index) else {
-                    self.set_status("Panelize preset edit failed: invalid selection");
-                    return;
-                };
-                entry.command = command.clone();
-                let label = entry.label.clone();
-
-                self.settings.configuration.panelize_presets = presets.clone();
-                self.settings.mark_dirty();
-                self.routes.pop();
-                self.open_panelize_preset_selection_dialog(command, presets);
-                self.set_status(format!("Updated panelize preset: {label}"));
-            }
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_panelize_preset_edit(
+                initial_command,
+                presets,
+                preset_index,
+                first,
+                second,
+            ),
             (Some(PendingDialogAction::PanelizePresetEdit { .. }), DialogResult::Canceled) => {
                 self.set_status("Panelize preset edit canceled");
+            }
+            (
+                Some(PendingDialogAction::PanelizePresetRemove {
+                    initial_command,
+                    presets,
+                    preset_index,
+                }),
+                DialogResult::ConfirmAccepted,
+            ) => self.confirm_panelize_preset_remove(initial_command, presets, preset_index),
+            (
+                Some(PendingDialogAction::PanelizePresetRemove { .. }),
+                DialogResult::ConfirmDeclined,
+            )
+            | (Some(PendingDialogAction::PanelizePresetRemove { .. }), DialogResult::Canceled) => {
+                self.set_status("Panelize preset removal canceled");
             }
             (
                 Some(PendingDialogAction::ViewerSearch { direction }),

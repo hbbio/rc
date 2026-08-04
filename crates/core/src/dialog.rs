@@ -66,6 +66,7 @@ impl PairInputDialogState {
 pub struct ListboxDialogState {
     pub items: Vec<String>,
     pub selected: usize,
+    pub footer_hint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -274,6 +275,24 @@ impl DialogState {
     }
 
     pub fn listbox(title: impl Into<String>, items: Vec<String>, selected: usize) -> Self {
+        Self::listbox_state(title, items, selected, None)
+    }
+
+    pub fn listbox_with_hint(
+        title: impl Into<String>,
+        items: Vec<String>,
+        selected: usize,
+        footer_hint: impl Into<String>,
+    ) -> Self {
+        Self::listbox_state(title, items, selected, Some(footer_hint.into()))
+    }
+
+    fn listbox_state(
+        title: impl Into<String>,
+        items: Vec<String>,
+        selected: usize,
+        footer_hint: Option<String>,
+    ) -> Self {
         let selected = if items.is_empty() {
             0
         } else {
@@ -281,7 +300,11 @@ impl DialogState {
         };
         Self {
             title: title.into(),
-            kind: DialogKind::Listbox(ListboxDialogState { items, selected }),
+            kind: DialogKind::Listbox(ListboxDialogState {
+                items,
+                selected,
+                footer_hint,
+            }),
         }
     }
 
@@ -604,6 +627,7 @@ mod tests {
             kind: DialogKind::Listbox(ListboxDialogState {
                 items: Vec::new(),
                 selected: 0,
+                footer_hint: None,
             }),
         };
 
