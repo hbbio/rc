@@ -43,6 +43,7 @@ struct TrackedMouseClick {
     column: u16,
     row: u16,
     context: KeyContext,
+    logical_target: AppCommand,
     occurred_at: Instant,
 }
 
@@ -56,12 +57,14 @@ impl MouseClickTracker {
         column: u16,
         row: u16,
         context: KeyContext,
+        logical_target: AppCommand,
         occurred_at: Instant,
     ) -> bool {
         let is_double_click = self.previous.as_ref().is_some_and(|previous| {
             previous.column == column
                 && previous.row == row
                 && previous.context == context
+                && previous.logical_target == logical_target
                 && occurred_at.saturating_duration_since(previous.occurred_at)
                     <= DOUBLE_CLICK_INTERVAL
         });
@@ -69,6 +72,7 @@ impl MouseClickTracker {
             column,
             row,
             context,
+            logical_target,
             occurred_at,
         });
         is_double_click
@@ -583,6 +587,7 @@ fn handle_mouse(
         mouse_event.column,
         mouse_event.row,
         state.key_context(),
+        commands.primary,
         Instant::now(),
     );
     if apply_and_dispatch(state, commands.primary, runtime, skin_runtime)? == ApplyResult::Quit {
@@ -1170,12 +1175,14 @@ mod tests {
     fn mouse_click_tracker_requires_matching_recent_clicks() {
         let started_at = Instant::now();
         let mut tracker = MouseClickTracker::default();
+        let target = AppCommand::HotlistSelectAt(3);
 
-        assert!(!tracker.register(10, 12, KeyContext::Hotlist, started_at));
+        assert!(!tracker.register(10, 12, KeyContext::Hotlist, target, started_at));
         assert!(tracker.register(
             10,
             12,
             KeyContext::Hotlist,
+            target,
             started_at + Duration::from_millis(100),
         ));
         assert!(
@@ -1183,6 +1190,7 @@ mod tests {
                 10,
                 12,
                 KeyContext::Hotlist,
+                target,
                 started_at + Duration::from_millis(150),
             ),
             "a completed pair should not turn a third click into another double-click"
@@ -1192,26 +1200,109 @@ mod tests {
             10,
             12,
             KeyContext::Hotlist,
+            target,
             started_at + Duration::from_millis(175),
         ));
         assert!(!tracker.register(
             11,
             12,
             KeyContext::Hotlist,
+            target,
             started_at + Duration::from_millis(200),
         ));
         assert!(!tracker.register(
             11,
             12,
             KeyContext::Tree,
+            AppCommand::TreeSelectVisibleAt(3),
             started_at + Duration::from_millis(250),
         ));
         assert!(!tracker.register(
             11,
             12,
             KeyContext::Tree,
+            AppCommand::TreeSelectVisibleAt(3),
             started_at + DOUBLE_CLICK_INTERVAL + Duration::from_secs(1),
         ));
+    }
+
+    #[test]
+    fn double_click_requires_the_same_logical_target_after_viewport_recentering() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-hotlist-recenter-click-{stamp}"));
+        fs::create_dir_all(&root).expect("must create hotlist target");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state.settings_mut().configuration.hotlist = (0..24)
+            .map(|index| rc_core::HotlistEntry::new(format!("Entry {index}"), root.clone()))
+            .collect();
+        state
+            .apply(AppCommand::OpenHotlist)
+            .expect("hotlist should open");
+        let viewport_width = 40;
+        let viewport_height = 12;
+        let list = rc_core::layout::hotlist_layout(rc_core::layout::ScreenRect::new(
+            0,
+            0,
+            viewport_width,
+            viewport_height,
+        ))
+        .list;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x,
+            row: list.y + list.height - 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let (mut runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+
+        let first_target = state
+            .commands_for_left_click(click.column, click.row, viewport_width, viewport_height)
+            .expect("first click should hit a hotlist entry")
+            .primary;
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("first click should select the hotlist entry");
+        let second_target = state
+            .commands_for_left_click(click.column, click.row, viewport_width, viewport_height)
+            .expect("second click should hit a hotlist entry")
+            .primary;
+        assert_ne!(first_target, second_target, "the viewport should recenter");
+
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("second click should select its newly resolved entry");
+        assert_eq!(
+            state.key_context(),
+            KeyContext::Hotlist,
+            "a different logical target at the same coordinates is not a double-click"
+        );
+
+        fs::remove_dir_all(root).expect("must remove temp root");
     }
 
     #[test]
