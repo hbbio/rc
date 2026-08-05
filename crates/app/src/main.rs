@@ -523,6 +523,10 @@ fn handle_key(
     let tree_input_command = (context == KeyContext::Tree)
         .then(|| tree_search_input_command(&key_event))
         .flatten();
+    let listbox_space_command = (context == KeyContext::Listbox)
+        .then(|| input_char_command(&key_event))
+        .flatten()
+        .filter(|command| matches!(command, AppCommand::DialogInputChar(' ')));
 
     let Some(chord) = map_key_event_to_chord(key_event, input_compatibility) else {
         return Ok(false);
@@ -544,7 +548,7 @@ fn handle_key(
                 .flatten()
         })
     });
-    if command.is_none() && tree_input_command.is_none() {
+    if command.is_none() && tree_input_command.is_none() && listbox_space_command.is_none() {
         if context == KeyContext::FileManagerXMap {
             state.clear_xmap();
             state.set_status("Extended keymap command not found");
@@ -553,6 +557,7 @@ fn handle_key(
     }
     let command = command
         .or(tree_input_command)
+        .or(listbox_space_command)
         .expect("a command was checked above");
     let command = rc_ui::resolve_file_manager_navigation(state, command, viewport_width);
 
@@ -1793,6 +1798,61 @@ mod tests {
         )
         .expect("Left should return to the preceding Brief column");
         assert_eq!(state.active_panel().cursor, 5);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn sort_order_space_key_toggles_reverse() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-sort-order-space-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .apply(AppCommand::OpenSortOrder)
+            .expect("sort-order dialog should open");
+        assert_eq!(state.key_context(), KeyContext::Listbox);
+        assert!(!state.active_panel().sort_mode.reverse);
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char(' '), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("Space should toggle reverse sorting");
+        let rc_core::Route::Dialog(dialog) = state.top_route() else {
+            panic!("sort-order dialog should remain open");
+        };
+        let rc_core::DialogKind::Listbox(listbox) = &dialog.kind else {
+            panic!("sort-order dialog should remain a listbox");
+        };
+        assert!(
+            listbox
+                .footer_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("Reverse: on"))
+        );
+
+        state
+            .apply(AppCommand::DialogAccept)
+            .expect("sort order should apply");
+        assert!(state.active_panel().sort_mode.reverse);
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
