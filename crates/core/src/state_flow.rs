@@ -518,7 +518,7 @@ impl AppState {
     }
 
     pub(crate) fn selected_operation_paths(&self) -> Vec<PathBuf> {
-        let tagged = self.active_panel().tagged_paths_in_display_order();
+        let tagged = self.active_panel().tagged_paths_in_operation_order();
         if !tagged.is_empty() {
             return tagged;
         }

@@ -1651,10 +1651,20 @@ fn filtering_preserves_the_selected_path_and_tags_hidden_entries_non_destructive
             .tagged_paths_in_display_order()
             .is_empty()
     );
+    assert_eq!(
+        app.selected_operation_paths(),
+        std::slice::from_ref(&notes_path),
+        "operations must target preserved tags even when every tag is filtered out"
+    );
     app.active_panel_mut().invert_tags();
     assert!(
         app.active_panel().is_tagged(&notes_path),
         "inverting the filtered view must preserve tags on hidden entries"
+    );
+    assert_eq!(
+        app.selected_operation_paths(),
+        [root.join("alpha.rs"), zulu_path.clone(), notes_path.clone()],
+        "visible tags should retain display order before deterministically ordered hidden tags"
     );
 
     app.apply(AppCommand::Panel(

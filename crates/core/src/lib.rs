@@ -1257,6 +1257,25 @@ impl PanelState {
             .collect()
     }
 
+    pub(crate) fn tagged_paths_in_operation_order(&self) -> Vec<PathBuf> {
+        let mut paths = self.tagged_paths_in_display_order();
+        if paths.len() == self.tagged.len() {
+            return paths;
+        }
+
+        let mut hidden = {
+            let visible = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+            self.tagged
+                .iter()
+                .filter(|path| !visible.contains(path.as_path()))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        hidden.sort_unstable();
+        paths.extend(hidden);
+        paths
+    }
+
     pub fn tagged_paths(&self) -> Vec<PathBuf> {
         let mut paths = self.tagged.iter().cloned().collect::<Vec<_>>();
         paths.sort_unstable();
