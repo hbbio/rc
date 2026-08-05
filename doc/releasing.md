@@ -37,8 +37,9 @@ crates.io index.
 
 The release-package verifier performs a workspace-wide `cargo publish --dry-run`, so Cargo
 builds the normalized archives against a temporary local registry in dependency order. It then
-checks their metadata, target names, dependency versions, provenance, licenses, README files,
-keymap, and complete embedded-skin set.
+materializes the archives at Cargo's documented package output path and checks their metadata,
+target names, dependency versions, provenance, licenses, README files, keymap, and complete
+embedded-skin set.
 
 6. Optionally inspect the file list of any archive before uploading:
 

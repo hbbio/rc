@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 
 PUBLISH_ARGS=(publish --workspace --all-features --locked --dry-run)
+PACKAGE_ARGS=(package --workspace --all-features --locked --no-verify)
 VALIDATOR_ARGS=(
   --repository "$REPOSITORY_ROOT"
   --archives "$REPOSITORY_ROOT/target/package"
@@ -16,6 +17,7 @@ case "${1:-}" in
   --allow-dirty)
     ALLOW_DIRTY=true
     PUBLISH_ARGS+=(--allow-dirty)
+    PACKAGE_ARGS+=(--allow-dirty)
     VALIDATOR_ARGS+=(--allow-dirty)
     ;;
   *)
@@ -37,4 +39,5 @@ fi
 
 VALIDATOR_ARGS+=(--expected-revision "$(git rev-parse HEAD)")
 cargo "${PUBLISH_ARGS[@]}"
+cargo "${PACKAGE_ARGS[@]}"
 python3 "$SCRIPT_DIR/verify_release_packages.py" "${VALIDATOR_ARGS[@]}"
