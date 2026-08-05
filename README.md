@@ -1,16 +1,16 @@
 # rust commander (rc)
 
 *rust commander* is an in-progress Rust TUI file manager inspired by GNU Midnight
-Commander. I'm already using it as a daily driver and even after 20 years of using `mc`, 
-I find it improves over the orignal in multiple ways:
+Commander. I'm already using it as a daily driver and, even after 20 years of using `mc`,
+I find it improves over the original in multiple ways:
 
 - faster startup
 - async operations
 - better keybindings due to the removal of immediate shell
 - Quick CD is really quick (keybinding: `/`)
 
-The goal to be provide an mc-inspired behavior and keymaps, with a modern internal
-architecture that keeps the UI responsive while long operations run, without requiring a 
+The goal is to provide mc-inspired behavior and keymaps, with a modern internal
+architecture that keeps the UI responsive while long operations run, without requiring a
 strict 1:1 reimplementation of every mc subsystem.
 
 ## Current status
@@ -80,35 +80,37 @@ Requirements:
 - Rust 1.88.0 or newer
 - A terminal with ANSI support
 
-Install from a local checkout:
+Install the released binary from crates.io:
 
 ```bash
-cargo install --path crates/app --locked
+cargo install rust-commander --locked
+rc
 ```
 
-Note: recent Cargo versions require `--path` for local installs.
+The package is named `rust-commander`; the installed executable is intentionally named
+`rc`.
 
-Run:
+To run from a local checkout instead:
 
 ```bash
-cargo run -p rc
+cargo run -p rust-commander --locked
 ```
 
 Optional arguments:
 
 ```bash
-cargo run -p rc -- --path /some/start/dir --tick-rate-ms 200
+rc --path /some/start/dir --tick-rate-ms 200
 ```
 
 Select an `mc` skin:
 
 ```bash
-cargo run -p rc -- --skin modarin256
-cargo run -p rc -- --skin julia256 --skin-dir /path/to/mc/skins
+rc --skin modarin256
+rc --skin julia256 --skin-dir /path/to/mc/skins
 ```
 
-`rc` looks up skins in `crates/ui/assets/skins` (bundled originals) and standard system
-locations like `/usr/share/mc/skins` and Homebrew paths.
+`rc` embeds its bundled original skins in the binary and also discovers custom and system
+skins in locations such as `/usr/share/mc/skins` and Homebrew paths.
 
 ## Settings and setup
 
@@ -183,10 +185,10 @@ Notes:
 
 ## Project layout
 
-- `crates/app`: terminal app entrypoint, event loop, input normalization
-- `crates/core`: domain model, commands, routes, file operations, jobs, keymap parser
-- `crates/ui`: ratatui rendering layer
-- `crates/shell`: process backend primitives used by core/runtime
+- `crates/app` (`rust-commander`): terminal app entrypoint, event loop, input normalization
+- `crates/core` (`rust-commander-core`): domain model, commands, routes, operations, jobs
+- `crates/ui` (`rust-commander-ui`): ratatui rendering and bundled skin support
+- `crates/shell` (`rust-commander-shell`): cancelable process backend primitives
 - `doc/roadmap.md`: feature plan and milestone breakdown
 - `doc/architecture/`: bounded contexts, crate contracts, ownership map
 - `doc/adr/`: architecture decision records
@@ -201,20 +203,20 @@ above 8 MiB are reset on the next startup.
 Run baseline checks locally:
 
 ```bash
-cargo --locked fmt --all --check
-cargo --locked clippy --all-targets --all-features -- -D warnings
-cargo --locked test --all-targets --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
 ```
 
 Additional local equivalents of CI policy/perf checks (requires extra cargo tools):
 
 ```bash
 cargo +1.88.0 check --workspace --all-targets --locked
-cargo --locked nextest run --workspace --all-targets --all-features
+cargo nextest run --workspace --all-targets --all-features --locked
 cargo deny check bans licenses advisories sources
 cargo +nightly udeps --workspace --all-targets --all-features --locked
 mkdir -p target/coverage
-cargo --locked llvm-cov --workspace --all-targets --all-features --json --output-path target/coverage/llvm-cov.json
+cargo llvm-cov --workspace --all-targets --all-features --locked --json --output-path target/coverage/llvm-cov.json
 ./scripts/coverage_trend.sh target/coverage/llvm-cov.json .github/coverage-baseline.json
 ```
 
@@ -226,3 +228,4 @@ CI runs all required gates on pushes and pull requests via:
 
 GPL-3.0-or-later, as this project is derived from the original
 [midnight commander](https://github.com/MidnightCommander/mc).
+See [LICENSE](LICENSE) for the complete terms.
