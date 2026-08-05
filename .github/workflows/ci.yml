@@ -76,7 +76,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run cargo-deny policy checks
-        run: cargo deny check bans licenses advisories sources
+        run: cargo deny check bans licenses sources
 
       - name: Install nightly Rust toolchain for udeps
         uses: dtolnay/rust-toolchain@nightly

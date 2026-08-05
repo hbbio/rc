@@ -5,6 +5,13 @@ targets = [{ triple = "x86_64-unknown-linux-gnu" }]
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
+unused-ignored-advisory = "deny"
+# Temporary waivers must use the structured reason format enforced by
+# scripts/validate_rust_advisory_waivers.sh. Waivers may last at most 90 days.
+# Reason format: expires=YYYY-MM-DD; tracking=https://...; rationale
+ignore = [
+  # { id = "RUSTSEC-YYYY-NNNN", reason = "<format above>" },
+]
 
 [licenses]
 version = 2
@@ -33,4 +40,3 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-

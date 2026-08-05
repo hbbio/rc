@@ -26,7 +26,11 @@ crates.io index.
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
    cargo test --workspace --all-targets --all-features --locked
-   cargo deny check bans licenses advisories sources
+   ./scripts/validate_rust_advisory_waivers.sh
+   cargo deny check bans licenses sources
+   ./scripts/run_cargo_deny.sh \
+     --manifest-path Cargo.toml --all-features --locked \
+     check --config deny.toml advisories
    git diff --check
    ```
 

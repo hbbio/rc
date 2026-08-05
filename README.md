@@ -213,7 +213,11 @@ Additional local equivalents of CI policy/perf checks (requires extra cargo tool
 ```bash
 cargo +1.88.0 check --workspace --all-targets --locked
 cargo nextest run --workspace --all-targets --all-features --locked
-cargo deny check bans licenses advisories sources
+./scripts/validate_rust_advisory_waivers.sh
+cargo deny check bans licenses sources
+./scripts/run_cargo_deny.sh \
+  --manifest-path Cargo.toml --all-features --locked \
+  check --config deny.toml advisories
 cargo +nightly udeps --workspace --all-targets --all-features --locked
 mkdir -p target/coverage
 cargo llvm-cov --workspace --all-targets --all-features --locked --json --output-path target/coverage/llvm-cov.json
@@ -223,6 +227,8 @@ cargo llvm-cov --workspace --all-targets --all-features --locked --json --output
 CI runs all required gates on pushes and pull requests via:
 
 - `.github/workflows/ci.yml`
+- `.github/workflows/rust-security.yml`, which also runs weekly against the latest RustSec
+  advisory database
 
 ## License
 

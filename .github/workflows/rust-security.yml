@@ -1,0 +1,48 @@
+name: Rust dependency security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    name: RustSec advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out immutable revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test advisory waiver validation
+        run: python3 -m unittest scripts/test_validate_rust_advisory_waivers.py
+
+      - name: Validate temporary advisory waivers
+        run: ./scripts/validate_rust_advisory_waivers.sh
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-deny@0.19.9
+          fallback: none
+
+      - name: Reject vulnerable dependencies
+        run: |
+          ./scripts/run_cargo_deny.sh \
+            --manifest-path Cargo.toml \
+            --all-features \
+            --locked \
+            check \
+            --config deny.toml \
+            advisories
