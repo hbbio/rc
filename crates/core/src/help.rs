@@ -94,6 +94,7 @@ Views:\n\
 Listing:\n\
   Full, Brief, and Long formats are independent and persisted per panel.\n\
   {{fm_cycle_listing}} cycles the active panel's format.\n\
+  In Brief format, Left/Right moves across columns and Up/Down within them.\n\
   Sort order supports name, version, extension, times, size, inode,\n\
   and unsorted discovery order, with an independent reverse toggle.\n\
   {{fm_sort_next}} cycles sort fields; {{fm_sort_reverse}} toggles reverse.\n\
@@ -752,6 +753,7 @@ mod tests {
         assert!(content.contains("F9 -> Left or Right"));
         assert!(content.contains("Quick view loads the other panel's selection asynchronously"));
         assert!(content.contains("Full, Brief, and Long formats"));
+        assert!(content.contains("Left/Right moves across columns"));
         assert!(content.contains("Shift-F6 cycles sort fields"));
         assert!(content.contains("shell pattern or regular expression"));
         assert!(content.contains("without rerunning commands"));

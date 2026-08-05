@@ -145,6 +145,7 @@ Main file manager:
 - `F9`: open menus; Left/Right configure either panel's view, format, sort, and filter
 - `Ctrl-X i` / `Ctrl-X q`: show Info / Quick view in the passive panel
 - `Alt-Shift-T`: cycle Full, Brief, and Long formats on the active panel
+- `Left` / `Right`: move across responsive columns in Brief format
 - `Shift-F6` / `Shift-F8`: cycle sort field / toggle reverse order
 - `q` / `Esc`: quit
 

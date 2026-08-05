@@ -182,12 +182,14 @@ fn navigation_command(context: KeyContext, key_command: &KeyCommand) -> Option<A
     let motion = match (target, key_command) {
         (_, KeyCommand::CursorUp) => NavigationMotion::Up,
         (_, KeyCommand::CursorDown) => NavigationMotion::Down,
-        (NavigationTarget::Menu | NavigationTarget::Tree, KeyCommand::CursorLeft) => {
-            NavigationMotion::Left
-        }
-        (NavigationTarget::Menu | NavigationTarget::Tree, KeyCommand::CursorRight) => {
-            NavigationMotion::Right
-        }
+        (
+            NavigationTarget::FileManager | NavigationTarget::Menu | NavigationTarget::Tree,
+            KeyCommand::CursorLeft,
+        ) => NavigationMotion::Left,
+        (
+            NavigationTarget::FileManager | NavigationTarget::Menu | NavigationTarget::Tree,
+            KeyCommand::CursorRight,
+        ) => NavigationMotion::Right,
         (
             NavigationTarget::FileManager
             | NavigationTarget::Help

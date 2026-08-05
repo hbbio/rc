@@ -224,6 +224,7 @@ pub enum AppCommand {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
     SetView(PanelViewMode),
+    SelectAt(usize),
     OpenTree,
     OpenListingFormat,
     OpenSortOrder,
@@ -381,6 +382,7 @@ impl AppCommand {
             | Self::Panel(
                 _,
                 PanelCommand::SetView(_)
+                | PanelCommand::SelectAt(_)
                 | PanelCommand::RestorePanelizedResults
                 | PanelCommand::Reread,
             )
@@ -1181,6 +1183,14 @@ impl PanelState {
             self.cursor.saturating_add(delta as usize).min(last)
         };
         self.cursor = next;
+    }
+
+    pub(crate) fn select_at(&mut self, index: usize) -> bool {
+        if index >= self.entries.len() || index == self.cursor {
+            return false;
+        }
+        self.cursor = index;
+        true
     }
 
     pub fn move_cursor_page(&mut self, pages: isize, page_step: usize) {

@@ -467,6 +467,7 @@ fn run_event_loop(
                             state,
                             keymap,
                             key_event,
+                            viewport.width,
                             runtime,
                             skin_runtime,
                             InputCompatibility {
@@ -506,6 +507,7 @@ fn handle_key(
     state: &mut AppState,
     keymap: &Keymap,
     key_event: KeyEvent,
+    viewport_width: u16,
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
     input_compatibility: InputCompatibility,
@@ -552,6 +554,7 @@ fn handle_key(
     let command = command
         .or(tree_input_command)
         .expect("a command was checked above");
+    let command = rc_ui::resolve_file_manager_navigation(state, command, viewport_width);
 
     Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
@@ -1072,6 +1075,8 @@ mod tests {
         ffi::OsString,
         os::unix::ffi::{OsStrExt, OsStringExt},
     };
+
+    const TEST_VIEWPORT_WIDTH: u16 = 120;
 
     fn compat_enabled() -> InputCompatibility {
         InputCompatibility {
@@ -1703,6 +1708,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1713,6 +1719,80 @@ mod tests {
             state.settings().learn_keys.last_learned_binding.as_deref(),
             Some("Ctrl-x")
         );
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn brief_listing_left_and_right_follow_responsive_columns() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-brief-navigation-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        for index in 0..12 {
+            fs::write(root.join(format!("entry-{index:02}")), index.to_string())
+                .expect("brief-listing fixture should be written");
+        }
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .active_panel_mut()
+            .refresh()
+            .expect("active panel should load fixtures");
+        state
+            .apply(AppCommand::CycleListingFormat)
+            .expect("listing format should cycle to Brief");
+        assert_eq!(state.active_panel().entries.len(), 13);
+        assert_eq!(
+            state.panel_listing_format(state.active_panel),
+            rc_core::PanelListingFormat::Brief
+        );
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Right, KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("Right should move to the next Brief column");
+        assert_eq!(state.active_panel().cursor, 5);
+
+        state.active_panel_mut().cursor = 10;
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Right, KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("Right at the final Brief column should be handled");
+        assert_eq!(state.active_panel().cursor, 10);
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Left, KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("Left should return to the preceding Brief column");
+        assert_eq!(state.active_panel().cursor, 5);
 
         fs::remove_dir_all(&root).expect("must remove temp root");
     }
@@ -1743,6 +1823,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('b'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1757,6 +1838,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Backspace, KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1771,6 +1853,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('q'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1805,6 +1888,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1814,6 +1898,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('h'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1850,6 +1935,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('/'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1861,6 +1947,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('d'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1870,6 +1957,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Enter, KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1916,6 +2004,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1925,6 +2014,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('!'), KeyModifiers::SHIFT),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1963,6 +2053,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),
@@ -1972,6 +2063,7 @@ mod tests {
             &mut state,
             &keymap,
             KeyEvent::new(CrosstermKeyCode::Char('1'), KeyModifiers::SHIFT),
+            TEST_VIEWPORT_WIDTH,
             &mut runtime,
             &skin_runtime,
             compat_enabled(),

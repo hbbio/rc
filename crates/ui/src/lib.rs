@@ -19,9 +19,10 @@ use rc_core::layout::{
 use rc_core::{
     ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
     FilterDialogField, FindDialogField, FindNameMode, FindResultsState, FindResultsStatus,
-    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, PairInputField, PanelListingFormat,
-    PanelState, PanelViewMode, QuickCdSearchStatus, QuickViewState, Route, SelectionSizeState,
-    SettingsScreenState, TreeLoadState, TreeState, ViewerState, top_menus,
+    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, NavigationMotion, NavigationTarget,
+    PairInputField, PanelCommand, PanelListingFormat, PanelState, PanelViewMode,
+    QuickCdSearchStatus, QuickViewState, Route, SelectionSizeState, SettingsScreenState,
+    TreeLoadState, TreeState, ViewerState, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -95,14 +96,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(viewer) = state.active_viewer() {
         render_viewer(frame, root[1], viewer, skin.as_ref());
     } else {
-        let panels = [ActivePanel::Left, ActivePanel::Right];
-        let uses_single_panel_layout = panels
-            .into_iter()
-            .all(|panel| state.panel_view_mode(panel) == PanelViewMode::Listing)
-            && panels
-                .into_iter()
-                .any(|panel| state.panel_listing_format(panel) == PanelListingFormat::Long);
-        if uses_single_panel_layout {
+        if uses_single_panel_layout(state) {
             let panel = state.active_panel;
             render_panel(
                 frame,
@@ -114,10 +108,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 state,
             );
         } else {
-            let panel_areas = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(root[1]);
+            let panel_areas = dual_panel_areas(root[1]);
 
             render_panel(
                 frame,
@@ -176,6 +167,24 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Settings(settings) => render_settings_screen(frame, settings, skin.as_ref()),
         Route::FileManager => {}
     }
+}
+
+fn uses_single_panel_layout(state: &AppState) -> bool {
+    let panels = [ActivePanel::Left, ActivePanel::Right];
+    panels
+        .into_iter()
+        .all(|panel| state.panel_view_mode(panel) == PanelViewMode::Listing)
+        && panels
+            .into_iter()
+            .any(|panel| state.panel_listing_format(panel) == PanelListingFormat::Long)
+}
+
+fn dual_panel_areas(area: Rect) -> [Rect; 2] {
+    let areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    [areas[0], areas[1]]
 }
 
 fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, active_menu: Option<usize>) {
@@ -617,6 +626,93 @@ fn render_full_panel_entries(
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
+const BRIEF_MIN_COLUMN_WIDTH: u16 = 16;
+const BRIEF_MAX_COLUMNS: usize = 9;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BriefGrid {
+    entry_count: usize,
+    columns: usize,
+    rows: usize,
+}
+
+impl BriefGrid {
+    fn new(entry_count: usize, width: u16) -> Self {
+        let columns = usize::from((width / BRIEF_MIN_COLUMN_WIDTH).max(1)).min(BRIEF_MAX_COLUMNS);
+        Self {
+            entry_count,
+            columns,
+            rows: entry_count.div_ceil(columns),
+        }
+    }
+
+    fn index_at(self, column: usize, row: usize) -> Option<usize> {
+        if column >= self.columns || row >= self.rows {
+            return None;
+        }
+        let index = column.checked_mul(self.rows)?.checked_add(row)?;
+        (index < self.entry_count).then_some(index)
+    }
+
+    fn left_of(self, cursor: usize) -> Option<usize> {
+        if self.rows == 0 {
+            return None;
+        }
+        let row = cursor % self.rows;
+        let column = (cursor / self.rows).checked_sub(1)?;
+        self.index_at(column, row)
+    }
+
+    fn right_of(self, cursor: usize) -> Option<usize> {
+        if self.rows == 0 {
+            return None;
+        }
+        let row = cursor % self.rows;
+        let column = (cursor / self.rows).checked_add(1)?;
+        self.index_at(column, row)
+    }
+}
+
+/// Resolves viewport-dependent Left/Right movement in a responsive Brief grid.
+pub fn resolve_file_manager_navigation(
+    state: &AppState,
+    command: AppCommand,
+    viewport_width: u16,
+) -> AppCommand {
+    let AppCommand::Navigate(
+        NavigationTarget::FileManager,
+        motion @ (NavigationMotion::Left | NavigationMotion::Right),
+    ) = command
+    else {
+        return command;
+    };
+    let panel = state.active_panel;
+    if state.panel_view_mode(panel) != PanelViewMode::Listing
+        || state.panel_listing_format(panel) != PanelListingFormat::Brief
+    {
+        return command;
+    }
+
+    let viewport = Rect::new(0, 0, viewport_width, 1);
+    let panel_width = if uses_single_panel_layout(state) {
+        viewport_width
+    } else {
+        dual_panel_areas(viewport)[panel.index()].width
+    };
+    let listing_width = panel_width.saturating_sub(2);
+    let panel_state = &state.panels[panel.index()];
+    let grid = BriefGrid::new(panel_state.entries.len(), listing_width);
+    let target = match motion {
+        NavigationMotion::Left => grid.left_of(panel_state.cursor),
+        NavigationMotion::Right => grid.right_of(panel_state.cursor),
+        _ => unreachable!("only horizontal motions are accepted above"),
+    };
+
+    target.map_or(command, |index| {
+        AppCommand::Panel(panel, PanelCommand::SelectAt(index))
+    })
+}
+
 fn render_brief_panel_entries(
     frame: &mut Frame,
     area: Rect,
@@ -624,11 +720,9 @@ fn render_brief_panel_entries(
     active: bool,
     skin: &UiSkin,
 ) {
-    const MIN_COLUMN_WIDTH: u16 = 16;
-    const MAX_COLUMNS: usize = 9;
-
-    let columns = usize::from((area.width / MIN_COLUMN_WIDTH).max(1)).min(MAX_COLUMNS);
-    let total_rows = panel.entries.len().div_ceil(columns);
+    let grid = BriefGrid::new(panel.entries.len(), area.width);
+    let columns = grid.columns;
+    let total_rows = grid.rows;
     let selected_row = panel.cursor % total_rows.max(1);
     let viewport_rows = usize::from(area.height.max(1));
     let (window_start, window_end) = visible_window(total_rows, selected_row, viewport_rows);
@@ -638,7 +732,9 @@ fn render_brief_panel_entries(
         .unwrap_or(0);
     let rows = (window_start..window_end).map(|row_index| {
         let cells = (0..columns).map(|column| {
-            let entry_index = column.saturating_mul(total_rows).saturating_add(row_index);
+            let Some(entry_index) = grid.index_at(column, row_index) else {
+                return Cell::from(String::new());
+            };
             let Some(entry) = panel.entries.get(entry_index) else {
                 return Cell::from(String::new());
             };
@@ -3228,6 +3324,20 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn brief_grid_moves_between_existing_cells_on_the_same_visual_row() {
+        let grid = BriefGrid::new(13, 58);
+
+        assert_eq!(grid.columns, 3);
+        assert_eq!(grid.rows, 5);
+        assert_eq!(grid.right_of(0), Some(5));
+        assert_eq!(grid.right_of(5), Some(10));
+        assert_eq!(grid.right_of(10), None);
+        assert_eq!(grid.left_of(10), Some(5));
+        assert_eq!(grid.right_of(4), Some(9));
+        assert_eq!(grid.right_of(9), None, "the last column has no row four");
     }
 
     #[test]

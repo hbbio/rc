@@ -18,6 +18,11 @@ impl AppState {
             AppCommand::Panel(panel, PanelCommand::SetView(mode)) => {
                 self.set_panel_view_mode(panel, mode);
             }
+            AppCommand::Panel(panel, PanelCommand::SelectAt(index)) => {
+                if self.panels[panel.index()].select_at(index) {
+                    self.sync_quick_view_from(panel, false);
+                }
+            }
             AppCommand::SetOtherPanelView(mode) => {
                 self.set_panel_view_mode(self.active_panel.other(), mode);
             }
@@ -194,6 +199,7 @@ impl AppState {
     }
 
     fn apply_file_manager_navigation(&mut self, motion: NavigationMotion) {
+        let previous_cursor = self.active_panel().cursor;
         match motion {
             NavigationMotion::Up => self.move_cursor(-1),
             NavigationMotion::Down => self.move_cursor(1),
@@ -209,7 +215,9 @@ impl AppState {
             NavigationMotion::End => self.active_panel_mut().move_cursor_end(),
             _ => {}
         }
-        self.sync_quick_view_from(self.active_panel, false);
+        if self.active_panel().cursor != previous_cursor {
+            self.sync_quick_view_from(self.active_panel, false);
+        }
     }
 
     fn apply_find_results_navigation(&mut self, motion: NavigationMotion) {

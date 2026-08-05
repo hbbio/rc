@@ -763,6 +763,20 @@ fn app_command_mapping_is_context_aware() {
         ))
     );
     assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorLeft),
+        Some(AppCommand::Navigate(
+            NavigationTarget::FileManager,
+            NavigationMotion::Left,
+        ))
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::CursorRight),
+        Some(AppCommand::Navigate(
+            NavigationTarget::FileManager,
+            NavigationMotion::Right,
+        ))
+    );
+    assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenEntry),
         Some(AppCommand::OpenEntry)
     );
