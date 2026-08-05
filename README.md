@@ -1,5 +1,7 @@
 # rust commander (rc)
 
+![Rust Commander dual-pane terminal interface](https://raw.githubusercontent.com/hbbio/rc/main/doc/rc.png)
+
 *rust commander* is an in-progress Rust TUI file manager inspired by GNU Midnight
 Commander. I'm already using it as a daily driver and, even after 20 years of using `mc`,
 I find it improves over the original in multiple ways:
