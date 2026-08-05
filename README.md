@@ -1,11 +1,17 @@
-# rc
+# rust commander (rc)
 
-`rc` is an in-progress Rust TUI file manager inspired by GNU Midnight Commander.
-Already using it as a daily driver.
+*rust commander* is an in-progress Rust TUI file manager inspired by GNU Midnight
+Commander. I'm already using it as a daily driver and even after 20 years of using `mc`, 
+I find it improves over the orignal in multiple ways:
 
-The goal is MC-compatible behavior and keymaps, with a modern internal architecture that
-keeps the UI responsive while long operations run, without requiring a strict 1:1
-reimplementation of every MC subsystem.
+- faster startup
+- async operations
+- better keybindings due to the removal of immediate shell
+- Quick CD is really quick (keybinding: `/`)
+
+The goal to be provide an mc-inspired behavior and keymaps, with a modern internal
+architecture that keeps the UI responsive while long operations run, without requiring a 
+strict 1:1 reimplementation of every mc subsystem.
 
 ## Current status
 
