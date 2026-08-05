@@ -22,7 +22,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use rc_core::settings_io;
-use rc_core::{AppCommand, AppState, ApplyResult, ExternalEditRequest, JobRequest, Settings};
+use rc_core::{
+    AppCommand, AppState, ApplyResult, ExternalEditRequest, JobRequest, MouseClickTarget, Settings,
+};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
@@ -43,7 +45,7 @@ struct TrackedMouseClick {
     column: u16,
     row: u16,
     context: KeyContext,
-    logical_target: AppCommand,
+    target: MouseClickTarget,
     occurred_at: Instant,
 }
 
@@ -57,14 +59,14 @@ impl MouseClickTracker {
         column: u16,
         row: u16,
         context: KeyContext,
-        logical_target: AppCommand,
+        target: MouseClickTarget,
         occurred_at: Instant,
     ) -> bool {
         let is_double_click = self.previous.as_ref().is_some_and(|previous| {
             previous.column == column
                 && previous.row == row
                 && previous.context == context
-                && previous.logical_target == logical_target
+                && previous.target == target
                 && occurred_at.saturating_duration_since(previous.occurred_at)
                     <= DOUBLE_CLICK_INTERVAL
         });
@@ -72,7 +74,7 @@ impl MouseClickTracker {
             column,
             row,
             context,
-            logical_target,
+            target,
             occurred_at,
         });
         is_double_click
@@ -591,18 +593,20 @@ fn handle_mouse(
         click_tracker.clear();
         return Ok(false);
     };
+    let primary = commands.primary;
+    let activation = commands.activation;
     let is_double_click = click_tracker.register(
         mouse_event.column,
         mouse_event.row,
         state.key_context(),
-        commands.primary,
+        commands.target,
         Instant::now(),
     );
-    if apply_and_dispatch(state, commands.primary, runtime, skin_runtime)? == ApplyResult::Quit {
+    if apply_and_dispatch(state, primary, runtime, skin_runtime)? == ApplyResult::Quit {
         return Ok(true);
     }
     if is_double_click
-        && let Some(activation) = commands.activation
+        && let Some(activation) = activation
         && apply_and_dispatch(state, activation, runtime, skin_runtime)? == ApplyResult::Quit
     {
         return Ok(true);
@@ -1072,7 +1076,8 @@ mod tests {
     use super::*;
     use crate::runtime::{self, RuntimeCommand};
     use crossterm::event::{KeyCode as CrosstermKeyCode, KeyEvent, KeyModifiers};
-    use rc_core::WorkerCommand;
+    use rc_core::{WorkerCommand, build_tree_ready_event};
+    use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
     #[cfg(unix)]
@@ -1185,14 +1190,14 @@ mod tests {
     fn mouse_click_tracker_requires_matching_recent_clicks() {
         let started_at = Instant::now();
         let mut tracker = MouseClickTracker::default();
-        let target = AppCommand::HotlistSelectAt(3);
+        let target = MouseClickTarget::Command(AppCommand::HotlistSelectAt(3));
 
-        assert!(!tracker.register(10, 12, KeyContext::Hotlist, target, started_at));
+        assert!(!tracker.register(10, 12, KeyContext::Hotlist, target.clone(), started_at));
         assert!(tracker.register(
             10,
             12,
             KeyContext::Hotlist,
-            target,
+            target.clone(),
             started_at + Duration::from_millis(100),
         ));
         assert!(
@@ -1200,7 +1205,7 @@ mod tests {
                 10,
                 12,
                 KeyContext::Hotlist,
-                target,
+                target.clone(),
                 started_at + Duration::from_millis(150),
             ),
             "a completed pair should not turn a third click into another double-click"
@@ -1210,7 +1215,7 @@ mod tests {
             10,
             12,
             KeyContext::Hotlist,
-            target,
+            target.clone(),
             started_at + Duration::from_millis(175),
         ));
         assert!(!tracker.register(
@@ -1220,18 +1225,19 @@ mod tests {
             target,
             started_at + Duration::from_millis(200),
         ));
+        let tree_target = MouseClickTarget::TreeEntry(PathBuf::from("/tree/entry"));
         assert!(!tracker.register(
             11,
             12,
             KeyContext::Tree,
-            AppCommand::TreeSelectVisibleAt(3),
+            tree_target.clone(),
             started_at + Duration::from_millis(250),
         ));
         assert!(!tracker.register(
             11,
             12,
             KeyContext::Tree,
-            AppCommand::TreeSelectVisibleAt(3),
+            tree_target,
             started_at + DOUBLE_CLICK_INTERVAL + Duration::from_secs(1),
         ));
     }
@@ -1311,6 +1317,121 @@ mod tests {
             KeyContext::Hotlist,
             "a different logical target at the same coordinates is not a double-click"
         );
+
+        fs::remove_dir_all(root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn tree_double_click_requires_the_same_entry_after_projection_changes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-tree-project-click-{stamp}"));
+        let alpha = root.join("alpha");
+        let parent = root.join("parent");
+        let child_a = parent.join("child-a");
+        let child_b = parent.join("child-b");
+        fs::create_dir_all(&alpha).expect("must create sibling directory");
+        fs::create_dir_all(&child_a).expect("must create first child directory");
+        fs::create_dir_all(&child_b).expect("must create second child directory");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .apply(AppCommand::OpenTree)
+            .expect("tree screen should open");
+        let scan_job_id = match state.top_route() {
+            rc_core::Route::Tree(tree) => tree.scan_job_id().expect("tree scan should be pending"),
+            _ => panic!("top route should be tree"),
+        };
+        state.take_pending_worker_commands();
+        let tree_ready =
+            build_tree_ready_event(scan_job_id, root.clone(), 8, 64, &AtomicBool::new(false))
+                .expect("tree fixture should scan");
+        state.handle_background_event(tree_ready);
+        state
+            .apply(AppCommand::TreeSelectVisibleAt(2))
+            .expect("parent should be selectable");
+        assert!(matches!(
+            state.top_route(),
+            rc_core::Route::Tree(tree)
+                if tree.selected_entry().is_some_and(|entry| entry.path == parent)
+        ));
+
+        let viewport_width = 120;
+        let viewport_height = 40;
+        let list = rc_core::layout::tree_layout(rc_core::layout::ScreenRect::new(
+            0,
+            0,
+            viewport_width,
+            viewport_height,
+        ))
+        .list;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x,
+            row: list.y + 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        let (mut runtime, _command_rx) = runtime::test_runtime_bridge_with_capacity(4);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("first click should select child-a");
+        assert!(matches!(
+            state.top_route(),
+            rc_core::Route::Tree(tree)
+                if tree.selected_entry().is_some_and(|entry| entry.path == child_a)
+        ));
+
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("second click should select child-b without activating it");
+        assert_eq!(
+            state.key_context(),
+            KeyContext::Tree,
+            "the same projection index must not double-click a different tree entry"
+        );
+        assert!(matches!(
+            state.top_route(),
+            rc_core::Route::Tree(tree)
+                if tree.selected_entry().is_some_and(|entry| entry.path == child_b)
+        ));
+
+        handle_mouse(
+            &mut state,
+            click,
+            viewport_width,
+            viewport_height,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .expect("third click should complete a double-click on child-b");
+        assert_eq!(state.key_context(), KeyContext::FileManager);
+        assert_eq!(state.active_panel().cwd, child_b);
 
         fs::remove_dir_all(root).expect("must remove temp root");
     }

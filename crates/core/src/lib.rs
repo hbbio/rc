@@ -724,24 +724,41 @@ pub enum ApplyResult {
     Quit,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MouseClickTarget {
+    Command(AppCommand),
+    TreeEntry(PathBuf),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MouseClickCommands {
     pub primary: AppCommand,
     pub activation: Option<AppCommand>,
+    pub target: MouseClickTarget,
 }
 
 impl MouseClickCommands {
-    const fn primary(primary: AppCommand) -> Self {
+    fn primary(primary: AppCommand) -> Self {
         Self {
             primary,
             activation: None,
+            target: MouseClickTarget::Command(primary),
         }
     }
 
-    const fn list_selection(primary: AppCommand, activation: AppCommand) -> Self {
+    fn list_selection(primary: AppCommand, activation: AppCommand) -> Self {
+        Self::list_selection_with_target(primary, activation, MouseClickTarget::Command(primary))
+    }
+
+    fn list_selection_with_target(
+        primary: AppCommand,
+        activation: AppCommand,
+        target: MouseClickTarget,
+    ) -> Self {
         Self {
             primary,
             activation: Some(activation),
+            target,
         }
     }
 }

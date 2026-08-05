@@ -286,6 +286,11 @@ impl TreeState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn visible_entry(&self, visible_index: usize) -> Option<&TreeEntry> {
+        let entry_index = *self.visible_indices.get(visible_index)?;
+        self.entries.get(entry_index)
+    }
+
     pub fn visible_entries(&self) -> impl ExactSizeIterator<Item = &TreeEntry> {
         self.visible_indices
             .iter()

@@ -2367,6 +2367,7 @@ fn menu_mouse_clicks_map_to_commands() {
         Some(MouseClickCommands {
             primary: AppCommand::OpenMenuAt(1),
             activation: None,
+            target: MouseClickTarget::Command(AppCommand::OpenMenuAt(1)),
         })
     );
 
@@ -2377,6 +2378,7 @@ fn menu_mouse_clicks_map_to_commands() {
         Some(MouseClickCommands {
             primary: AppCommand::MenuSelectAt(1),
             activation: None,
+            target: MouseClickTarget::Command(AppCommand::MenuSelectAt(1)),
         })
     );
     assert_eq!(
@@ -2384,6 +2386,7 @@ fn menu_mouse_clicks_map_to_commands() {
         Some(MouseClickCommands {
             primary: AppCommand::CloseMenu,
             activation: None,
+            target: MouseClickTarget::Command(AppCommand::CloseMenu),
         })
     );
 

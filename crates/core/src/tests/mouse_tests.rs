@@ -80,6 +80,7 @@ fn tree_click_maps_visible_projection_and_offers_open_activation() {
     let commands = click_commands(&app, list.x, list.y + 1);
     assert_eq!(commands.primary, AppCommand::TreeSelectVisibleAt(1));
     assert_eq!(commands.activation, Some(AppCommand::TreeOpenEntry));
+    assert_eq!(commands.target, MouseClickTarget::TreeEntry(alpha.clone()));
 
     app.apply(commands.primary)
         .expect("tree mouse selection should apply");

@@ -272,9 +272,11 @@ impl AppState {
                     tree.visible_entry_count(),
                     tree.visible_cursor(),
                 )?;
-                Some(MouseClickCommands::list_selection(
+                let target = MouseClickTarget::TreeEntry(tree.visible_entry(index)?.path.clone());
+                Some(MouseClickCommands::list_selection_with_target(
                     AppCommand::TreeSelectVisibleAt(index),
                     AppCommand::TreeOpenEntry,
+                    target,
                 ))
             }
             Route::Hotlist => {
