@@ -1,9 +1,20 @@
 [package]
-name = "rc"
+name = "rust-commander"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
+readme.workspace = true
+repository.workspace = true
 rust-version.workspace = true
+description = "A fast asynchronous TUI file manager inspired by Midnight Commander"
+default-run = "rc"
+keywords = ["file-manager", "tui", "terminal", "filesystem"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "rc"
+path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true

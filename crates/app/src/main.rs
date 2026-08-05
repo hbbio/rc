@@ -82,7 +82,11 @@ impl MouseClickTracker {
 }
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Roadmap bootstrap for the rc file manager")]
+#[command(
+    name = "rc",
+    version,
+    about = "A fast asynchronous TUI file manager inspired by Midnight Commander"
+)]
 struct Cli {
     #[arg(long, default_value_t = 200)]
     tick_rate_ms: u64,

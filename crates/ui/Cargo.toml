@@ -1,9 +1,17 @@
 [package]
-name = "rc-ui"
+name = "rust-commander-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
+readme.workspace = true
+repository.workspace = true
 rust-version.workspace = true
+description = "Ratatui rendering and skin support for Rust Commander"
+
+[lib]
+name = "rc_ui"
+path = "src/lib.rs"
 
 [dependencies]
 chrono.workspace = true

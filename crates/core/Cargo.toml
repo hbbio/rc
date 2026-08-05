@@ -1,9 +1,17 @@
 [package]
-name = "rc-core"
+name = "rust-commander-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
+readme.workspace = true
+repository.workspace = true
 rust-version.workspace = true
+description = "Core domain model and asynchronous workflows for Rust Commander"
+
+[lib]
+name = "rc_core"
+path = "src/lib.rs"
 
 [dependencies]
 filetime = "0.2"
