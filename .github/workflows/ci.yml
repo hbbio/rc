@@ -109,6 +109,23 @@ jobs:
       - name: Check workspace on MSRV
         run: cargo check --workspace --all-targets --locked
 
+  packages:
+    name: release-packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify publishable archives
+        run: ./scripts/verify_release_packages.sh
+
   coverage:
     name: coverage-trend
     runs-on: ubuntu-latest

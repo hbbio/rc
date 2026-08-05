@@ -218,6 +218,7 @@ cargo deny check bans licenses sources
 ./scripts/run_cargo_deny.sh \
   --manifest-path Cargo.toml --all-features --locked \
   check --config deny.toml advisories
+./scripts/verify_release_packages.sh
 cargo +nightly udeps --workspace --all-targets --all-features --locked
 mkdir -p target/coverage
 cargo llvm-cov --workspace --all-targets --all-features --locked --json --output-path target/coverage/llvm-cov.json
