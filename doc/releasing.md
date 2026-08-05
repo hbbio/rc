@@ -84,7 +84,7 @@ Install exactly the uploaded version into a temporary root and confirm the execu
 
 ```bash
 release_root="$(mktemp -d)"
-cargo install rust-commander --version 0.1.0 --locked --root "$release_root"
+cargo install rust-commander --version 0.1.1 --locked --root "$release_root"
 "$release_root/bin/rc" --version
 ```
 
@@ -92,8 +92,8 @@ Only after all four crates and the clean installation are verified, create and p
 tag and publish the corresponding GitHub release:
 
 ```bash
-git tag -s v0.1.0 -m "Rust Commander 0.1.0"
-git push origin main v0.1.0
+git tag -s v0.1.1 -m "Rust Commander 0.1.1"
+git push origin main v0.1.1
 ```
 
 If a serious issue is discovered after publication, yank the affected version and prepare a
