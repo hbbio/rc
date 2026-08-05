@@ -73,24 +73,29 @@ Planned next major milestones include `mc.ext.ini`, user menu, command-based dif
 integration (`difftastic`/`diff`), optional remote VFS, and subshell integration.
 See [doc/roadmap.md](doc/roadmap.md).
 
-## Quick start
+## Installation
 
 Requirements:
 
 - Rust 1.88.0 or newer
 - A terminal with ANSI support
 
-Install the released binary from crates.io:
+Install Rust Commander from [`crates.io`](https://crates.io/crates/rust-commander):
 
 ```bash
 cargo install rust-commander --locked
+```
+
+Then launch it with:
+
+```bash
 rc
 ```
 
 The package is named `rust-commander`; the installed executable is intentionally named
 `rc`.
 
-To run from a local checkout instead:
+To build and run from a local checkout instead:
 
 ```bash
 cargo run -p rust-commander --locked
