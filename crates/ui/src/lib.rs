@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod bundled_skins;
 mod skin;
 
 use chrono::{DateTime, Local};

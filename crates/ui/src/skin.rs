@@ -1,3 +1,4 @@
+use crate::bundled_skins::BUNDLED_SKINS;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -5,7 +6,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-const BUNDLED_SKIN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/skins");
 const HOMEBREW_PREFIX_SKIN_DIR: &str = "/opt/homebrew/share/mc/skins";
 const LOCAL_SKIN_DIR: &str = "/usr/local/share/mc/skins";
 const SYSTEM_SKIN_DIR: &str = "/usr/share/mc/skins";
@@ -54,8 +54,10 @@ impl UiSkin {
     }
 
     fn fallback() -> Self {
-        Self::from_ini("default", include_str!("../assets/skins/default.ini"))
-            .unwrap_or_else(|_| Self::hardcoded_fallback())
+        let Some((_, source)) = bundled_skin("default") else {
+            return Self::hardcoded_fallback();
+        };
+        Self::from_ini("default", source).unwrap_or_else(|_| Self::hardcoded_fallback())
     }
 
     fn hardcoded_fallback() -> Self {
@@ -102,22 +104,24 @@ impl UiSkin {
     }
 
     fn from_named_skin(name: &str, extra_skin_dirs: &[PathBuf]) -> Result<Self, String> {
-        let path = resolve_skin_path(name, extra_skin_dirs).ok_or_else(|| {
-            let searched = search_dirs(extra_skin_dirs)
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>();
-            format!("unable to locate skin '{name}' in: {}", searched.join(", "))
-        })?;
-
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read skin '{}': {error}", path.display()))?;
-        let skin_name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or(name)
-            .to_string();
-        Self::from_ini(&skin_name, &source)
+        match resolve_skin(name, extra_skin_dirs).ok_or_else(|| {
+            format!(
+                "unable to locate skin '{name}' in: {}",
+                search_locations(extra_skin_dirs).join(", ")
+            )
+        })? {
+            SkinSource::Bundled { name, source } => Self::from_ini(name, source),
+            SkinSource::File(path) => {
+                let source = fs::read_to_string(&path).map_err(|error| {
+                    format!("failed to read skin '{}': {error}", path.display())
+                })?;
+                let skin_name = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(name);
+                Self::from_ini(skin_name, &source)
+            }
+        }
     }
 
     fn from_ini(name: &str, source: &str) -> Result<Self, String> {
@@ -181,9 +185,12 @@ pub fn list_available_skins(skin_dir: Option<&Path>) -> Vec<String> {
 }
 
 pub fn list_available_skins_with_search_roots(extra_skin_dirs: &[PathBuf]) -> Vec<String> {
-    let mut names = BTreeSet::new();
+    let mut names = BUNDLED_SKINS
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect::<BTreeSet<_>>();
 
-    for directory in search_dirs(extra_skin_dirs) {
+    for directory in filesystem_search_dirs(extra_skin_dirs) {
         let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
@@ -204,15 +211,23 @@ pub fn list_available_skins_with_search_roots(extra_skin_dirs: &[PathBuf]) -> Ve
     names.into_iter().collect()
 }
 
-fn resolve_skin_path(name: &str, extra_skin_dirs: &[PathBuf]) -> Option<PathBuf> {
+enum SkinSource {
+    Bundled {
+        name: &'static str,
+        source: &'static str,
+    },
+    File(PathBuf),
+}
+
+fn resolve_skin(name: &str, extra_skin_dirs: &[PathBuf]) -> Option<SkinSource> {
     let requested_path = Path::new(name);
     if requested_path.is_absolute() || name.contains('/') {
         if requested_path.exists() {
-            return Some(requested_path.to_path_buf());
+            return Some(SkinSource::File(requested_path.to_path_buf()));
         }
         let with_extension = requested_path.with_extension("ini");
         if with_extension.exists() {
-            return Some(with_extension);
+            return Some(SkinSource::File(with_extension));
         }
     }
 
@@ -221,16 +236,35 @@ fn resolve_skin_path(name: &str, extra_skin_dirs: &[PathBuf]) -> Option<PathBuf>
     } else {
         format!("{name}.ini")
     };
-    for directory in search_dirs(extra_skin_dirs) {
+    for directory in extra_skin_dirs {
         let path = directory.join(&file_name);
         if path.exists() {
-            return Some(path);
+            return Some(SkinSource::File(path));
+        }
+    }
+
+    if let Some((name, source)) = bundled_skin(name) {
+        return Some(SkinSource::Bundled { name, source });
+    }
+
+    for directory in system_skin_dirs() {
+        let path = directory.join(&file_name);
+        if path.exists() {
+            return Some(SkinSource::File(path));
         }
     }
     None
 }
 
-fn search_dirs(extra_skin_dirs: &[PathBuf]) -> Vec<PathBuf> {
+fn bundled_skin(name: &str) -> Option<(&'static str, &'static str)> {
+    let name = name.strip_suffix(".ini").unwrap_or(name);
+    BUNDLED_SKINS
+        .iter()
+        .copied()
+        .find(|(candidate, _)| *candidate == name)
+}
+
+fn filesystem_search_dirs(extra_skin_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
 
@@ -241,12 +275,7 @@ fn search_dirs(extra_skin_dirs: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
 
-    for path in [
-        PathBuf::from(BUNDLED_SKIN_DIR),
-        PathBuf::from(HOMEBREW_PREFIX_SKIN_DIR),
-        PathBuf::from(LOCAL_SKIN_DIR),
-        PathBuf::from(SYSTEM_SKIN_DIR),
-    ] {
+    for path in system_skin_dirs() {
         let key = path.to_string_lossy().into_owned();
         if seen.insert(key) {
             dirs.push(path);
@@ -254,6 +283,28 @@ fn search_dirs(extra_skin_dirs: &[PathBuf]) -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+fn system_skin_dirs() -> [PathBuf; 3] {
+    [
+        PathBuf::from(HOMEBREW_PREFIX_SKIN_DIR),
+        PathBuf::from(LOCAL_SKIN_DIR),
+        PathBuf::from(SYSTEM_SKIN_DIR),
+    ]
+}
+
+fn search_locations(extra_skin_dirs: &[PathBuf]) -> Vec<String> {
+    let mut locations = extra_skin_dirs
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    locations.push(String::from("embedded skins"));
+    locations.extend(
+        system_skin_dirs()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    locations
 }
 
 fn parse_ini(source: &str) -> HashMap<String, HashMap<String, String>> {
@@ -538,6 +589,48 @@ fn intern_border_symbol(value: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_skin_table_matches_packaged_assets() {
+        let bundled_names = BUNDLED_SKINS
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            bundled_names.len(),
+            BUNDLED_SKINS.len(),
+            "bundled skin names must be unique"
+        );
+
+        let asset_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/skins");
+        let asset_names = fs::read_dir(asset_dir)
+            .expect("packaged skin assets should be readable")
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("ini") {
+                    return None;
+                }
+                path.file_stem()?.to_str().map(str::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(bundled_names, asset_names);
+    }
+
+    #[test]
+    fn named_bundled_skin_resolves_without_a_runtime_asset_path() {
+        assert!(matches!(
+            resolve_skin("julia256", &[]),
+            Some(SkinSource::Bundled {
+                name: "julia256",
+                source,
+            }) if !source.is_empty()
+        ));
+        let skin = UiSkin::from_named_skin("julia256", &[])
+            .expect("embedded non-default skin should parse");
+        assert_eq!(skin.name(), "julia256");
+    }
 
     #[test]
     fn parses_rgb_gray_and_hex_colors() {
