@@ -430,6 +430,7 @@ fn compile_glob(
 
 struct ContentMatcher {
     regex: BytesRegex,
+    continuation_regex: Option<BytesRegex>,
     overlap: usize,
     whole_word: bool,
 }
@@ -441,25 +442,37 @@ impl ContentMatcher {
         whole_word: bool,
     ) -> Result<Self, FindSearchError> {
         let escaped = regex::escape(pattern);
-        let expression = if whole_word {
-            format!(r"(?:^|(?u:\W)){escaped}(?:$|(?u:\W))")
+        let (expression, continuation_expression) = if whole_word {
+            let trailing_boundary = format!(r"{escaped}(?:$|(?u:\W))");
+            (
+                format!(r"(?:^|(?u:\W)){trailing_boundary}"),
+                Some(format!(r"(?u:\W){trailing_boundary}")),
+            )
         } else {
-            escaped
+            (escaped, None)
         };
-        let regex = BytesRegexBuilder::new(&expression)
-            .case_insensitive(!case_sensitive)
-            .unicode(true)
-            .build()
-            .map_err(|error| FindSearchError::InvalidPattern {
-                field: "content",
-                message: error.to_string(),
-            })?;
+        let compile_regex = |expression: &str| {
+            BytesRegexBuilder::new(expression)
+                .case_insensitive(!case_sensitive)
+                .unicode(true)
+                .build()
+                .map_err(|error| FindSearchError::InvalidPattern {
+                    field: "content",
+                    message: error.to_string(),
+                })
+        };
+        let regex = compile_regex(&expression)?;
+        let continuation_regex = continuation_expression
+            .as_deref()
+            .map(compile_regex)
+            .transpose()?;
         let overlap = pattern
             .len()
             .saturating_mul(UTF8_BOUNDARY_LOOKAHEAD)
             .saturating_add(UTF8_BOUNDARY_LOOKAHEAD * 2);
         Ok(Self {
             regex,
+            continuation_regex,
             overlap,
             whole_word,
         })
@@ -474,6 +487,7 @@ impl ContentMatcher {
         let mut file = File::open(path).map_err(ContentSearchError::Io)?;
         let mut read_buffer = [0_u8; CONTENT_READ_BUFFER_SIZE];
         let mut window = Vec::with_capacity(CONTENT_READ_BUFFER_SIZE + self.overlap);
+        let mut window_includes_file_start = true;
 
         loop {
             wait_for_resume(cancel_flag, pause_flag).map_err(ContentSearchError::Control)?;
@@ -490,8 +504,12 @@ impl ContentMatcher {
             } else {
                 window.len().saturating_sub(UTF8_BOUNDARY_LOOKAHEAD)
             };
-            if self
-                .regex
+            let regex = if window_includes_file_start {
+                &self.regex
+            } else {
+                self.continuation_regex.as_ref().unwrap_or(&self.regex)
+            };
+            if regex
                 .find_iter(&window)
                 .any(|matched| matched.end() <= stable_end)
             {
@@ -503,6 +521,11 @@ impl ContentMatcher {
 
             let keep_from = window.len().saturating_sub(self.overlap);
             window.drain(..keep_from);
+            if keep_from > 0 {
+                // `^` denotes only the start of the file. The retained overlap supplies
+                // real boundary context for candidates that span subsequent reads.
+                window_includes_file_start = false;
+            }
         }
     }
 }
@@ -524,5 +547,44 @@ fn wait_for_resume(
             return Ok(());
         }
         thread::sleep(PAUSE_POLL_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn whole_word_anchor_does_not_match_at_a_retained_window_boundary() {
+        let matcher = ContentMatcher::compile("needle", true, true)
+            .expect("whole-word matcher should compile");
+        let retained_start = CONTENT_READ_BUFFER_SIZE
+            .checked_sub(matcher.overlap)
+            .expect("overlap should fit inside the read buffer");
+        let mut content = vec![b'x'; retained_start];
+        content.extend_from_slice(b"needle ");
+        content.resize(CONTENT_READ_BUFFER_SIZE + 1, b'x');
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after the Unix epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("rc-whole-word-window-{stamp}"));
+        fs::write(&path, content).expect("content fixture should be written");
+        let cancel = AtomicBool::new(false);
+        let pause = AtomicBool::new(false);
+
+        let matched = matcher
+            .is_match(&path, &cancel, &pause)
+            .unwrap_or_else(|_| panic!("content fixture should be searchable"));
+
+        assert!(
+            !matched,
+            "the word character before the retained window must prevent a whole-word match"
+        );
+        fs::remove_file(path).expect("content fixture should be removable");
     }
 }
