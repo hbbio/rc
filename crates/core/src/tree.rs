@@ -544,7 +544,6 @@ impl TreeState {
             self.set_cursor(found);
             return true;
         }
-        self.move_visible(1);
         false
     }
 
@@ -1115,6 +1114,28 @@ mod tests {
         assert_eq!(tree.search_query, "b");
         assert!(tree.search_next());
         assert_eq!(tree.selected_entry().map(|entry| &entry.path), Some(&beta));
+
+        fs::remove_dir_all(root).expect("tree fixture should be removable");
+    }
+
+    #[test]
+    fn failed_incremental_search_next_keeps_the_cursor_fixed() {
+        let root = temp_root("failed-search-next");
+        fs::create_dir_all(root.join("alpha")).expect("alpha fixture should be creatable");
+        fs::create_dir_all(root.join("beta")).expect("beta fixture should be creatable");
+        let mut tree = loaded_tree(&root, 4, 64);
+
+        assert!(!tree.append_search_char('z'));
+        let selected_before = tree
+            .selected_entry()
+            .map(|entry| entry.path.clone())
+            .expect("tree should retain a selected entry");
+        assert!(!tree.search_next());
+        assert_eq!(
+            tree.selected_entry().map(|entry| &entry.path),
+            Some(&selected_before),
+            "an unsuccessful search must not select an unrelated directory"
+        );
 
         fs::remove_dir_all(root).expect("tree fixture should be removable");
     }
