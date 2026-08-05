@@ -11,8 +11,11 @@ impl AppState {
             AppCommand::MenuNotImplemented(label) => {
                 self.set_status(format!("{label} is not implemented yet"));
             }
-            AppCommand::OpenMenu => self.open_menu(0),
-            AppCommand::OpenMenuAt(index) => self.open_menu(index),
+            AppCommand::OpenUserMenu => {
+                self.set_status("User menu is not implemented yet (planned for Milestone 5)");
+            }
+            AppCommand::OpenMenuBar => self.open_menu_bar(0),
+            AppCommand::OpenMenuBarAt(index) => self.open_menu_bar(index),
             AppCommand::CloseMenu => self.close_menu(),
             AppCommand::OpenHelp => self.open_help_screen(),
             AppCommand::CloseHelp => self.close_help_screen(),
@@ -197,7 +200,7 @@ impl AppState {
         Some(help)
     }
 
-    pub(crate) fn open_menu(&mut self, menu_index: usize) {
+    pub(crate) fn open_menu_bar(&mut self, menu_index: usize) {
         if let Some(Route::Menu(menu)) = self.routes.last_mut() {
             menu.set_active_menu(menu_index);
             let title = menu.active_menu_title();
@@ -329,7 +332,7 @@ impl AppState {
             && row == 0
             && let Some(menu_index) = top_menu_hit_test(column)
         {
-            return Some(MouseClickCommands::primary(AppCommand::OpenMenuAt(
+            return Some(MouseClickCommands::primary(AppCommand::OpenMenuBarAt(
                 menu_index,
             )));
         }

@@ -150,7 +150,8 @@ Main file manager:
   `Up`/`Down`
 - `>`: reserved for a future explicit shell-command prompt; rc has no always-live shell
   input
-- `F5` copy, `F6` move, `F7` mkdir, `F8` delete, `F2` rename/move
+- `F2`: reserved for the MC-compatible user menu coming in Milestone 5
+- `F5` copy, `F6` rename/move, `F7` mkdir, `F8` delete
 - `Ctrl-J`: open jobs screen
 - `Alt-J`: cancel latest/selected job
 - `Alt-F`, `M-?`, `Ctrl-/`: open find dialog

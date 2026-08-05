@@ -20,7 +20,7 @@ fn quick_cd_menu_entry_opens_the_directory_dialog() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
-    app.apply(AppCommand::OpenMenuAt(1))
+    app.apply(AppCommand::OpenMenuBarAt(1))
         .expect("file menu should open");
     move_menu_selection_to_label(&mut app, "Quick cd");
     app.apply(AppCommand::MenuAccept)

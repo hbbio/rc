@@ -708,8 +708,12 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::HelpBack)
     );
     assert_eq!(
-        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenMenu),
-        Some(AppCommand::OpenMenu)
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenUserMenu),
+        Some(AppCommand::OpenUserMenu)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenMenuBar),
+        Some(AppCommand::OpenMenuBar)
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::PanelInfo),

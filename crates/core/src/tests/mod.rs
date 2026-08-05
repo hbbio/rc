@@ -1160,7 +1160,7 @@ fn menu_route_supports_keyboard_navigation_and_selection() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = app_with_loaded_panels(root.clone());
-    app.apply(AppCommand::OpenMenuAt(2))
+    app.apply(AppCommand::OpenMenuBarAt(2))
         .expect("menu route should open");
     assert_eq!(app.key_context(), KeyContext::Menu);
 
@@ -1182,7 +1182,7 @@ fn menu_stub_action_reports_not_implemented_status() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
-    app.apply(AppCommand::OpenMenuAt(0))
+    app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left menu should open");
     move_menu_selection_to_label(&mut app, "Encoding...");
     app.apply(AppCommand::MenuAccept)
@@ -1192,6 +1192,25 @@ fn menu_stub_action_reports_not_implemented_status() {
         app.status_line.contains("not implemented"),
         "stub actions should report a not-implemented status"
     );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn user_menu_command_is_reserved_for_milestone_five() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-user-menu-placeholder-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.apply(AppCommand::OpenUserMenu)
+        .expect("user menu placeholder should be handled");
+
+    assert_eq!(app.key_context(), KeyContext::FileManager);
+    assert!(app.status_line.contains("planned for Milestone 5"));
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -1207,7 +1226,7 @@ fn side_menu_info_mode_targets_its_named_panel() {
 
     let mut app = app_with_loaded_panels(root.clone());
     app.active_panel = ActivePanel::Right;
-    app.apply(AppCommand::OpenMenuAt(0))
+    app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left menu should open");
     move_menu_selection_to_label(&mut app, "Info");
     app.apply(AppCommand::MenuAccept)
@@ -1229,7 +1248,7 @@ fn side_menu_info_mode_targets_its_named_panel() {
     );
     assert_eq!(app.active_panel, ActivePanel::Right);
 
-    app.apply(AppCommand::OpenMenuAt(0))
+    app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left menu should reopen");
     move_menu_selection_to_label(&mut app, "File listing");
     app.apply(AppCommand::MenuAccept)
@@ -1253,7 +1272,7 @@ fn side_menu_rescan_targets_its_named_panel() {
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.active_panel = ActivePanel::Left;
-    app.apply(AppCommand::OpenMenuAt(4))
+    app.apply(AppCommand::OpenMenuBarAt(4))
         .expect("right menu should open");
     move_menu_selection_to_label(&mut app, "Rescan");
     app.apply(AppCommand::MenuAccept)
@@ -1373,7 +1392,7 @@ fn listing_format_dialog_updates_only_its_named_panel() {
 
     let mut app = app_with_loaded_panels(root.clone());
     app.active_panel = ActivePanel::Right;
-    app.apply(AppCommand::OpenMenuAt(0))
+    app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left menu should open");
     move_menu_selection_to_label(&mut app, "Listing format...");
     app.apply(AppCommand::MenuAccept)
@@ -2340,7 +2359,7 @@ fn command_menu_external_panelize_opens_dialog() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
-    app.apply(AppCommand::OpenMenuAt(2))
+    app.apply(AppCommand::OpenMenuBarAt(2))
         .expect("command menu should open");
     move_menu_selection_to_label(&mut app, "External panelize");
     app.apply(AppCommand::MenuAccept)
@@ -2365,13 +2384,13 @@ fn menu_mouse_clicks_map_to_commands() {
     assert_eq!(
         commands,
         Some(MouseClickCommands {
-            primary: AppCommand::OpenMenuAt(1),
+            primary: AppCommand::OpenMenuBarAt(1),
             activation: None,
-            target: MouseClickTarget::Command(AppCommand::OpenMenuAt(1)),
+            target: MouseClickTarget::Command(AppCommand::OpenMenuBarAt(1)),
         })
     );
 
-    app.apply(AppCommand::OpenMenuAt(1))
+    app.apply(AppCommand::OpenMenuBarAt(1))
         .expect("menu route should open");
     assert_eq!(
         app.commands_for_left_click(8, 3, 120, 40),

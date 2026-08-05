@@ -107,7 +107,8 @@ impl KeyChord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyCommand {
     OpenHelp,
-    OpenMenu,
+    OpenUserMenu,
+    OpenMenuBar,
     Quit,
     PanelOther,
     PanelInfo,
@@ -197,8 +198,8 @@ impl KeyCommand {
 
         match normalized.as_str() {
             "help" => Self::OpenHelp,
-            "menu" | "openmenu" | "pulldown" => Self::OpenMenu,
-            "usermenu" => Self::OpenMenu,
+            "usermenu" => Self::OpenUserMenu,
+            "menu" | "openmenu" | "pulldown" => Self::OpenMenuBar,
             "quit" => Self::Quit,
             "panelother" => Self::PanelOther,
             "panelinfo" => Self::PanelInfo,
@@ -767,7 +768,7 @@ Quit = f10
         let keymap = Keymap::parse(source).expect("keymap should parse");
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(9))),
-            Some(&KeyCommand::OpenMenu)
+            Some(&KeyCommand::OpenMenuBar)
         );
         assert_eq!(
             keymap.resolve(KeyContext::Menu, KeyChord::new(KeyCode::Up)),
@@ -1025,7 +1026,7 @@ MakeDir = f7
         let keymap = Keymap::parse(source).expect("keymap should parse");
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(2))),
-            Some(&KeyCommand::OpenMenu)
+            Some(&KeyCommand::OpenUserMenu)
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(3))),
@@ -1436,6 +1437,17 @@ Reread = ctrl-r
             None,
             "greater-than is reserved for the future shell-command prompt"
         );
+    }
+
+    #[test]
+    fn bundled_keymap_preserves_mc_file_manager_menu_semantics() {
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let resolve_function_key =
+            |number| keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(number)));
+
+        assert_eq!(resolve_function_key(2), Some(&KeyCommand::OpenUserMenu));
+        assert_eq!(resolve_function_key(6), Some(&KeyCommand::Move));
+        assert_eq!(resolve_function_key(9), Some(&KeyCommand::OpenMenuBar));
     }
 
     #[test]
