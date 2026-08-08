@@ -98,6 +98,7 @@ pub enum JobRequest {
     Move {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
+        destination_names: Option<Vec<String>>,
         overwrite: OverwritePolicy,
     },
     Delete {
@@ -205,12 +206,24 @@ impl JobRequest {
                 sources,
                 destination_dir,
                 overwrite,
-            } => format!(
-                "move {} item(s) -> {} [{}]",
-                sources.len(),
-                destination_dir.to_string_lossy(),
-                overwrite.label(),
-            ),
+                destination_names,
+                ..
+            } => {
+                let destination_suffix = match destination_names {
+                    Some(destination_names) if !destination_names.is_empty() => {
+                        format!(" with custom names [{}]", destination_names.join(", "))
+                    }
+                    Some(_) => String::from(""),
+                    None => String::from(""),
+                };
+                format!(
+                    "move {} item(s) -> {} [{}]{}",
+                    sources.len(),
+                    destination_dir.to_string_lossy(),
+                    overwrite.label(),
+                    destination_suffix
+                )
+            }
             Self::Delete { targets } => format!("delete {} item(s)", targets.len()),
             Self::Mkdir { path } => format!("mkdir {}", path.to_string_lossy()),
             Self::Rename {
@@ -918,8 +931,15 @@ fn execute_job(
         JobRequest::Move {
             sources,
             destination_dir,
+            destination_names,
             overwrite,
-        } => move_paths(&sources, &destination_dir, overwrite, progress),
+        } => move_paths(
+            &sources,
+            &destination_dir,
+            destination_names.as_deref(),
+            overwrite,
+            progress,
+        ),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
         JobRequest::Mkdir { path } => {
             progress.set_current_path(&path);
@@ -1002,37 +1022,299 @@ fn copy_paths(
 fn move_paths(
     sources: &[PathBuf],
     destination_dir: &Path,
+    destination_names: Option<&[String]>,
     overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
-    for source in sources {
+    if let Some(destination_names) = destination_names
+        && destination_names.len() != sources.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "move rename requires one destination name per source",
+        ));
+    }
+
+    let move_plan = build_move_plan(sources, destination_dir, destination_names)?;
+    validate_move_plan(&move_plan)?;
+
+    for planned_move in move_plan {
+        let source = planned_move.source;
         progress.ensure_not_canceled()?;
         let source_totals = measure_path_totals(source, progress.cancel_flag.as_ref())?;
-        let destination = destination_path(source, destination_dir)?;
-        let Some(destination) =
-            resolve_destination(source, destination, overwrite, source_totals, progress)?
+        if is_case_only_rename(source, &planned_move.destination)? {
+            move_path(source, &planned_move.destination, source_totals, progress)?;
+            continue;
+        }
+
+        let Some(destination) = resolve_destination(
+            source,
+            planned_move.destination,
+            overwrite,
+            source_totals,
+            progress,
+        )?
         else {
             continue;
         };
-        progress.set_current_path(source);
-        let move_result = (|| -> io::Result<()> {
-            validate_move_destination(source, &destination.path)?;
-            match fs::rename(source, &destination.path) {
-                Ok(()) => {
-                    progress.advance_totals(source, source_totals);
-                    Ok(())
-                }
-                Err(error) if is_cross_device_error(&error) => {
-                    copy_path(source, &destination.path, progress)?;
-                    remove_path(source)?;
-                    Ok(())
-                }
-                Err(error) => Err(error),
-            }
-        })();
+        let move_result = move_path(source, &destination.path, source_totals, progress);
         destination.finish(move_result)?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct PlannedMove<'a> {
+    source: &'a Path,
+    destination: PathBuf,
+}
+
+fn build_move_plan<'a>(
+    sources: &'a [PathBuf],
+    destination_dir: &Path,
+    destination_names: Option<&[String]>,
+) -> io::Result<Vec<PlannedMove<'a>>> {
+    sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let destination = match destination_names {
+                Some(destination_names) => {
+                    let destination_name = &destination_names[index];
+                    validate_custom_destination_name(destination_name)?;
+                    destination_dir.join(destination_name)
+                }
+                None => destination_path(source, destination_dir)?,
+            };
+            if destination.file_name().is_none() || destination.as_os_str().is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "move destination name is invalid",
+                ));
+            }
+            validate_move_destination(source, &destination)?;
+            Ok(PlannedMove {
+                source,
+                destination,
+            })
+        })
+        .collect()
+}
+
+fn validate_custom_destination_name(destination_name: &str) -> io::Result<()> {
+    let path = Path::new(destination_name);
+    let mut components = path.components();
+    let is_single_normal_component = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(component)), None) if component == path.as_os_str()
+    );
+    if is_single_normal_component {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("move destination name must be a single file name: {destination_name:?}"),
+    ))
+}
+
+fn validate_move_plan(move_plan: &[PlannedMove<'_>]) -> io::Result<()> {
+    let mut source_indices = HashMap::new();
+    let mut destination_indices = HashMap::new();
+    let mut source_identities: HashMap<ExistingPathIdentity, Vec<usize>> = HashMap::new();
+
+    for (index, planned_move) in move_plan.iter().enumerate() {
+        if let Some(previous_index) = source_indices.insert(planned_move.source, index) {
+            return Err(move_plan_conflict_error(
+                "source is selected more than once",
+                &move_plan[previous_index],
+                planned_move,
+            ));
+        }
+        if let Some(previous_index) =
+            destination_indices.insert(planned_move.destination.as_path(), index)
+        {
+            return Err(move_plan_conflict_error(
+                "multiple sources have the same destination",
+                &move_plan[previous_index],
+                planned_move,
+            ));
+        }
+        if let Some(identity) = existing_path_identity(planned_move.source)? {
+            source_identities.entry(identity).or_default().push(index);
+        }
+    }
+
+    let mut destination_identities = HashMap::new();
+    for (destination_index, planned_move) in move_plan.iter().enumerate() {
+        if let Some(source_index) = source_indices.get(planned_move.destination.as_path())
+            && *source_index != destination_index
+        {
+            return Err(move_plan_conflict_error(
+                "destination is another selected source",
+                &move_plan[*source_index],
+                planned_move,
+            ));
+        }
+        if planned_move.source == planned_move.destination {
+            continue;
+        }
+
+        if let Some(identity) = existing_path_identity(&planned_move.destination)? {
+            if let Some(source_index) = source_identities.get(&identity).and_then(|indices| {
+                indices
+                    .iter()
+                    .copied()
+                    .find(|source_index| *source_index != destination_index)
+            }) {
+                return Err(move_plan_conflict_error(
+                    "destination is another selected source",
+                    &move_plan[source_index],
+                    planned_move,
+                ));
+            }
+            if let Some(previous_index) = destination_identities.insert(identity, destination_index)
+            {
+                return Err(move_plan_conflict_error(
+                    "multiple sources have the same destination",
+                    &move_plan[previous_index],
+                    planned_move,
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn move_plan_conflict_error(
+    reason: &str,
+    first: &PlannedMove<'_>,
+    second: &PlannedMove<'_>,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "conflicting move mappings ({reason}): {} -> {}; {} -> {}",
+            first.source.to_string_lossy(),
+            first.destination.to_string_lossy(),
+            second.source.to_string_lossy(),
+            second.destination.to_string_lossy(),
+        ),
+    )
+}
+
+fn move_path(
+    source: &Path,
+    destination: &Path,
+    source_totals: JobTotals,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
+    progress.set_current_path(source);
+    validate_move_destination(source, destination)?;
+    match fs::rename(source, destination) {
+        Ok(()) => {
+            progress.advance_totals(source, source_totals);
+            Ok(())
+        }
+        Err(error) if is_cross_device_error(&error) => {
+            copy_path(source, destination, progress)?;
+            remove_path(source)?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_case_only_rename(source: &Path, destination: &Path) -> io::Result<bool> {
+    if source == destination {
+        return Ok(false);
+    }
+
+    let (Some(source_name), Some(destination_name)) = (source.file_name(), destination.file_name())
+    else {
+        return Ok(false);
+    };
+    let names_differ_only_in_case = source_name != destination_name
+        && source_name
+            .to_str()
+            .zip(destination_name.to_str())
+            .is_some_and(|(source_name, destination_name)| {
+                source_name.to_lowercase() == destination_name.to_lowercase()
+            });
+    if !names_differ_only_in_case {
+        return Ok(false);
+    }
+
+    let source_parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    if !existing_paths_refer_to_same_entry(source_parent, destination_parent)?
+        || !existing_paths_refer_to_same_entry(source, destination)?
+    {
+        return Ok(false);
+    }
+
+    let mut source_spelling_exists = false;
+    let mut destination_spelling_exists = false;
+    for entry in fs::read_dir(source_parent)? {
+        let entry_name = entry?.file_name();
+        source_spelling_exists |= entry_name == source_name;
+        destination_spelling_exists |= entry_name == destination_name;
+        if source_spelling_exists && destination_spelling_exists {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+#[cfg(unix)]
+type ExistingPathIdentity = (u64, u64);
+
+#[cfg(windows)]
+type ExistingPathIdentity = String;
+
+#[cfg(not(any(unix, windows)))]
+type ExistingPathIdentity = PathBuf;
+
+fn existing_path_identity(path: &Path) -> io::Result<Option<ExistingPathIdentity>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        match fs::canonicalize(path) {
+            Ok(path) => Ok(Some(path.to_string_lossy().to_lowercase())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        match fs::canonicalize(path) {
+            Ok(path) => Ok(Some(path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn existing_paths_refer_to_same_entry(first: &Path, second: &Path) -> io::Result<bool> {
+    if first == second {
+        return Ok(true);
+    }
+    Ok(existing_path_identity(first)?
+        .zip(existing_path_identity(second)?)
+        .is_some_and(|(first, second)| first == second))
 }
 
 fn delete_paths(targets: &[PathBuf], progress: &mut ProgressTracker<'_>) -> io::Result<()> {
@@ -2766,6 +3048,251 @@ mod tests {
     }
 
     #[test]
+    fn batch_move_rejects_destination_that_is_another_source_before_mutating() {
+        let root = make_temp_dir("move-target-source-collision");
+        let first_source = root.join("a");
+        let second_source = root.join("a.bak");
+        let final_destination = root.join("a.bak.bak");
+        fs::write(&first_source, "first payload").expect("first source should exist");
+        fs::write(&second_source, "second payload").expect("second source should exist");
+
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Move {
+                sources: vec![first_source.clone(), second_source.clone()],
+                destination_dir: root.clone(),
+                destination_names: Some(vec![String::from("a.bak"), String::from("a.bak.bak")]),
+                overwrite: OverwritePolicy::Overwrite,
+            },
+            &LocalFsBackend,
+        );
+
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => {
+                assert_eq!(error.code, JobErrorCode::InvalidInput);
+                assert!(
+                    error
+                        .message
+                        .contains("destination is another selected source")
+                );
+            }
+            _ => panic!("conflicting batch move should fail"),
+        }
+        assert_eq!(counts.failed, 1);
+        assert_eq!(
+            fs::read_to_string(&first_source).expect("first source should remain readable"),
+            "first payload"
+        );
+        assert_eq!(
+            fs::read_to_string(&second_source).expect("second source should remain readable"),
+            "second payload"
+        );
+        assert!(
+            !final_destination.exists(),
+            "preflight failure must not create a destination"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn batch_move_rejects_duplicate_destinations_before_mutating() {
+        let root = make_temp_dir("move-duplicate-destination");
+        let first_source = root.join("first.txt");
+        let second_source = root.join("second.txt");
+        let duplicate_destination = root.join("renamed.txt");
+        fs::write(&first_source, "first payload").expect("first source should exist");
+        fs::write(&second_source, "second payload").expect("second source should exist");
+
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Move {
+                sources: vec![first_source.clone(), second_source.clone()],
+                destination_dir: root.clone(),
+                destination_names: Some(vec![
+                    String::from("renamed.txt"),
+                    String::from("renamed.txt"),
+                ]),
+                overwrite: OverwritePolicy::Overwrite,
+            },
+            &LocalFsBackend,
+        );
+
+        match finished {
+            JobEvent::Finished {
+                result: Err(error), ..
+            } => {
+                assert_eq!(error.code, JobErrorCode::InvalidInput);
+                assert!(
+                    error
+                        .message
+                        .contains("multiple sources have the same destination")
+                );
+            }
+            _ => panic!("duplicate batch destinations should fail"),
+        }
+        assert_eq!(counts.failed, 1);
+        assert_eq!(
+            fs::read_to_string(&first_source).expect("first source should remain readable"),
+            "first payload"
+        );
+        assert_eq!(
+            fs::read_to_string(&second_source).expect("second source should remain readable"),
+            "second payload"
+        );
+        assert!(
+            !duplicate_destination.exists(),
+            "preflight failure must not create a destination"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn batch_move_rejects_custom_names_outside_the_destination_directory() {
+        let root = make_temp_dir("move-name-escape");
+        let destination_dir = root.join("destination");
+        fs::create_dir(&destination_dir).expect("destination directory should exist");
+        let source = root.join("source.txt");
+        let outside = root.join("outside.txt");
+        fs::write(&source, "source payload").expect("source should exist");
+        fs::write(&outside, "outside payload").expect("outside file should exist");
+        let invalid_names = [
+            outside.to_string_lossy().into_owned(),
+            String::from("../outside.txt"),
+            String::from("nested/name.txt"),
+            String::from("."),
+            String::from("trailing/"),
+        ];
+
+        for invalid_name in invalid_names {
+            let (finished, counts) = execute_request_with_backend(
+                JobRequest::Move {
+                    sources: vec![source.clone()],
+                    destination_dir: destination_dir.clone(),
+                    destination_names: Some(vec![invalid_name]),
+                    overwrite: OverwritePolicy::Overwrite,
+                },
+                &LocalFsBackend,
+            );
+
+            match finished {
+                JobEvent::Finished {
+                    result: Err(error), ..
+                } => {
+                    assert_eq!(error.code, JobErrorCode::InvalidInput);
+                    assert!(
+                        error.message.contains("must be a single file name"),
+                        "invalid custom name should report its constraint"
+                    );
+                }
+                _ => panic!("custom name outside the destination should fail"),
+            }
+            assert_eq!(counts.failed, 1);
+            assert_eq!(
+                fs::read_to_string(&source).expect("source should remain readable"),
+                "source payload"
+            );
+            assert_eq!(
+                fs::read_to_string(&outside).expect("outside file should remain readable"),
+                "outside payload"
+            );
+        }
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_move_allows_exact_self_maps_for_hard_linked_sources() {
+        let root = make_temp_dir("move-hard-link-self-map");
+        let first_source = root.join("first.txt");
+        let second_source = root.join("second.txt");
+        fs::write(&first_source, "shared payload").expect("first source should exist");
+        fs::hard_link(&first_source, &second_source).expect("hard link should be creatable");
+
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Move {
+                sources: vec![first_source.clone(), second_source.clone()],
+                destination_dir: root.clone(),
+                destination_names: None,
+                overwrite: OverwritePolicy::Skip,
+            },
+            &LocalFsBackend,
+        );
+
+        assert!(
+            matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+            "exact hard-link self-maps should remain valid no-op moves"
+        );
+        assert_eq!(counts.succeeded, 1);
+        assert_eq!(
+            fs::read_to_string(&first_source).expect("first source should remain readable"),
+            "shared payload"
+        );
+        assert_eq!(
+            fs::read_to_string(&second_source).expect("second source should remain readable"),
+            "shared payload"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn case_only_move_rename_uses_the_requested_spelling_for_every_policy() {
+        let root = make_temp_dir("move-case-only");
+
+        for (label, overwrite) in [
+            ("skip", OverwritePolicy::Skip),
+            ("rename", OverwritePolicy::Rename),
+            ("overwrite", OverwritePolicy::Overwrite),
+        ] {
+            let policy_root = root.join(label);
+            fs::create_dir(&policy_root).expect("policy directory should exist");
+            let source = policy_root.join("foo.txt");
+            let destination = policy_root.join("FOO.txt");
+            fs::write(&source, label).expect("source should exist");
+
+            let (finished, counts) = execute_request_with_backend(
+                JobRequest::Move {
+                    sources: vec![source],
+                    destination_dir: policy_root.clone(),
+                    destination_names: Some(vec![String::from("FOO.txt")]),
+                    overwrite,
+                },
+                &LocalFsBackend,
+            );
+
+            assert!(
+                matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+                "case-only rename should succeed with {label} policy"
+            );
+            assert_eq!(counts.succeeded, 1);
+            let entry_names: Vec<String> = fs::read_dir(&policy_root)
+                .expect("policy directory should be readable")
+                .map(|entry| {
+                    entry
+                        .expect("directory entry should be readable")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            assert_eq!(
+                entry_names,
+                vec![String::from("FOO.txt")],
+                "case-only rename should update the directory entry spelling"
+            );
+            assert_eq!(
+                fs::read_to_string(&destination).expect("renamed file should be readable"),
+                label
+            );
+        }
+
+        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
     fn move_rejects_destination_inside_source_tree() {
         let root = make_temp_dir("move-self");
         let source_root = root.join("source");
@@ -2780,6 +3307,7 @@ mod tests {
         let move_job = manager.enqueue(JobRequest::Move {
             sources: vec![source_root.clone()],
             destination_dir: source_root.clone(),
+            destination_names: None,
             overwrite: OverwritePolicy::Skip,
         });
         command_tx
@@ -2825,6 +3353,7 @@ mod tests {
         let move_job = manager.enqueue(JobRequest::Move {
             sources: vec![source_root.clone()],
             destination_dir: source_root.clone(),
+            destination_names: None,
             overwrite: OverwritePolicy::Overwrite,
         });
         command_tx
@@ -2918,6 +3447,7 @@ mod tests {
         let move_job = manager.enqueue(JobRequest::Move {
             sources: vec![source_file.clone()],
             destination_dir: move_dest.clone(),
+            destination_names: None,
             overwrite: OverwritePolicy::Skip,
         });
         command_tx

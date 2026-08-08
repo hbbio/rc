@@ -172,7 +172,7 @@ fn side_panel_menu_restores_external_panelize_results_and_operation_targets() {
         PanelListingSource::Directory
     ));
 
-    app.apply(AppCommand::OpenMenuAt(0))
+    app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left panel menu should open");
     move_menu_selection_to_label(&mut app, "Panelize");
     app.apply(AppCommand::MenuAccept)

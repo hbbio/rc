@@ -11,6 +11,33 @@ fn select_tree_path(app: &mut AppState, path: &Path) {
     );
 }
 
+fn take_single_run_job_request(app: &mut AppState) -> JobRequest {
+    let commands = app.take_pending_worker_commands();
+    let mut move_request = None;
+    for command in commands {
+        if let WorkerCommand::Run(job) = command
+            && matches!(&job.request, JobRequest::Move { .. })
+        {
+            assert!(
+                move_request.is_none(),
+                "move should queue only one move request per dialog submission"
+            );
+            move_request = Some(job.request);
+        }
+    }
+    move_request.expect("move should dispatch run worker command")
+}
+
+fn set_active_panel_cursor_to_path(app: &mut AppState, target: &Path) {
+    let index = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == *target)
+        .unwrap_or_else(|| panic!("target should exist in active panel: {}", target.display()));
+    app.active_panel_mut().cursor = index;
+}
+
 #[test]
 fn tree_screen_selects_directory_for_active_panel() {
     let stamp = SystemTime::now()
@@ -38,6 +65,240 @@ fn tree_screen_selects_directory_for_active_panel() {
     assert_eq!(app.active_panel().cwd, branch);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn renmov_single_file_default_name_queues_plain_move() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-renmov-single-move-{stamp}"));
+    let destination = root.join("destination");
+    fs::create_dir_all(&destination).expect("destination should exist");
+    let source_file = root.join("demo.txt");
+    fs::write(&source_file, "data").expect("source fixture should be writable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    app.settings_mut().confirmation.confirm_overwrite = false;
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch should move focus");
+    app.set_active_panel_directory(destination.clone())
+        .expect("right panel should move");
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch back focus");
+    set_active_panel_cursor_to_path(&mut app, &source_file);
+
+    app.apply(AppCommand::Move)
+        .expect("move dialog should open");
+    let second_default = match app.top_route() {
+        Route::Dialog(dialog) => {
+            let DialogKind::PairInput(pair_input) = &dialog.kind else {
+                panic!("renmov should open pair-input dialog");
+            };
+            assert!(matches!(
+                dialog.action(),
+                Some(PendingDialogAction::TransferDestination {
+                    new_name_uses_shell_pattern: false,
+                    ..
+                })
+            ));
+            pair_input.second_value.clone()
+        }
+        _ => panic!("renmov should open dialog"),
+    };
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: destination.to_string_lossy().into_owned(),
+        second: second_default,
+    });
+
+    let request = take_single_run_job_request(&mut app);
+    let JobRequest::Move {
+        sources,
+        destination_dir,
+        destination_names,
+        ..
+    } = request
+    else {
+        panic!("move command should dispatch move request");
+    };
+    assert_eq!(sources, vec![source_file.clone()]);
+    assert_eq!(destination_dir, destination);
+    assert!(
+        destination_names.is_none(),
+        "unchanged name should use default move request"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn renmov_single_file_with_wildcards_uses_its_default_as_a_literal_name() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-renmov-single-literal-{stamp}"));
+    let destination = root.join("destination");
+    fs::create_dir_all(&destination).expect("destination should exist");
+    let source_file = root.join("a*b*c");
+    fs::write(&source_file, "data").expect("source fixture should be writable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    app.settings_mut().confirmation.confirm_overwrite = false;
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch should move focus");
+    app.set_active_panel_directory(destination.clone())
+        .expect("right panel should move");
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch back focus");
+    set_active_panel_cursor_to_path(&mut app, &source_file);
+
+    app.apply(AppCommand::Move)
+        .expect("move dialog should open");
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: destination.to_string_lossy().into_owned(),
+        second: String::from("renamed.txt"),
+    });
+
+    let request = take_single_run_job_request(&mut app);
+    let JobRequest::Move {
+        sources,
+        destination_names,
+        ..
+    } = request
+    else {
+        panic!("move command should dispatch move request");
+    };
+    assert_eq!(sources, vec![source_file]);
+    assert_eq!(
+        destination_names,
+        Some(vec![String::from("renamed.txt")]),
+        "literal wildcard characters in the source name must not enable pattern matching"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn renmov_single_file_preserves_literal_whitespace_in_its_default_name() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-renmov-single-whitespace-{stamp}"));
+    let destination = root.join("destination");
+    fs::create_dir_all(&destination).expect("destination should exist");
+    let source_file = root.join(" demo.txt ");
+    fs::write(&source_file, "data").expect("source fixture should be writable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    app.settings_mut().confirmation.confirm_overwrite = false;
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch should move focus");
+    app.set_active_panel_directory(destination.clone())
+        .expect("right panel should move");
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch back focus");
+    set_active_panel_cursor_to_path(&mut app, &source_file);
+
+    app.apply(AppCommand::Move)
+        .expect("move dialog should open");
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: destination.to_string_lossy().into_owned(),
+        second: String::from("renamed.txt"),
+    });
+
+    let request = take_single_run_job_request(&mut app);
+    let JobRequest::Move {
+        destination_names, ..
+    } = request
+    else {
+        panic!("move command should dispatch move request");
+    };
+    assert_eq!(
+        destination_names,
+        Some(vec![String::from("renamed.txt")]),
+        "literal whitespace in the source name must be preserved while matching the default"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn renmov_multiple_selection_can_rename_by_wildcard_pattern() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-renmov-multi-rename-{stamp}"));
+    let destination = root.join("destination");
+    fs::create_dir_all(&destination).expect("destination should exist");
+    let source_root = root;
+    let first = source_root.join("first.txt");
+    let second = source_root.join("second.txt");
+    fs::write(&first, "a").expect("first source fixture should be writable");
+    fs::write(&second, "b").expect("second source fixture should be writable");
+
+    let mut app = app_with_loaded_panels(source_root.clone());
+    app.settings_mut().confirmation.confirm_overwrite = false;
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch should move focus");
+    app.set_active_panel_directory(destination.clone())
+        .expect("right panel should move");
+    app.apply(AppCommand::SwitchPanel)
+        .expect("switch back focus");
+    set_active_panel_cursor_to_path(&mut app, &first);
+    app.apply(AppCommand::ToggleTag)
+        .expect("first item should be taggable");
+    set_active_panel_cursor_to_path(&mut app, &second);
+    app.apply(AppCommand::ToggleTag)
+        .expect("second item should be taggable");
+
+    app.apply(AppCommand::Move)
+        .expect("move dialog should open");
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("renmov should open dialog");
+    };
+    assert!(matches!(
+        dialog.action(),
+        Some(PendingDialogAction::TransferDestination {
+            new_name_uses_shell_pattern: true,
+            ..
+        })
+    ));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: destination.to_string_lossy().into_owned(),
+        second: String::from("*.txt.bak"),
+    });
+
+    let request = take_single_run_job_request(&mut app);
+    let JobRequest::Move {
+        sources,
+        destination_dir,
+        destination_names,
+        ..
+    } = request
+    else {
+        panic!("move command should dispatch move request");
+    };
+    assert_eq!(
+        sources,
+        vec![first.clone(), second.clone()],
+        "tagged operation order should be preserved"
+    );
+    assert_eq!(destination_dir, destination);
+    assert_eq!(
+        destination_names.expect("pattern rename should provide names"),
+        vec![
+            String::from("first.txt.bak"),
+            String::from("second.txt.bak")
+        ]
+    );
+
+    fs::remove_dir_all(&source_root).expect("must remove temp root");
 }
 
 #[test]
@@ -708,8 +969,12 @@ fn app_command_mapping_is_context_aware() {
         Some(AppCommand::HelpBack)
     );
     assert_eq!(
-        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenMenu),
-        Some(AppCommand::OpenMenu)
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenUserMenu),
+        Some(AppCommand::OpenUserMenu)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenMenuBar),
+        Some(AppCommand::OpenMenuBar)
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::PanelInfo),

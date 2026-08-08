@@ -3,6 +3,15 @@ use std::collections::HashMap;
 use crate::*;
 
 impl AppState {
+    pub fn function_key_command(
+        &self,
+        context: KeyContext,
+        function_key: u8,
+    ) -> Option<AppCommand> {
+        self.keybinding_hints
+            .command_for_function_key(context, function_key)
+    }
+
     pub fn keybinding_labels(&self, context: KeyContext, command: AppCommand) -> Option<&[String]> {
         self.keybinding_hints.labels_for(context, command)
     }
@@ -302,7 +311,7 @@ impl AppState {
             "fm_open_menu",
             self.keybinding_primary_or_fallback(
                 KeyContext::FileManager,
-                AppCommand::OpenMenu,
+                AppCommand::OpenMenuBar,
                 "F9",
             ),
         );
@@ -339,7 +348,7 @@ impl AppState {
             "fm_external_panelize_menu",
             self.keybinding_primary_or_fallback(
                 KeyContext::FileManager,
-                AppCommand::OpenMenu,
+                AppCommand::OpenMenuBar,
                 "F9",
             ),
         );
@@ -569,7 +578,7 @@ impl AppState {
                 self.xmap_sequence_or_fallback(AppCommand::OpenPanelizeDialog, "Ctrl-X !"),
                 self.keybinding_primary_or_fallback(
                     KeyContext::FileManager,
-                    AppCommand::OpenMenu,
+                    AppCommand::OpenMenuBar,
                     "F9"
                 ),
             ),

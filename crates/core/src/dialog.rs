@@ -150,9 +150,11 @@ impl PairInputField {
 pub struct PairInputDialogState {
     pub first_prompt: String,
     pub first_value: String,
+    pub first_default_value: Option<String>,
     pub second_prompt: String,
     pub second_value: String,
     pub focus: PairInputField,
+    pub second_default_value: Option<String>,
 }
 
 impl PairInputDialogState {
@@ -463,14 +465,42 @@ impl DialogState {
         second_prompt: impl Into<String>,
         second_value: impl Into<String>,
     ) -> Self {
+        let first_value = first_value.into();
+        let second_value = second_value.into();
         Self {
             title: title.into(),
             kind: DialogKind::PairInput(PairInputDialogState {
                 first_prompt: first_prompt.into(),
-                first_value: first_value.into(),
+                first_value: first_value.clone(),
+                first_default_value: Some(first_value),
                 second_prompt: second_prompt.into(),
-                second_value: second_value.into(),
+                second_value,
                 focus: PairInputField::First,
+                second_default_value: None,
+            }),
+        }
+    }
+
+    pub fn pair_input_with_default(
+        title: impl Into<String>,
+        first_prompt: impl Into<String>,
+        first_value: impl Into<String>,
+        second_prompt: impl Into<String>,
+        second_value: impl Into<String>,
+        second_default: impl Into<String>,
+    ) -> Self {
+        let first_value = first_value.into();
+        let second_value = second_value.into();
+        Self {
+            title: title.into(),
+            kind: DialogKind::PairInput(PairInputDialogState {
+                first_prompt: first_prompt.into(),
+                first_value: first_value.clone(),
+                first_default_value: Some(first_value),
+                second_prompt: second_prompt.into(),
+                second_value,
+                focus: PairInputField::First,
+                second_default_value: Some(second_default.into()),
             }),
         }
     }

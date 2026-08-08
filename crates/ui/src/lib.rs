@@ -208,185 +208,93 @@ fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, active_menu: Op
     frame.render_widget(Paragraph::new(Line::from(spans)).style(menu_style), area);
 }
 
-type ButtonBinding = Option<(KeyContext, AppCommand, Option<u8>)>;
-type ButtonLabel<'a> = (&'a str, &'a str, ButtonBinding);
-
 fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppState) {
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
-    let labels: [ButtonLabel<'_>; 10] = match state.top_route() {
+    let (context, fallback_labels): (KeyContext, [&str; 10]) = match state.top_route() {
         Route::FindResults(results) => {
             let pause_label = if matches!(results.status, FindResultsStatus::Paused) {
                 "Continue"
             } else {
                 "Pause"
             };
-            [
-                (
-                    "1",
+            (
+                KeyContext::FindResults,
+                [
                     "Help",
-                    Some((KeyContext::FindResults, AppCommand::OpenHelp, Some(1))),
-                ),
-                ("2", "", None),
-                ("3", "", None),
-                (
-                    "4",
+                    "",
+                    "",
                     "Again",
-                    Some((
-                        KeyContext::FindResults,
-                        AppCommand::FindResultsAgain,
-                        Some(4),
-                    )),
-                ),
-                (
-                    "5",
                     "Panelize",
-                    Some((
-                        KeyContext::FindResults,
-                        AppCommand::FindResultsPanelize,
-                        Some(5),
-                    )),
-                ),
-                (
-                    "6",
                     pause_label,
-                    Some((
-                        KeyContext::FindResults,
-                        AppCommand::FindResultsTogglePause,
-                        Some(6),
-                    )),
-                ),
-                ("7", "", None),
-                ("8", "", None),
-                ("9", "", None),
-                (
-                    "10",
+                    "",
+                    "",
+                    "",
                     "Close",
-                    Some((
-                        KeyContext::FindResults,
-                        AppCommand::CloseFindResults,
-                        Some(10),
-                    )),
-                ),
-            ]
+                ],
+            )
         }
-        Route::Help(_) => [
-            (
-                "1",
-                "Help",
-                Some((KeyContext::Help, AppCommand::OpenHelp, Some(1))),
-            ),
-            (
-                "2",
-                "Index",
-                Some((KeyContext::Help, AppCommand::HelpIndex, Some(2))),
-            ),
-            (
-                "3",
-                "Prev",
-                Some((KeyContext::Help, AppCommand::HelpBack, Some(3))),
-            ),
-            ("4", "", None),
-            ("5", "", None),
-            ("6", "", None),
-            ("7", "", None),
-            ("8", "", None),
-            ("9", "", None),
-            (
-                "10",
+        Route::Help(_) => (
+            KeyContext::Help,
+            ["Help", "Index", "Prev", "", "", "", "", "", "", "Quit"],
+        ),
+        _ => (
+            KeyContext::FileManager,
+            [
+                "Help", "Menu", "View", "Edit", "Copy", "RenMov", "Mkdir", "Delete", "PullDn",
                 "Quit",
-                Some((KeyContext::Help, AppCommand::CloseHelp, Some(10))),
-            ),
-        ],
-        _ => [
-            (
-                "1",
-                "Help",
-                Some((KeyContext::FileManager, AppCommand::OpenHelp, Some(1))),
-            ),
-            (
-                "2",
-                "Menu",
-                Some((KeyContext::FileManager, AppCommand::OpenMenu, Some(2))),
-            ),
-            (
-                "3",
-                "View",
-                Some((KeyContext::FileManager, AppCommand::OpenEntry, Some(3))),
-            ),
-            (
-                "4",
-                "Edit",
-                Some((KeyContext::FileManager, AppCommand::EditEntry, Some(4))),
-            ),
-            (
-                "5",
-                "Copy",
-                Some((KeyContext::FileManager, AppCommand::Copy, Some(5))),
-            ),
-            (
-                "6",
-                "RenMov",
-                Some((KeyContext::FileManager, AppCommand::Move, Some(6))),
-            ),
-            (
-                "7",
-                "Mkdir",
-                Some((
-                    KeyContext::FileManager,
-                    AppCommand::OpenInputDialog,
-                    Some(7),
-                )),
-            ),
-            (
-                "8",
-                "Delete",
-                Some((KeyContext::FileManager, AppCommand::Delete, Some(8))),
-            ),
-            (
-                "9",
-                "PullDn",
-                Some((KeyContext::FileManager, AppCommand::OpenMenu, Some(9))),
-            ),
-            (
-                "10",
-                "Quit",
-                Some((KeyContext::FileManager, AppCommand::Quit, Some(10))),
-            ),
-        ],
+            ],
+        ),
     };
 
     let mut spans: Vec<Span<'_>> = Vec::new();
-    for (index, (fallback_hotkey, label, binding)) in labels.into_iter().enumerate() {
+    for (index, fallback_label) in fallback_labels.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(" ", button_style));
         }
-        let hotkey = binding
-            .and_then(|(context, command, preferred_f)| {
-                button_bar_hotkey_label(state, context, command, preferred_f)
-            })
-            .unwrap_or_else(|| fallback_hotkey.to_string());
-        spans.push(Span::styled(hotkey, hotkey_style));
+        let function_key = (index + 1) as u8;
+        let label = match state.function_key_command(context, function_key) {
+            Some(command) => button_bar_command_label(state, command).unwrap_or(""),
+            None => fallback_label,
+        };
+        spans.push(Span::styled(format!("F{function_key}"), hotkey_style));
         spans.push(Span::styled(label, button_style));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
 }
 
-fn button_bar_hotkey_label(
-    state: &AppState,
-    context: KeyContext,
-    command: AppCommand,
-    preferred_function_key: Option<u8>,
-) -> Option<String> {
-    let labels = state.keybinding_labels(context, command)?;
-    if let Some(function_key) = preferred_function_key {
-        let preferred_label = format!("F{function_key}");
-        if labels.iter().any(|label| label == &preferred_label) {
-            return Some(preferred_label);
+fn button_bar_command_label(state: &AppState, command: AppCommand) -> Option<&'static str> {
+    match command {
+        AppCommand::OpenHelp => Some("Help"),
+        AppCommand::OpenUserMenu => Some("Menu"),
+        AppCommand::OpenEntry => Some("View"),
+        AppCommand::EditEntry => Some("Edit"),
+        AppCommand::Copy => Some("Copy"),
+        AppCommand::Move => Some("RenMov"),
+        AppCommand::OpenConfirmDialog => Some("Rename"),
+        AppCommand::OpenInputDialog => Some("Mkdir"),
+        AppCommand::Delete => Some("Delete"),
+        AppCommand::OpenMenuBar => Some("PullDn"),
+        AppCommand::Quit | AppCommand::CloseHelp => Some("Quit"),
+        AppCommand::FindResultsAgain => Some("Again"),
+        AppCommand::FindResultsPanelize => Some("Panelize"),
+        AppCommand::FindResultsTogglePause => {
+            if matches!(
+                state.top_route(),
+                Route::FindResults(results)
+                    if matches!(results.status, FindResultsStatus::Paused)
+            ) {
+                Some("Continue")
+            } else {
+                Some("Pause")
+            }
         }
+        AppCommand::CloseFindResults => Some("Close"),
+        AppCommand::HelpIndex => Some("Index"),
+        AppCommand::HelpBack => Some("Prev"),
+        _ => None,
     }
-    labels.first().cloned()
 }
 
 fn keybinding_primary_or(
@@ -1654,6 +1562,7 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                     Constraint::Length(1),
                     Constraint::Length(3),
                     Constraint::Length(1),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
             let field_block = |focused| {
@@ -1688,10 +1597,46 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                     .block(field_block(input.focus == PairInputField::Second)),
                 layout[3],
             );
+            let (is_move_rename, has_preview) = match (
+                input.first_default_value.as_deref(),
+                input.second_default_value.as_deref(),
+            ) {
+                (Some(_), Some(second_default)) => (second_default != input.second_value, true),
+                _ => (false, false),
+            };
+            let action = if is_move_rename {
+                "Enter to Rename"
+            } else {
+                "Enter to Move"
+            };
+            let action_text = if input
+                .first_default_value
+                .as_ref()
+                .is_some_and(|_| input.second_default_value.as_ref().is_some())
+            {
+                action
+            } else {
+                "Type text | Tab next field | Enter accept | Esc cancel"
+            };
+
+            let preview_text = if has_preview {
+                format!(
+                    "Result: {}",
+                    Path::new(&input.first_value)
+                        .join(&input.second_value)
+                        .display()
+                )
+            } else {
+                String::new()
+            };
             frame.render_widget(
-                Paragraph::new("Type text | Tab next field | Enter accept | Esc cancel")
-                    .style(skin.style("core", "disabled")),
+                Paragraph::new(preview_text).style(skin.style("core", "disabled")),
                 layout[4],
+            );
+            frame.render_widget(
+                Paragraph::new(format!("{action_text} | Tab next field | Esc cancel"))
+                    .style(skin.style("core", "disabled")),
+                layout[5],
             );
         }
         DialogKind::Listbox(listbox) => {
@@ -3058,6 +3003,31 @@ mod tests {
     }
 
     #[test]
+    fn move_dialog_labels_destination_only_changes_as_moves() {
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut dialog = DialogState::pair_input_with_default(
+            "Move",
+            "Destination directory:",
+            "/tmp/original",
+            "New name:",
+            "demo.txt",
+            "demo.txt",
+        );
+        let DialogKind::PairInput(input) = &mut dialog.kind else {
+            panic!("move dialog should use pair input");
+        };
+        input.first_value = String::from("/tmp/changed");
+
+        terminal
+            .draw(|frame| render_dialog(frame, &dialog, current_skin().as_ref()))
+            .expect("dialog should render");
+        let rendered = buffer_to_text(terminal.backend().buffer());
+        assert!(rendered.contains("Enter to Move"));
+        assert!(!rendered.contains("Enter to Rename"));
+    }
+
+    #[test]
     fn render_draws_quick_cd_query_ranked_results_and_search_state() {
         let backend = TestBackend::new(110, 32);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
@@ -3712,10 +3682,46 @@ mod tests {
     }
 
     #[test]
+    fn file_manager_button_bar_keeps_f2_and_f9_semantically_distinct() {
+        let root = temp_root("file-manager-button-bar");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap =
+            rc_core::keymap::Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+
+        let frame = render_to_text(&app, 120, 40);
+        assert_eq!(frame.matches("F2Menu").count(), 1, "{frame}");
+        assert_eq!(frame.matches("F9PullDn").count(), 1, "{frame}");
+        assert!(!frame.contains("F9Menu"), "{frame}");
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn file_manager_button_bar_labels_the_command_bound_to_each_function_key() {
+        let root = temp_root("remapped-file-manager-button-bar");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap = rc_core::keymap::Keymap::parse(
+            r#"
+[filemanager]
+OpenConfirmDialog = f2
+"#,
+        )
+        .expect("custom keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+
+        let frame = render_to_text(&app, 120, 40);
+        assert!(frame.contains("F2Rename"), "{frame}");
+        assert!(!frame.contains("F2Menu"), "{frame}");
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
     fn render_draws_menu_overlay() {
         let root = temp_root("menu");
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.apply(AppCommand::OpenMenuAt(1))
+        app.apply(AppCommand::OpenMenuBarAt(1))
             .expect("menu route should open");
 
         let frame = render_to_text(&app, 120, 40);
@@ -3748,7 +3754,7 @@ mod tests {
     fn render_styles_unimplemented_menu_entries_as_inactive() {
         let root = temp_root("menu-inactive");
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.apply(AppCommand::OpenMenuAt(1))
+        app.apply(AppCommand::OpenMenuBarAt(1))
             .expect("menu route should open");
 
         let buffer = render_to_buffer(&app, 120, 40);

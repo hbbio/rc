@@ -99,7 +99,7 @@ pub(crate) use tree::{
 };
 pub use viewer::ViewerState;
 
-use crate::keymap::{KeyChord, KeyCode, KeyContext, Keymap, KeymapParseReport};
+use crate::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use crate::panel::read_entries_with_visibility;
 use crate::panel_filter::apply_panel_filter;
 use crate::quick_cd::QuickCdSearchWorkflow;
@@ -117,8 +117,9 @@ const VIEWER_TEXT_PREVIEW_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 pub enum AppCommand {
     OpenHelp,
     CloseHelp,
-    OpenMenu,
-    OpenMenuAt(usize),
+    OpenUserMenu,
+    OpenMenuBar,
+    OpenMenuBarAt(usize),
     CloseMenu,
     Quit,
     CloseViewer,
@@ -336,8 +337,9 @@ impl AppCommand {
         match self {
             Self::OpenHelp
             | Self::CloseHelp
-            | Self::OpenMenu
-            | Self::OpenMenuAt(_)
+            | Self::OpenUserMenu
+            | Self::OpenMenuBar
+            | Self::OpenMenuBarAt(_)
             | Self::CloseMenu
             | Self::Quit
             | Self::CloseViewer
@@ -1777,6 +1779,15 @@ enum PendingDialogAction {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         source_base_dir: PathBuf,
+        new_name_default: Option<String>,
+        new_name_uses_shell_pattern: bool,
+        origin: OperationOrigin,
+    },
+    TransferRenameOverwrite {
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+        destination_names: Vec<String>,
         origin: OperationOrigin,
     },
     TransferOverwrite {
@@ -1913,12 +1924,14 @@ enum EditSelectionResult {
 #[derive(Clone, Debug, Default)]
 struct KeybindingHints {
     labels_by_context_and_command: HashMap<(KeyContext, AppCommand), Vec<String>>,
+    commands_by_context_and_function_key: HashMap<(KeyContext, u8), AppCommand>,
 }
 
 impl KeybindingHints {
     fn from_keymap(keymap: &Keymap) -> Self {
         let mut chords_by_context_and_command: HashMap<(KeyContext, AppCommand), Vec<KeyChord>> =
             HashMap::new();
+        let mut commands_by_context_and_function_key = HashMap::new();
         let contexts = [
             KeyContext::FileManager,
             KeyContext::FileManagerXMap,
@@ -1951,6 +1964,12 @@ impl KeybindingHints {
                 let Some(app_command) = app_command else {
                     continue;
                 };
+                if chord.modifiers == KeyModifiers::default()
+                    && let KeyCode::F(function_key) = chord.code
+                {
+                    commands_by_context_and_function_key
+                        .insert((context, function_key), app_command);
+                }
                 chords_by_context_and_command
                     .entry((context, app_command))
                     .or_default()
@@ -1975,6 +1994,7 @@ impl KeybindingHints {
 
         Self {
             labels_by_context_and_command,
+            commands_by_context_and_function_key,
         }
     }
 
@@ -1982,6 +2002,16 @@ impl KeybindingHints {
         self.labels_by_context_and_command
             .get(&(context, command))
             .map(Vec::as_slice)
+    }
+
+    fn command_for_function_key(
+        &self,
+        context: KeyContext,
+        function_key: u8,
+    ) -> Option<AppCommand> {
+        self.commands_by_context_and_function_key
+            .get(&(context, function_key))
+            .copied()
     }
 }
 

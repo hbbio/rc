@@ -93,6 +93,7 @@ fn recursive_copy_move_delete_round_trip() {
     let move_job = manager.enqueue(JobRequest::Move {
         sources: vec![copied_root.clone()],
         destination_dir: move_dest.clone(),
+        destination_names: None,
         overwrite: OverwritePolicy::Skip,
     });
     command_tx

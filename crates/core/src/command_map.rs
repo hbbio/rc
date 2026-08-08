@@ -9,7 +9,8 @@ impl AppCommand {
 
         match (context, key_command) {
             (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
-            (KeyContext::FileManager, KeyCommand::OpenMenu) => Some(Self::OpenMenu),
+            (KeyContext::FileManager, KeyCommand::OpenUserMenu) => Some(Self::OpenUserMenu),
+            (KeyContext::FileManager, KeyCommand::OpenMenuBar) => Some(Self::OpenMenuBar),
             (KeyContext::Menu, KeyCommand::Quit) => Some(Self::CloseMenu),
             (KeyContext::Menu, KeyCommand::DialogCancel) => Some(Self::CloseMenu),
             (KeyContext::Menu, KeyCommand::DialogAccept)

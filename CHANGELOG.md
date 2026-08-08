@@ -5,6 +5,19 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-08-05
+
+### Fixed
+
+- Restored Midnight Commander function-key semantics: `F2` is reserved for the user menu,
+  `F6` performs rename/move, and `F9` opens the pull-down menu bar.
+- Made the button bar resolve the command bound to each physical function key instead of
+  borrowing another shortcut and potentially displaying duplicate key numbers.
+
+### Documentation
+
+- Added crates.io installation instructions and a current interface screenshot.
+
 ## [0.1.0] - 2026-08-05
 
 ### Added
@@ -30,4 +43,5 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added bounded, cancelable, request-correlated background work throughout expensive
   filesystem workflows.
 
+[0.1.1]: https://github.com/hbbio/rc/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hbbio/rc/releases/tag/v0.1.0
