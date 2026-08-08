@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::dialog::DialogEvent;
 use crate::*;
@@ -160,7 +160,59 @@ impl AppState {
     }
 
     pub(crate) fn start_move_dialog(&mut self) {
-        self.start_transfer_dialog(TransferKind::Move);
+        let sources = self.selected_operation_paths();
+        if sources.is_empty() {
+            self.set_status("Copy/Move requires a selected or tagged entry");
+            return;
+        }
+
+        let destination_dir = self.passive_panel().cwd.clone();
+        let source_base_dir = self.active_panel().cwd.clone();
+        self.start_move_dialog_for_paths(
+            sources,
+            source_base_dir,
+            destination_dir,
+            OperationOrigin::Panel(self.active_panel),
+        );
+    }
+
+    fn start_move_dialog_for_paths(
+        &mut self,
+        sources: Vec<PathBuf>,
+        source_base_dir: PathBuf,
+        destination_dir: PathBuf,
+        origin: OperationOrigin,
+    ) {
+        let new_name_uses_shell_pattern = sources.len() > 1;
+        let default_name = if new_name_uses_shell_pattern {
+            most_common_file_extension_pattern(&sources)
+        } else {
+            sources
+                .first()
+                .and_then(|source| source.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| String::from("*"))
+        };
+        let dialog = DialogState::pair_input_with_default(
+            "Move",
+            "Destination directory:",
+            destination_dir.to_string_lossy(),
+            "New name:",
+            &default_name,
+            &default_name,
+        );
+        self.push_dialog(
+            dialog,
+            PendingDialogAction::TransferDestination {
+                kind: TransferKind::Move,
+                sources,
+                source_base_dir,
+                new_name_default: Some(default_name),
+                new_name_uses_shell_pattern,
+                origin,
+            },
+        );
+        self.set_status("Move: choose destination and new name");
     }
 
     fn start_transfer_dialog(&mut self, kind: TransferKind) {
@@ -203,6 +255,8 @@ impl AppState {
                 kind,
                 sources,
                 source_base_dir,
+                new_name_default: None,
+                new_name_uses_shell_pattern: false,
                 origin,
             },
         );
@@ -399,6 +453,8 @@ impl AppState {
                     kind,
                     sources,
                     source_base_dir,
+                    new_name_default: _,
+                    new_name_uses_shell_pattern: _,
                     origin,
                 }),
                 DialogResult::InputSubmitted(value),
@@ -439,6 +495,125 @@ impl AppState {
                         origin,
                     );
                 }
+            }
+            (
+                Some(PendingDialogAction::TransferDestination {
+                    kind,
+                    sources,
+                    source_base_dir,
+                    new_name_default,
+                    new_name_uses_shell_pattern,
+                    origin,
+                }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => {
+                if kind != TransferKind::Move {
+                    self.set_status("Copy does not support rename input");
+                    return;
+                }
+                let destination_input = first.trim();
+                if destination_input.is_empty() {
+                    self.set_status("Copy/Move canceled: empty destination");
+                    return;
+                }
+                let destination = parse_destination_path(&source_base_dir, destination_input);
+                if destination.as_os_str().is_empty() {
+                    self.set_status("Copy/Move canceled: empty destination");
+                    return;
+                }
+                let default_new_name = new_name_default.as_deref().unwrap_or_default();
+                let new_name = second.as_str();
+                if new_name.is_empty() {
+                    self.set_status("Rename canceled: empty name");
+                    return;
+                }
+                if default_new_name == new_name {
+                    if self.settings.confirmation.confirm_overwrite {
+                        let selected = overwrite_policy_index(self.overwrite_policy());
+                        self.push_dialog(
+                            DialogState::listbox(
+                                "Overwrite Policy",
+                                overwrite_policy_items(),
+                                selected,
+                            ),
+                            PendingDialogAction::TransferOverwrite {
+                                kind,
+                                sources,
+                                destination_dir: destination,
+                                origin,
+                            },
+                        );
+                        self.set_status("Choose overwrite policy");
+                    } else {
+                        self.queue_copy_or_move_job(
+                            kind,
+                            sources,
+                            destination,
+                            self.overwrite_policy(),
+                            origin,
+                        );
+                    }
+                    return;
+                }
+
+                let rename_destinations = rename_sources(
+                    &sources,
+                    default_new_name,
+                    new_name,
+                    new_name_uses_shell_pattern,
+                );
+                if self.settings.confirmation.confirm_overwrite {
+                    let selected = overwrite_policy_index(self.overwrite_policy());
+                    self.push_dialog(
+                        DialogState::listbox(
+                            "Overwrite Policy",
+                            overwrite_policy_items(),
+                            selected,
+                        ),
+                        PendingDialogAction::TransferRenameOverwrite {
+                            kind,
+                            sources,
+                            destination_dir: destination,
+                            destination_names: rename_destinations,
+                            origin,
+                        },
+                    );
+                    self.set_status("Choose overwrite policy");
+                } else {
+                    self.queue_copy_or_move_job_with_names(
+                        kind,
+                        sources,
+                        destination,
+                        rename_destinations,
+                        self.overwrite_policy(),
+                        origin,
+                    );
+                }
+            }
+            (
+                Some(PendingDialogAction::TransferRenameOverwrite {
+                    kind,
+                    sources,
+                    destination_dir,
+                    destination_names,
+                    origin,
+                }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                let overwrite = index
+                    .map(overwrite_policy_from_index)
+                    .unwrap_or(self.overwrite_policy());
+                self.queue_copy_or_move_job_with_names(
+                    kind,
+                    sources,
+                    destination_dir,
+                    destination_names,
+                    overwrite,
+                    origin,
+                );
+            }
+            (Some(PendingDialogAction::TransferRenameOverwrite { .. }), DialogResult::Canceled) => {
+                self.set_status("Copy/Move canceled");
             }
             (Some(PendingDialogAction::TransferDestination { .. }), DialogResult::Canceled) => {
                 self.set_status("Copy/Move canceled");
@@ -788,6 +963,110 @@ fn overwrite_policy_items() -> Vec<String> {
     ]
 }
 
+fn parse_destination_path(base_dir: &Path, value: &str) -> PathBuf {
+    let input_path = PathBuf::from(value);
+    if input_path.is_absolute() {
+        input_path
+    } else {
+        base_dir.join(input_path)
+    }
+}
+
+fn most_common_file_extension_pattern(sources: &[PathBuf]) -> String {
+    let mut common_extension: Option<String> = None;
+    for source in sources {
+        let Some(name) = source.file_name() else {
+            return String::from("*");
+        };
+        let name = name.to_string_lossy();
+        let extension = Path::new(name.as_ref())
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("");
+        if extension.is_empty() || extension.contains('*') {
+            return String::from("*");
+        }
+        if let Some(current) = common_extension.as_ref() {
+            if current != extension {
+                return String::from("*");
+            }
+        } else {
+            common_extension = Some(String::from(extension));
+        }
+    }
+
+    let extension = common_extension.unwrap_or_default();
+    if extension.is_empty() {
+        String::from("*")
+    } else {
+        format!("*.{extension}")
+    }
+}
+
+fn rename_sources(
+    sources: &[PathBuf],
+    old_pattern: &str,
+    new_pattern: &str,
+    use_shell_patterns: bool,
+) -> Vec<String> {
+    sources
+        .iter()
+        .map(|source| {
+            let source_name = source
+                .file_name()
+                .map_or_else(|| source.to_string_lossy(), |name| name.to_string_lossy())
+                .into_owned();
+            rename_source_name(&source_name, old_pattern, new_pattern, use_shell_patterns)
+        })
+        .collect()
+}
+
+fn rename_source_name(
+    source_name: &str,
+    old_pattern: &str,
+    new_pattern: &str,
+    use_shell_patterns: bool,
+) -> String {
+    if use_shell_patterns {
+        if let Some(capture) = wildcard_capture(source_name, old_pattern) {
+            if new_pattern.contains('*') {
+                return new_pattern.replace('*', &capture);
+            }
+            return new_pattern.to_string();
+        }
+        return source_name.to_string();
+    }
+    if source_name == old_pattern {
+        new_pattern.to_string()
+    } else {
+        source_name.to_string()
+    }
+}
+
+fn wildcard_capture(haystack: &str, pattern: &str) -> Option<String> {
+    let parts: Vec<_> = pattern.split('*').collect();
+    if parts.len() > 2 {
+        return None;
+    }
+    if parts.len() == 1 {
+        if haystack == pattern {
+            return Some(String::new());
+        }
+        return None;
+    }
+
+    let (head, tail) = (parts[0], parts[1]);
+    if !haystack.starts_with(head) || !haystack.ends_with(tail) {
+        return None;
+    }
+    let middle_start = head.len();
+    let middle_end = haystack.len().saturating_sub(tail.len());
+    if middle_end < middle_start {
+        return None;
+    }
+    Some(haystack[middle_start..middle_end].to_string())
+}
+
 fn overwrite_policy_index(policy: OverwritePolicy) -> usize {
     match policy {
         OverwritePolicy::Overwrite => 0,
@@ -802,5 +1081,22 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
         1 => OverwritePolicy::Skip,
         2 => OverwritePolicy::Rename,
         _ => OverwritePolicy::Skip,
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_extensions_use_a_valid_catch_all_pattern() {
+        let sources = [PathBuf::from("first.*"), PathBuf::from("second.*")];
+        let pattern = most_common_file_extension_pattern(&sources);
+
+        assert_eq!(pattern, "*");
+        assert_eq!(
+            rename_sources(&sources, &pattern, "*.bak", true),
+            vec![String::from("first.*.bak"), String::from("second.*.bak")]
+        );
     }
 }

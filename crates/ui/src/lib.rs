@@ -1562,6 +1562,7 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                     Constraint::Length(1),
                     Constraint::Length(3),
                     Constraint::Length(1),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
             let field_block = |focused| {
@@ -1596,10 +1597,46 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                     .block(field_block(input.focus == PairInputField::Second)),
                 layout[3],
             );
+            let (is_move_rename, has_preview) = match (
+                input.first_default_value.as_deref(),
+                input.second_default_value.as_deref(),
+            ) {
+                (Some(_), Some(second_default)) => (second_default != input.second_value, true),
+                _ => (false, false),
+            };
+            let action = if is_move_rename {
+                "Enter to Rename"
+            } else {
+                "Enter to Move"
+            };
+            let action_text = if input
+                .first_default_value
+                .as_ref()
+                .is_some_and(|_| input.second_default_value.as_ref().is_some())
+            {
+                action
+            } else {
+                "Type text | Tab next field | Enter accept | Esc cancel"
+            };
+
+            let preview_text = if has_preview {
+                format!(
+                    "Result: {}",
+                    Path::new(&input.first_value)
+                        .join(&input.second_value)
+                        .display()
+                )
+            } else {
+                String::new()
+            };
             frame.render_widget(
-                Paragraph::new("Type text | Tab next field | Enter accept | Esc cancel")
-                    .style(skin.style("core", "disabled")),
+                Paragraph::new(preview_text).style(skin.style("core", "disabled")),
                 layout[4],
+            );
+            frame.render_widget(
+                Paragraph::new(format!("{action_text} | Tab next field | Esc cancel"))
+                    .style(skin.style("core", "disabled")),
+                layout[5],
             );
         }
         DialogKind::Listbox(listbox) => {
@@ -2963,6 +3000,31 @@ mod tests {
         assert!(rendered.contains("Path:"));
         assert!(rendered.contains("/tmp/docs"));
         assert!(rendered.contains("Tab next field"));
+    }
+
+    #[test]
+    fn move_dialog_labels_destination_only_changes_as_moves() {
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        let mut dialog = DialogState::pair_input_with_default(
+            "Move",
+            "Destination directory:",
+            "/tmp/original",
+            "New name:",
+            "demo.txt",
+            "demo.txt",
+        );
+        let DialogKind::PairInput(input) = &mut dialog.kind else {
+            panic!("move dialog should use pair input");
+        };
+        input.first_value = String::from("/tmp/changed");
+
+        terminal
+            .draw(|frame| render_dialog(frame, &dialog, current_skin().as_ref()))
+            .expect("dialog should render");
+        let rendered = buffer_to_text(terminal.backend().buffer());
+        assert!(rendered.contains("Enter to Move"));
+        assert!(!rendered.contains("Enter to Rename"));
     }
 
     #[test]

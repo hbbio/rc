@@ -394,6 +394,32 @@ impl AppState {
             TransferKind::Move => JobRequest::Move {
                 sources,
                 destination_dir,
+                destination_names: None,
+                overwrite,
+            },
+        };
+        self.queue_filesystem_job(request, origin);
+    }
+
+    pub(crate) fn queue_copy_or_move_job_with_names(
+        &mut self,
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+        destination_names: Vec<String>,
+        overwrite: OverwritePolicy,
+        origin: OperationOrigin,
+    ) {
+        let request = match kind {
+            TransferKind::Copy => JobRequest::Copy {
+                sources,
+                destination_dir,
+                overwrite,
+            },
+            TransferKind::Move => JobRequest::Move {
+                sources,
+                destination_dir,
+                destination_names: Some(destination_names),
                 overwrite,
             },
         };

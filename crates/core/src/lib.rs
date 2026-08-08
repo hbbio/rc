@@ -1779,6 +1779,15 @@ enum PendingDialogAction {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         source_base_dir: PathBuf,
+        new_name_default: Option<String>,
+        new_name_uses_shell_pattern: bool,
+        origin: OperationOrigin,
+    },
+    TransferRenameOverwrite {
+        kind: TransferKind,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+        destination_names: Vec<String>,
         origin: OperationOrigin,
     },
     TransferOverwrite {
