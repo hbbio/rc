@@ -31,6 +31,13 @@ PACKAGES: dict[str, PackageSpec] = {
         required_files=("src/lib.rs",),
         internal_dependencies={},
     ),
+    "rust-commander-platform": PackageSpec(
+        source_dir="crates/platform",
+        target_kind="lib",
+        target_name="rc_platform",
+        required_files=("src/lib.rs", "src/windows_console.rs"),
+        internal_dependencies={},
+    ),
     "rust-commander-core": PackageSpec(
         source_dir="crates/core",
         target_kind="lib",
@@ -52,6 +59,7 @@ PACKAGES: dict[str, PackageSpec] = {
         required_files=("src/main.rs", "src/runtime.rs"),
         internal_dependencies={
             "rc-core": "rust-commander-core",
+            "rc-platform": "rust-commander-platform",
             "rc-ui": "rust-commander-ui",
         },
     ),
