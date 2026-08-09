@@ -188,8 +188,17 @@ impl AppState {
             .map(|entry| entry.path.clone());
         let request_id = self.panel_refresh.begin_request(panel, selection_target);
 
-        let (cwd, source, sort_mode, filter, show_hidden_files, cached_panelized_entries) = {
+        let (
+            cwd,
+            source,
+            sort_mode,
+            filter,
+            show_hidden_files,
+            cached_panelized_entries,
+            home_directory,
+        ) = {
             let panel_state = &mut self.panels[panel_index];
+            panel_state.clear_canonical_paths();
             panel_state.loading = true;
             panel_state.disk_usage = None;
             (
@@ -199,6 +208,7 @@ impl AppState {
                 panel_state.filter.clone(),
                 panel_state.show_hidden_files,
                 panel_state.panelized_entries.clone(),
+                panel_state.home_directory.clone(),
             )
         };
         let request = JobRequest::RefreshPanel {
@@ -209,8 +219,36 @@ impl AppState {
             filter,
             show_hidden_files,
             cached_panelized_entries,
+            home_directory,
             request_id,
         };
+        self.queue_panel_refresh_request(panel, request_id, request);
+    }
+
+    pub(crate) fn queue_panel_identity_resolution(&mut self, panel: ActivePanel) {
+        let panel_index = panel.index();
+        let request_id = self.panel_refresh.begin_request(panel, None);
+        let (cwd, home_directory) = {
+            let panel_state = &mut self.panels[panel_index];
+            panel_state.clear_canonical_paths();
+            (panel_state.cwd.clone(), panel_state.home_directory.clone())
+        };
+        let request = JobRequest::ResolvePanelIdentity {
+            panel,
+            cwd,
+            home_directory,
+            request_id,
+        };
+        self.queue_panel_refresh_request(panel, request_id, request);
+    }
+
+    fn queue_panel_refresh_request(
+        &mut self,
+        panel: ActivePanel,
+        request_id: u64,
+        request: JobRequest,
+    ) {
+        let panel_index = panel.index();
         if let Some(previous_job_id) = self.panel_refresh.take_job_id(panel) {
             if self.replace_pending_queued_job_request(previous_job_id, &request) {
                 self.panel_refresh.set_job_id(panel, previous_job_id);
@@ -229,6 +267,25 @@ impl AppState {
 
         let job_id = self.queue_worker_job_request(request);
         self.panel_refresh.set_job_id(panel, job_id);
+    }
+
+    pub(crate) fn handle_panel_identity_resolved(
+        &mut self,
+        panel: ActivePanel,
+        cwd: PathBuf,
+        request_id: u64,
+        result: Result<PanelPathIdentity, String>,
+    ) {
+        if !self.panel_refresh_is_current_request(panel, request_id)
+            || self.panels[panel.index()].cwd != cwd
+        {
+            return;
+        }
+        if let Ok(identity) = result {
+            self.panels[panel.index()]
+                .set_canonical_paths(identity.canonical_cwd, identity.canonical_home_directory);
+        }
+        self.panel_refresh_clear_panel(panel);
     }
 
     pub(crate) fn clear_panel_refresh_state_for_job(&mut self, id: JobId) {
@@ -429,6 +486,8 @@ impl AppState {
                     let PanelRefreshResult {
                         entries,
                         panelized_entries,
+                        canonical_cwd,
+                        canonical_home_directory,
                     } = refresh;
                     let entry_count = entries.len();
                     let streamed_selection = if source.is_panelized()
@@ -441,6 +500,7 @@ impl AppState {
                     };
                     panel_state.apply_entries(entries);
                     panel_state.panelized_entries = panelized_entries;
+                    panel_state.set_canonical_paths(canonical_cwd, canonical_home_directory);
                     if let Some(selected_path) = streamed_selection
                         && let Some(index) = panel_state
                             .entries

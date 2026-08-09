@@ -1026,6 +1026,7 @@ impl AppState {
         }
         let panel = &mut self.panels[panel_index];
         panel.cwd = destination;
+        panel.clear_canonical_paths();
         panel.cursor = 0;
         panel.source = PanelListingSource::Directory;
         panel.panelized_entries = None;

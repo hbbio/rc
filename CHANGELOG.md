@@ -9,6 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Abbreviate refresh-resolved, filesystem-equivalent current-home paths as `~` in pane toplines,
+  align paths left and listing summaries right, and omit empty tag counts.
 - Split Enter activation from F3 viewing: Enter now executes runnable files or opens
   documents with the operating system's configured application, while F3 always uses
   the internal viewer.

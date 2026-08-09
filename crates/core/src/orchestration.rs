@@ -308,6 +308,12 @@ impl AppState {
                 disk_usage,
                 result,
             }),
+            BackgroundEvent::PanelIdentityResolved {
+                panel,
+                cwd,
+                request_id,
+                result,
+            } => self.handle_panel_identity_resolved(panel, cwd, request_id, result),
             BackgroundEvent::ViewerLoaded { path, result } => match result {
                 Ok(viewer) => {
                     let is_preview = viewer.text_is_preview();

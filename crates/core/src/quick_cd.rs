@@ -220,7 +220,7 @@ impl AppState {
         }
 
         let cwd = self.active_panel().cwd.clone();
-        let home = system_home_directory(None).ok().flatten();
+        let home = current_user_home_directory();
         let root = filesystem_root(&cwd);
         let previous_directory = self.previous_panel_directories[self.active_panel.index()].clone();
         if let Some(quick_cd) = self.quick_cd_dialog_mut() {
@@ -412,6 +412,11 @@ fn lexically_normalize(path: &Path) -> PathBuf {
     } else {
         normalized
     }
+}
+
+/// Returns the current user's home directory when it can be resolved on this platform.
+pub fn current_user_home_directory() -> Option<PathBuf> {
+    system_home_directory(None).ok().flatten()
 }
 
 #[cfg(unix)]

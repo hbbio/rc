@@ -43,8 +43,9 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
 pub use background::{
-    BackgroundEvent, PanelRefreshResult, PanelRefreshStreamRequest, build_tree_ready_event,
-    read_disk_usage, refresh_panel_entries, refresh_panel_event, stream_refresh_panel_entries,
+    BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
+    build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,
+    resolve_panel_path_identity, stream_refresh_panel_entries,
 };
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
@@ -71,6 +72,7 @@ pub(crate) use panel::{
     sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
 pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
+pub use quick_cd::current_user_home_directory;
 pub use quick_cd_search::{
     DEFAULT_QUICK_CD_MAX_DIRECTORIES, DEFAULT_QUICK_CD_MAX_RESULTS, QuickCdSearchError,
     QuickCdSearchSnapshot, QuickCdSearchSpec, QuickCdSuggestion, run_quick_cd_search,
@@ -1139,6 +1141,9 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    home_directory: Option<PathBuf>,
+    canonical_cwd: Option<PathBuf>,
+    canonical_home_directory: Option<PathBuf>,
     filter: PanelFilter,
     show_hidden_files: bool,
     source: PanelListingSource,
@@ -1155,6 +1160,9 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            home_directory: None,
+            canonical_cwd: None,
+            canonical_home_directory: None,
             filter: PanelFilter::default(),
             show_hidden_files: true,
             source: PanelListingSource::Directory,
@@ -1166,6 +1174,7 @@ impl PanelState {
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
+        self.clear_canonical_paths();
         let (entries, panelized_entries) = match &self.source {
             PanelListingSource::Directory => {
                 let entries = read_entries_with_visibility(
@@ -1198,8 +1207,11 @@ impl PanelState {
         };
         let entries = apply_panel_filter(entries, &self.filter)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let (canonical_cwd, canonical_home_directory) =
+            canonical_panel_paths(&self.cwd, self.home_directory.as_deref());
         self.panelized_entries = panelized_entries;
         self.apply_entries(entries);
+        self.set_canonical_paths(canonical_cwd, canonical_home_directory);
         self.loading = false;
         Ok(())
     }
@@ -1255,6 +1267,37 @@ impl PanelState {
 
     pub fn filter(&self) -> &PanelFilter {
         &self.filter
+    }
+
+    pub fn home_directory(&self) -> Option<&Path> {
+        self.home_directory.as_deref()
+    }
+
+    pub fn canonical_cwd(&self) -> Option<&Path> {
+        self.canonical_cwd.as_deref()
+    }
+
+    pub fn canonical_home_directory(&self) -> Option<&Path> {
+        self.canonical_home_directory.as_deref()
+    }
+
+    pub(crate) fn set_home_directory(&mut self, home_directory: Option<PathBuf>) {
+        self.home_directory = home_directory;
+        self.clear_canonical_paths();
+    }
+
+    pub(crate) fn set_canonical_paths(
+        &mut self,
+        canonical_cwd: Option<PathBuf>,
+        canonical_home_directory: Option<PathBuf>,
+    ) {
+        self.canonical_cwd = canonical_cwd;
+        self.canonical_home_directory = canonical_home_directory;
+    }
+
+    pub(crate) fn clear_canonical_paths(&mut self) {
+        self.canonical_cwd = None;
+        self.canonical_home_directory = None;
     }
 
     pub fn move_cursor_home(&mut self) {
@@ -1368,6 +1411,7 @@ impl PanelState {
         }
 
         self.cwd = path;
+        self.clear_canonical_paths();
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
@@ -1383,6 +1427,7 @@ impl PanelState {
         };
 
         self.cwd = parent.to_path_buf();
+        self.clear_canonical_paths();
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
@@ -1433,6 +1478,19 @@ impl PanelState {
     pub fn is_panelized(&self) -> bool {
         self.source.is_panelized()
     }
+}
+
+pub(crate) fn canonical_panel_paths(
+    cwd: &Path,
+    home_directory: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Some(home_directory) = home_directory.filter(|path| !path.as_os_str().is_empty()) else {
+        return (None, None);
+    };
+    (
+        fs::canonicalize(cwd).ok(),
+        fs::canonicalize(home_directory).ok(),
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

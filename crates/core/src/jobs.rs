@@ -125,6 +125,13 @@ pub enum JobRequest {
         filter: PanelFilter,
         show_hidden_files: bool,
         cached_panelized_entries: Option<Arc<[FileEntry]>>,
+        home_directory: Option<PathBuf>,
+        request_id: u64,
+    },
+    ResolvePanelIdentity {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        home_directory: Option<PathBuf>,
         request_id: u64,
     },
     Find {
@@ -167,7 +174,7 @@ impl JobRequest {
             Self::Mkdir { .. } => JobKind::Mkdir,
             Self::Rename { .. } => JobKind::Rename,
             Self::PersistSettings { .. } => JobKind::PersistSettings,
-            Self::RefreshPanel { .. } => JobKind::RefreshPanel,
+            Self::RefreshPanel { .. } | Self::ResolvePanelIdentity { .. } => JobKind::RefreshPanel,
             Self::Find { .. } => JobKind::Find,
             Self::QuickCdSearch { .. } => JobKind::QuickCdSearch,
             Self::OpenDesktop { .. } => JobKind::OpenDesktop,
@@ -186,7 +193,7 @@ impl JobRequest {
             Self::Mkdir { .. } => 1,
             Self::Rename { .. } => 1,
             Self::PersistSettings { .. } => 1,
-            Self::RefreshPanel { .. } => 1,
+            Self::RefreshPanel { .. } | Self::ResolvePanelIdentity { .. } => 1,
             Self::Find { .. } => 1,
             Self::QuickCdSearch { .. } => 1,
             Self::OpenDesktop { .. } => 1,
@@ -269,6 +276,16 @@ impl JobRequest {
                     source_label
                 )
             }
+            Self::ResolvePanelIdentity {
+                panel,
+                cwd,
+                request_id,
+                ..
+            } => format!(
+                "resolve {:?} panel path identity at {} (request #{request_id})",
+                panel,
+                cwd.to_string_lossy()
+            ),
             Self::Find { spec, .. } => {
                 format!(
                     "find '{}' ({}) under {}",
@@ -977,10 +994,12 @@ fn execute_job(
             progress.complete_item(marker);
             Ok(())
         }
-        JobRequest::RefreshPanel { .. } => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "panel refresh jobs are executed by the runtime adapter",
-        )),
+        JobRequest::RefreshPanel { .. } | JobRequest::ResolvePanelIdentity { .. } => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "panel refresh jobs are executed by the runtime adapter",
+            ))
+        }
         JobRequest::Find { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "find jobs are executed by the runtime adapter",
@@ -1831,6 +1850,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::Rename { .. }
         | JobRequest::PersistSettings { .. }
         | JobRequest::RefreshPanel { .. }
+        | JobRequest::ResolvePanelIdentity { .. }
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }

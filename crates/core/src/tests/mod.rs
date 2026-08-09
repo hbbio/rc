@@ -33,6 +33,8 @@ fn panel_refresh_result(entries: Vec<FileEntry>) -> PanelRefreshResult {
     PanelRefreshResult {
         entries,
         panelized_entries: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
     }
 }
 
@@ -78,6 +80,7 @@ fn drain_background(app: &mut AppState) {
                             filter,
                             show_hidden_files,
                             cached_panelized_entries,
+                            home_directory,
                             request_id,
                         } => {
                             let _ = event_tx.send(JobEvent::Started { id: job_id });
@@ -91,6 +94,7 @@ fn drain_background(app: &mut AppState) {
                                     filter: filter.clone(),
                                     show_hidden_files: *show_hidden_files,
                                     cached_panelized_entries: cached_panelized_entries.clone(),
+                                    home_directory: home_directory.clone(),
                                     request_id: *request_id,
                                 },
                                 cancel_flag.as_ref(),
@@ -98,6 +102,36 @@ fn drain_background(app: &mut AppState) {
                             let _ = event_tx.send(JobEvent::Finished {
                                 id: job_id,
                                 result: Ok(()),
+                            });
+                        }
+                        JobRequest::ResolvePanelIdentity {
+                            panel,
+                            cwd,
+                            home_directory,
+                            request_id,
+                        } => {
+                            let _ = event_tx.send(JobEvent::Started { id: job_id });
+                            let cancel_flag = job.cancel_flag();
+                            let (result, job_result) = match resolve_panel_path_identity(
+                                cwd,
+                                home_directory.as_deref(),
+                                cancel_flag.as_ref(),
+                            ) {
+                                Ok(identity) => (Ok(identity), Ok(())),
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    (Err(message), Err(JobError::from_io(error)))
+                                }
+                            };
+                            app.handle_background_event(BackgroundEvent::PanelIdentityResolved {
+                                panel: *panel,
+                                cwd: cwd.clone(),
+                                request_id: *request_id,
+                                result,
+                            });
+                            let _ = event_tx.send(JobEvent::Finished {
+                                id: job_id,
+                                result: job_result,
                             });
                         }
                         JobRequest::Find { spec, max_results } => {
@@ -317,6 +351,9 @@ fn move_cursor_stays_in_bounds() {
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -473,6 +510,9 @@ fn toggle_and_invert_tags_work_for_non_parent_entries() {
         ],
         cursor: 0,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -512,6 +552,9 @@ fn page_home_end_navigation_stays_bounded() {
         entries,
         cursor: 1,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -541,6 +584,9 @@ fn sort_mode_cycles_and_toggles_direction() {
         entries: Vec::new(),
         cursor: 0,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,

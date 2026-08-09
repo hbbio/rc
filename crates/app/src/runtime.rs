@@ -9,9 +9,9 @@ use anyhow::{Result, anyhow};
 #[cfg(any(target_os = "linux", all(test, unix)))]
 use rc_core::JOB_CANCELED_MESSAGE;
 use rc_core::{
-    AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
-    PanelListingSource, PanelRefreshResult, PanelRefreshStreamRequest, WorkerCommand,
-    build_tree_ready_event, execute_worker_job, read_disk_usage, run_find_entries,
+    ActivePanel, AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
+    PanelListingSource, PanelRefreshStreamRequest, WorkerCommand, build_tree_ready_event,
+    execute_worker_job, read_disk_usage, resolve_panel_path_identity, run_find_entries,
     stream_refresh_panel_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc, oneshot};
@@ -499,6 +499,7 @@ async fn run_runtime_loop(
                             }
                             JobRequest::Find { .. }
                             | JobRequest::QuickCdSearch { .. }
+                            | JobRequest::ResolvePanelIdentity { .. }
                             | JobRequest::MeasureSelection { .. }
                             | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan")
@@ -775,28 +776,45 @@ fn finish_canceled_worker_before_start(
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
-    if let JobRequest::RefreshPanel {
-        panel,
-        cwd,
-        source,
-        sort_mode,
-        filter,
-        show_hidden_files,
-        cached_panelized_entries,
-        request_id,
-    } = &worker_job.request
-    {
-        let request = PanelRefreshStreamRequest {
-            panel: *panel,
-            cwd: cwd.clone(),
-            source: source.clone(),
-            sort_mode: *sort_mode,
-            filter: filter.clone(),
-            show_hidden_files: *show_hidden_files,
-            cached_panelized_entries: cached_panelized_entries.clone(),
-            request_id: *request_id,
-        };
-        let _ = background_event_tx.send(request.canceled_event());
+    match &worker_job.request {
+        JobRequest::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            filter,
+            show_hidden_files,
+            cached_panelized_entries,
+            home_directory,
+            request_id,
+        } => {
+            let request = PanelRefreshStreamRequest {
+                panel: *panel,
+                cwd: cwd.clone(),
+                source: source.clone(),
+                sort_mode: *sort_mode,
+                filter: filter.clone(),
+                show_hidden_files: *show_hidden_files,
+                cached_panelized_entries: cached_panelized_entries.clone(),
+                home_directory: home_directory.clone(),
+                request_id: *request_id,
+            };
+            let _ = background_event_tx.send(request.canceled_event());
+        }
+        JobRequest::ResolvePanelIdentity {
+            panel,
+            cwd,
+            request_id,
+            ..
+        } => {
+            let _ = background_event_tx.send(BackgroundEvent::PanelIdentityResolved {
+                panel: *panel,
+                cwd: cwd.clone(),
+                request_id: *request_id,
+                result: Err(JobError::canceled().message),
+            });
+        }
+        _ => {}
     }
     let _ = worker_event_tx.send(JobEvent::Finished {
         id: worker_job.id,
@@ -836,6 +854,7 @@ fn execute_runtime_worker_job(
             filter,
             show_hidden_files,
             cached_panelized_entries,
+            home_directory,
             request_id,
         } => execute_refresh_worker_job(
             worker_job.id,
@@ -847,6 +866,24 @@ fn execute_runtime_worker_job(
                 filter,
                 show_hidden_files,
                 cached_panelized_entries,
+                home_directory,
+                request_id,
+            },
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
+        JobRequest::ResolvePanelIdentity {
+            panel,
+            cwd,
+            home_directory,
+            request_id,
+        } => execute_panel_identity_worker_job(
+            worker_job.id,
+            PanelIdentityWorkerRequest {
+                panel,
+                cwd,
+                home_directory,
                 request_id,
             },
             cancel_flag,
@@ -1434,16 +1471,61 @@ fn execute_refresh_worker_job(
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
-fn refresh_outcomes(
-    refresh_result: std::io::Result<PanelRefreshResult>,
+struct PanelIdentityWorkerRequest {
+    panel: ActivePanel,
+    cwd: std::path::PathBuf,
+    home_directory: Option<std::path::PathBuf>,
+    request_id: u64,
+}
+
+fn execute_panel_identity_worker_job(
+    job_id: JobId,
+    request: PanelIdentityWorkerRequest,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let PanelIdentityWorkerRequest {
+        panel,
+        cwd,
+        home_directory,
+        request_id,
+    } = request;
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let identity_result = resolve_panel_path_identity(
+        cwd.as_path(),
+        home_directory.as_deref(),
+        cancel_flag.as_ref(),
+    );
+    let (event_result, result) = refresh_outcomes(identity_result, cancel_flag.as_ref());
+    let delivered = background_event_tx
+        .send(BackgroundEvent::PanelIdentityResolved {
+            panel,
+            cwd,
+            request_id,
+            result: event_result,
+        })
+        .is_ok();
+    let result = if delivered {
+        result
+    } else {
+        Err(JobError::from_message(
+            "background event channel disconnected",
+        ))
+    };
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
+fn refresh_outcomes<T>(
+    refresh_result: std::io::Result<T>,
     cancel_flag: &AtomicBool,
-) -> (Result<PanelRefreshResult, String>, Result<(), JobError>) {
+) -> (Result<T, String>, Result<(), JobError>) {
     match refresh_result {
-        Ok(entries) => {
+        Ok(value) => {
             if is_canceled(cancel_flag) {
-                (Ok(entries), Err(JobError::canceled()))
+                (Ok(value), Err(JobError::canceled()))
             } else {
-                (Ok(entries), Ok(()))
+                (Ok(value), Ok(()))
             }
         }
         Err(error) => {
@@ -1706,6 +1788,7 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
             | JobRequest::LoadViewer { .. }
             | JobRequest::LoadQuickView { .. } => CommandPriority::High,
             JobRequest::RefreshPanel { .. }
+            | JobRequest::ResolvePanelIdentity { .. }
             | JobRequest::QuickCdSearch { .. }
             | JobRequest::MeasureSelection { .. } => CommandPriority::Low,
             _ => CommandPriority::Medium,
@@ -1848,6 +1931,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id,
         }
     }
@@ -2200,6 +2284,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 99,
         });
         let high_job = manager.enqueue(JobRequest::LoadViewer {
@@ -2257,6 +2342,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 7,
         });
         let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
@@ -3246,6 +3332,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 17,
         });
         let job_id = job.id;
@@ -3272,6 +3359,99 @@ mod tests {
         ));
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn identity_canceled_before_start_emits_terminal_background_event() {
+        let root = make_temp_dir("identity-canceled-before-start");
+        let mut manager = JobManager::new();
+        let job = manager.enqueue(JobRequest::ResolvePanelIdentity {
+            panel: ActivePanel::Left,
+            cwd: root.clone(),
+            home_directory: Some(root.clone()),
+            request_id: 19,
+        });
+        let job_id = job.id;
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        finish_canceled_worker_before_start(&job, &worker_event_tx, &background_event_tx);
+
+        assert!(matches!(
+            background_event_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(BackgroundEvent::PanelIdentityResolved {
+                panel: ActivePanel::Left,
+                request_id: 19,
+                result: Err(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            worker_event_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(JobEvent::Finished {
+                id,
+                result: Err(error),
+            }) if id == job_id && error.code == JobErrorCode::Canceled
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn identity_worker_emits_only_identity_completion() {
+        let root = make_temp_dir("panel-identity-only");
+        for index in 0..250 {
+            fs::write(
+                root.join(format!("entry-{index:03}.txt")),
+                index.to_string(),
+            )
+            .expect("identity fixture should be writable");
+        }
+        let canonical_root = fs::canonicalize(&root).expect("fixture should canonicalize");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_panel_identity_worker_job(
+            JobId(18),
+            PanelIdentityWorkerRequest {
+                panel: ActivePanel::Left,
+                cwd: root.clone(),
+                home_directory: Some(root.clone()),
+                request_id: 23,
+            },
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let events = background_event_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(
+            events.len(),
+            1,
+            "identity work must not emit listing chunks"
+        );
+        assert!(matches!(
+            &events[0],
+            BackgroundEvent::PanelIdentityResolved {
+                panel: ActivePanel::Left,
+                cwd,
+                request_id: 23,
+                result: Ok(identity),
+            } if cwd == &root
+                && identity.canonical_cwd.as_deref() == Some(canonical_root.as_path())
+                && identity.canonical_home_directory.as_deref()
+                    == Some(canonical_root.as_path())
+        ));
+        assert!(matches!(
+            worker_event_rx.try_iter().last(),
+            Some(JobEvent::Finished {
+                id: JobId(18),
+                result: Ok(()),
+            })
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
     #[test]
@@ -3456,7 +3636,7 @@ mod tests {
     #[test]
     fn refresh_outcomes_map_permission_denied_to_elevated_retry_hint() {
         let cancel_flag = AtomicBool::new(false);
-        let (event_result, result) = refresh_outcomes(
+        let (event_result, result) = refresh_outcomes::<()>(
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "permission denied",

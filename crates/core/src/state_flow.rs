@@ -8,8 +8,11 @@ use crate::*;
 impl AppState {
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
         let settings = Settings::default();
-        let left = PanelState::new(start_path.clone())?;
-        let right = PanelState::new(start_path)?;
+        let home_directory = current_user_home_directory();
+        let mut left = PanelState::new(start_path.clone())?;
+        left.set_home_directory(home_directory.clone());
+        let mut right = PanelState::new(start_path)?;
+        right.set_home_directory(home_directory);
 
         Ok(Self {
             settings: settings.clone(),

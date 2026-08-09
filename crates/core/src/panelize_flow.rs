@@ -81,6 +81,7 @@ impl AppState {
 
         let panel = &mut self.panels[panel_index];
         panel.cwd = cwd;
+        panel.clear_canonical_paths();
         panel.source = source;
         panel.panelized_entries = Some(panelized_entries);
         panel.entries = entries;
@@ -88,6 +89,7 @@ impl AppState {
         panel.tagged = tagged;
         panel.loading = false;
         panel.disk_usage = disk_usage;
+        self.queue_panel_identity_resolution(panel_id);
         self.sync_quick_view_from(panel_id, true);
         self.sync_selection_size(panel_id, true);
         self.set_status(format!(

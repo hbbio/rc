@@ -321,27 +321,134 @@ fn keybinding_joined_or(
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn panel_title(panel: &PanelState, format: PanelListingFormat) -> String {
-    let panelize_suffix = if panel.is_panelized() {
-        " | panelize"
-    } else {
-        ""
-    };
-    let filter_suffix = if panel.filter().is_active() {
-        format!(" | filter:{}", panel.filter().display_pattern())
-    } else {
-        String::new()
-    };
-    format!(
-        "{} | sort:{}{} | {}{} | tagged:{}{}",
-        format.title_label(),
-        panel.sort_label(),
-        filter_suffix,
-        panel.cwd.to_string_lossy(),
-        panelize_suffix,
-        panel.tagged_count(),
-        if panel.loading { " | loading..." } else { "" }
-    )
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PanelToplineTitles {
+    path: String,
+    summary: String,
+}
+
+const PANEL_TOPLINE_GAP_WIDTH: usize = 1;
+const MIN_USEFUL_PANEL_TITLE_WIDTH: usize = 4;
+
+fn panel_topline_titles(panel: &PanelState, format: PanelListingFormat) -> PanelToplineTitles {
+    panel_topline_titles_with_home(panel, format, panel.home_directory())
+}
+
+fn panel_topline_titles_with_home(
+    panel: &PanelState,
+    format: PanelListingFormat,
+    home: Option<&Path>,
+) -> PanelToplineTitles {
+    let mut summary = vec![
+        format.title_label().to_string(),
+        format!("sort:{}", panel.sort_label()),
+    ];
+    if panel.filter().is_active() {
+        summary.push(format!("filter:{}", panel.filter().display_pattern()));
+    }
+    if panel.is_panelized() {
+        summary.push(String::from("panelize"));
+    }
+    let tagged_count = panel.tagged_count();
+    if tagged_count > 0 {
+        summary.push(format!("tagged:{tagged_count}"));
+    }
+    if panel.loading {
+        summary.push(String::from("loading..."));
+    }
+
+    PanelToplineTitles {
+        path: format_panel_path(
+            &panel.cwd,
+            home,
+            panel.canonical_cwd(),
+            panel.canonical_home_directory(),
+        ),
+        summary: summary.join(" | "),
+    }
+}
+
+fn format_panel_path(
+    path: &Path,
+    home: Option<&Path>,
+    canonical_path: Option<&Path>,
+    canonical_home: Option<&Path>,
+) -> String {
+    let relative = home
+        .filter(|home| !home.as_os_str().is_empty())
+        .and_then(|home| path.strip_prefix(home).ok())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let canonical_path = canonical_path?;
+            let canonical_home = canonical_home.filter(|home| !home.as_os_str().is_empty())?;
+            canonical_path
+                .strip_prefix(canonical_home)
+                .ok()
+                .map(Path::to_path_buf)
+        });
+
+    match relative {
+        Some(relative) if relative.as_os_str().is_empty() => String::from("~"),
+        Some(relative) => format!("~/{}", relative.to_string_lossy()),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+fn fit_panel_topline_titles(titles: PanelToplineTitles, width: usize) -> PanelToplineTitles {
+    let path = sanitize_single_line(&titles.path);
+    let summary = sanitize_single_line(&titles.summary);
+    let path_width = UnicodeWidthStr::width(path.as_str());
+    let summary_width = UnicodeWidthStr::width(summary.as_str());
+
+    if summary_width == 0 {
+        return PanelToplineTitles {
+            path: fit_single_line(path, width),
+            summary,
+        };
+    }
+    if path_width == 0 {
+        return PanelToplineTitles {
+            path,
+            summary: fit_single_line(summary, width),
+        };
+    }
+    if path_width
+        .saturating_add(PANEL_TOPLINE_GAP_WIDTH)
+        .saturating_add(summary_width)
+        <= width
+    {
+        return PanelToplineTitles { path, summary };
+    }
+
+    let available = width.saturating_sub(PANEL_TOPLINE_GAP_WIDTH);
+    let minimum_path_width = path_width.min(MIN_USEFUL_PANEL_TITLE_WIDTH);
+    let minimum_summary_width = summary_width.min(MIN_USEFUL_PANEL_TITLE_WIDTH);
+    if available < minimum_path_width.saturating_add(minimum_summary_width) {
+        return PanelToplineTitles {
+            path: fit_single_line(path, width),
+            summary: String::new(),
+        };
+    }
+
+    // Preserve at least one third of constrained toplines for the path while allowing a short
+    // summary to use only the width it needs. This keeps both sides useful without overlap.
+    let reserved_path_width = path_width.min(MIN_USEFUL_PANEL_TITLE_WIDTH.max(available / 3));
+    let summary_budget = summary_width.min(available.saturating_sub(reserved_path_width));
+    let path_budget = available.saturating_sub(summary_budget);
+    PanelToplineTitles {
+        path: fit_single_line(path, path_budget),
+        summary: fit_single_line(summary, summary_budget),
+    }
+}
+
+fn with_panel_topline_titles<'a>(mut block: Block<'a>, titles: PanelToplineTitles) -> Block<'a> {
+    if !titles.path.is_empty() {
+        block = block.title_top(Line::raw(titles.path).left_aligned());
+    }
+    if !titles.summary.is_empty() {
+        block = block.title_top(Line::raw(titles.summary).right_aligned());
+    }
+    block
 }
 
 fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
@@ -407,17 +514,19 @@ fn render_panel(
     } else {
         configured_format
     };
-    let title = fit_single_line(
-        panel_title(panel, format),
+    let titles = fit_panel_topline_titles(
+        panel_topline_titles(panel, format),
         area.width.saturating_sub(2) as usize,
     );
 
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_set(skin.panel_border_set())
-        .border_style(skin.style("core", "_default_"))
-        .style(skin.style("core", "_default_"));
+    let block = with_panel_topline_titles(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_set(skin.panel_border_set())
+            .border_style(skin.style("core", "_default_"))
+            .style(skin.style("core", "_default_")),
+        titles,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2747,6 +2856,7 @@ mod tests {
     };
     use std::env;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -2762,6 +2872,25 @@ mod tests {
     fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
         let buffer = render_to_buffer(state, width, height);
         buffer_to_text(&buffer)
+    }
+
+    fn render_panel_topline_to_text(titles: PanelToplineTitles, interior_width: u16) -> String {
+        let backend = TestBackend::new(interior_width.saturating_add(2), 2);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        terminal
+            .draw(|frame| {
+                let block = with_panel_topline_titles(
+                    Block::default().borders(Borders::ALL),
+                    titles.clone(),
+                );
+                frame.render_widget(block, frame.area());
+            })
+            .expect("topline should render");
+        buffer_to_text(terminal.backend().buffer())
+            .lines()
+            .next()
+            .expect("rendered block should have a top line")
+            .to_string()
     }
 
     fn buffer_to_text(buffer: &Buffer) -> String {
@@ -2813,6 +2942,7 @@ mod tests {
                                 filter,
                                 show_hidden_files,
                                 cached_panelized_entries,
+                                home_directory,
                                 request_id,
                             } => {
                                 let _ = event_tx.send(JobEvent::Started { id: job_id });
@@ -2826,6 +2956,7 @@ mod tests {
                                         filter: filter.clone(),
                                         show_hidden_files: *show_hidden_files,
                                         cached_panelized_entries: cached_panelized_entries.clone(),
+                                        home_directory: home_directory.clone(),
                                         request_id: *request_id,
                                     },
                                     cancel_flag.as_ref(),
@@ -3450,6 +3581,266 @@ mod tests {
     }
 
     #[test]
+    fn panel_topline_shortens_home_paths_with_tilde() {
+        let home = PathBuf::from("home").join("alice");
+        let relative = PathBuf::from("projects").join("rc");
+        let descendant = home.join(&relative);
+        let mut panel = PanelState::new(descendant.clone()).expect("panel should initialize");
+
+        let descendant_titles =
+            panel_topline_titles_with_home(&panel, PanelListingFormat::Full, Some(&home));
+        assert_eq!(
+            descendant_titles.path,
+            format!("~/{}", relative.to_string_lossy())
+        );
+
+        panel.cwd = home.clone();
+        let home_titles =
+            panel_topline_titles_with_home(&panel, PanelListingFormat::Full, Some(&home));
+        assert_eq!(home_titles.path, "~");
+
+        let lookalike = PathBuf::from("home").join("alice-backup");
+        assert_eq!(
+            format_panel_path(&lookalike, Some(&home), None, None),
+            lookalike.to_string_lossy()
+        );
+        assert_eq!(
+            format_panel_path(&descendant, None, None, None),
+            descendant.to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panel_topline_normalizes_filesystem_equivalent_home_aliases() {
+        let root = temp_root("topline-home-alias");
+        let home = root.join("Users").join("henri");
+        let sibling = root.join("Users").join("henri-backup");
+        let relative = PathBuf::from("projects").join("rc");
+        fs::create_dir_all(home.join(&relative)).expect("home fixture should be creatable");
+        fs::create_dir_all(&sibling).expect("sibling fixture should be creatable");
+        let home_alias = root.join("home-alias");
+        std::os::unix::fs::symlink(&home, &home_alias).expect("home alias should be creatable");
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+        let canonical_alias =
+            fs::canonicalize(&home_alias).expect("home alias should canonicalize");
+        let alias_descendant = home_alias.join(&relative);
+        let canonical_descendant =
+            fs::canonicalize(&alias_descendant).expect("alias descendant should canonicalize");
+        let canonical_sibling = fs::canonicalize(&sibling).expect("sibling should canonicalize");
+
+        assert_eq!(
+            format_panel_path(&home_alias, Some(&home), None, None),
+            home_alias.to_string_lossy(),
+            "an invalidated identity must not be recomputed by rendering"
+        );
+        assert_eq!(
+            format_panel_path(
+                &home_alias,
+                Some(&home),
+                Some(&canonical_alias),
+                Some(&canonical_home),
+            ),
+            "~"
+        );
+        assert_eq!(
+            format_panel_path(
+                &alias_descendant,
+                Some(&home),
+                Some(&canonical_descendant),
+                Some(&canonical_home),
+            ),
+            format!("~/{}", relative.to_string_lossy())
+        );
+        assert_eq!(
+            format_panel_path(
+                &sibling,
+                Some(&home),
+                Some(&canonical_sibling),
+                Some(&canonical_home),
+            ),
+            sibling.to_string_lossy(),
+            "a canonically normalized sibling must not be abbreviated"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panel_topline_normalizes_case_variant_home_paths() {
+        let root = temp_root("topline-home-case");
+        let home = root.join("Users").join("henri");
+        let relative = PathBuf::from("Projects").join("rc");
+        fs::create_dir_all(home.join(&relative)).expect("home fixture should be creatable");
+        let case_variant = root.join("users").join("HENRI").join("projects").join("RC");
+
+        // Case-sensitive APFS volumes are valid too; this behavior applies only when the
+        // alternate spelling resolves to the same filesystem object.
+        if !case_variant
+            .try_exists()
+            .expect("case-variant path should be testable")
+        {
+            fs::remove_dir_all(root).expect("temp root should be removable");
+            return;
+        }
+
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+        let canonical_case_variant =
+            fs::canonicalize(&case_variant).expect("case variant should canonicalize");
+        assert_eq!(
+            format_panel_path(
+                &case_variant,
+                Some(&home),
+                Some(&canonical_case_variant),
+                Some(&canonical_home),
+            ),
+            format!("~/{}", relative.to_string_lossy())
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn panel_topline_normalizes_verbatim_windows_paths() {
+        let root = temp_root("topline-home-verbatim");
+        let home = root.join("Users").join("Henri");
+        let relative = PathBuf::from("Projects").join("rc");
+        let descendant = home.join(&relative);
+        fs::create_dir_all(&descendant).expect("home fixture should be creatable");
+        let case_variant = root.join("users").join("HENRI").join("projects").join("RC");
+        let verbatim_descendant = fs::canonicalize(&case_variant)
+            .expect("Windows path should have a canonical representation");
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+
+        assert_eq!(
+            format_panel_path(
+                &verbatim_descendant,
+                Some(&home),
+                Some(&verbatim_descendant),
+                Some(&canonical_home),
+            ),
+            format!("~/{}", relative.to_string_lossy())
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn panel_topline_omits_zero_tags_and_includes_nonzero_tags() {
+        let root = temp_root("topline-tags");
+        let entry_path = root.join("entry.txt");
+        fs::write(&entry_path, "demo").expect("file should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        let format = app.panel_listing_format(app.active_panel);
+
+        let untagged_titles = panel_topline_titles(app.active_panel(), format);
+        assert!(
+            !untagged_titles.summary.contains("tagged:"),
+            "zero tags should not consume topline space: {}",
+            untagged_titles.summary
+        );
+
+        let entry_cursor = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == entry_path)
+            .expect("fixture should be listed");
+        app.active_panel_mut().cursor = entry_cursor;
+        assert!(app.active_panel_mut().toggle_tag_on_cursor());
+
+        let tagged_titles = panel_topline_titles(app.active_panel(), format);
+        assert!(
+            tagged_titles.summary.contains("tagged:1"),
+            "nonzero tag counts should remain visible: {}",
+            tagged_titles.summary
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn panel_topline_titles_fit_every_constrained_width_without_overlap() {
+        let samples = [
+            PanelToplineTitles {
+                path: String::from("~/projects/a-very-long-directory/rust-commander"),
+                summary: String::from(
+                    "full | sort:name asc | filter:*.rs | panelize | tagged:12 | loading...",
+                ),
+            },
+            PanelToplineTitles {
+                path: String::from("~/資料/非常に長いディレクトリ名"),
+                summary: String::from("brief | sort:extension desc | tagged:2"),
+            },
+        ];
+
+        for titles in samples {
+            for width in 0..=128 {
+                let fitted = fit_panel_topline_titles(titles.clone(), width);
+                let path_width = UnicodeWidthStr::width(fitted.path.as_str());
+                let summary_width = UnicodeWidthStr::width(fitted.summary.as_str());
+                let gap_width = usize::from(!fitted.path.is_empty() && !fitted.summary.is_empty());
+                assert!(
+                    path_width + gap_width + summary_width <= width,
+                    "titles overlap at width {width}: {fitted:?}"
+                );
+            }
+        }
+
+        let constrained = PanelToplineTitles {
+            path: String::from("~/a/long/path"),
+            summary: String::from("full | sort:name asc"),
+        };
+        assert!(
+            fit_panel_topline_titles(constrained.clone(), 8)
+                .summary
+                .is_empty(),
+            "the path should win when both sides cannot remain useful"
+        );
+        let first_split = fit_panel_topline_titles(constrained, 9);
+        assert!(!first_split.path.is_empty());
+        assert!(!first_split.summary.is_empty());
+    }
+
+    #[test]
+    fn panel_topline_renders_path_left_and_summary_right_at_every_width() {
+        let titles = PanelToplineTitles {
+            path: String::from("~/work/a-long-path"),
+            summary: String::from("full | sort:name asc | tagged:12"),
+        };
+
+        for interior_width in 0..=64_u16 {
+            let fitted = fit_panel_topline_titles(titles.clone(), usize::from(interior_width));
+            let rendered = render_panel_topline_to_text(fitted.clone(), interior_width);
+            assert_eq!(
+                UnicodeWidthStr::width(rendered.as_str()),
+                usize::from(interior_width) + 2,
+                "rendered border width changed at interior width {interior_width}: {rendered:?}"
+            );
+            assert!(
+                rendered.starts_with(&format!("┌{}", fitted.path)),
+                "path is not left aligned at interior width {interior_width}: {rendered:?}"
+            );
+            assert!(
+                rendered.ends_with(&format!("{}┐", fitted.summary)),
+                "summary is not right aligned at interior width {interior_width}: {rendered:?}"
+            );
+            if !fitted.path.is_empty() && !fitted.summary.is_empty() {
+                let between = rendered
+                    .strip_prefix(&format!("┌{}", fitted.path))
+                    .and_then(|line| line.strip_suffix(&format!("{}┐", fitted.summary)))
+                    .expect("aligned titles should leave the border between them");
+                assert!(
+                    UnicodeWidthStr::width(between) >= PANEL_TOPLINE_GAP_WIDTH,
+                    "titles touch at interior width {interior_width}: {rendered:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn render_status_line_sanitizes_newlines_and_clips_width() {
         let root = temp_root("status-clamp");
         let mut app = app_with_loaded_panels(root.clone());
@@ -3474,7 +3865,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn panel_title_marks_panelize_panels() {
+    fn panel_topline_marks_panelize_panels() {
         let root = temp_root("panelize-title");
         fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
         let mut app = app_with_loaded_panels(root.clone());
@@ -3484,13 +3875,13 @@ mod tests {
             .expect("default panelize preset should run");
         drain_background(&mut app);
 
-        let title = panel_title(
+        let titles = panel_topline_titles(
             app.active_panel(),
             app.panel_listing_format(app.active_panel),
         );
         assert!(
-            title.contains("panelize"),
-            "panel title should indicate panelize mode"
+            titles.summary.contains("panelize"),
+            "panel topline should indicate panelize mode"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");

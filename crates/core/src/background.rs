@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::{
     ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JobId, PanelFilter,
     PanelListingSource, SortMode, TreeBuildResult, ViewerState, build_tree_entries,
-    ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
+    canonical_panel_paths, ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
     read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
     stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
@@ -28,6 +28,7 @@ pub struct PanelRefreshStreamRequest {
     pub filter: PanelFilter,
     pub show_hidden_files: bool,
     pub cached_panelized_entries: Option<Arc<[FileEntry]>>,
+    pub home_directory: Option<PathBuf>,
     pub request_id: u64,
 }
 
@@ -35,6 +36,14 @@ pub struct PanelRefreshStreamRequest {
 pub struct PanelRefreshResult {
     pub entries: Vec<FileEntry>,
     pub panelized_entries: Option<Arc<[FileEntry]>>,
+    pub canonical_cwd: Option<PathBuf>,
+    pub canonical_home_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PanelPathIdentity {
+    pub canonical_cwd: Option<PathBuf>,
+    pub canonical_home_directory: Option<PathBuf>,
 }
 
 impl PanelRefreshStreamRequest {
@@ -72,6 +81,12 @@ pub enum BackgroundEvent {
         request_id: u64,
         disk_usage: Option<DiskUsageSummary>,
         result: Result<PanelRefreshResult, String>,
+    },
+    PanelIdentityResolved {
+        panel: ActivePanel,
+        cwd: PathBuf,
+        request_id: u64,
+        result: Result<PanelPathIdentity, String>,
     },
     ViewerLoaded {
         path: PathBuf,
@@ -171,6 +186,20 @@ pub fn refresh_panel_entries(
     }
 }
 
+pub fn resolve_panel_path_identity(
+    cwd: &Path,
+    home_directory: Option<&Path>,
+    cancel_flag: &AtomicBool,
+) -> io::Result<PanelPathIdentity> {
+    ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+    let (canonical_cwd, canonical_home_directory) = canonical_panel_paths(cwd, home_directory);
+    ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+    Ok(PanelPathIdentity {
+        canonical_cwd,
+        canonical_home_directory,
+    })
+}
+
 pub fn stream_refresh_panel_entries<F>(
     request: &PanelRefreshStreamRequest,
     cancel_flag: &AtomicBool,
@@ -179,14 +208,19 @@ pub fn stream_refresh_panel_entries<F>(
 where
     F: FnMut(BackgroundEvent) -> bool,
 {
-    match &request.source {
+    let mut result = match &request.source {
         PanelListingSource::Directory => {
             stream_directory_entries(request, cancel_flag, &mut emit_chunk)
         }
         PanelListingSource::Panelize { .. } | PanelListingSource::FindResults { .. } => {
             stream_panelized_source_entries(request, cancel_flag, &mut emit_chunk)
         }
-    }
+    }?;
+    let identity =
+        resolve_panel_path_identity(&request.cwd, request.home_directory.as_deref(), cancel_flag)?;
+    result.canonical_cwd = identity.canonical_cwd;
+    result.canonical_home_directory = identity.canonical_home_directory;
+    Ok(result)
 }
 
 fn stream_panelized_source_entries<F>(
@@ -217,6 +251,8 @@ where
         return Ok(PanelRefreshResult {
             entries,
             panelized_entries: Some(cached_entries),
+            canonical_cwd: None,
+            canonical_home_directory: None,
         });
     }
 
@@ -267,6 +303,8 @@ where
     Ok(PanelRefreshResult {
         entries: visible_entries,
         panelized_entries: Some(panelized_entries),
+        canonical_cwd: None,
+        canonical_home_directory: None,
     })
 }
 
@@ -382,6 +420,8 @@ where
     Ok(PanelRefreshResult {
         entries,
         panelized_entries: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
     })
 }
 
@@ -432,6 +472,46 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn panel_refresh_resolves_canonical_paths_in_the_worker() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panel-path-identity-{stamp}"));
+        let home = root.join("home");
+        fs::create_dir_all(home.join("projects")).expect("home fixture should be creatable");
+        let alias = root.join("home-alias");
+        std::os::unix::fs::symlink(&home, &alias).expect("home alias should be creatable");
+        let request = PanelRefreshStreamRequest {
+            panel: ActivePanel::Left,
+            cwd: alias,
+            source: PanelListingSource::Directory,
+            sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
+            show_hidden_files: true,
+            cached_panelized_entries: None,
+            home_directory: Some(home.clone()),
+            request_id: 40,
+        };
+
+        let result = stream_refresh_panel_entries(&request, &AtomicBool::new(false), |_| true)
+            .expect("panel refresh should resolve path identity");
+
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+        assert_eq!(
+            result.canonical_cwd.as_deref(),
+            Some(canonical_home.as_path())
+        );
+        assert_eq!(
+            result.canonical_home_directory.as_deref(),
+            Some(canonical_home.as_path())
+        );
+
+        fs::remove_dir_all(root).expect("temporary directory should be removed");
+    }
+
     #[test]
     fn find_panelized_stream_uses_bounded_chunks_without_losing_entries() {
         let paths: Vec<PathBuf> = (0..300)
@@ -449,6 +529,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 41,
         };
         let cancel_flag = AtomicBool::new(false);
@@ -501,6 +582,7 @@ mod tests {
             },
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 42,
         };
 
@@ -541,6 +623,7 @@ mod tests {
             },
             show_hidden_files: true,
             cached_panelized_entries: Some(Arc::clone(&cached)),
+            home_directory: None,
             request_id: 43,
         };
 
