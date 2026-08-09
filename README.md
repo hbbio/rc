@@ -140,7 +140,10 @@ skins in locations such as `/usr/share/mc/skins` and Homebrew paths.
 Main file manager:
 
 - `Tab`: switch active panel
-- `Enter` / `F3`: open directory or open file in viewer
+- `Enter`: open a directory, run an executable in the terminal, or open a document with
+  the operating system's configured application; falls back to the internal viewer when
+  no default application or desktop launcher is available
+- `F3`: open the selected file in the internal viewer
 - `F4`: edit file using `editor_command`, `$EDITOR`, `$VISUAL`, or PATH probes (`hx`,
   `nvim`, `vim`, `vi`, `emacs`)
 - `Space` / `Insert` / `Ctrl-T`: toggle selected item
@@ -164,6 +167,12 @@ Main file manager:
 - `Left` / `Right`: move across responsive columns in Brief format
 - `Shift-F6` / `Shift-F8`: cycle sort field / toggle reverse order
 - `q` / `Esc`: quit
+
+On Unix, rc gives an executed command its own foreground terminal process group. On Windows, it
+temporarily handles console-control events in the parent while the child retains its normal
+interrupt behavior. In both cases, `Ctrl-C` interrupts the command, then rc restores its terminal
+and resumes. Linux desktop opens use the portal when available; accepted legacy launchers are
+reaped independently and are never terminated when rc exits.
 
 Milestone 4 screens:
 

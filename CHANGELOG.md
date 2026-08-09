@@ -5,6 +5,23 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Split Enter activation from F3 viewing: Enter now executes runnable files or opens
+  documents with the operating system's configured application, while F3 always uses
+  the internal viewer.
+- Run executable files with a dedicated foreground process group on Unix, and protect rc with
+  a process-local console-control handler on Windows, so interrupting a child does not terminate
+  the file manager.
+- Dispatch desktop document launches asynchronously and fall back to the internal viewer on
+  failure. Linux prefers the status-aware desktop portal, tries the complete xdg/GIO/GNOME/KDE
+  chain without requiring `xdg-mime`, and releases accepted blocking launchers to an independent
+  reaper so shutdown never terminates the opened application. Windows delegates
+  association-backed script formats to `ShellExecuteExW` instead of passing them to
+  `CreateProcessW`.
+
 ## [0.1.1] - 2026-08-05
 
 ### Fixed

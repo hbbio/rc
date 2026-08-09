@@ -107,6 +107,27 @@ impl AppState {
                 if self.open_selected_directory() {
                     self.queue_panel_refresh(self.active_panel);
                     self.set_status("Loading selected directory...");
+                } else {
+                    match self.execute_selected_file() {
+                        ExecuteSelectionResult::OpenedExternal => {
+                            self.set_status("Executing selected file...")
+                        }
+                        ExecuteSelectionResult::QueuedDesktopOpen => {
+                            self.set_status("Opening with the default application...")
+                        }
+                        ExecuteSelectionResult::NoEntrySelected => {
+                            self.set_status("No entry selected")
+                        }
+                        ExecuteSelectionResult::SelectedEntryIsDirectory => {
+                            self.set_status("Selected directory could not be opened")
+                        }
+                    }
+                }
+            }
+            AppCommand::ViewEntry => {
+                if self.open_selected_directory() {
+                    self.queue_panel_refresh(self.active_panel);
+                    self.set_status("Loading selected directory...");
                 } else if self.open_selected_file_in_viewer() {
                     self.set_status("Opening viewer...");
                 } else {

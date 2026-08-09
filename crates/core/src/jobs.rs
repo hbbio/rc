@@ -44,6 +44,7 @@ pub enum JobKind {
     RefreshPanel,
     Find,
     QuickCdSearch,
+    OpenDesktop,
     LoadViewer,
     LoadQuickView,
     MeasureSelection,
@@ -62,6 +63,7 @@ impl JobKind {
             Self::RefreshPanel => "refresh-panel",
             Self::Find => "find",
             Self::QuickCdSearch => "quick-cd-search",
+            Self::OpenDesktop => "open-desktop",
             Self::LoadViewer => "load-viewer",
             Self::LoadQuickView => "load-quick-view",
             Self::MeasureSelection => "measure-selection",
@@ -133,6 +135,9 @@ pub enum JobRequest {
         spec: QuickCdSearchSpec,
         request_id: u64,
     },
+    OpenDesktop {
+        path: PathBuf,
+    },
     LoadViewer {
         path: PathBuf,
     },
@@ -165,6 +170,7 @@ impl JobRequest {
             Self::RefreshPanel { .. } => JobKind::RefreshPanel,
             Self::Find { .. } => JobKind::Find,
             Self::QuickCdSearch { .. } => JobKind::QuickCdSearch,
+            Self::OpenDesktop { .. } => JobKind::OpenDesktop,
             Self::LoadViewer { .. } => JobKind::LoadViewer,
             Self::LoadQuickView { .. } => JobKind::LoadQuickView,
             Self::MeasureSelection { .. } => JobKind::MeasureSelection,
@@ -183,6 +189,7 @@ impl JobRequest {
             Self::RefreshPanel { .. } => 1,
             Self::Find { .. } => 1,
             Self::QuickCdSearch { .. } => 1,
+            Self::OpenDesktop { .. } => 1,
             Self::LoadViewer { .. } => 1,
             Self::LoadQuickView { .. } => 1,
             Self::MeasureSelection { paths, .. } => paths.len(),
@@ -277,6 +284,9 @@ impl JobRequest {
                 spec.query,
                 spec.cwd.to_string_lossy()
             ),
+            Self::OpenDesktop { path } => {
+                format!("open with default application {}", path.to_string_lossy())
+            }
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
             Self::LoadQuickView { panel, path, .. } => format!(
                 "preview {} in {} panel",
@@ -978,6 +988,10 @@ fn execute_job(
         JobRequest::QuickCdSearch { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "quick-cd search jobs are executed by the runtime adapter",
+        )),
+        JobRequest::OpenDesktop { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "desktop-open jobs are executed by the runtime adapter",
         )),
         JobRequest::LoadViewer { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1818,6 +1832,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::PersistSettings { .. }
         | JobRequest::RefreshPanel { .. }
         | JobRequest::QuickCdSearch { .. }
+        | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }

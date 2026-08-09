@@ -231,8 +231,16 @@ impl AppState {
             self.keybinding_joined_or_fallback(
                 KeyContext::FileManager,
                 AppCommand::OpenEntry,
-                "Enter/F3",
-                2,
+                "Enter",
+                1,
+            ),
+        );
+        replacements.insert(
+            "fm_view_entry",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::ViewEntry,
+                "F3",
             ),
         );
         replacements.insert(
@@ -593,7 +601,7 @@ impl AppState {
                 "{}/{}/{}/{}/{}",
                 self.keybinding_primary_or_fallback(
                     KeyContext::FileManager,
-                    AppCommand::OpenEntry,
+                    AppCommand::ViewEntry,
                     "F3"
                 ),
                 self.keybinding_primary_or_fallback(

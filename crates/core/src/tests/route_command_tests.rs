@@ -955,6 +955,20 @@ fn executable_candidate_requires_execute_bit() {
 }
 
 #[test]
+fn windows_direct_execution_excludes_association_backed_pathext_formats() {
+    for extension in ["COM", "exe", "Bat", "cmd"] {
+        assert!(windows_extension_is_directly_runnable(Some(extension)));
+    }
+    for extension in ["VBS", "VBE", "JS", "JSE", "WSF", "WSH", "MSC", "PS1"] {
+        assert!(
+            !windows_extension_is_directly_runnable(Some(extension)),
+            "{extension} requires an interpreter or file association"
+        );
+    }
+    assert!(!windows_extension_is_directly_runnable(None));
+}
+
+#[test]
 fn app_command_mapping_is_context_aware() {
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenHelp),
@@ -1044,6 +1058,10 @@ fn app_command_mapping_is_context_aware() {
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::OpenEntry),
         Some(AppCommand::OpenEntry)
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::ViewEntry),
+        Some(AppCommand::ViewEntry)
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManager, &KeyCommand::EditEntry),

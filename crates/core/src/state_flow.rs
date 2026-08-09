@@ -35,6 +35,7 @@ impl AppState {
             pending_find_tree_picker: None,
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
+            pending_external_execute_requests: Vec::new(),
             panelized_result_history: [None, None],
             previous_panel_directories: [None, None],
             quick_cd_search: QuickCdSearchWorkflow::default(),
@@ -350,6 +351,31 @@ impl AppState {
         }
 
         EditSelectionResult::NoEditorResolved
+    }
+
+    pub(crate) fn execute_selected_file(&mut self) -> ExecuteSelectionResult {
+        let Some((path, is_dir, is_runnable)) = self
+            .selected_non_parent_entry()
+            .map(|entry| (entry.path.clone(), entry.is_dir(), entry.is_runnable()))
+        else {
+            return ExecuteSelectionResult::NoEntrySelected;
+        };
+
+        if is_dir {
+            return ExecuteSelectionResult::SelectedEntryIsDirectory;
+        }
+
+        if is_runnable {
+            self.pending_external_execute_requests
+                .push(ExternalExecuteRequest {
+                    path,
+                    cwd: self.active_panel().cwd.clone(),
+                });
+            ExecuteSelectionResult::OpenedExternal
+        } else {
+            self.queue_worker_job_request(JobRequest::OpenDesktop { path });
+            ExecuteSelectionResult::QueuedDesktopOpen
+        }
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {

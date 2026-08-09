@@ -123,6 +123,7 @@ pub enum KeyCommand {
     Home,
     End,
     OpenEntry,
+    ViewEntry,
     EditEntry,
     CdUp,
     QuickCd,
@@ -215,7 +216,8 @@ impl KeyCommand {
             "halfpageup" => Self::HelpHalfPageUp,
             "home" | "top" => Self::Home,
             "end" | "bottom" => Self::End,
-            "enter" | "view" | "viewfile" => Self::OpenEntry,
+            "enter" | "execute" | "executeentry" | "open" => Self::OpenEntry,
+            "view" | "viewfile" => Self::ViewEntry,
             "edit" => Self::EditEntry,
             "cdup" => Self::CdUp,
             "cdquick" | "quickcd" => Self::QuickCd,
@@ -1019,6 +1021,7 @@ OpenJobs = f3
 [filemanager]
 UserMenu = f2
 View = f3
+Enter = enter
 Edit = f4
 MakeDir = f7
 "#;
@@ -1030,6 +1033,10 @@ MakeDir = f7
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(3))),
+            Some(&KeyCommand::ViewEntry)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Enter)),
             Some(&KeyCommand::OpenEntry)
         );
         assert_eq!(
@@ -1446,8 +1453,13 @@ Reread = ctrl-r
             |number| keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(number)));
 
         assert_eq!(resolve_function_key(2), Some(&KeyCommand::OpenUserMenu));
+        assert_eq!(resolve_function_key(3), Some(&KeyCommand::ViewEntry));
         assert_eq!(resolve_function_key(6), Some(&KeyCommand::Move));
         assert_eq!(resolve_function_key(9), Some(&KeyCommand::OpenMenuBar));
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Enter)),
+            Some(&KeyCommand::OpenEntry)
+        );
     }
 
     #[test]

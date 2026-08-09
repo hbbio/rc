@@ -156,7 +156,11 @@ pub enum AppCommand {
     CancelJob,
     OpenJobsScreen,
     CloseJobsScreen,
+    /// Activate the selected entry: descend into directories, execute runnable files,
+    /// or delegate documents to the operating system's configured application.
     OpenEntry,
+    /// Open the selected file in rc's internal viewer.
+    ViewEntry,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -398,6 +402,7 @@ impl AppCommand {
             | Self::CancelJob
             | Self::RestorePanelizedResults
             | Self::OpenEntry
+            | Self::ViewEntry
             | Self::EditEntry
             | Self::CdUp
             | Self::Reread
@@ -605,7 +610,7 @@ const LEFT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::L
 const RIGHT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::Right);
 
 const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
-    MenuEntry::action_with_shortcut("View", "F3", AppCommand::OpenEntry),
+    MenuEntry::action_with_shortcut("View", "F3", AppCommand::ViewEntry),
     MenuEntry::stub("View file...", ""),
     MenuEntry::stub("Filtered view", "M-!"),
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
@@ -1048,6 +1053,33 @@ impl FileEntry {
 
     pub const fn is_parent(&self) -> bool {
         self.kind.is_parent()
+    }
+
+    /// Whether the operating system considers this file directly runnable.
+    ///
+    /// Unix asks the kernel for execute access so the current identity, ownership,
+    /// groups, and ACLs are honored. Windows limits direct spawning to native
+    /// executables and batch commands; association-backed `PATHEXT` formats are
+    /// delegated to the desktop opener instead.
+    pub fn is_runnable(&self) -> bool {
+        if self.kind != FileEntryKind::File {
+            return false;
+        }
+
+        #[cfg(unix)]
+        {
+            executable_path_is_runnable(&self.path)
+        }
+
+        #[cfg(windows)]
+        {
+            windows_path_is_directly_runnable(&self.path)
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
     }
 }
 
@@ -1913,6 +1945,20 @@ pub struct ExternalEditRequest {
     pub cwd: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalExecuteRequest {
+    pub path: PathBuf,
+    pub cwd: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecuteSelectionResult {
+    OpenedExternal,
+    QueuedDesktopOpen,
+    NoEntrySelected,
+    SelectedEntryIsDirectory,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditSelectionResult {
     OpenedExternal,
@@ -2040,6 +2086,7 @@ pub struct AppState {
     pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
+    pending_external_execute_requests: Vec<ExternalExecuteRequest>,
     panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
     previous_panel_directories: [Option<PathBuf>; 2],
     quick_cd_search: QuickCdSearchWorkflow,
@@ -2206,24 +2253,8 @@ fn executable_candidate_exists(dir: &Path, name: &str) -> bool {
         if executable_path_is_runnable(&candidate) {
             return true;
         }
-        let extensions = std::env::var_os("PATHEXT")
-            .map(|value| {
-                value
-                    .to_string_lossy()
-                    .split(';')
-                    .filter(|extension| !extension.trim().is_empty())
-                    .map(|extension| extension.trim().trim_start_matches('.').to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
-                vec![
-                    String::from("exe"),
-                    String::from("cmd"),
-                    String::from("bat"),
-                ]
-            });
-        extensions
-            .into_iter()
+        WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS
+            .iter()
             .any(|extension| executable_path_is_runnable(&dir.join(format!("{name}.{extension}"))))
     }
     #[cfg(not(windows))]
@@ -2234,17 +2265,35 @@ fn executable_candidate_exists(dir: &Path, name: &str) -> bool {
 
 #[cfg(windows)]
 fn executable_path_is_runnable(path: &Path) -> bool {
+    windows_path_is_directly_runnable(path)
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS: [&str; 4] = ["com", "exe", "bat", "cmd"];
+
+#[cfg(windows)]
+fn windows_path_is_directly_runnable(path: &Path) -> bool {
     path.is_file()
+        && windows_extension_is_directly_runnable(path.extension().and_then(|value| value.to_str()))
+}
+
+#[cfg(any(windows, test))]
+fn windows_extension_is_directly_runnable(extension: Option<&str>) -> bool {
+    extension.is_some_and(|extension| {
+        WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+    })
 }
 
 #[cfg(unix)]
 fn executable_path_is_runnable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+    use nix::unistd::{AccessFlags, access};
 
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
-    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    metadata.is_file() && access(path, AccessFlags::X_OK).is_ok()
 }
 
 #[cfg(not(any(unix, windows)))]

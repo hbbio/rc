@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn open_entry_on_file_opens_viewer_route() {
+fn view_entry_on_file_opens_viewer_route() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -20,8 +20,8 @@ fn open_entry_on_file_opens_viewer_route() {
         .expect("viewer file should be visible");
     app.active_panel_mut().cursor = file_index;
 
-    app.apply(AppCommand::OpenEntry)
-        .expect("open entry should open viewer");
+    app.apply(AppCommand::ViewEntry)
+        .expect("view entry should open viewer");
     drain_background(&mut app);
     assert_eq!(app.key_context(), KeyContext::Viewer);
 
@@ -30,6 +30,169 @@ fn open_entry_on_file_opens_viewer_route() {
     };
     assert_eq!(viewer.path(), &file_path);
     assert_eq!(viewer.line_count(), 3);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn open_entry_on_document_queues_default_application() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-open-default-application-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let file_path = root.join("image.png");
+    fs::write(
+        &file_path,
+        b"not-an-image-but-the-extension-is-owned-by-the-desktop",
+    )
+    .expect("must create document target");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let file_index = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == file_path)
+        .expect("document should be visible");
+    app.active_panel_mut().cursor = file_index;
+
+    app.apply(AppCommand::OpenEntry)
+        .expect("open entry should resolve an activation action");
+
+    assert!(app.take_pending_external_execute_requests().is_empty());
+    let pending = app.take_pending_worker_commands();
+    assert_eq!(pending.len(), 1);
+    match &pending[0] {
+        WorkerCommand::Run(job) => assert_eq!(
+            job.request,
+            JobRequest::OpenDesktop {
+                path: file_path.clone()
+            }
+        ),
+        other => panic!("expected a desktop-open worker request, got {other:?}"),
+    }
+    assert_eq!(app.key_context(), KeyContext::FileManager);
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn quit_does_not_cancel_a_desktop_application_handoff() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-open-survives-quit-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let file_path = root.join("image.png");
+    fs::write(&file_path, b"desktop-owned document").expect("must create document target");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let file_index = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == file_path)
+        .expect("document should be visible");
+    app.active_panel_mut().cursor = file_index;
+    app.apply(AppCommand::OpenEntry)
+        .expect("open entry should queue a desktop application");
+    let desktop_job_id = app
+        .jobs
+        .last_job()
+        .expect("desktop-open job should be tracked")
+        .id;
+
+    assert_eq!(
+        app.apply(AppCommand::Quit).expect("quit should succeed"),
+        ApplyResult::Quit
+    );
+    assert!(
+        !app.take_pending_worker_commands()
+            .iter()
+            .any(|command| matches!(
+                command,
+                WorkerCommand::Cancel(job_id) if *job_id == desktop_job_id
+            )),
+        "quit must leave the desktop launcher for the runtime to release safely"
+    );
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_entry_on_runnable_file_queues_interactive_execution() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-execute-runnable-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let file_path = root.join("script");
+    fs::write(&file_path, "#!/bin/sh\nexit 0\n").expect("must create executable target");
+    fs::set_permissions(&file_path, fs::Permissions::from_mode(0o755))
+        .expect("must make target executable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    let file_index = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == file_path)
+        .expect("executable should be visible");
+    assert!(app.active_panel().entries[file_index].is_runnable());
+    app.active_panel_mut().cursor = file_index;
+
+    app.apply(AppCommand::OpenEntry)
+        .expect("open entry should resolve executable action");
+
+    let requests = app.take_pending_external_execute_requests();
+    assert_eq!(
+        requests,
+        [ExternalExecuteRequest {
+            path: file_path,
+            cwd: root.clone(),
+        }]
+    );
+    assert!(app.take_pending_worker_commands().is_empty());
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn failed_default_application_falls_back_to_internal_viewer() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-open-fallback-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let file_path = root.join("unknown.data");
+    fs::write(&file_path, "fallback payload").expect("must create fallback target");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+
+    app.handle_background_event(BackgroundEvent::DesktopOpenFinished {
+        path: file_path.clone(),
+        result: Err(String::from("no configured handler")),
+    });
+
+    let pending = app.take_pending_worker_commands();
+    assert_eq!(pending.len(), 1);
+    match &pending[0] {
+        WorkerCommand::Run(job) => assert_eq!(
+            job.request,
+            JobRequest::LoadViewer {
+                path: file_path.clone()
+            }
+        ),
+        other => panic!("expected viewer fallback request, got {other:?}"),
+    }
+    assert!(app.status_line.contains("opening viewer"));
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -189,7 +352,7 @@ fn viewer_supports_scroll_search_goto_and_wrap() {
         .position(|entry| entry.path == file_path)
         .expect("viewer file should be visible");
     app.active_panel_mut().cursor = file_index;
-    app.apply(AppCommand::OpenEntry)
+    app.apply(AppCommand::ViewEntry)
         .expect("open entry should open viewer");
     drain_background(&mut app);
 
@@ -275,7 +438,7 @@ fn viewer_hex_mode_switches_context_and_navigation_model() {
         .position(|entry| entry.path == file_path)
         .expect("viewer file should be visible");
     app.active_panel_mut().cursor = file_index;
-    app.apply(AppCommand::OpenEntry)
+    app.apply(AppCommand::ViewEntry)
         .expect("open entry should open viewer");
     drain_background(&mut app);
     assert_eq!(app.key_context(), KeyContext::Viewer);
@@ -328,7 +491,7 @@ fn viewer_opens_binary_content_in_hex_mode_by_default() {
         .position(|entry| entry.path == file_path)
         .expect("binary file should be visible");
     app.active_panel_mut().cursor = file_index;
-    app.apply(AppCommand::OpenEntry)
+    app.apply(AppCommand::ViewEntry)
         .expect("open entry should queue viewer");
     drain_background(&mut app);
 
@@ -491,7 +654,7 @@ fn opening_large_text_file_reports_preview_mode_status() {
         .position(|entry| entry.path == file_path)
         .expect("large file should be visible");
     app.active_panel_mut().cursor = file_index;
-    app.apply(AppCommand::OpenEntry)
+    app.apply(AppCommand::ViewEntry)
         .expect("open entry should queue viewer");
     drain_background(&mut app);
 

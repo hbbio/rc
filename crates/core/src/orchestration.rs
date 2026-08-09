@@ -42,6 +42,10 @@ impl AppState {
         std::mem::take(&mut self.pending_external_edit_requests)
     }
 
+    pub fn take_pending_external_execute_requests(&mut self) -> Vec<ExternalExecuteRequest> {
+        std::mem::take(&mut self.pending_external_execute_requests)
+    }
+
     pub fn handle_job_event(&mut self, event: JobEvent) {
         if let JobEvent::Finished { id, .. } = &event {
             self.find_pause_flags.remove(id);
@@ -319,6 +323,18 @@ impl AppState {
                 }
                 Err(error) => {
                     self.set_status(format!("Viewer open failed: {error}"));
+                }
+            },
+            BackgroundEvent::DesktopOpenFinished { path, result } => match result {
+                Ok(()) => self.set_status(format!(
+                    "Opened {} with the default application",
+                    path.to_string_lossy()
+                )),
+                Err(error) => {
+                    self.queue_worker_job_request(JobRequest::LoadViewer { path });
+                    self.set_status(format!(
+                        "Default application unavailable ({error}); opening viewer..."
+                    ));
                 }
             },
             BackgroundEvent::QuickViewLoaded {
@@ -690,7 +706,9 @@ impl AppState {
             .iter()
             .filter(|job| {
                 matches!(job.status, JobStatus::Queued | JobStatus::Running)
-                    && !matches!(job.kind, JobKind::PersistSettings)
+                    // Persisted settings must finish, while an active desktop-open job owns an
+                    // application launcher that the runtime releases without terminating it.
+                    && !matches!(job.kind, JobKind::PersistSettings | JobKind::OpenDesktop)
             })
             .map(|job| job.id)
             .collect();
@@ -713,6 +731,7 @@ fn suppress_transient_job_status(kind: Option<JobKind>) -> bool {
         kind,
         Some(
             JobKind::RefreshPanel
+                | JobKind::OpenDesktop
                 | JobKind::LoadViewer
                 | JobKind::LoadQuickView
                 | JobKind::QuickCdSearch

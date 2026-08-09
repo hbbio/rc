@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,8 @@ use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use rc_core::settings_io;
 use rc_core::{
-    AppCommand, AppState, ApplyResult, ExternalEditRequest, JobRequest, MouseClickTarget, Settings,
+    AppCommand, AppState, ApplyResult, ExternalEditRequest, ExternalExecuteRequest, JobRequest,
+    MouseClickTarget, Settings,
 };
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
@@ -451,6 +452,7 @@ fn run_event_loop(
         runtime.dispatch_pending_commands(state);
         state.expire_status_line();
         dispatch_pending_external_edit_requests(terminal, state);
+        dispatch_pending_external_execute_requests(terminal, state);
 
         terminal
             .draw(|frame| rc_ui::render(frame, state))
@@ -657,10 +659,28 @@ fn dispatch_pending_external_edit_requests(
     }
 }
 
+fn dispatch_pending_external_execute_requests(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) {
+    for request in state.take_pending_external_execute_requests() {
+        match run_external_execute_request(terminal, &request) {
+            Ok(()) => state.set_status(format!(
+                "Finished executing {}",
+                request.path.to_string_lossy()
+            )),
+            Err(error) => state.set_status(format!("Execution failed: {error}")),
+        }
+    }
+}
+
 fn run_external_editor_request(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     request: &ExternalEditRequest,
 ) -> Result<()> {
+    #[cfg(windows)]
+    let _console_control_guard = rc_platform::ParentConsoleControlGuard::acquire()
+        .context("failed to protect rc from external editor console interrupts")?;
     suspend_terminal_for_external_command(terminal)?;
     let run_result = run_external_editor_process(request);
     let resume_result = resume_terminal_after_external_command(terminal);
@@ -675,57 +695,375 @@ fn run_external_editor_request(
     }
 }
 
+fn run_external_execute_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    request: &ExternalExecuteRequest,
+) -> Result<()> {
+    #[cfg(windows)]
+    let _console_control_guard = rc_platform::ParentConsoleControlGuard::acquire()
+        .context("failed to protect rc from executable console interrupts")?;
+    suspend_terminal_for_external_command(terminal)?;
+    let run_result = run_external_execute_process(request);
+    let resume_result = resume_terminal_after_external_command(terminal);
+
+    match (run_result, resume_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(run_error), Ok(())) => Err(run_error),
+        (Ok(()), Err(resume_error)) => Err(resume_error),
+        (Err(run_error), Err(resume_error)) => Err(anyhow!(
+            "executable failed: {run_error}; terminal restore failed: {resume_error}"
+        )),
+    }
+}
+
 fn suspend_terminal_for_external_command(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    disable_raw_mode().context("failed to disable raw mode for external editor")?;
+    disable_raw_mode().context("failed to disable raw mode for external command")?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
     )
-    .context("failed to leave alternate screen for external editor")?;
+    .context("failed to leave alternate screen for external command")?;
     terminal
         .show_cursor()
-        .context("failed to show cursor for external editor")?;
+        .context("failed to show cursor for external command")?;
     Ok(())
 }
 
 fn resume_terminal_after_external_command(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    enable_raw_mode().context("failed to re-enable raw mode after external editor")?;
+    enable_raw_mode().context("failed to re-enable raw mode after external command")?;
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
         EnableMouseCapture
     )
-    .context("failed to re-enter alternate screen after external editor")?;
+    .context("failed to re-enter alternate screen after external command")?;
     terminal
         .clear()
-        .context("failed to clear terminal after external editor")?;
+        .context("failed to clear terminal after external command")?;
     Ok(())
 }
 
 fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
     let command = resolve_external_editor_process_command(request)?;
-    let status = Command::new(&command.program)
+    let mut process = Command::new(&command.program);
+    process
         .args(&command.args)
         .current_dir(&request.cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to launch external editor command '{}'",
-                request.editor_command
-            )
-        })?;
+        .stderr(Stdio::inherit());
+    let status = run_interactive_process(&mut process).with_context(|| {
+        format!(
+            "failed to launch external editor command '{}'",
+            request.editor_command
+        )
+    })?;
     if !status.success() {
         return Err(anyhow!("external editor exited with {status}"));
     }
     Ok(())
+}
+
+fn run_external_execute_process(request: &ExternalExecuteRequest) -> Result<()> {
+    let mut process = Command::new(&request.path);
+    process
+        .current_dir(&request.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let status = run_interactive_process(&mut process).with_context(|| {
+        format!(
+            "failed to launch executable '{}'",
+            request.path.to_string_lossy()
+        )
+    })?;
+    if !status.success() {
+        return Err(anyhow!("executable exited with {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_interactive_process(command: &mut Command) -> io::Result<ExitStatus> {
+    let _console_control_guard = rc_platform::ParentConsoleControlGuard::acquire()?;
+    command.status()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn run_interactive_process(command: &mut Command) -> io::Result<ExitStatus> {
+    command.status()
+}
+
+#[cfg(unix)]
+fn run_interactive_process(command: &mut Command) -> io::Result<ExitStatus> {
+    use std::os::unix::process::CommandExt as _;
+
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, raise};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    use nix::unistd::Pid;
+
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let child_pid = match i32::try_from(child.id()).map(Pid::from_raw) {
+        Ok(child_pid) => child_pid,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("child process ID does not fit in pid_t"));
+        }
+    };
+
+    let mut foreground = match TerminalForegroundGuard::handoff(child_pid) {
+        Ok(Some(foreground)) => foreground,
+        Ok(None) => return child.wait(),
+        Err(handoff_error) => match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                terminate_process_group(&mut child, child_pid);
+                return Err(handoff_error);
+            }
+            Err(status_error) => {
+                terminate_process_group(&mut child, child_pid);
+                return Err(io::Error::new(
+                    handoff_error.kind(),
+                    format!(
+                        "{handoff_error}; additionally failed to inspect child status: \
+                         {status_error}"
+                    ),
+                ));
+            }
+        },
+    };
+
+    loop {
+        match waitpid(child_pid, Some(WaitPidFlag::WUNTRACED)) {
+            Ok(WaitStatus::Exited(_, code)) => {
+                let restore_result = foreground.restore();
+                let status = unix_exit_status_from_code(code);
+                restore_result?;
+                return Ok(status);
+            }
+            Ok(WaitStatus::Signaled(_, signal, dumped_core)) => {
+                let restore_result = foreground.restore();
+                let status = unix_exit_status_from_signal(signal, dumped_core);
+                restore_result?;
+                return Ok(status);
+            }
+            Ok(WaitStatus::Stopped(_, Signal::SIGTTIN | Signal::SIGTTOU)) => {
+                // The child may touch the terminal in the small interval between spawn and
+                // tcsetpgrp. It is now foreground, so resume it without surfacing a stop.
+                if let Err(error) = continue_process_group(child_pid) {
+                    return Err(abort_interactive_process(
+                        &mut child,
+                        child_pid,
+                        Some(&mut foreground),
+                        error,
+                    ));
+                }
+            }
+            Ok(WaitStatus::Stopped(_, _)) => {
+                // Preserve normal shell job-control semantics: give the terminal back to rc,
+                // stop rc as one foreground job, then resume the child when rc is foregrounded.
+                if let Err(error) = foreground.restore() {
+                    return Err(abort_interactive_process(
+                        &mut child, child_pid, None, error,
+                    ));
+                }
+                if let Err(error) = raise(Signal::SIGTSTP).map_err(io::Error::from) {
+                    return Err(abort_interactive_process(
+                        &mut child, child_pid, None, error,
+                    ));
+                }
+                foreground = match TerminalForegroundGuard::handoff(child_pid) {
+                    Ok(Some(foreground)) => foreground,
+                    Ok(None) => {
+                        return Err(abort_interactive_process(
+                            &mut child,
+                            child_pid,
+                            None,
+                            io::Error::new(
+                                io::ErrorKind::NotConnected,
+                                "controlling terminal disappeared while resuming child process",
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(abort_interactive_process(
+                            &mut child, child_pid, None, error,
+                        ));
+                    }
+                };
+            }
+            Ok(_) => {}
+            Err(Errno::EINTR) => {}
+            Err(error) => {
+                return Err(abort_interactive_process(
+                    &mut child,
+                    child_pid,
+                    Some(&mut foreground),
+                    io::Error::from(error),
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn abort_interactive_process(
+    child: &mut std::process::Child,
+    process_group: nix::unistd::Pid,
+    foreground: Option<&mut TerminalForegroundGuard>,
+    error: io::Error,
+) -> io::Error {
+    let restore_error = foreground.and_then(|foreground| foreground.restore().err());
+    terminate_process_group(child, process_group);
+    match restore_error {
+        Some(restore_error) => io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; additionally failed to restore rc's terminal foreground group: \
+                 {restore_error}"
+            ),
+        ),
+        None => error,
+    }
+}
+
+#[cfg(unix)]
+fn unix_exit_status_from_code(code: i32) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    ExitStatus::from_raw(code << 8)
+}
+
+#[cfg(unix)]
+fn unix_exit_status_from_signal(signal: nix::sys::signal::Signal, dumped_core: bool) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let core_dump_flag = if dumped_core { 0x80 } else { 0 };
+    ExitStatus::from_raw(signal as i32 | core_dump_flag)
+}
+
+#[cfg(unix)]
+fn continue_process_group(process_group: nix::unistd::Pid) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+
+    match killpg(process_group, Signal::SIGCONT) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut std::process::Child, process_group: nix::unistd::Pid) {
+    use nix::sys::signal::{Signal, killpg};
+
+    let _ = killpg(process_group, Signal::SIGKILL);
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+struct TerminalForegroundGuard {
+    original_process_group: nix::unistd::Pid,
+    previous_signal_mask: nix::sys::signal::SigSet,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl TerminalForegroundGuard {
+    fn handoff(process_group: nix::unistd::Pid) -> io::Result<Option<Self>> {
+        use nix::errno::Errno;
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+        use nix::unistd::tcgetpgrp;
+
+        let terminal = io::stdin();
+        let original_process_group = match tcgetpgrp(&terminal) {
+            Ok(process_group) => process_group,
+            Err(Errno::ENOTTY) => return Ok(None),
+            Err(error) => return Err(io::Error::from(error)),
+        };
+
+        let mut blocked = SigSet::empty();
+        blocked.add(Signal::SIGTTOU);
+        let mut previous_signal_mask = SigSet::empty();
+        pthread_sigmask(
+            SigmaskHow::SIG_BLOCK,
+            Some(&blocked),
+            Some(&mut previous_signal_mask),
+        )
+        .map_err(io::Error::from)?;
+
+        if let Err(error) = set_terminal_foreground_process_group(process_group) {
+            let _ = pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&previous_signal_mask), None);
+            return Err(error);
+        }
+
+        let guard = Self {
+            original_process_group,
+            previous_signal_mask,
+            active: true,
+        };
+        if let Err(error) = continue_process_group(process_group) {
+            let mut guard = guard;
+            let _ = guard.restore();
+            return Err(error);
+        }
+        Ok(Some(guard))
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        use nix::sys::signal::{SigmaskHow, pthread_sigmask};
+
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+
+        let terminal_result = set_terminal_foreground_process_group(self.original_process_group);
+        let mask_result = pthread_sigmask(
+            SigmaskHow::SIG_SETMASK,
+            Some(&self.previous_signal_mask),
+            None,
+        )
+        .map_err(io::Error::from);
+
+        match (terminal_result, mask_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(terminal_error), Err(mask_error)) => Err(io::Error::other(format!(
+                "failed to restore terminal foreground group: {terminal_error}; \
+                 failed to restore signal mask: {mask_error}"
+            ))),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_terminal_foreground_process_group(process_group: nix::unistd::Pid) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::unistd::tcsetpgrp;
+
+    loop {
+        match tcsetpgrp(io::stdin(), process_group) {
+            Ok(()) => return Ok(()),
+            Err(Errno::EINTR) => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TerminalForegroundGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1800,6 +2138,134 @@ mod tests {
         assert!(
             parts.is_none(),
             "unterminated windows-style quoting should fail to parse"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interactive_process_isolates_terminal_interrupts() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::sync::mpsc;
+        use std::thread;
+
+        const FIXTURE_ENV: &str = "RC_JOB_CONTROL_TEST_FIXTURE";
+        const READY_MARKER: &str = "RC_CHILD_READY";
+        const SURVIVED_MARKER: &str = "RC_PARENT_SURVIVED";
+
+        if env::var_os(FIXTURE_ENV).is_some() {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "printf 'RC_CHILD_READY\\n'; exec /bin/sleep 30"])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+            let status = run_interactive_process(&mut command)
+                .expect("interactive child should launch and return its signal status");
+            assert_eq!(status.signal(), Some(2), "child should receive SIGINT");
+            println!("{SURVIVED_MARKER}");
+            return;
+        }
+
+        // BSD `script` gives the nested test process a real controlling pseudo-terminal.
+        // Sending ETX through the master then exercises the kernel's foreground-process-group
+        // signal routing exactly as a user pressing Ctrl-C would.
+        let mut session = Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(env::current_exe().expect("test executable path should resolve"))
+            .args([
+                "--exact",
+                "tests::interactive_process_isolates_terminal_interrupts",
+                "--nocapture",
+            ])
+            .env(FIXTURE_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("pseudo-terminal fixture should launch");
+        let stdout = session
+            .stdout
+            .take()
+            .expect("fixture stdout should be piped");
+        let (line_tx, line_rx) = mpsc::channel();
+        let transcript_thread = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut transcript = String::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        transcript.push_str(&line);
+                        let _ = line_tx.send(line);
+                    }
+                    Err(error) => {
+                        transcript.push_str(&format!("<read error: {error}>"));
+                        break;
+                    }
+                }
+            }
+            transcript
+        });
+
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < ready_deadline {
+            let remaining = ready_deadline.saturating_duration_since(Instant::now());
+            match line_rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Ok(line) if line.contains(READY_MARKER) => {
+                    ready = true;
+                    break;
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if ready {
+            // Let the parent complete tcsetpgrp after the child writes its marker.
+            thread::sleep(Duration::from_millis(100));
+            session
+                .stdin
+                .as_mut()
+                .expect("fixture stdin should be piped")
+                .write_all(&[3])
+                .expect("Ctrl-C should be written to the pseudo-terminal");
+        }
+        drop(session.stdin.take());
+
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        let mut status = None;
+        while Instant::now() < exit_deadline {
+            status = session
+                .try_wait()
+                .expect("fixture status should be readable");
+            if status.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let exited_promptly = status.is_some();
+        if !exited_promptly {
+            let _ = session.kill();
+        }
+        let _ = session.wait();
+        let transcript = transcript_thread
+            .join()
+            .expect("reader thread should finish");
+
+        assert!(
+            ready,
+            "child never became ready; transcript: {transcript:?}"
+        );
+        assert!(
+            exited_promptly,
+            "job-control fixture did not exit promptly; transcript: {transcript:?}"
+        );
+        assert!(
+            transcript.contains(SURVIVED_MARKER),
+            "Ctrl-C terminated rc's process group; transcript: {transcript:?}"
         );
     }
 

@@ -268,7 +268,8 @@ fn button_bar_command_label(state: &AppState, command: AppCommand) -> Option<&'s
     match command {
         AppCommand::OpenHelp => Some("Help"),
         AppCommand::OpenUserMenu => Some("Menu"),
-        AppCommand::OpenEntry => Some("View"),
+        AppCommand::OpenEntry => Some("Open"),
+        AppCommand::ViewEntry => Some("View"),
         AppCommand::EditEntry => Some("Edit"),
         AppCommand::Copy => Some("Copy"),
         AppCommand::Move => Some("RenMov"),
@@ -3562,7 +3563,7 @@ mod tests {
             .position(|entry| entry.path == file_path)
             .expect("file should be listed");
         app.active_panel_mut().cursor = index;
-        app.apply(AppCommand::OpenEntry)
+        app.apply(AppCommand::ViewEntry)
             .expect("viewer command should succeed");
         drain_background(&mut app);
         app.apply(AppCommand::ViewerToggleHex)

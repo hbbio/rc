@@ -77,6 +77,10 @@ pub enum BackgroundEvent {
         path: PathBuf,
         result: Result<ViewerState, String>,
     },
+    DesktopOpenFinished {
+        path: PathBuf,
+        result: Result<(), String>,
+    },
     QuickViewLoaded {
         panel: ActivePanel,
         path: PathBuf,

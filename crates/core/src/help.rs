@@ -46,7 +46,8 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
         "File Manager",
         "File manager quick keys:\n\
   {{fm_switch_panel}} switch panel\n\
-  {{fm_open_entry}} open directory or view file\n\
+  {{fm_open_entry}} enter directory, run executable, or open file\n\
+  {{fm_view_entry}} view file internally\n\
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
   {{fm_find}} open find/back to find results\n\
@@ -600,7 +601,8 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("help_node_cycle", String::from("n / p")),
         ("help_close", String::from("F10 / Esc")),
         ("fm_switch_panel", String::from("Tab")),
-        ("fm_open_entry", String::from("Enter/F3")),
+        ("fm_open_entry", String::from("Enter")),
+        ("fm_view_entry", String::from("F3")),
         ("fm_parent", String::from("Backspace")),
         ("fm_quick_cd", String::from("/ or Alt-C")),
         ("fm_find", String::from("Alt-F")),
