@@ -13,5 +13,9 @@ description = "Cancelable process execution primitives for Rust Commander"
 name = "rc_shell"
 path = "src/lib.rs"
 
+[dependencies]
+serde_json.workspace = true
+unicode-segmentation.workspace = true
+
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }

@@ -388,7 +388,7 @@ fn parse_tilde(argument: &str) -> Option<TildeExpansion<'_>> {
     })
 }
 
-fn lexically_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexically_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

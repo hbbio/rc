@@ -24,6 +24,7 @@ impl AppState {
             selection_sizes: std::array::from_fn(|_| SelectionSizeState::default()),
             status_line: String::from("Press F1 for help"),
             status_expires_at: None,
+            status_message_generation: 0,
             last_dialog_result: None,
             jobs: JobManager::new(),
             jobs_cursor: 0,
@@ -34,6 +35,16 @@ impl AppState {
             pending_skin_preview: None,
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
+            command_line: CommandLineModel::new(settings.shell.history),
+            next_command_line_activation_id: 1,
+            #[cfg(unix)]
+            next_shell_resolution_request_id: 1,
+            pending_shell_resolution: None,
+            pending_shell_resolution_request: None,
+            next_completion_request_id: 1,
+            pending_completion_requests: Vec::new(),
+            pending_completion_cancellations: Vec::new(),
+            pending_foreground_shell_requests: Vec::new(),
             paused_find_results: None,
             pending_find_tree_picker: None,
             pending_worker_commands: Vec::new(),
@@ -121,6 +132,8 @@ impl AppState {
 
     pub fn replace_settings(&mut self, settings: Settings) {
         self.settings = settings;
+        self.command_line
+            .set_history_mode(self.settings.shell.history);
         self.hotlist_cursor = self
             .hotlist_cursor
             .min(self.settings.configuration.hotlist.len().saturating_sub(1));
@@ -387,6 +400,7 @@ impl AppState {
             .status_message_timeout()
             .and_then(|timeout| Instant::now().checked_add(timeout))
             .filter(|_| !self.status_line.is_empty());
+        self.status_message_generation = self.status_message_generation.wrapping_add(1);
     }
 
     pub fn expire_status_line(&mut self) {
@@ -528,6 +542,7 @@ impl AppState {
                     KeyContext::FileManager
                 }
             }
+            Route::CommandLine(_) => KeyContext::CommandLine,
             Route::Jobs => KeyContext::Jobs,
             Route::Viewer(viewer) => {
                 if viewer.hex_mode {

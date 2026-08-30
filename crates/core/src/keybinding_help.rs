@@ -263,6 +263,14 @@ impl AppState {
             ),
         );
         replacements.insert(
+            "fm_command_line",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenCommandLine,
+                ">",
+            ),
+        );
+        replacements.insert(
             "fm_find",
             self.keybinding_joined_or_fallback(
                 KeyContext::FileManager,

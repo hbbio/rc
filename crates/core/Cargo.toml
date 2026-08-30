@@ -20,6 +20,12 @@ rc-shell.workspace = true
 regex = "1.11"
 shlex.workspace = true
 tracing.workspace = true
+tui-input.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(any(unix, windows))'.dependencies]
+getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }

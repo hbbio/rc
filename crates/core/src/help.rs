@@ -50,6 +50,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_view_entry}} view file internally\n\
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
+  {{fm_command_line}} open command line (Unix)\n\
   {{fm_find}} open find/back to find results\n\
   {{fm_tree}} open directory tree\n\
   {{fm_hotlist}} open directory hotlist\n\
@@ -76,8 +77,10 @@ directory, home, and filesystem root. Results are ranked and streamed from a\n\
 bounded background scan; use Up/Down to choose one and Enter to open it.\n\
 \n\
 rc deliberately has no always-live shell input: file-manager keys remain\n\
-available for navigation. > is reserved for a future explicit shell-command\n\
-prompt.\n\
+available for navigation. On Unix, use {{fm_command_line}} to open the modal command line\n\
+in the active panel directory. Tab/Shift-Tab completes, Up/Down browses history,\n\
+Enter submits the command, and Esc returns to the panels.\n\
+A successful literal cd updates the active panel directory.\n\
 \n\
 More: [Panel controls](panel-controls), [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
     ),
@@ -605,6 +608,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_view_entry", String::from("F3")),
         ("fm_parent", String::from("Backspace")),
         ("fm_quick_cd", String::from("/ or Alt-C")),
+        ("fm_command_line", String::from(">")),
         ("fm_find", String::from("Alt-F")),
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
@@ -736,9 +740,11 @@ mod tests {
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("Tab switch panel"));
         assert!(content.contains("/ or Alt-C quick cd"));
+        assert!(content.contains("> open command line"));
         assert!(content.contains("case-insensitive directory search"));
         assert!(content.contains("use Up/Down to choose one"));
-        assert!(content.contains("> is reserved for a future explicit shell-command"));
+        assert!(content.contains("Tab/Shift-Tab completes"));
+        assert!(content.contains("successful literal cd updates the active panel directory"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));
         assert!(content.contains("Ctrl-X i show info in the passive panel"));

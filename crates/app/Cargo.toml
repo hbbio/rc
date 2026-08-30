@@ -31,7 +31,7 @@ rc-core.workspace = true
 rc-ui.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["process", "signal", "term"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "term"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util.workspace = true

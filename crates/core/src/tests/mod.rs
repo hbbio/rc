@@ -1163,6 +1163,7 @@ fn help_content_applies_keybinding_replacements() {
         r#"
 [filemanager]
 OpenJobs = f6
+OpenCommandLine = f7
 "#,
     )
     .expect("keymap should parse");
@@ -1191,6 +1192,10 @@ OpenJobs = f6
     assert!(
         content.contains("F6 open jobs screen"),
         "help should reflect keymap-derived shortcuts"
+    );
+    assert!(
+        content.contains("F7 open command line"),
+        "command-line help should reflect its configured shortcut"
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");
@@ -2131,7 +2136,7 @@ fn set_status_sanitizes_controls_and_truncates_very_long_messages() {
     app.set_status(format!(
         "line1\nline2\t{}\r{}",
         '\u{1b}',
-        "x".repeat(MAX_STATUS_LINE_CHARS.saturating_add(128))
+        "x".repeat(rc_shell::DISPLAY_LINE_LIMIT_BYTES.saturating_add(128))
     ));
     assert!(
         !app.status_line.contains('\n')
@@ -2141,11 +2146,15 @@ fn set_status_sanitizes_controls_and_truncates_very_long_messages() {
         "status text should strip control characters before render"
     );
     assert!(
-        app.status_line.ends_with("..."),
+        app.status_line.contains("\\x1b"),
+        "terminal controls should be rendered visibly"
+    );
+    assert!(
+        app.status_line.ends_with('…'),
         "very long status text should be truncated with an ellipsis"
     );
     assert!(
-        app.status_line.chars().count() <= MAX_STATUS_LINE_CHARS.saturating_add(3),
+        app.status_line.len() <= rc_shell::DISPLAY_LINE_LIMIT_BYTES,
         "status text should be bounded to avoid pathological render costs"
     );
 

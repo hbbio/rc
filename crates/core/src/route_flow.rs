@@ -14,6 +14,7 @@ impl AppState {
             AppCommand::OpenUserMenu => {
                 self.set_status("User menu is not implemented yet (planned for Milestone 5)");
             }
+            AppCommand::OpenCommandLine => self.open_command_line(),
             AppCommand::OpenMenuBar => self.open_menu_bar(0),
             AppCommand::OpenMenuBarAt(index) => self.open_menu_bar(index),
             AppCommand::CloseMenu => self.close_menu(),
@@ -252,6 +253,7 @@ impl AppState {
         let viewport = ScreenRect::new(0, 0, viewport_width, viewport_height);
         match self.top_route() {
             Route::FileManager | Route::Menu(_) => self.menu_commands_for_left_click(column, row),
+            Route::CommandLine(_) => None,
             Route::FindResults(results) => {
                 let layout = find_results_layout(viewport);
                 let index = visible_list_index_at(

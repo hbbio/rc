@@ -19,3 +19,4 @@ ratatui.workspace = true
 rc-core.workspace = true
 syntect.workspace = true
 unicode-width.workspace = true
+unicode-segmentation.workspace = true

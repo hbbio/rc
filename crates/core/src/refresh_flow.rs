@@ -20,6 +20,15 @@ pub(crate) struct PanelRefreshRevert {
     panel: PanelState,
     previous_directory: Option<PathBuf>,
     panelized_result_history: Option<PanelizedResultSnapshot>,
+    effect: Option<PanelTransitionEffect>,
+}
+
+#[derive(Debug)]
+enum PanelTransitionEffect {
+    LiteralCd {
+        activation_id: u64,
+        buffer_revision: u64,
+    },
 }
 
 pub(crate) struct PanelRefreshCompletion {
@@ -155,12 +164,26 @@ impl PanelRefreshPostWorkflow {
         }
     }
 
-    fn clear_revert(&mut self, panel: ActivePanel) {
-        self.reverts[panel.index()] = None;
-    }
-
     fn has_revert(&self, panel: ActivePanel) -> bool {
         self.reverts[panel.index()].is_some()
+    }
+
+    fn attach_effect(&mut self, panel: ActivePanel, effect: PanelTransitionEffect) -> bool {
+        let Some(revert) = self.reverts[panel.index()].as_mut() else {
+            return false;
+        };
+        if revert.effect.is_some() {
+            return false;
+        }
+        revert.effect = Some(effect);
+        true
+    }
+
+    fn has_effect(&self) -> bool {
+        self.reverts
+            .iter()
+            .flatten()
+            .any(|revert| revert.effect.is_some())
     }
 
     fn take_revert(&mut self, panel: ActivePanel) -> Option<PanelRefreshRevert> {
@@ -340,6 +363,7 @@ impl AppState {
             panel: self.panels[panel_index].clone(),
             previous_directory: self.previous_panel_directories[panel_index].clone(),
             panelized_result_history: self.panelized_result_history[panel_index].clone(),
+            effect: None,
         }
     }
 
@@ -351,16 +375,68 @@ impl AppState {
         self.panel_refresh_post.ensure_revert(panel, snapshot);
     }
 
+    pub(crate) fn schedule_literal_cd_transition(
+        &mut self,
+        panel: ActivePanel,
+        activation_id: u64,
+        buffer_revision: u64,
+    ) -> bool {
+        self.panel_refresh_post.attach_effect(
+            panel,
+            PanelTransitionEffect::LiteralCd {
+                activation_id,
+                buffer_revision,
+            },
+        )
+    }
+
+    pub(crate) fn literal_cd_transition_pending(&self) -> bool {
+        self.panel_refresh_post.has_effect()
+    }
+
+    fn finish_panel_transition_effect(
+        &mut self,
+        effect: Option<PanelTransitionEffect>,
+        succeeded: bool,
+    ) {
+        let Some(PanelTransitionEffect::LiteralCd {
+            activation_id,
+            buffer_revision,
+        }) = effect
+        else {
+            return;
+        };
+        self.finish_literal_cd_transition(activation_id, buffer_revision, succeeded);
+    }
+
+    fn commit_panel_refresh_revert(&mut self, panel: ActivePanel) -> bool {
+        let Some(revert) = self.panel_refresh_post.take_revert(panel) else {
+            return false;
+        };
+        self.finish_panel_transition_effect(revert.effect, true);
+        true
+    }
+
     fn restore_panel_refresh_revert(&mut self, panel: ActivePanel) -> bool {
         let Some(mut revert) = self.panel_refresh_post.take_revert(panel) else {
             return false;
         };
+        let effect = revert.effect.take();
         let panel_index = panel.index();
         revert.panel.loading = false;
         self.panels[panel_index] = revert.panel;
         self.previous_panel_directories[panel_index] = revert.previous_directory;
         self.panelized_result_history[panel_index] = revert.panelized_result_history;
+        self.finish_panel_transition_effect(effect, false);
         true
+    }
+
+    fn discard_panel_refresh_revert(&mut self, panel: ActivePanel) {
+        let effect = self
+            .panel_refresh_post
+            .take_revert(panel)
+            .and_then(|revert| revert.effect);
+        self.finish_panel_transition_effect(effect, false);
     }
 
     pub(crate) fn rollback_panel_refresh_for_job(&mut self, id: JobId) {
@@ -390,7 +466,7 @@ impl AppState {
         if let Some(job_id) = self.panel_refresh.invalidate_request(panel) {
             let _ = self.request_cancel_for_job(job_id);
         }
-        self.panel_refresh_post.clear_revert(panel);
+        self.discard_panel_refresh_revert(panel);
         self.panel_refresh_post.clear_focus_target_for_panel(panel);
         self.panels[panel.index()].loading = false;
     }
@@ -509,7 +585,6 @@ impl AppState {
                     {
                         panel_state.cursor = index;
                     }
-                    self.panel_refresh_post.clear_revert(panel);
                     if source.is_panelized() {
                         completion_status =
                             Some(format!("Panelize complete: {entry_count} result(s)"));
@@ -548,6 +623,8 @@ impl AppState {
         }
         if refresh_failed {
             self.restore_panel_refresh_revert(panel);
+        } else {
+            self.commit_panel_refresh_revert(panel);
         }
         self.panel_refresh_clear_panel(panel);
         if clear_focus_target {

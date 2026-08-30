@@ -1010,6 +1010,7 @@ impl AppState {
         panel_id: ActivePanel,
         destination: PathBuf,
     ) -> io::Result<bool> {
+        let destination = crate::quick_cd::lexically_normalize(&destination);
         let metadata = match fs::metadata(&destination) {
             Ok(metadata) => metadata,
             Err(_) => return Ok(false),

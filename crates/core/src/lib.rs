@@ -2,6 +2,7 @@
 
 mod background;
 mod command_dispatch;
+mod command_line;
 mod command_map;
 pub mod dialog;
 mod dialog_flow;
@@ -47,6 +48,13 @@ pub use background::{
     build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,
     resolve_panel_path_identity, stream_refresh_panel_entries,
 };
+pub use command_line::{
+    COMMAND_BUFFER_LIMIT_BYTES, COMMAND_HISTORY_LIMIT_BYTES, COMMAND_HISTORY_LIMIT_ENTRIES,
+    CommandLineCompletionState, CommandLineInput, CommandLineModel, CommandLineSession,
+    CompletionCancellation, CompletionIntent, ForegroundShellRequest, OpenCompletion,
+    PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest, ShellResolutionResponse,
+    resolve_shell_request_blocking, sanitize_paste,
+};
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
     FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
@@ -78,7 +86,14 @@ pub use quick_cd_search::{
     QuickCdSearchSnapshot, QuickCdSearchSpec, QuickCdSuggestion, run_quick_cd_search,
 };
 pub use quick_view_flow::QuickViewState;
+pub use rc_shell::{
+    COMPLETION_DEADLINE, CompletionCandidate, CompletionEdit, CompletionProvider,
+    CompletionRequest, CompletionResponse,
+};
+pub use rc_shell::{CompletionOutcome, complete_request};
+pub use rc_shell::{CustomShell, ShellDialect, ShellHistoryMode, ShellMode, ShellSettings};
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
+pub use rc_shell::{sanitize_display_field, sanitize_display_line, sanitize_display_lossy};
 pub use selection_size::{
     SELECTION_SIZE_CANCELED_MESSAGE, SelectionSizeReport, measure_selection_size,
 };
@@ -112,12 +127,12 @@ use crate::refresh_flow::{
 use crate::selection_size_flow::SelectionSizeWorkflow;
 use crate::viewer::ViewerSearchDirection;
 
-const MAX_STATUS_LINE_CHARS: usize = 1024;
 const VIEWER_TEXT_PREVIEW_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
     OpenHelp,
+    OpenCommandLine,
     CloseHelp,
     OpenUserMenu,
     OpenMenuBar,
@@ -342,6 +357,7 @@ impl AppCommand {
     pub(crate) const fn domain(self) -> CommandDomain {
         match self {
             Self::OpenHelp
+            | Self::OpenCommandLine
             | Self::CloseHelp
             | Self::OpenUserMenu
             | Self::OpenMenuBar
@@ -1985,6 +2001,7 @@ impl DerefMut for DialogRoute {
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
+    CommandLine(CommandLineSession),
     Help(HelpState),
     Menu(MenuState),
     Settings(SettingsScreenState),
@@ -2039,6 +2056,7 @@ impl KeybindingHints {
         let contexts = [
             KeyContext::FileManager,
             KeyContext::FileManagerXMap,
+            KeyContext::CommandLine,
             KeyContext::Help,
             KeyContext::Jobs,
             KeyContext::FindResults,
@@ -2130,6 +2148,8 @@ pub struct AppState {
     selection_sizes: [SelectionSizeState; 2],
     pub status_line: String,
     status_expires_at: Option<Instant>,
+    // Explicit replacements only; expiry must not hide a still-valid saved status message.
+    status_message_generation: u64,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
     pub jobs_cursor: usize,
@@ -2140,6 +2160,16 @@ pub struct AppState {
     pending_skin_preview: Option<String>,
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
+    command_line: CommandLineModel,
+    next_command_line_activation_id: u64,
+    #[cfg(unix)]
+    next_shell_resolution_request_id: u64,
+    pending_shell_resolution: Option<command_line::PendingShellResolution>,
+    pending_shell_resolution_request: Option<ShellResolutionRequest>,
+    next_completion_request_id: u64,
+    pending_completion_requests: Vec<CompletionRequest>,
+    pending_completion_cancellations: Vec<CompletionCancellation>,
+    pending_foreground_shell_requests: Vec<ForegroundShellRequest>,
     paused_find_results: Option<FindResultsState>,
     pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,
@@ -2166,28 +2196,7 @@ pub struct AppState {
 }
 
 fn normalize_status_message(message: String) -> String {
-    let mut normalized = String::new();
-    let mut count = 0_usize;
-    let mut truncated = false;
-
-    for ch in message.chars() {
-        if count >= MAX_STATUS_LINE_CHARS {
-            truncated = true;
-            break;
-        }
-        let normalized_ch = if ch == '\n' || ch == '\r' || ch == '\t' || ch.is_control() {
-            ' '
-        } else {
-            ch
-        };
-        normalized.push(normalized_ch);
-        count = count.saturating_add(1);
-    }
-
-    if truncated {
-        normalized.push_str("...");
-    }
-    normalized
+    rc_shell::sanitize_display_line(&message)
 }
 
 fn key_chord_sort_key(chord: &KeyChord) -> (u8, u16, String) {

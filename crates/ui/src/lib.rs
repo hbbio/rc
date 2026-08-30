@@ -18,12 +18,13 @@ use rc_core::layout::{
     tree_layout, visible_window,
 };
 use rc_core::{
-    ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
-    FilterDialogField, FindDialogField, FindNameMode, FindResultsState, FindResultsStatus,
-    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, NavigationMotion, NavigationTarget,
-    PairInputField, PanelCommand, PanelListingFormat, PanelState, PanelViewMode,
-    QuickCdSearchStatus, QuickViewState, Route, SelectionSizeState, SettingsScreenState,
-    TreeLoadState, TreeState, ViewerState, top_menus,
+    ActivePanel, AppCommand, AppState, CommandLineCompletionState, CommandLineSession,
+    DialogButtonFocus, DialogKind, DialogState, FileEntry, FilterDialogField, FindDialogField,
+    FindNameMode, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord, JobStatus,
+    MenuState, NavigationMotion, NavigationTarget, PairInputField, PanelCommand,
+    PanelListingFormat, PanelState, PanelViewMode, QuickCdSearchStatus, QuickViewState, Route,
+    SelectionSizeState, SettingsScreenState, TreeLoadState, TreeState, ViewerState,
+    sanitize_display_field, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -33,6 +34,7 @@ use syntect::highlighting::{
     Style as SyntectStyle, Theme,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use skin::{UiSkin, current_skin};
@@ -132,24 +134,28 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         }
     }
 
-    let status = if state.show_debug_status() {
-        format!(
-            "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
-            state.key_context(),
-            state.route_depth(),
-            skin.name(),
-            job_counts.queued,
-            job_counts.running,
-            job_counts.succeeded,
-            job_counts.canceled,
-            job_counts.failed,
-            state.status_line
-        )
+    if let Some(session) = state.command_line_session() {
+        render_command_line_status(frame, root[2], state, session, skin.as_ref());
     } else {
-        state.status_line.clone()
-    };
-    let status = fit_single_line(status, root[2].width as usize);
-    frame.render_widget(Paragraph::new(status), root[2]);
+        let status = if state.show_debug_status() {
+            format!(
+                "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
+                state.key_context(),
+                state.route_depth(),
+                skin.name(),
+                job_counts.queued,
+                job_counts.running,
+                job_counts.succeeded,
+                job_counts.canceled,
+                job_counts.failed,
+                state.status_line
+            )
+        } else {
+            state.status_line.clone()
+        };
+        let status = fit_single_line(status, root[2].width as usize);
+        frame.render_widget(Paragraph::new(status), root[2]);
+    }
     if state.show_button_bar() {
         render_button_bar(frame, root[3], skin.as_ref(), state);
     }
@@ -166,8 +172,293 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Help(help) => render_help_screen(frame, state, help, skin.as_ref()),
         Route::Menu(menu) => render_menu_overlay(frame, state, menu, skin.as_ref()),
         Route::Settings(settings) => render_settings_screen(frame, settings, skin.as_ref()),
+        Route::CommandLine(session) => {
+            render_completion_pager(frame, root[1], session, skin.as_ref())
+        }
         Route::FileManager => {}
     }
+}
+
+fn render_command_line_status(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    session: &CommandLineSession,
+    skin: &UiSkin,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let model = state.command_line_model();
+    let layout = command_line_prompt_layout(state, session, area.width as usize);
+    let prefix = layout.prefix;
+    let prefix_width = layout.prefix_width;
+    let input_width = layout.input_width;
+    let scroll = layout.scroll;
+    let total_width = area.width as usize;
+    let visible_value = display_column_slice(model.value(), scroll, input_width);
+    let visible_value_width = UnicodeWidthStr::width(visible_value.as_str());
+    let mut remaining = input_width.saturating_sub(visible_value_width);
+
+    let base_style = skin.style("core", "_default_");
+    let mut spans = vec![
+        Span::styled(prefix, base_style),
+        Span::styled(visible_value, base_style),
+    ];
+    let transient_notice = match &session.completion {
+        CommandLineCompletionState::Pending(_) => Some("completing…"),
+        _ => session.notice.as_deref(),
+    };
+    if transient_notice.is_none()
+        && remaining > 0
+        && let Some(suggestion) = model.autosuggestion()
+        && let Some(suffix) = suggestion.strip_prefix(model.value())
+    {
+        let suffix = display_column_slice(suffix, 0, remaining);
+        remaining = remaining.saturating_sub(UnicodeWidthStr::width(suffix.as_str()));
+        spans.push(Span::styled(suffix, base_style.add_modifier(Modifier::DIM)));
+    }
+
+    if remaining > 2
+        && let Some(notice) = transient_notice
+    {
+        let notice = sanitize_display_field(notice);
+        let notice = fit_single_line(format!("  {notice}"), remaining);
+        spans.push(Span::styled(
+            notice,
+            base_style.fg(Color::Yellow).add_modifier(Modifier::DIM),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), area);
+    if input_width > 0 {
+        let cursor_in_input = model.visual_cursor().saturating_sub(scroll);
+        let cursor_x = prefix_width
+            .saturating_add(cursor_in_input)
+            .min(total_width.saturating_sub(1));
+        frame.set_cursor_position((area.x.saturating_add(cursor_x as u16), area.y));
+    } else {
+        frame.set_cursor_position((area.x.saturating_add(area.width.saturating_sub(1)), area.y));
+    }
+}
+
+struct CommandLinePromptLayout {
+    prefix: String,
+    prefix_width: usize,
+    input_width: usize,
+    scroll: usize,
+}
+
+fn command_line_prompt_layout(
+    state: &AppState,
+    session: &CommandLineSession,
+    total_width: usize,
+) -> CommandLinePromptLayout {
+    let model = state.command_line_model();
+    let cwd = format_panel_path(
+        &state.active_panel().cwd,
+        state.active_panel().home_directory(),
+        None,
+        state.active_panel().canonical_home_directory(),
+    );
+    let cwd = sanitize_display_field(&cwd);
+    let identity = sanitize_display_field(&session.shell.identity);
+    let shell_label = model.last_exit_status().map_or_else(
+        || format!("[{identity}]"),
+        |status| format!("[{identity}:{status}]"),
+    );
+    let prefix_budget = total_width.saturating_sub(1);
+    let shell_prompt = fit_shell_prompt(&shell_label, prefix_budget);
+    let shell_width = UnicodeWidthStr::width(shell_prompt.as_str());
+    let cwd_budget = prefix_budget.saturating_sub(shell_width);
+    let prefix = if cwd_budget > 1 {
+        format!(
+            "{} {shell_prompt}",
+            fit_single_line(cwd, cwd_budget.saturating_sub(1))
+        )
+    } else {
+        shell_prompt
+    };
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str()).min(total_width);
+    let input_width = total_width.saturating_sub(prefix_width);
+    let scroll = model.visual_scroll(input_width.saturating_sub(1));
+    CommandLinePromptLayout {
+        prefix,
+        prefix_width,
+        input_width,
+        scroll,
+    }
+}
+
+fn fit_shell_prompt(shell_label: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return String::from(">");
+    }
+    if width == 2 {
+        return String::from("> ");
+    }
+    let suffix = " > ";
+    let label = fit_single_line(shell_label, width.saturating_sub(3));
+    format!("{label}{suffix}")
+}
+
+pub fn command_line_cursor_for_column(
+    state: &AppState,
+    column: u16,
+    viewport_width: u16,
+) -> Option<usize> {
+    let session = state.command_line_session()?;
+    let layout = command_line_prompt_layout(state, session, viewport_width as usize);
+    let column = column as usize;
+    if column < layout.prefix_width {
+        return Some(0);
+    }
+    let target = layout.scroll.saturating_add(
+        column
+            .saturating_sub(layout.prefix_width)
+            .min(layout.input_width),
+    );
+    Some(codepoint_for_display_column(
+        state.command_line_model().value(),
+        target,
+    ))
+}
+
+fn codepoint_for_display_column(value: &str, target: usize) -> usize {
+    let mut column = 0_usize;
+    let mut codepoints = 0_usize;
+    for grapheme in value.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        if target < column.saturating_add(width) {
+            return codepoints;
+        }
+        column = column.saturating_add(width);
+        codepoints = codepoints.saturating_add(grapheme.chars().count());
+    }
+    codepoints
+}
+
+fn display_column_slice(value: &str, start: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut column = 0_usize;
+    let mut output_width = 0_usize;
+    let mut output = String::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        let next_column = column.saturating_add(grapheme_width);
+        if next_column <= start {
+            column = next_column;
+            continue;
+        }
+        if column < start || output_width.saturating_add(grapheme_width) > width {
+            column = next_column;
+            continue;
+        }
+        output.push_str(grapheme);
+        output_width = output_width.saturating_add(grapheme_width);
+        column = next_column;
+        if output_width >= width {
+            break;
+        }
+    }
+    output
+}
+
+fn render_completion_pager(
+    frame: &mut Frame,
+    panel_area: Rect,
+    session: &CommandLineSession,
+    skin: &UiSkin,
+) {
+    let Some((candidates, selected)) = session.completion_candidates() else {
+        return;
+    };
+    if candidates.is_empty() || panel_area.width == 0 || panel_area.height == 0 {
+        return;
+    }
+    let selected = selected.min(candidates.len() - 1);
+    let selected_style = skin.style("core", "selected");
+    let base_style = skin.style("core", "_default_");
+    if panel_area.height <= 3 {
+        let candidate = &candidates[selected];
+        let display = sanitize_display_field(&candidate.display);
+        let line = fit_single_line(
+            format!("{display} ({}/{})", selected + 1, candidates.len()),
+            panel_area.width as usize,
+        );
+        let area = Rect::new(
+            panel_area.x,
+            panel_area
+                .y
+                .saturating_add(panel_area.height.saturating_sub(1)),
+            panel_area.width,
+            1,
+        );
+        frame.render_widget(Paragraph::new(line).style(selected_style), area);
+        return;
+    }
+
+    let visible_rows = candidates
+        .len()
+        .min(6)
+        .min(panel_area.height.saturating_sub(2) as usize);
+    let height = (visible_rows as u16)
+        .saturating_add(2)
+        .min(panel_area.height);
+    let width = panel_area.width.min(88);
+    let area = Rect::new(
+        panel_area.x,
+        panel_area
+            .y
+            .saturating_add(panel_area.height.saturating_sub(height)),
+        width,
+        height,
+    );
+    let first = selected
+        .saturating_sub(visible_rows / 2)
+        .min(candidates.len().saturating_sub(visible_rows));
+    let items = candidates[first..first + visible_rows]
+        .iter()
+        .enumerate()
+        .map(|(offset, candidate)| {
+            let mut value = sanitize_display_field(&candidate.display);
+            if let Some(description) = candidate.description.as_deref() {
+                let description = sanitize_display_field(description);
+                if !description.is_empty() {
+                    value.push_str(" — ");
+                    value.push_str(&description);
+                }
+            }
+            let value = fit_single_line(value, width.saturating_sub(2) as usize);
+            let style = if first + offset == selected {
+                selected_style
+            } else {
+                base_style
+            };
+            ListItem::new(value).style(style)
+        })
+        .collect::<Vec<_>>();
+    let title = fit_single_line(
+        format!("Completions {}/{}", selected + 1, candidates.len()),
+        width.saturating_sub(2) as usize,
+    );
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_set(skin.panel_border_set())
+                .border_style(selected_style)
+                .style(base_style),
+        )
+        .style(base_style);
+    frame.render_widget(Clear, area);
+    frame.render_widget(list, area);
 }
 
 fn uses_single_panel_layout(state: &AppState) -> bool {
@@ -467,12 +758,14 @@ fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
 
     let prefix_width = width - 3;
     let mut truncated = String::new();
-    for ch in sanitized.chars() {
-        truncated.push(ch);
-        if UnicodeWidthStr::width(truncated.as_str()) > prefix_width {
-            truncated.pop();
+    let mut truncated_width = 0_usize;
+    for grapheme in sanitized.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if truncated_width.saturating_add(grapheme_width) > prefix_width {
             break;
         }
+        truncated.push_str(grapheme);
+        truncated_width = truncated_width.saturating_add(grapheme_width);
     }
     truncated.push_str("...");
     debug_assert!(UnicodeWidthStr::width(truncated.as_str()) <= width);
@@ -2874,6 +3167,16 @@ mod tests {
         buffer_to_text(&buffer)
     }
 
+    #[cfg(unix)]
+    fn open_command_line_for_test(app: &mut AppState) {
+        app.open_command_line();
+        let request = app
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution should be queued");
+        app.handle_shell_resolution_response(rc_core::resolve_shell_request_blocking(request));
+        assert!(app.command_line_session().is_some());
+    }
+
     fn render_panel_topline_to_text(titles: PanelToplineTitles, interior_width: u16) -> String {
         let backend = TestBackend::new(interior_width.saturating_add(2), 2);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
@@ -4173,5 +4476,179 @@ OpenConfirmDialog = f2
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_cursor_stays_visible_at_every_constrained_width() {
+        use rc_core::CommandLineInput;
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from(
+            "printf 'wide: 你好 e\u{301}' and-a-very-long-tail",
+        )))
+        .expect("paste");
+
+        for width in 1..=120 {
+            let backend = TestBackend::new(width, 8);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal.draw(|frame| render(frame, &app)).expect("render");
+            let cursor = terminal.get_cursor_position().expect("cursor");
+            assert!(cursor.x < width, "cursor escaped width {width}: {cursor:?}");
+            assert!(cursor.y < 8, "cursor escaped height at width {width}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_sanitizes_shell_and_completion_display_fields() {
+        use rc_core::{
+            CommandLineInput, CompletionCandidate, CompletionEdit, CompletionIntent,
+            CompletionOutcome, CompletionProvider, CompletionResponse, Settings, ShellDialect,
+            ShellHistoryMode, ShellSettings,
+        };
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        let settings = Settings {
+            shell: ShellSettings::custom(
+                "evil\u{1b}[31m-shell",
+                ShellDialect::Posix,
+                None,
+                ShellHistoryMode::Session,
+            )
+            .expect("custom shell"),
+            ..Settings::default()
+        };
+        app.replace_settings(settings);
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request");
+        let request = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("request");
+        app.handle_completion_response(CompletionResponse {
+            activation_id: request.activation_id,
+            request_id: request.request_id,
+            buffer_revision: request.buffer_revision,
+            original_buffer: request.buffer,
+            outcome: CompletionOutcome::Candidates {
+                provider: CompletionProvider::Generic,
+                candidates: vec![CompletionCandidate {
+                    edit: CompletionEdit {
+                        start_byte: 0,
+                        end_byte: 0,
+                        replacement: String::from("safe"),
+                    },
+                    display: String::from("candidate\u{1b}[2J"),
+                    description: Some(String::from("line\nnext")),
+                }],
+                notice: None,
+            },
+        });
+
+        let rendered = render_to_text(&app, 80, 12);
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("\\x1b"));
+        assert!(!rendered.contains("line\nnext"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_mouse_column_maps_to_grapheme_boundary() {
+        use rc_core::CommandLineInput;
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("ab好cd")))
+            .expect("paste");
+        let session = app.command_line_session().expect("session");
+        let layout = command_line_prompt_layout(&app, session, 100);
+        assert_eq!(
+            command_line_cursor_for_column(&app, (layout.prefix_width + 2) as u16, 100),
+            Some(2)
+        );
+        assert_eq!(
+            command_line_cursor_for_column(&app, (layout.prefix_width + 4) as u16, 100),
+            Some(3)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_prompt_preserves_shell_identity_before_long_cwd() {
+        use rc_core::{Settings, ShellDialect, ShellHistoryMode, ShellSettings};
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        app.replace_settings(Settings {
+            shell: ShellSettings::custom(
+                "fish",
+                ShellDialect::Fish,
+                None,
+                ShellHistoryMode::Session,
+            )
+            .expect("custom fish"),
+            ..Settings::default()
+        });
+        open_command_line_for_test(&mut app);
+        let session = app.command_line_session().expect("session");
+        let layout = command_line_prompt_layout(&app, session, 18);
+        assert!(layout.prefix.contains("[fish]"), "{}", layout.prefix);
+        assert!(layout.prefix.ends_with("> "), "{}", layout.prefix);
+        assert!(layout.prefix_width <= 17);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_pager_renders_at_every_tiny_height() {
+        use rc_core::{
+            CommandLineInput, CompletionCandidate, CompletionEdit, CompletionIntent,
+            CompletionOutcome, CompletionProvider, CompletionResponse,
+        };
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request");
+        let request = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("request");
+        app.handle_completion_response(CompletionResponse {
+            activation_id: request.activation_id,
+            request_id: request.request_id,
+            buffer_revision: request.buffer_revision,
+            original_buffer: request.buffer,
+            outcome: CompletionOutcome::Candidates {
+                provider: CompletionProvider::Generic,
+                candidates: (0..10)
+                    .map(|index| CompletionCandidate {
+                        edit: CompletionEdit {
+                            start_byte: 0,
+                            end_byte: 0,
+                            replacement: format!("candidate-{index}"),
+                        },
+                        display: format!("candidate-{index}"),
+                        description: Some(String::from("description")),
+                    })
+                    .collect(),
+                notice: None,
+            },
+        });
+
+        for height in 1..=10 {
+            let backend = TestBackend::new(24, height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal.draw(|frame| render(frame, &app)).expect("render");
+            let cursor = terminal.get_cursor_position().expect("cursor");
+            assert!(cursor.x < 24, "height {height}: {cursor:?}");
+            assert!(cursor.y < height, "height {height}: {cursor:?}");
+        }
     }
 }

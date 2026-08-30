@@ -5,6 +5,7 @@ use std::fmt;
 pub enum KeyContext {
     FileManager,
     FileManagerXMap,
+    CommandLine,
     Help,
     Jobs,
     FindResults,
@@ -40,6 +41,7 @@ impl KeyContext {
 
         match base.as_str() {
             "filemanager" | "panel" => Some(Self::FileManager),
+            "commandline" | "command-line" | "shellprompt" => Some(Self::CommandLine),
             "help" => Some(Self::Help),
             "jobs" => Some(Self::Jobs),
             "find" | "findresults" => Some(Self::FindResults),
@@ -107,6 +109,7 @@ impl KeyChord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyCommand {
     OpenHelp,
+    OpenCommandLine,
     OpenUserMenu,
     OpenMenuBar,
     Quit,
@@ -199,6 +202,7 @@ impl KeyCommand {
 
         match normalized.as_str() {
             "help" => Self::OpenHelp,
+            "opencommandline" | "commandline" => Self::OpenCommandLine,
             "usermenu" => Self::OpenUserMenu,
             "menu" | "openmenu" | "pulldown" => Self::OpenMenuBar,
             "quit" => Self::Quit,
@@ -1441,8 +1445,7 @@ Reread = ctrl-r
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char('>'))),
-            None,
-            "greater-than is reserved for the future shell-command prompt"
+            Some(&KeyCommand::OpenCommandLine)
         );
     }
 
