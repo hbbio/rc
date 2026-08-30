@@ -33,6 +33,7 @@ use rc_core::{
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
+mod clipboard;
 mod runtime;
 
 use runtime::RuntimeBridge;
@@ -616,6 +617,7 @@ fn run_event_loop(
         state.poll_deferred_work();
         runtime.dispatch_pending_commands(state);
         state.expire_status_line();
+        dispatch_pending_clipboard_copy_requests(terminal.backend_mut(), state);
         dispatch_pending_external_edit_requests(terminal, state);
         dispatch_pending_external_execute_requests(terminal, state);
         dispatch_pending_foreground_shell_requests(terminal, state);
@@ -796,6 +798,7 @@ fn command_line_keymap_command(
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged
             | AppCommand::PutOtherTagged
+            | AppCommand::CopySelectedPath
     )
     .then_some(command)
 }
@@ -890,6 +893,17 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
         paths: skin_runtime.settings_paths.clone(),
         snapshot: Box::new(snapshot),
     });
+}
+
+fn dispatch_pending_clipboard_copy_requests(writer: &mut impl io::Write, state: &mut AppState) {
+    for request in state.take_pending_clipboard_copy_requests() {
+        match clipboard::write_text(writer, &request.text) {
+            Ok(()) => state.set_command_feedback("Copied selected path to clipboard"),
+            Err(error) => {
+                state.set_command_feedback(format!("Clipboard copy failed: {error}"));
+            }
+        }
+    }
 }
 
 fn dispatch_pending_external_edit_requests(
@@ -2309,8 +2323,9 @@ fn map_shifted_ascii_symbol(ch: char) -> Option<char> {
 mod tests {
     use super::*;
     use crate::runtime::{self, RuntimeCommand};
+    use base64::Engine as _;
     use crossterm::event::{KeyCode as CrosstermKeyCode, KeyEvent, KeyModifiers};
-    use rc_core::{WorkerCommand, build_tree_ready_event};
+    use rc_core::{ActivePanel, WorkerCommand, build_tree_ready_event};
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
@@ -3828,6 +3843,175 @@ mod tests {
         assert!(state.status_line.contains("Add hotlist entry"));
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn ctrl_x_y_copies_the_selected_absolute_path_via_osc52() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-ctrlx-copy-path-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let selected = root.join("selected file.txt");
+        fs::write(&selected, "data").expect("selected fixture should be writable");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state.panels[ActivePanel::Left.index()]
+            .refresh()
+            .expect("left panel should refresh");
+        state.active_panel_mut().cursor = state
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == selected)
+            .expect("selected fixture should be listed");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("ctrl-x should enter xmap mode");
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('y'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("ctrl-x y should queue the selected path");
+
+        let mut output = Vec::new();
+        dispatch_pending_clipboard_copy_requests(&mut output, &mut state);
+        assert_eq!(
+            output,
+            format!(
+                "\x1b]52;c;{}\x1b\\",
+                base64::engine::general_purpose::STANDARD.encode(
+                    selected
+                        .to_str()
+                        .expect("temporary path should be valid UTF-8")
+                )
+            )
+            .into_bytes()
+        );
+        assert_eq!(state.status_line, "Copied selected path to clipboard");
+        assert_eq!(state.key_context(), KeyContext::FileManager);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_results_are_visible_in_the_command_line_notice() {
+        struct FailingWriter;
+
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("test clipboard write failure"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-command-line-clipboard-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let selected = root.join("selected.txt");
+        fs::write(&selected, "data").expect("selected fixture should be writable");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .active_panel_mut()
+            .refresh()
+            .expect("active panel should refresh");
+        state.active_panel_mut().cursor = state
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == selected)
+            .expect("selected fixture should be listed");
+        state.open_command_line();
+        let request = state
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution should be queued");
+        state.handle_shell_resolution_response(rc_core::resolve_shell_request_blocking(request));
+        state
+            .handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request should be queued");
+        let completion_request = state
+            .take_pending_completion_requests()
+            .pop()
+            .expect("completion should be pending");
+
+        state
+            .apply(AppCommand::CopySelectedPath)
+            .expect("clipboard request should be queued");
+        let cancellations = state.take_pending_completion_cancellations();
+        assert_eq!(cancellations.len(), 1);
+        assert_eq!(
+            cancellations[0].activation_id,
+            completion_request.activation_id
+        );
+        assert_eq!(cancellations[0].request_id, completion_request.request_id);
+        assert_eq!(
+            state
+                .command_line_session()
+                .and_then(|session| session.notice.as_deref()),
+            Some("Copying selected path to clipboard...")
+        );
+
+        let mut output = Vec::new();
+        dispatch_pending_clipboard_copy_requests(&mut output, &mut state);
+        state.handle_completion_response(rc_core::CompletionResponse {
+            activation_id: completion_request.activation_id,
+            request_id: completion_request.request_id,
+            buffer_revision: completion_request.buffer_revision,
+            original_buffer: completion_request.buffer,
+            outcome: rc_core::CompletionOutcome::Candidates {
+                provider: rc_core::CompletionProvider::Generic,
+                candidates: Vec::new(),
+                notice: Some(String::from("late completion notice")),
+            },
+        });
+        assert_eq!(
+            state
+                .command_line_session()
+                .and_then(|session| session.notice.as_deref()),
+            Some("Copied selected path to clipboard")
+        );
+
+        state
+            .apply(AppCommand::CopySelectedPath)
+            .expect("second clipboard request should be queued");
+        dispatch_pending_clipboard_copy_requests(&mut FailingWriter, &mut state);
+        assert_eq!(
+            state
+                .command_line_session()
+                .and_then(|session| session.notice.as_deref()),
+            Some("Clipboard copy failed: test clipboard write failure")
+        );
+
+        fs::remove_dir_all(root).expect("must remove temp root");
     }
 
     #[test]

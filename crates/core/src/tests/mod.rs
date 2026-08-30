@@ -1185,6 +1185,7 @@ ExtendedKeyMap = ctrl-g
 [filemanager:xmap]
 PutCurrentTagged = z
 PutOtherTagged = ctrl-z
+CopySelectedPath = y
 "#,
     )
     .expect("keymap should parse");
@@ -1233,6 +1234,10 @@ PutOtherTagged = ctrl-z
     assert!(
         content.contains("Ctrl-g Ctrl-z insert passive-panel tagged names"),
         "passive tagged-file help should reflect its configured xmap sequence"
+    );
+    assert!(
+        content.contains("Ctrl-g y copy the selected entry's full path to the clipboard"),
+        "clipboard help should reflect its configured xmap sequence"
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");

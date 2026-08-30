@@ -7,6 +7,7 @@ use crate::*;
 
 impl AppState {
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
+        let start_path = std::path::absolute(start_path)?;
         let settings = Settings::default();
         let home_directory = current_user_home_directory();
         let mut left = PanelState::new(start_path.clone())?;
@@ -50,6 +51,7 @@ impl AppState {
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
             pending_external_execute_requests: Vec::new(),
+            pending_clipboard_copy_requests: Vec::new(),
             panelized_result_history: [None, None],
             previous_panel_directories: [None, None],
             quick_cd_search: QuickCdSearchWorkflow::default(),
@@ -582,5 +584,31 @@ impl AppState {
         self.active_panel()
             .selected_entry()
             .filter(|entry| !entry.is_parent())
+    }
+
+    pub(crate) fn copy_selected_path_to_clipboard(&mut self) {
+        let Some(path) = self
+            .active_panel()
+            .selected_entry()
+            .map(|entry| entry.path.clone())
+        else {
+            self.set_command_feedback("No entry selected");
+            return;
+        };
+        let absolute_path = match std::path::absolute(path) {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_command_feedback(format!("Selected path cannot be resolved: {error}"));
+                return;
+            }
+        };
+        let Some(text) = absolute_path.to_str().map(ToString::to_string) else {
+            self.set_command_feedback("Selected path is not valid UTF-8 and cannot be copied");
+            return;
+        };
+
+        self.pending_clipboard_copy_requests
+            .push(ClipboardCopyRequest { text });
+        self.set_command_feedback("Copying selected path to clipboard...");
     }
 }

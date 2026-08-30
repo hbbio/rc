@@ -46,6 +46,10 @@ impl AppState {
         std::mem::take(&mut self.pending_external_execute_requests)
     }
 
+    pub fn take_pending_clipboard_copy_requests(&mut self) -> Vec<ClipboardCopyRequest> {
+        std::mem::take(&mut self.pending_clipboard_copy_requests)
+    }
+
     pub fn handle_job_event(&mut self, event: JobEvent) {
         if let JobEvent::Finished { id, .. } = &event {
             self.find_pause_flags.remove(id);

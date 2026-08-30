@@ -12,7 +12,9 @@ use tui_input::{Input, InputRequest};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{AppCommand, AppState, PanelState, Route, current_user_home_directory};
+use crate::{
+    AppCommand, AppState, PanelState, Route, current_user_home_directory, normalize_status_message,
+};
 
 pub const COMMAND_BUFFER_LIMIT_BYTES: usize = 64 * 1024;
 pub const PASTE_PAYLOAD_LIMIT_BYTES: usize = 64 * 1024;
@@ -596,6 +598,16 @@ impl AppState {
             return None;
         };
         Some(session)
+    }
+
+    pub fn set_command_feedback(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if matches!(self.routes.last(), Some(Route::CommandLine(_))) {
+            self.cancel_and_close_completion();
+            self.set_command_line_notice(normalize_status_message(message));
+        } else {
+            self.set_status(message);
+        }
     }
 
     fn command_line_session_by_activation_mut(
