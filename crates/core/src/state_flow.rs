@@ -8,8 +8,11 @@ use crate::*;
 impl AppState {
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
         let settings = Settings::default();
-        let left = PanelState::new(start_path.clone())?;
-        let right = PanelState::new(start_path)?;
+        let home_directory = current_user_home_directory();
+        let mut left = PanelState::new(start_path.clone())?;
+        left.set_home_directory(home_directory.clone());
+        let mut right = PanelState::new(start_path)?;
+        right.set_home_directory(home_directory);
 
         Ok(Self {
             settings: settings.clone(),
@@ -21,6 +24,7 @@ impl AppState {
             selection_sizes: std::array::from_fn(|_| SelectionSizeState::default()),
             status_line: String::from("Press F1 for help"),
             status_expires_at: None,
+            status_message_generation: 0,
             last_dialog_result: None,
             jobs: JobManager::new(),
             jobs_cursor: 0,
@@ -31,10 +35,21 @@ impl AppState {
             pending_skin_preview: None,
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
+            command_line: CommandLineModel::new(settings.shell.history),
+            next_command_line_activation_id: 1,
+            #[cfg(unix)]
+            next_shell_resolution_request_id: 1,
+            pending_shell_resolution: None,
+            pending_shell_resolution_request: None,
+            next_completion_request_id: 1,
+            pending_completion_requests: Vec::new(),
+            pending_completion_cancellations: Vec::new(),
+            pending_foreground_shell_requests: Vec::new(),
             paused_find_results: None,
             pending_find_tree_picker: None,
             pending_worker_commands: Vec::new(),
             pending_external_edit_requests: Vec::new(),
+            pending_external_execute_requests: Vec::new(),
             panelized_result_history: [None, None],
             previous_panel_directories: [None, None],
             quick_cd_search: QuickCdSearchWorkflow::default(),
@@ -117,6 +132,8 @@ impl AppState {
 
     pub fn replace_settings(&mut self, settings: Settings) {
         self.settings = settings;
+        self.command_line
+            .set_history_mode(self.settings.shell.history);
         self.hotlist_cursor = self
             .hotlist_cursor
             .min(self.settings.configuration.hotlist.len().saturating_sub(1));
@@ -352,12 +369,38 @@ impl AppState {
         EditSelectionResult::NoEditorResolved
     }
 
+    pub(crate) fn execute_selected_file(&mut self) -> ExecuteSelectionResult {
+        let Some((path, is_dir, is_runnable)) = self
+            .selected_non_parent_entry()
+            .map(|entry| (entry.path.clone(), entry.is_dir(), entry.is_runnable()))
+        else {
+            return ExecuteSelectionResult::NoEntrySelected;
+        };
+
+        if is_dir {
+            return ExecuteSelectionResult::SelectedEntryIsDirectory;
+        }
+
+        if is_runnable {
+            self.pending_external_execute_requests
+                .push(ExternalExecuteRequest {
+                    path,
+                    cwd: self.active_panel().cwd.clone(),
+                });
+            ExecuteSelectionResult::OpenedExternal
+        } else {
+            self.queue_worker_job_request(JobRequest::OpenDesktop { path });
+            ExecuteSelectionResult::QueuedDesktopOpen
+        }
+    }
+
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status_line = normalize_status_message(message.into());
         self.status_expires_at = self
             .status_message_timeout()
             .and_then(|timeout| Instant::now().checked_add(timeout))
             .filter(|_| !self.status_line.is_empty());
+        self.status_message_generation = self.status_message_generation.wrapping_add(1);
     }
 
     pub fn expire_status_line(&mut self) {
@@ -439,6 +482,10 @@ impl AppState {
         self.xmap_pending = false;
     }
 
+    pub fn is_xmap_pending(&self) -> bool {
+        self.xmap_pending
+    }
+
     pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
         self.keybinding_hints = KeybindingHints::from_keymap(keymap);
     }
@@ -499,6 +546,7 @@ impl AppState {
                     KeyContext::FileManager
                 }
             }
+            Route::CommandLine(_) => KeyContext::CommandLine,
             Route::Jobs => KeyContext::Jobs,
             Route::Viewer(viewer) => {
                 if viewer.hex_mode {

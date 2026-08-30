@@ -9,6 +9,23 @@ impl AppCommand {
 
         match (context, key_command) {
             (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
+            (KeyContext::FileManager, KeyCommand::OpenCommandLine) => Some(Self::OpenCommandLine),
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
+                KeyCommand::PutCurrentSelected,
+            ) => Some(Self::PutCurrentSelected),
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
+                KeyCommand::PutCurrentFullSelected,
+            ) => Some(Self::PutCurrentFullSelected),
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
+                KeyCommand::PutCurrentTagged,
+            ) => Some(Self::PutCurrentTagged),
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
+                KeyCommand::PutOtherTagged,
+            ) => Some(Self::PutOtherTagged),
             (KeyContext::FileManager, KeyCommand::OpenUserMenu) => Some(Self::OpenUserMenu),
             (KeyContext::FileManager, KeyCommand::OpenMenuBar) => Some(Self::OpenMenuBar),
             (KeyContext::Menu, KeyCommand::Quit) => Some(Self::CloseMenu),
@@ -62,6 +79,7 @@ impl AppCommand {
             (KeyContext::Help, KeyCommand::HelpNodeNext) => Some(Self::HelpNodeNext),
             (KeyContext::Help, KeyCommand::HelpNodePrev) => Some(Self::HelpNodePrev),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
+            (KeyContext::FileManager, KeyCommand::ViewEntry) => Some(Self::ViewEntry),
             (KeyContext::FileManager, KeyCommand::EditEntry) => Some(Self::EditEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::QuickCd) => Some(Self::OpenQuickCd),

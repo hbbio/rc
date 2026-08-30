@@ -2,6 +2,7 @@
 
 mod background;
 mod command_dispatch;
+mod command_line;
 mod command_map;
 pub mod dialog;
 mod dialog_flow;
@@ -43,8 +44,16 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
 pub use background::{
-    BackgroundEvent, PanelRefreshResult, PanelRefreshStreamRequest, build_tree_ready_event,
-    read_disk_usage, refresh_panel_entries, refresh_panel_event, stream_refresh_panel_entries,
+    BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
+    build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,
+    resolve_panel_path_identity, stream_refresh_panel_entries,
+};
+pub use command_line::{
+    COMMAND_BUFFER_LIMIT_BYTES, COMMAND_HISTORY_LIMIT_BYTES, COMMAND_HISTORY_LIMIT_ENTRIES,
+    CommandLineCompletionState, CommandLineInput, CommandLineModel, CommandLineSession,
+    CompletionCancellation, CompletionCandidates, CompletionIntent, ForegroundShellRequest,
+    OpenCompletion, PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest,
+    ShellResolutionResponse, resolve_shell_request_blocking, sanitize_paste,
 };
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
@@ -71,12 +80,20 @@ pub(crate) use panel::{
     sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
 pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
+pub use quick_cd::current_user_home_directory;
 pub use quick_cd_search::{
     DEFAULT_QUICK_CD_MAX_DIRECTORIES, DEFAULT_QUICK_CD_MAX_RESULTS, QuickCdSearchError,
     QuickCdSearchSnapshot, QuickCdSearchSpec, QuickCdSuggestion, run_quick_cd_search,
 };
 pub use quick_view_flow::QuickViewState;
+pub use rc_shell::{
+    COMPLETION_DEADLINE, CompletionCandidate, CompletionEdit, CompletionProvider,
+    CompletionRequest, CompletionResponse,
+};
+pub use rc_shell::{CompletionOutcome, complete_request};
+pub use rc_shell::{CustomShell, ShellDialect, ShellHistoryMode, ShellMode, ShellSettings};
 pub use rc_shell::{LocalProcessBackend, ProcessBackend, ProcessExit, ProcessOutputLimits};
+pub use rc_shell::{sanitize_display_field, sanitize_display_line, sanitize_display_lossy};
 pub use selection_size::{
     SELECTION_SIZE_CANCELED_MESSAGE, SelectionSizeReport, measure_selection_size,
 };
@@ -110,12 +127,16 @@ use crate::refresh_flow::{
 use crate::selection_size_flow::SelectionSizeWorkflow;
 use crate::viewer::ViewerSearchDirection;
 
-const MAX_STATUS_LINE_CHARS: usize = 1024;
 const VIEWER_TEXT_PREVIEW_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppCommand {
     OpenHelp,
+    OpenCommandLine,
+    PutCurrentSelected,
+    PutCurrentFullSelected,
+    PutCurrentTagged,
+    PutOtherTagged,
     CloseHelp,
     OpenUserMenu,
     OpenMenuBar,
@@ -156,7 +177,11 @@ pub enum AppCommand {
     CancelJob,
     OpenJobsScreen,
     CloseJobsScreen,
+    /// Activate the selected entry: descend into directories, execute runnable files,
+    /// or delegate documents to the operating system's configured application.
     OpenEntry,
+    /// Open the selected file in rc's internal viewer.
+    ViewEntry,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -336,6 +361,11 @@ impl AppCommand {
     pub(crate) const fn domain(self) -> CommandDomain {
         match self {
             Self::OpenHelp
+            | Self::OpenCommandLine
+            | Self::PutCurrentSelected
+            | Self::PutCurrentFullSelected
+            | Self::PutCurrentTagged
+            | Self::PutOtherTagged
             | Self::CloseHelp
             | Self::OpenUserMenu
             | Self::OpenMenuBar
@@ -398,6 +428,7 @@ impl AppCommand {
             | Self::CancelJob
             | Self::RestorePanelizedResults
             | Self::OpenEntry
+            | Self::ViewEntry
             | Self::EditEntry
             | Self::CdUp
             | Self::Reread
@@ -605,7 +636,7 @@ const LEFT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::L
 const RIGHT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::Right);
 
 const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
-    MenuEntry::action_with_shortcut("View", "F3", AppCommand::OpenEntry),
+    MenuEntry::action_with_shortcut("View", "F3", AppCommand::ViewEntry),
     MenuEntry::stub("View file...", ""),
     MenuEntry::stub("Filtered view", "M-!"),
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
@@ -1049,6 +1080,33 @@ impl FileEntry {
     pub const fn is_parent(&self) -> bool {
         self.kind.is_parent()
     }
+
+    /// Whether the operating system considers this file directly runnable.
+    ///
+    /// Unix asks the kernel for execute access so the current identity, ownership,
+    /// groups, and ACLs are honored. Windows limits direct spawning to native
+    /// executables and batch commands; association-backed `PATHEXT` formats are
+    /// delegated to the desktop opener instead.
+    pub fn is_runnable(&self) -> bool {
+        if self.kind != FileEntryKind::File {
+            return false;
+        }
+
+        #[cfg(unix)]
+        {
+            executable_path_is_runnable(&self.path)
+        }
+
+        #[cfg(windows)]
+        {
+            windows_path_is_directly_runnable(&self.path)
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1107,6 +1165,9 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    home_directory: Option<PathBuf>,
+    canonical_cwd: Option<PathBuf>,
+    canonical_home_directory: Option<PathBuf>,
     filter: PanelFilter,
     show_hidden_files: bool,
     source: PanelListingSource,
@@ -1123,6 +1184,9 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            home_directory: None,
+            canonical_cwd: None,
+            canonical_home_directory: None,
             filter: PanelFilter::default(),
             show_hidden_files: true,
             source: PanelListingSource::Directory,
@@ -1134,6 +1198,7 @@ impl PanelState {
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
+        self.clear_canonical_paths();
         let (entries, panelized_entries) = match &self.source {
             PanelListingSource::Directory => {
                 let entries = read_entries_with_visibility(
@@ -1166,8 +1231,11 @@ impl PanelState {
         };
         let entries = apply_panel_filter(entries, &self.filter)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let (canonical_cwd, canonical_home_directory) =
+            canonical_panel_paths(&self.cwd, self.home_directory.as_deref());
         self.panelized_entries = panelized_entries;
         self.apply_entries(entries);
+        self.set_canonical_paths(canonical_cwd, canonical_home_directory);
         self.loading = false;
         Ok(())
     }
@@ -1223,6 +1291,37 @@ impl PanelState {
 
     pub fn filter(&self) -> &PanelFilter {
         &self.filter
+    }
+
+    pub fn home_directory(&self) -> Option<&Path> {
+        self.home_directory.as_deref()
+    }
+
+    pub fn canonical_cwd(&self) -> Option<&Path> {
+        self.canonical_cwd.as_deref()
+    }
+
+    pub fn canonical_home_directory(&self) -> Option<&Path> {
+        self.canonical_home_directory.as_deref()
+    }
+
+    pub(crate) fn set_home_directory(&mut self, home_directory: Option<PathBuf>) {
+        self.home_directory = home_directory;
+        self.clear_canonical_paths();
+    }
+
+    pub(crate) fn set_canonical_paths(
+        &mut self,
+        canonical_cwd: Option<PathBuf>,
+        canonical_home_directory: Option<PathBuf>,
+    ) {
+        self.canonical_cwd = canonical_cwd;
+        self.canonical_home_directory = canonical_home_directory;
+    }
+
+    pub(crate) fn clear_canonical_paths(&mut self) {
+        self.canonical_cwd = None;
+        self.canonical_home_directory = None;
     }
 
     pub fn move_cursor_home(&mut self) {
@@ -1336,6 +1435,7 @@ impl PanelState {
         }
 
         self.cwd = path;
+        self.clear_canonical_paths();
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
@@ -1351,6 +1451,7 @@ impl PanelState {
         };
 
         self.cwd = parent.to_path_buf();
+        self.clear_canonical_paths();
         self.cursor = 0;
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
@@ -1401,6 +1502,19 @@ impl PanelState {
     pub fn is_panelized(&self) -> bool {
         self.source.is_panelized()
     }
+}
+
+pub(crate) fn canonical_panel_paths(
+    cwd: &Path,
+    home_directory: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Some(home_directory) = home_directory.filter(|path| !path.as_os_str().is_empty()) else {
+        return (None, None);
+    };
+    (
+        fs::canonicalize(cwd).ok(),
+        fs::canonicalize(home_directory).ok(),
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1895,6 +2009,7 @@ impl DerefMut for DialogRoute {
 #[derive(Clone, Debug)]
 pub enum Route {
     FileManager,
+    CommandLine(CommandLineSession),
     Help(HelpState),
     Menu(MenuState),
     Settings(SettingsScreenState),
@@ -1911,6 +2026,20 @@ pub struct ExternalEditRequest {
     pub editor_command: String,
     pub path: PathBuf,
     pub cwd: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalExecuteRequest {
+    pub path: PathBuf,
+    pub cwd: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecuteSelectionResult {
+    OpenedExternal,
+    QueuedDesktopOpen,
+    NoEntrySelected,
+    SelectedEntryIsDirectory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1935,6 +2064,7 @@ impl KeybindingHints {
         let contexts = [
             KeyContext::FileManager,
             KeyContext::FileManagerXMap,
+            KeyContext::CommandLine,
             KeyContext::Help,
             KeyContext::Jobs,
             KeyContext::FindResults,
@@ -2026,6 +2156,8 @@ pub struct AppState {
     selection_sizes: [SelectionSizeState; 2],
     pub status_line: String,
     status_expires_at: Option<Instant>,
+    // Explicit replacements only; expiry must not hide a still-valid saved status message.
+    status_message_generation: u64,
     pub last_dialog_result: Option<DialogResult>,
     pub jobs: JobManager,
     pub jobs_cursor: usize,
@@ -2036,10 +2168,21 @@ pub struct AppState {
     pending_skin_preview: Option<String>,
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
+    command_line: CommandLineModel,
+    next_command_line_activation_id: u64,
+    #[cfg(unix)]
+    next_shell_resolution_request_id: u64,
+    pending_shell_resolution: Option<command_line::PendingShellResolution>,
+    pending_shell_resolution_request: Option<ShellResolutionRequest>,
+    next_completion_request_id: u64,
+    pending_completion_requests: Vec<CompletionRequest>,
+    pending_completion_cancellations: Vec<CompletionCancellation>,
+    pending_foreground_shell_requests: Vec<ForegroundShellRequest>,
     paused_find_results: Option<FindResultsState>,
     pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
+    pending_external_execute_requests: Vec<ExternalExecuteRequest>,
     panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
     previous_panel_directories: [Option<PathBuf>; 2],
     quick_cd_search: QuickCdSearchWorkflow,
@@ -2061,28 +2204,7 @@ pub struct AppState {
 }
 
 fn normalize_status_message(message: String) -> String {
-    let mut normalized = String::new();
-    let mut count = 0_usize;
-    let mut truncated = false;
-
-    for ch in message.chars() {
-        if count >= MAX_STATUS_LINE_CHARS {
-            truncated = true;
-            break;
-        }
-        let normalized_ch = if ch == '\n' || ch == '\r' || ch == '\t' || ch.is_control() {
-            ' '
-        } else {
-            ch
-        };
-        normalized.push(normalized_ch);
-        count = count.saturating_add(1);
-    }
-
-    if truncated {
-        normalized.push_str("...");
-    }
-    normalized
+    rc_shell::sanitize_display_line(&message)
 }
 
 fn key_chord_sort_key(chord: &KeyChord) -> (u8, u16, String) {
@@ -2206,24 +2328,8 @@ fn executable_candidate_exists(dir: &Path, name: &str) -> bool {
         if executable_path_is_runnable(&candidate) {
             return true;
         }
-        let extensions = std::env::var_os("PATHEXT")
-            .map(|value| {
-                value
-                    .to_string_lossy()
-                    .split(';')
-                    .filter(|extension| !extension.trim().is_empty())
-                    .map(|extension| extension.trim().trim_start_matches('.').to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
-                vec![
-                    String::from("exe"),
-                    String::from("cmd"),
-                    String::from("bat"),
-                ]
-            });
-        extensions
-            .into_iter()
+        WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS
+            .iter()
             .any(|extension| executable_path_is_runnable(&dir.join(format!("{name}.{extension}"))))
     }
     #[cfg(not(windows))]
@@ -2234,17 +2340,35 @@ fn executable_candidate_exists(dir: &Path, name: &str) -> bool {
 
 #[cfg(windows)]
 fn executable_path_is_runnable(path: &Path) -> bool {
+    windows_path_is_directly_runnable(path)
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS: [&str; 4] = ["com", "exe", "bat", "cmd"];
+
+#[cfg(windows)]
+fn windows_path_is_directly_runnable(path: &Path) -> bool {
     path.is_file()
+        && windows_extension_is_directly_runnable(path.extension().and_then(|value| value.to_str()))
+}
+
+#[cfg(any(windows, test))]
+fn windows_extension_is_directly_runnable(extension: Option<&str>) -> bool {
+    extension.is_some_and(|extension| {
+        WINDOWS_DIRECT_EXECUTABLE_EXTENSIONS
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+    })
 }
 
 #[cfg(unix)]
 fn executable_path_is_runnable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+    use nix::unistd::{AccessFlags, access};
 
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
-    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    metadata.is_file() && access(path, AccessFlags::X_OK).is_ok()
 }
 
 #[cfg(not(any(unix, windows)))]

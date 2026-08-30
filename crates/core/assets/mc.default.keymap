@@ -507,7 +507,7 @@ PageUp = pgup
 PageDown = pgdn
 Home = home
 End = end
-Enter = enter; f3
+Enter = enter
 CdUp = backspace
 Reread = r; ctrl-r
 ToggleTag = insert; ctrl-t; space
@@ -527,7 +527,7 @@ OpenTree = alt-t
 CycleListingFormat = alt-shift-t
 OpenHotlist = alt-h
 OpenPanelizeDialog = alt-p; ctrl-p
-# greater is reserved for rc's future explicit shell-command prompt.
+OpenCommandLine = greater
 
 [dialog]
 Ok = enter

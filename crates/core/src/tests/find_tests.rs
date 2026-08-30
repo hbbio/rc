@@ -174,9 +174,14 @@ fn find_results_panelize_creates_virtual_panel_and_preserves_resume() {
         "restored find-panelized history should retain prior matches"
     );
     assert!(
-        app.take_pending_worker_commands().is_empty(),
-        "restoring find-panelized history should not start a refresh"
+        app.pending_worker_commands.iter().any(|command| matches!(
+            command,
+            WorkerCommand::Run(job)
+                if matches!(&job.request, JobRequest::ResolvePanelIdentity { .. })
+        )),
+        "restoring find-panelized history should re-resolve its path identity"
     );
+    drain_background(&mut app);
 
     app.apply(AppCommand::OpenFindDialog)
         .expect("find dialog should resume previous results");

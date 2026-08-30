@@ -1,0 +1,17 @@
+[package]
+name = "rust-commander-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Platform integration primitives for Rust Commander"
+
+[lib]
+name = "rc_platform"
+path = "src/lib.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

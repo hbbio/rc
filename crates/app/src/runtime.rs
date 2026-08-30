@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+#[cfg(any(target_os = "linux", all(test, unix)))]
+use rc_core::JOB_CANCELED_MESSAGE;
 use rc_core::{
-    AppState, BackgroundEvent, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
-    PanelListingSource, PanelRefreshResult, PanelRefreshStreamRequest, WorkerCommand,
-    build_tree_ready_event, execute_worker_job, read_disk_usage, run_find_entries,
+    ActivePanel, AppState, BackgroundEvent, COMPLETION_DEADLINE, CompletionCancellation,
+    CompletionRequest, CompletionResponse, FOUNDATION_SLO, JobError, JobEvent, JobId, JobRequest,
+    PanelListingSource, PanelRefreshStreamRequest, ShellResolutionRequest, ShellResolutionResponse,
+    WorkerCommand, build_tree_ready_event, execute_worker_job, read_disk_usage,
+    resolve_panel_path_identity, resolve_shell_request_blocking, run_find_entries,
     stream_refresh_panel_entries,
 };
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc, oneshot};
@@ -18,21 +22,610 @@ use tokio_util::sync::CancellationToken;
 
 const RUNTIME_COMMAND_QUEUE_CAPACITY: usize = 256;
 const RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK: usize = 256;
+const COMPLETION_LANE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const COMPLETION_CLEANUP_GRACE: Duration = Duration::from_millis(250);
 const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
 const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
 const SCAN_CONCURRENCY_LIMIT: usize = 4;
 const PROCESS_CONCURRENCY_LIMIT: usize = 2;
+const DESKTOP_OPEN_CONCURRENCY_LIMIT: usize = 4;
+#[cfg(target_os = "linux")]
+const DESKTOP_PORTAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
+const DESKTOP_PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
+#[cfg(target_os = "linux")]
+const DESKTOP_PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+#[cfg(target_os = "linux")]
+const DESKTOP_PORTAL_OPEN_URI_INTERFACE: &str = "org.freedesktop.portal.OpenURI";
+#[cfg(target_os = "linux")]
+const DESKTOP_PORTAL_REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
+#[cfg(target_os = "linux")]
+const DESKTOP_LAUNCHER_STARTUP_OBSERVATION: Duration = Duration::from_secs(2);
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const DESKTOP_LAUNCHER_POLL_INTERVAL: Duration = Duration::from_millis(20);
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const DESKTOP_LAUNCHER_TERMINATION_GRACE: Duration = Duration::from_millis(100);
 
 pub(crate) struct RuntimeBridge {
     command_tx: tokio_mpsc::Sender<RuntimeCommand>,
     worker_event_rx: Receiver<JobEvent>,
     background_event_rx: Receiver<BackgroundEvent>,
+    shell_resolution: ShellResolutionRuntime,
+    completion: CompletionRuntime,
     runtime_handle: Option<thread::JoinHandle<Result<()>>>,
     worker_disconnected: bool,
     background_disconnected: bool,
     pending_first_seen: HashMap<PendingCommandKey, Instant>,
     consecutive_full_count: u64,
     stale_pending_warned: bool,
+}
+
+struct CompletionRuntime {
+    command_tx: Sender<CompletionLaneCommand>,
+    event_rx: Receiver<CompletionResponse>,
+    handle: Option<thread::JoinHandle<()>>,
+    disconnected: bool,
+}
+
+struct ShellResolutionRuntime {
+    command_tx: SyncSender<ShellResolutionLaneCommand>,
+    event_rx: Receiver<ShellResolutionResponse>,
+    handle: Option<thread::JoinHandle<()>>,
+    disconnected: bool,
+}
+
+type ShellResolutionExecutor =
+    Arc<dyn Fn(ShellResolutionRequest) -> ShellResolutionResponse + Send + Sync + 'static>;
+
+enum ShellResolutionLaneCommand {
+    Resolve(ShellResolutionRequest),
+    Shutdown,
+}
+
+type CompletionExecutor =
+    Arc<dyn Fn(&CompletionRequest, &AtomicBool) -> CompletionResponse + Send + Sync + 'static>;
+
+#[derive(Clone, Copy)]
+struct CompletionLaneTiming {
+    deadline: Duration,
+    cleanup_grace: Duration,
+    poll_interval: Duration,
+}
+
+impl Default for CompletionLaneTiming {
+    fn default() -> Self {
+        Self {
+            deadline: COMPLETION_DEADLINE,
+            cleanup_grace: COMPLETION_CLEANUP_GRACE,
+            poll_interval: COMPLETION_LANE_POLL_INTERVAL,
+        }
+    }
+}
+
+enum CompletionLaneCommand {
+    Start(CompletionRequest),
+    Cancel(CompletionCancellation),
+    Shutdown,
+}
+
+impl ShellResolutionRuntime {
+    fn spawn() -> Result<Self> {
+        Self::spawn_with(Arc::new(resolve_shell_request_blocking))
+    }
+
+    fn spawn_with(executor: ShellResolutionExecutor) -> Result<Self> {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (event_tx, event_rx) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name(String::from("rc-shell-resolution"))
+            .spawn(move || run_shell_resolution_lane(command_rx, event_tx, executor))
+            .map_err(|error| anyhow!("failed to spawn shell-resolution runtime: {error}"))?;
+        Ok(Self {
+            command_tx,
+            event_rx,
+            handle: Some(handle),
+            disconnected: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn disconnected() -> Self {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        drop(command_rx);
+        let (event_tx, event_rx) = mpsc::channel();
+        drop(event_tx);
+        Self {
+            command_tx,
+            event_rx,
+            handle: None,
+            disconnected: true,
+        }
+    }
+
+    fn dispatch(&mut self, state: &mut AppState) {
+        let Some(request) = state.take_pending_shell_resolution_request() else {
+            return;
+        };
+        if self.disconnected {
+            state.handle_shell_resolution_response(unavailable_shell_resolution_response(
+                request,
+                "Shell-resolution runtime is unavailable",
+            ));
+            return;
+        }
+        match self
+            .command_tx
+            .try_send(ShellResolutionLaneCommand::Resolve(request))
+        {
+            Ok(()) => {}
+            Err(TrySendError::Full(ShellResolutionLaneCommand::Resolve(request))) => {
+                state.restore_pending_shell_resolution_request(request);
+            }
+            Err(TrySendError::Disconnected(ShellResolutionLaneCommand::Resolve(request))) => {
+                self.disconnected = true;
+                state.handle_shell_resolution_response(unavailable_shell_resolution_response(
+                    request,
+                    "Shell-resolution runtime is unavailable",
+                ));
+            }
+            Err(
+                TrySendError::Full(ShellResolutionLaneCommand::Shutdown)
+                | TrySendError::Disconnected(ShellResolutionLaneCommand::Shutdown),
+            ) => {}
+        }
+    }
+
+    fn drain(&mut self, state: &mut AppState, budget: usize) -> usize {
+        let mut drained = 0;
+        while drained < budget {
+            match self.event_rx.try_recv() {
+                Ok(response) => {
+                    state.handle_shell_resolution_response(response);
+                    drained += 1;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.disconnected = true;
+                    state.handle_shell_resolution_runtime_unavailable(
+                        "Shell-resolution worker disconnected",
+                    );
+                    break;
+                }
+            }
+        }
+        drained
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        let _ = self
+            .command_tx
+            .try_send(ShellResolutionLaneCommand::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            if handle.is_finished() {
+                handle
+                    .join()
+                    .map_err(|_| anyhow!("shell-resolution runtime thread panicked"))?;
+            } else {
+                // The one resolver can be blocked in metadata or user-database I/O. Detaching
+                // this single bounded thread keeps process shutdown independent of that syscall.
+                drop(handle);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn unavailable_shell_resolution_response(
+    request: ShellResolutionRequest,
+    message: &str,
+) -> ShellResolutionResponse {
+    ShellResolutionResponse {
+        request_id: request.request_id,
+        cwd: request.cwd,
+        result: Err(message.to_string()),
+    }
+}
+
+fn run_shell_resolution_lane(
+    command_rx: Receiver<ShellResolutionLaneCommand>,
+    event_tx: Sender<ShellResolutionResponse>,
+    executor: ShellResolutionExecutor,
+) {
+    while let Ok(command) = command_rx.recv() {
+        match command {
+            ShellResolutionLaneCommand::Resolve(request) => {
+                let response = executor(request);
+                let _ = event_tx.send(response);
+            }
+            ShellResolutionLaneCommand::Shutdown => return,
+        }
+    }
+}
+
+impl CompletionRuntime {
+    fn spawn() -> Result<Self> {
+        Self::spawn_with(Arc::new(rc_core::complete_request))
+    }
+
+    fn spawn_with(executor: CompletionExecutor) -> Result<Self> {
+        Self::spawn_with_timing(executor, CompletionLaneTiming::default())
+    }
+
+    fn spawn_with_timing(
+        executor: CompletionExecutor,
+        timing: CompletionLaneTiming,
+    ) -> Result<Self> {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name(String::from("rc-completion"))
+            .spawn(move || run_completion_lane(command_rx, event_tx, executor, timing))
+            .map_err(|error| anyhow!("failed to spawn completion runtime: {error}"))?;
+        Ok(Self {
+            command_tx,
+            event_rx,
+            handle: Some(handle),
+            disconnected: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn disconnected() -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
+        drop(command_rx);
+        let (event_tx, event_rx) = mpsc::channel();
+        drop(event_tx);
+        Self {
+            command_tx,
+            event_rx,
+            handle: None,
+            disconnected: true,
+        }
+    }
+
+    fn dispatch(&mut self, state: &mut AppState) {
+        for cancellation in state.take_pending_completion_cancellations() {
+            if self
+                .command_tx
+                .send(CompletionLaneCommand::Cancel(cancellation))
+                .is_err()
+            {
+                self.disconnected = true;
+                break;
+            }
+        }
+        for request in state.take_pending_completion_requests() {
+            if self.disconnected {
+                state.handle_completion_response(unavailable_completion_response(
+                    request,
+                    "Completion runtime is unavailable",
+                ));
+                continue;
+            }
+            if let Err(error) = self.command_tx.send(CompletionLaneCommand::Start(request)) {
+                self.disconnected = true;
+                if let CompletionLaneCommand::Start(request) = error.0 {
+                    state.handle_completion_response(unavailable_completion_response(
+                        request,
+                        "Completion runtime is unavailable",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn drain(&mut self, state: &mut AppState, budget: usize) -> usize {
+        let mut drained = 0;
+        while drained < budget {
+            match self.event_rx.try_recv() {
+                Ok(response) => {
+                    state.handle_completion_response(response);
+                    drained += 1;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.disconnected = true;
+                    break;
+                }
+            }
+        }
+        drained
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        let _ = self.command_tx.send(CompletionLaneCommand::Shutdown);
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow!("completion runtime thread panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+fn unavailable_completion_response(
+    request: CompletionRequest,
+    message: &str,
+) -> CompletionResponse {
+    CompletionResponse {
+        activation_id: request.activation_id,
+        request_id: request.request_id,
+        buffer_revision: request.buffer_revision,
+        original_buffer: request.buffer,
+        outcome: rc_core::CompletionOutcome::Unavailable(message.to_string()),
+    }
+}
+
+fn run_completion_lane(
+    command_rx: Receiver<CompletionLaneCommand>,
+    event_tx: Sender<CompletionResponse>,
+    executor: CompletionExecutor,
+    timing: CompletionLaneTiming,
+) {
+    let mut next_request = None;
+    let mut uncooperative_worker: Option<thread::JoinHandle<()>> = None;
+    loop {
+        if uncooperative_worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+            && let Some(worker) = uncooperative_worker.take()
+        {
+            let _ = worker.join();
+        }
+        if uncooperative_worker.is_some() {
+            match command_rx.recv_timeout(timing.poll_interval) {
+                Ok(CompletionLaneCommand::Start(request)) => {
+                    if uncooperative_worker
+                        .as_ref()
+                        .is_some_and(thread::JoinHandle::is_finished)
+                    {
+                        if let Some(worker) = uncooperative_worker.take() {
+                            let _ = worker.join();
+                        }
+                        next_request = Some(request);
+                    } else {
+                        let _ = event_tx.send(unavailable_completion_response(
+                            request,
+                            "Completion is unavailable because a previous request did not stop",
+                        ));
+                    }
+                }
+                Ok(CompletionLaneCommand::Cancel(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(CompletionLaneCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    drop(uncooperative_worker.take());
+                    return;
+                }
+            }
+            continue;
+        }
+
+        if next_request.is_none() {
+            match command_rx.recv() {
+                Ok(CompletionLaneCommand::Start(request)) => next_request = Some(request),
+                Ok(CompletionLaneCommand::Cancel(_)) => continue,
+                Ok(CompletionLaneCommand::Shutdown) | Err(_) => return,
+            }
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    CompletionLaneCommand::Start(request) => next_request = Some(request),
+                    CompletionLaneCommand::Cancel(cancellation) => {
+                        if next_request
+                            .as_ref()
+                            .is_some_and(|request: &CompletionRequest| {
+                                request.activation_id == cancellation.activation_id
+                                    && request.request_id == cancellation.request_id
+                            })
+                        {
+                            next_request = None;
+                        }
+                    }
+                    CompletionLaneCommand::Shutdown => return,
+                }
+            }
+            if next_request.is_none() {
+                continue;
+            }
+        }
+
+        let request = next_request.take().expect("request checked above");
+        let response_request = request.clone();
+        let active_ids = (request.activation_id, request.request_id);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker_executor = Arc::clone(&executor);
+        let mut worker = Some(thread::spawn(move || {
+            let response = worker_executor(&request, worker_cancel.as_ref());
+            let _ = result_tx.send(response);
+        }));
+        let started = Instant::now();
+        let hard_deadline = started + timing.deadline;
+        let execution_deadline = started + timing.deadline.saturating_sub(timing.cleanup_grace);
+        let mut retirement = None;
+
+        loop {
+            let wake_at = retirement
+                .map(|retirement: CompletionWorkerRetirement| retirement.deadline)
+                .unwrap_or(execution_deadline);
+            let wait = timing
+                .poll_interval
+                .min(wake_at.saturating_duration_since(Instant::now()));
+            match result_rx.recv_timeout(wait) {
+                Ok(response) => {
+                    if let Some(worker) = worker.take() {
+                        let _ = worker.join();
+                    }
+                    if finish_completion_attempt(
+                        retirement.map(|retirement| retirement.reason),
+                        &response_request,
+                        Some(response),
+                        &event_tx,
+                    ) {
+                        return;
+                    }
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Some(worker) = worker.take() {
+                        let _ = worker.join();
+                    }
+                    if finish_completion_attempt(
+                        retirement.map(|retirement| retirement.reason),
+                        &response_request,
+                        None,
+                        &event_tx,
+                    ) {
+                        return;
+                    }
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    CompletionLaneCommand::Start(request) => {
+                        cancel.store(true, AtomicOrdering::Relaxed);
+                        next_request = Some(request);
+                        begin_completion_retirement(
+                            &mut retirement,
+                            CompletionWorkerRetirementReason::Superseded,
+                            Instant::now() + timing.cleanup_grace,
+                        );
+                    }
+                    CompletionLaneCommand::Cancel(cancellation) => {
+                        if active_ids == (cancellation.activation_id, cancellation.request_id) {
+                            cancel.store(true, AtomicOrdering::Relaxed);
+                            begin_completion_retirement(
+                                &mut retirement,
+                                CompletionWorkerRetirementReason::Canceled,
+                                Instant::now() + timing.cleanup_grace,
+                            );
+                        }
+                        if next_request.as_ref().is_some_and(|request| {
+                            request.activation_id == cancellation.activation_id
+                                && request.request_id == cancellation.request_id
+                        }) {
+                            next_request = None;
+                        }
+                    }
+                    CompletionLaneCommand::Shutdown => {
+                        cancel.store(true, AtomicOrdering::Relaxed);
+                        next_request = None;
+                        begin_completion_retirement(
+                            &mut retirement,
+                            CompletionWorkerRetirementReason::Shutdown,
+                            Instant::now() + timing.cleanup_grace,
+                        );
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            if retirement.is_none() && now >= execution_deadline {
+                cancel.store(true, AtomicOrdering::Relaxed);
+                begin_completion_retirement(
+                    &mut retirement,
+                    CompletionWorkerRetirementReason::TimedOut,
+                    hard_deadline,
+                );
+            }
+            if let Some(retirement) = retirement
+                && now >= retirement.deadline
+            {
+                // A filesystem operation can remain blocked indefinitely on a stalled mount.
+                // Detach only after giving cooperative workers (notably fish, which owns a
+                // subprocess group) a bounded opportunity to kill and reap their children. Keep
+                // the handle and reject further work until it exits so at most one native worker
+                // can remain blocked.
+                let should_shutdown = finish_completion_attempt(
+                    Some(retirement.reason),
+                    &response_request,
+                    None,
+                    &event_tx,
+                );
+                if should_shutdown {
+                    drop(worker.take());
+                    return;
+                }
+                uncooperative_worker = worker.take();
+                if let Some(request) = next_request.take() {
+                    let _ = event_tx.send(unavailable_completion_response(
+                        request,
+                        "Completion is unavailable because a previous request did not stop",
+                    ));
+                }
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CompletionWorkerRetirement {
+    reason: CompletionWorkerRetirementReason,
+    deadline: Instant,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompletionWorkerRetirementReason {
+    Superseded,
+    Canceled,
+    TimedOut,
+    Shutdown,
+}
+
+fn begin_completion_retirement(
+    retirement: &mut Option<CompletionWorkerRetirement>,
+    reason: CompletionWorkerRetirementReason,
+    deadline: Instant,
+) {
+    let reason = match (*retirement, reason) {
+        (
+            Some(CompletionWorkerRetirement {
+                reason: CompletionWorkerRetirementReason::Shutdown,
+                ..
+            }),
+            _,
+        )
+        | (_, CompletionWorkerRetirementReason::Shutdown) => {
+            CompletionWorkerRetirementReason::Shutdown
+        }
+        _ => reason,
+    };
+    let deadline = retirement
+        .map(|retirement| retirement.deadline.min(deadline))
+        .unwrap_or(deadline);
+    *retirement = Some(CompletionWorkerRetirement { reason, deadline });
+}
+
+fn finish_completion_attempt(
+    retirement: Option<CompletionWorkerRetirementReason>,
+    request: &CompletionRequest,
+    response: Option<CompletionResponse>,
+    event_tx: &Sender<CompletionResponse>,
+) -> bool {
+    match retirement {
+        Some(CompletionWorkerRetirementReason::Shutdown) => true,
+        Some(
+            CompletionWorkerRetirementReason::Superseded
+            | CompletionWorkerRetirementReason::Canceled,
+        ) => false,
+        Some(CompletionWorkerRetirementReason::TimedOut) => {
+            let _ = event_tx.send(unavailable_completion_response(
+                request.clone(),
+                "Completion timed out",
+            ));
+            false
+        }
+        None => {
+            let response = response.unwrap_or_else(|| {
+                unavailable_completion_response(request.clone(), "Completion worker failed")
+            });
+            let _ = event_tx.send(response);
+            false
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -62,16 +655,39 @@ enum TaskCompletion {
     Worker { job_id: JobId },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeShutdownPolicy {
+    FinishActiveAndQueued,
+    CancelQueuedAndReleaseActive,
+    CancelQueuedAndActive,
+}
+
+impl RuntimeShutdownPolicy {
+    fn cancel_queued(self) -> bool {
+        !matches!(self, Self::FinishActiveAndQueued)
+    }
+
+    fn cancel_active(self) -> bool {
+        matches!(self, Self::CancelQueuedAndActive)
+    }
+
+    fn release_active(self) -> bool {
+        matches!(self, Self::CancelQueuedAndReleaseActive)
+    }
+}
+
 struct WorkerCancellation {
     token: CancellationToken,
     cancel_flag: Arc<AtomicBool>,
-    cancel_on_runtime_shutdown: bool,
+    release_flag: Arc<AtomicBool>,
+    runtime_shutdown_policy: RuntimeShutdownPolicy,
 }
 
 struct WorkerTaskSpec {
     limit: Arc<Semaphore>,
     runtime_shutdown: CancellationToken,
     job_cancel: CancellationToken,
+    release_flag: Arc<AtomicBool>,
     run_after: Option<oneshot::Receiver<()>>,
     notify_next: Option<oneshot::Sender<()>>,
     worker_class: &'static str,
@@ -103,10 +719,14 @@ impl RuntimeBridge {
             })
             .map_err(|error| anyhow!("failed to spawn runtime thread: {error}"))?;
 
+        let completion = CompletionRuntime::spawn()?;
+        let shell_resolution = ShellResolutionRuntime::spawn()?;
         Ok(Self {
             command_tx,
             worker_event_rx,
             background_event_rx,
+            shell_resolution,
+            completion,
             runtime_handle: Some(runtime_handle),
             worker_disconnected: false,
             background_disconnected: false,
@@ -117,6 +737,8 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn dispatch_pending_commands(&mut self, state: &mut AppState) {
+        self.shell_resolution.dispatch(state);
+        self.completion.dispatch(state);
         let pending_commands = prioritize_worker_commands(state.take_pending_worker_commands());
         if pending_commands.is_empty() {
             self.clear_pending_dispatch_metrics();
@@ -249,6 +871,28 @@ impl RuntimeBridge {
                 }
             }
 
+            if drained_events < RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+                && drain_started.elapsed() < FOUNDATION_SLO.ui_frame_budget
+            {
+                let shell_resolution_events = self.shell_resolution.drain(
+                    state,
+                    RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK.saturating_sub(drained_events),
+                );
+                drained_events = drained_events.saturating_add(shell_resolution_events);
+                progressed |= shell_resolution_events > 0;
+            }
+
+            if drained_events < RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK
+                && drain_started.elapsed() < FOUNDATION_SLO.ui_frame_budget
+            {
+                let completion_events = self.completion.drain(
+                    state,
+                    RUNTIME_EVENT_DRAIN_LIMIT_PER_TICK.saturating_sub(drained_events),
+                );
+                drained_events = drained_events.saturating_add(completion_events);
+                progressed |= completion_events > 0;
+            }
+
             if !progressed {
                 break;
             }
@@ -272,13 +916,16 @@ impl RuntimeBridge {
     }
 
     pub(crate) fn shutdown(mut self) -> Result<()> {
+        let shell_resolution_result = self.shell_resolution.shutdown();
+        let completion_result = self.completion.shutdown();
         let _ = self.command_tx.blocking_send(RuntimeCommand::Shutdown);
         if let Some(handle) = self.runtime_handle.take() {
             handle
                 .join()
                 .map_err(|_| anyhow!("runtime thread panicked"))??;
         }
-        Ok(())
+        completion_result?;
+        shell_resolution_result
     }
 
     fn command_key(command: &WorkerCommand) -> PendingCommandKey {
@@ -358,6 +1005,8 @@ pub(crate) fn test_runtime_bridge_with_capacity(
             command_tx,
             worker_event_rx,
             background_event_rx,
+            shell_resolution: ShellResolutionRuntime::disconnected(),
+            completion: CompletionRuntime::disconnected(),
             runtime_handle: None,
             worker_disconnected: false,
             background_disconnected: false,
@@ -386,6 +1035,8 @@ pub(crate) fn test_runtime_bridge_with_channels(
             command_tx,
             worker_event_rx,
             background_event_rx,
+            shell_resolution: ShellResolutionRuntime::disconnected(),
+            completion: CompletionRuntime::disconnected(),
             runtime_handle: None,
             worker_disconnected: false,
             background_disconnected: false,
@@ -408,6 +1059,7 @@ async fn run_runtime_loop(
     let settings_limit = Arc::new(Semaphore::new(SETTINGS_CONCURRENCY_LIMIT));
     let background_scan_limit = Arc::new(Semaphore::new(SCAN_CONCURRENCY_LIMIT));
     let background_process_limit = Arc::new(Semaphore::new(PROCESS_CONCURRENCY_LIMIT));
+    let desktop_open_limit = Arc::new(Semaphore::new(DESKTOP_OPEN_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
     let mut settings_sequence_tail = None;
     let mut worker_cancellations = HashMap::<JobId, WorkerCancellation>::new();
@@ -441,45 +1093,48 @@ async fn run_runtime_loop(
                         let worker_job = *job;
                         let job_id = worker_job.id;
                         let cancel_flag = worker_job.cancel_flag();
-                        let (limit, worker_class, cancel_on_runtime_shutdown) =
-                            match &worker_job.request {
+                        let runtime_shutdown_policy =
+                            worker_runtime_shutdown_policy(&worker_job.request);
+                        let (limit, worker_class) = match &worker_job.request {
                             JobRequest::PersistSettings { .. } => {
-                                (Arc::clone(&settings_limit), "settings", false)
+                                (Arc::clone(&settings_limit), "settings")
                             }
                             JobRequest::Copy { .. }
                             | JobRequest::Move { .. }
                             | JobRequest::Delete { .. }
                             | JobRequest::Mkdir { .. }
                             | JobRequest::Rename { .. } => {
-                                (Arc::clone(&fs_mutation_limit), "fs_mutation", true)
+                                (Arc::clone(&fs_mutation_limit), "fs_mutation")
                             }
                             JobRequest::Find { .. }
                             | JobRequest::QuickCdSearch { .. }
+                            | JobRequest::ResolvePanelIdentity { .. }
                             | JobRequest::MeasureSelection { .. }
                             | JobRequest::BuildTree { .. } => {
-                                (Arc::clone(&background_scan_limit), "scan", true)
+                                (Arc::clone(&background_scan_limit), "scan")
                             }
-                            JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
-                                (Arc::clone(&background_process_limit), "process", true)
+                            JobRequest::OpenDesktop { .. } => {
+                                (Arc::clone(&desktop_open_limit), "desktop_open")
+                            }
+                            JobRequest::LoadViewer { .. }
+                            | JobRequest::LoadQuickView { .. } => {
+                                (Arc::clone(&background_process_limit), "process")
                             }
                             JobRequest::RefreshPanel {
                                 source: PanelListingSource::Panelize { .. },
                                 ..
-                            } => (Arc::clone(&background_process_limit), "process", true),
+                            } => (Arc::clone(&background_process_limit), "process"),
                             JobRequest::RefreshPanel { .. } => {
-                                (Arc::clone(&background_scan_limit), "scan", true)
+                                (Arc::clone(&background_scan_limit), "scan")
                             }
                         };
-                        let runtime_shutdown = if cancel_on_runtime_shutdown {
+                        let runtime_shutdown = if runtime_shutdown_policy.cancel_queued() {
                             shutdown.child_token()
                         } else {
                             CancellationToken::new()
                         };
-                        let job_cancel = if cancel_on_runtime_shutdown {
-                            shutdown.child_token()
-                        } else {
-                            CancellationToken::new()
-                        };
+                        let job_cancel = CancellationToken::new();
+                        let release_flag = Arc::new(AtomicBool::new(false));
                         let (run_after, notify_next) = if matches!(
                             &worker_job.request,
                             JobRequest::PersistSettings { .. }
@@ -496,7 +1151,8 @@ async fn run_runtime_loop(
                             WorkerCancellation {
                                 token: job_cancel.clone(),
                                 cancel_flag,
-                                cancel_on_runtime_shutdown,
+                                release_flag: Arc::clone(&release_flag),
+                                runtime_shutdown_policy,
                             },
                         );
                         spawn_worker_task(
@@ -505,6 +1161,7 @@ async fn run_runtime_loop(
                                 limit,
                                 runtime_shutdown,
                                 job_cancel,
+                                release_flag,
                                 run_after,
                                 notify_next,
                                 worker_class,
@@ -557,7 +1214,11 @@ async fn run_runtime_loop(
 
     shutdown.cancel();
     for cancel in worker_cancellations.values() {
-        if !cancel.cancel_on_runtime_shutdown {
+        if cancel.runtime_shutdown_policy.release_active() {
+            cancel.release_flag.store(true, AtomicOrdering::Relaxed);
+            continue;
+        }
+        if !cancel.runtime_shutdown_policy.cancel_active() {
             continue;
         }
         cancel.cancel_flag.store(true, AtomicOrdering::Relaxed);
@@ -575,11 +1236,23 @@ async fn run_runtime_loop(
     }
 }
 
+fn worker_runtime_shutdown_policy(request: &JobRequest) -> RuntimeShutdownPolicy {
+    match request {
+        JobRequest::PersistSettings { .. } => RuntimeShutdownPolicy::FinishActiveAndQueued,
+        // A queued opener has not launched anything and can be canceled. An active portal request
+        // is closed, while an active legacy launcher is handed to the independent reaper; runtime
+        // shutdown must never turn into an application kill.
+        JobRequest::OpenDesktop { .. } => RuntimeShutdownPolicy::CancelQueuedAndReleaseActive,
+        _ => RuntimeShutdownPolicy::CancelQueuedAndActive,
+    }
+}
+
 fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) {
     let WorkerTaskSpec {
         limit,
         runtime_shutdown,
         job_cancel,
+        release_flag,
         run_after,
         notify_next,
         worker_class,
@@ -674,7 +1347,12 @@ fn spawn_worker_task(tasks: &mut JoinSet<TaskCompletion>, spec: WorkerTaskSpec) 
                 queue_wait_ms,
                 "runtime worker task started"
             );
-            execute_runtime_worker_job(worker_job, &worker_event_tx, &background_event_tx);
+            execute_runtime_worker_job(
+                worker_job,
+                release_flag,
+                &worker_event_tx,
+                &background_event_tx,
+            );
             tracing::debug!(
                 runtime_event = "finished",
                 command_class = "worker",
@@ -707,28 +1385,45 @@ fn finish_canceled_worker_before_start(
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
-    if let JobRequest::RefreshPanel {
-        panel,
-        cwd,
-        source,
-        sort_mode,
-        filter,
-        show_hidden_files,
-        cached_panelized_entries,
-        request_id,
-    } = &worker_job.request
-    {
-        let request = PanelRefreshStreamRequest {
-            panel: *panel,
-            cwd: cwd.clone(),
-            source: source.clone(),
-            sort_mode: *sort_mode,
-            filter: filter.clone(),
-            show_hidden_files: *show_hidden_files,
-            cached_panelized_entries: cached_panelized_entries.clone(),
-            request_id: *request_id,
-        };
-        let _ = background_event_tx.send(request.canceled_event());
+    match &worker_job.request {
+        JobRequest::RefreshPanel {
+            panel,
+            cwd,
+            source,
+            sort_mode,
+            filter,
+            show_hidden_files,
+            cached_panelized_entries,
+            home_directory,
+            request_id,
+        } => {
+            let request = PanelRefreshStreamRequest {
+                panel: *panel,
+                cwd: cwd.clone(),
+                source: source.clone(),
+                sort_mode: *sort_mode,
+                filter: filter.clone(),
+                show_hidden_files: *show_hidden_files,
+                cached_panelized_entries: cached_panelized_entries.clone(),
+                home_directory: home_directory.clone(),
+                request_id: *request_id,
+            };
+            let _ = background_event_tx.send(request.canceled_event());
+        }
+        JobRequest::ResolvePanelIdentity {
+            panel,
+            cwd,
+            request_id,
+            ..
+        } => {
+            let _ = background_event_tx.send(BackgroundEvent::PanelIdentityResolved {
+                panel: *panel,
+                cwd: cwd.clone(),
+                request_id: *request_id,
+                result: Err(JobError::canceled().message),
+            });
+        }
+        _ => {}
     }
     let _ = worker_event_tx.send(JobEvent::Finished {
         id: worker_job.id,
@@ -754,6 +1449,7 @@ impl Drop for SequenceCompletion {
 
 fn execute_runtime_worker_job(
     worker_job: rc_core::WorkerJob,
+    release_flag: Arc<AtomicBool>,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
@@ -767,6 +1463,7 @@ fn execute_runtime_worker_job(
             filter,
             show_hidden_files,
             cached_panelized_entries,
+            home_directory,
             request_id,
         } => execute_refresh_worker_job(
             worker_job.id,
@@ -778,6 +1475,24 @@ fn execute_runtime_worker_job(
                 filter,
                 show_hidden_files,
                 cached_panelized_entries,
+                home_directory,
+                request_id,
+            },
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
+        JobRequest::ResolvePanelIdentity {
+            panel,
+            cwd,
+            home_directory,
+            request_id,
+        } => execute_panel_identity_worker_job(
+            worker_job.id,
+            PanelIdentityWorkerRequest {
+                panel,
+                cwd,
+                home_directory,
                 request_id,
             },
             cancel_flag,
@@ -796,6 +1511,14 @@ fn execute_runtime_worker_job(
             spec,
             request_id,
             cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
+        JobRequest::OpenDesktop { path } => execute_desktop_open_worker_job(
+            worker_job.id,
+            path,
+            cancel_flag,
+            release_flag,
             worker_event_tx,
             background_event_tx,
         ),
@@ -849,6 +1572,477 @@ fn execute_runtime_worker_job(
     }
 }
 
+fn execute_desktop_open_worker_job(
+    job_id: JobId,
+    path: std::path::PathBuf,
+    cancel_flag: Arc<AtomicBool>,
+    release_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    execute_desktop_open_worker(
+        job_id,
+        path,
+        cancel_flag,
+        release_flag,
+        worker_event_tx,
+        background_event_tx,
+        open_with_default_application,
+    );
+}
+
+// On macOS, `/usr/bin/open` is short-lived but reports Launch Services errors only when we wait
+// for it. Linux prefers the response-bearing desktop portal, then observes the complete legacy
+// opener chain for a bounded startup window before handing attached helpers to a reaper. Windows
+// uses the native ShellExecuteExW implementation enabled for the `open` dependency.
+#[cfg(target_os = "macos")]
+fn open_with_default_application(
+    path: &std::path::Path,
+    _cancel_flag: &AtomicBool,
+    _release_flag: &AtomicBool,
+) -> std::io::Result<()> {
+    open::that(path)
+}
+
+#[cfg(target_os = "linux")]
+fn open_with_default_application(
+    path: &std::path::Path,
+    cancel_flag: &AtomicBool,
+    release_flag: &AtomicBool,
+) -> std::io::Result<()> {
+    let portal_error = match open_with_desktop_portal(path, cancel_flag, release_flag) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
+        Err(error) => error,
+    };
+
+    run_status_aware_launcher_commands(
+        open::commands(path),
+        cancel_flag,
+        release_flag,
+        DESKTOP_LAUNCHER_STARTUP_OBSERVATION,
+    )
+    .map_err(|launcher_error| {
+        std::io::Error::new(
+            launcher_error.kind(),
+            format!(
+                "desktop portal failed: {portal_error}; launcher fallback failed: \
+                 {launcher_error}"
+            ),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn open_with_desktop_portal(
+    path: &std::path::Path,
+    cancel_flag: &AtomicBool,
+    release_flag: &AtomicBool,
+) -> std::io::Result<()> {
+    use std::os::fd::AsFd as _;
+
+    use futures_util::StreamExt as _;
+    use zbus::zvariant::{Fd, OwnedObjectPath, OwnedValue, Value};
+
+    if cancel_flag.load(AtomicOrdering::Relaxed) || release_flag.load(AtomicOrdering::Relaxed) {
+        return Err(desktop_launcher_canceled_error());
+    }
+    let (file, writeable) = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => (file, true),
+        Err(_) => (std::fs::File::open(path)?, false),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let connection = zbus::Connection::session()
+            .await
+            .map_err(|error| desktop_portal_error("failed to connect to the session bus", error))?;
+        let handle_token = desktop_portal_handle_token()?;
+        let expected_path = desktop_portal_request_path(&connection, &handle_token)?;
+
+        // Subscribe at the predictable request path before OpenFile to avoid missing a fast
+        // Response signal. The portal specification permits a different returned path for older
+        // implementations, which is handled below.
+        let mut request_proxy =
+            desktop_portal_request_proxy(&connection, expected_path.clone()).await?;
+        let mut responses = request_proxy
+            .receive_signal("Response")
+            .await
+            .map_err(|error| {
+                desktop_portal_error("failed to subscribe to the portal response", error)
+            })?;
+        let open_proxy = zbus::Proxy::new_owned(
+            connection.clone(),
+            String::from(DESKTOP_PORTAL_DESTINATION),
+            String::from(DESKTOP_PORTAL_PATH),
+            String::from(DESKTOP_PORTAL_OPEN_URI_INTERFACE),
+        )
+        .await
+        .map_err(|error| desktop_portal_error("failed to create the OpenURI proxy", error))?;
+        let mut options = HashMap::<&str, Value<'_>>::new();
+        options.insert("handle_token", Value::from(handle_token.as_str()));
+        options.insert("writable", Value::from(writeable));
+        let arguments = ("", Fd::from(file.as_fd()), options);
+        let open_request = open_proxy.call::<_, _, OwnedObjectPath>("OpenFile", &arguments);
+        tokio::pin!(open_request);
+        let returned_path = tokio::select! {
+            result = &mut open_request => match result {
+                Ok(path) => path,
+                Err(error) => {
+                    close_desktop_portal_request(&request_proxy).await;
+                    return Err(desktop_portal_error("OpenFile request failed", error));
+                }
+            },
+            () = wait_for_desktop_portal_cancellation(cancel_flag, release_flag) => {
+                close_desktop_portal_request(&request_proxy).await;
+                return Err(desktop_launcher_canceled_error());
+            }
+        };
+
+        if returned_path != expected_path {
+            let replacement_proxy =
+                desktop_portal_request_proxy(&connection, returned_path).await?;
+            let replacement_responses =
+                replacement_proxy
+                    .receive_signal("Response")
+                    .await
+                    .map_err(|error| {
+                        desktop_portal_error(
+                            "failed to subscribe at the returned request path",
+                            error,
+                        )
+                    });
+            match replacement_responses {
+                Ok(replacement_responses) => {
+                    request_proxy = replacement_proxy;
+                    responses = replacement_responses;
+                }
+                Err(error) => {
+                    close_desktop_portal_request(&replacement_proxy).await;
+                    return Err(error);
+                }
+            }
+        }
+
+        let response = tokio::select! {
+            response = responses.next() => response.ok_or_else(|| {
+                std::io::Error::other("desktop portal response stream ended unexpectedly")
+            })?,
+            () = wait_for_desktop_portal_cancellation(cancel_flag, release_flag) => {
+                close_desktop_portal_request(&request_proxy).await;
+                return Err(desktop_launcher_canceled_error());
+            }
+        };
+        let (response_code, _results): (u32, HashMap<String, OwnedValue>) = response
+            .body()
+            .deserialize()
+            .map_err(|error| desktop_portal_error("invalid portal response", error))?;
+        match response_code {
+            0 => Ok(()),
+            1 => Err(desktop_launcher_canceled_error()),
+            2 => Err(std::io::Error::other(
+                "desktop portal interaction did not succeed",
+            )),
+            code => Err(std::io::Error::other(format!(
+                "desktop portal returned unknown response code {code}"
+            ))),
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_portal_handle_token() -> std::io::Result<String> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to generate a portal request token: {error}"
+        ))
+    })?;
+    let mut token = String::with_capacity(3 + random.len() * 2);
+    token.push_str("rc_");
+    for byte in random {
+        token.push(char::from(HEX[usize::from(byte >> 4)]));
+        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(token)
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_portal_request_path(
+    connection: &zbus::Connection,
+    handle_token: &str,
+) -> std::io::Result<zbus::zvariant::OwnedObjectPath> {
+    let sender = connection
+        .unique_name()
+        .ok_or_else(|| std::io::Error::other("session bus did not assign a unique name"))?
+        .as_str()
+        .trim_start_matches(':')
+        .replace('.', "_");
+    zbus::zvariant::OwnedObjectPath::try_from(format!(
+        "/org/freedesktop/portal/desktop/request/{sender}/{handle_token}"
+    ))
+    .map_err(|error| desktop_portal_error("failed to construct the portal request path", error))
+}
+
+#[cfg(target_os = "linux")]
+async fn desktop_portal_request_proxy(
+    connection: &zbus::Connection,
+    path: zbus::zvariant::OwnedObjectPath,
+) -> std::io::Result<zbus::Proxy<'static>> {
+    zbus::Proxy::new_owned(
+        connection.clone(),
+        String::from(DESKTOP_PORTAL_DESTINATION),
+        path,
+        String::from(DESKTOP_PORTAL_REQUEST_INTERFACE),
+    )
+    .await
+    .map_err(|error| desktop_portal_error("failed to create the portal request proxy", error))
+}
+
+#[cfg(target_os = "linux")]
+async fn close_desktop_portal_request(request: &zbus::Proxy<'_>) {
+    match tokio::time::timeout(
+        DESKTOP_PORTAL_CLOSE_TIMEOUT,
+        request.call_method("Close", &()),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => tracing::debug!(
+            runtime_event = "desktop_portal_close_failed",
+            "failed to close desktop portal request: {error}"
+        ),
+        Err(_) => tracing::debug!(
+            runtime_event = "desktop_portal_close_timed_out",
+            "timed out while closing desktop portal request"
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_portal_error(context: &str, error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(format!("{context}: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_desktop_portal_cancellation(cancel_flag: &AtomicBool, release_flag: &AtomicBool) {
+    while !cancel_flag.load(AtomicOrdering::Relaxed) && !release_flag.load(AtomicOrdering::Relaxed)
+    {
+        tokio::time::sleep(DESKTOP_LAUNCHER_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn open_with_default_application(
+    path: &std::path::Path,
+    _cancel_flag: &AtomicBool,
+    _release_flag: &AtomicBool,
+) -> std::io::Result<()> {
+    open::that_detached(path)
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn run_status_aware_launcher_commands(
+    commands: Vec<std::process::Command>,
+    cancel_flag: &AtomicBool,
+    release_flag: &AtomicBool,
+    startup_observation: Duration,
+) -> std::io::Result<()> {
+    let mut failures = Vec::new();
+    for mut command in commands {
+        if cancel_flag.load(AtomicOrdering::Relaxed) {
+            return Err(desktop_launcher_canceled_error());
+        }
+        if release_flag.load(AtomicOrdering::Relaxed) {
+            return Err(desktop_launcher_canceled_error());
+        }
+
+        let launcher = command.get_program().to_string_lossy().into_owned();
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+
+            command.process_group(0);
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                failures.push(format!("{launcher}: {error}"));
+                continue;
+            }
+        };
+        let started = Instant::now();
+        loop {
+            if cancel_flag.load(AtomicOrdering::Relaxed) {
+                terminate_desktop_launcher(&mut child);
+                return Err(desktop_launcher_canceled_error());
+            }
+            if release_flag.load(AtomicOrdering::Relaxed) {
+                handoff_desktop_launcher_to_reaper(child, launcher);
+                return Err(desktop_launcher_canceled_error());
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => {
+                    failures.push(format!("{launcher}: exited with {status}"));
+                    break;
+                }
+                Ok(None) if started.elapsed() < startup_observation => {
+                    thread::sleep(
+                        DESKTOP_LAUNCHER_POLL_INTERVAL
+                            .min(startup_observation.saturating_sub(started.elapsed())),
+                    );
+                }
+                // Legacy launchers have no acceptance handshake and may remain attached for the
+                // application's complete lifetime. Immediate failures have now had a bounded
+                // observation window; transfer ownership to a reaper that is independent of the
+                // worker scheduler and runtime shutdown.
+                Ok(None) => {
+                    handoff_desktop_launcher_to_reaper(child, launcher);
+                    return Ok(());
+                }
+                Err(error) => {
+                    terminate_desktop_launcher(&mut child);
+                    failures.push(format!("{launcher}: status check failed: {error}"));
+                    break;
+                }
+            }
+        }
+    }
+
+    let detail = if failures.is_empty() {
+        String::from("no desktop launchers are available")
+    } else {
+        failures.join("; ")
+    };
+    Err(std::io::Error::other(format!(
+        "no desktop launcher accepted the file ({detail})"
+    )))
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn handoff_desktop_launcher_to_reaper(mut child: std::process::Child, launcher: String) {
+    let launcher_for_error = launcher.clone();
+    if let Err(error) = thread::Builder::new()
+        .name(String::from("rc-desktop-reaper"))
+        .spawn(move || {
+            if let Err(error) = child.wait() {
+                tracing::debug!(
+                    runtime_event = "desktop_launcher_reap_failed",
+                    launcher,
+                    "failed to reap detached desktop launcher: {error}"
+                );
+            }
+        })
+    {
+        // Dropping Child does not terminate it. In the exceptional case where the reaper thread
+        // cannot be created, preserve the launched application even though rc cannot reap the
+        // helper before its own process exits.
+        tracing::warn!(
+            runtime_event = "desktop_launcher_reaper_unavailable",
+            launcher = launcher_for_error,
+            "failed to start desktop launcher reaper: {error}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn desktop_launcher_canceled_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, JOB_CANCELED_MESSAGE)
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn terminate_desktop_launcher(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        if let Ok(process_group) = i32::try_from(child.id()).map(Pid::from_raw) {
+            let _ = killpg(process_group, Signal::SIGTERM);
+            let deadline = Instant::now() + DESKTOP_LAUNCHER_TERMINATION_GRACE;
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) | Err(_) => thread::sleep(DESKTOP_LAUNCHER_POLL_INTERVAL),
+                }
+            }
+            let _ = killpg(process_group, Signal::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn execute_desktop_open_worker(
+    job_id: JobId,
+    path: std::path::PathBuf,
+    cancel_flag: Arc<AtomicBool>,
+    release_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+    opener: impl FnOnce(&std::path::Path, &AtomicBool, &AtomicBool) -> std::io::Result<()>,
+) {
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    if is_canceled(cancel_flag.as_ref()) || is_canceled(release_flag.as_ref()) {
+        let _ = worker_event_tx.send(JobEvent::Finished {
+            id: job_id,
+            result: Err(JobError::canceled()),
+        });
+        return;
+    }
+
+    let opener_result = opener(&path, cancel_flag.as_ref(), release_flag.as_ref());
+    if is_canceled(cancel_flag.as_ref())
+        || is_canceled(release_flag.as_ref())
+        || opener_result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        let _ = worker_event_tx.send(JobEvent::Finished {
+            id: job_id,
+            result: Err(JobError::canceled()),
+        });
+        return;
+    }
+    let (open_result, mut job_result) = match opener_result {
+        Ok(()) => (Ok(()), Ok(())),
+        Err(error) => {
+            let error = JobError::from_io(error);
+            (Err(error.message.clone()), Err(error))
+        }
+    };
+    if background_event_tx
+        .send(BackgroundEvent::DesktopOpenFinished {
+            path,
+            result: open_result,
+        })
+        .is_err()
+        && job_result.is_ok()
+    {
+        job_result = Err(JobError::from_message(
+            "background event channel disconnected",
+        ));
+    }
+    let _ = worker_event_tx.send(JobEvent::Finished {
+        id: job_id,
+        result: job_result,
+    });
+}
+
 fn execute_refresh_worker_job(
     job_id: JobId,
     request: PanelRefreshStreamRequest,
@@ -886,16 +2080,61 @@ fn execute_refresh_worker_job(
     let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
 }
 
-fn refresh_outcomes(
-    refresh_result: std::io::Result<PanelRefreshResult>,
+struct PanelIdentityWorkerRequest {
+    panel: ActivePanel,
+    cwd: std::path::PathBuf,
+    home_directory: Option<std::path::PathBuf>,
+    request_id: u64,
+}
+
+fn execute_panel_identity_worker_job(
+    job_id: JobId,
+    request: PanelIdentityWorkerRequest,
+    cancel_flag: Arc<AtomicBool>,
+    worker_event_tx: &Sender<JobEvent>,
+    background_event_tx: &Sender<BackgroundEvent>,
+) {
+    let PanelIdentityWorkerRequest {
+        panel,
+        cwd,
+        home_directory,
+        request_id,
+    } = request;
+    let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
+    let identity_result = resolve_panel_path_identity(
+        cwd.as_path(),
+        home_directory.as_deref(),
+        cancel_flag.as_ref(),
+    );
+    let (event_result, result) = refresh_outcomes(identity_result, cancel_flag.as_ref());
+    let delivered = background_event_tx
+        .send(BackgroundEvent::PanelIdentityResolved {
+            panel,
+            cwd,
+            request_id,
+            result: event_result,
+        })
+        .is_ok();
+    let result = if delivered {
+        result
+    } else {
+        Err(JobError::from_message(
+            "background event channel disconnected",
+        ))
+    };
+    let _ = worker_event_tx.send(JobEvent::Finished { id: job_id, result });
+}
+
+fn refresh_outcomes<T>(
+    refresh_result: std::io::Result<T>,
     cancel_flag: &AtomicBool,
-) -> (Result<PanelRefreshResult, String>, Result<(), JobError>) {
+) -> (Result<T, String>, Result<(), JobError>) {
     match refresh_result {
-        Ok(entries) => {
+        Ok(value) => {
             if is_canceled(cancel_flag) {
-                (Ok(entries), Err(JobError::canceled()))
+                (Ok(value), Err(JobError::canceled()))
             } else {
-                (Ok(entries), Ok(()))
+                (Ok(value), Ok(()))
             }
         }
         Err(error) => {
@@ -1154,10 +2393,11 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
     match command {
         WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => CommandPriority::High,
         WorkerCommand::Run(job) => match job.request {
-            JobRequest::LoadViewer { .. } | JobRequest::LoadQuickView { .. } => {
-                CommandPriority::High
-            }
+            JobRequest::OpenDesktop { .. }
+            | JobRequest::LoadViewer { .. }
+            | JobRequest::LoadQuickView { .. } => CommandPriority::High,
             JobRequest::RefreshPanel { .. }
+            | JobRequest::ResolvePanelIdentity { .. }
             | JobRequest::QuickCdSearch { .. }
             | JobRequest::MeasureSelection { .. } => CommandPriority::Low,
             _ => CommandPriority::Medium,
@@ -1257,6 +2497,8 @@ mod tests {
     use std::env;
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1270,6 +2512,276 @@ mod tests {
         let root = env::temp_dir().join(format!("rc-runtime-tests-{label}-{stamp}"));
         fs::create_dir_all(&root).expect("temp root should be creatable");
         root
+    }
+
+    #[cfg(unix)]
+    struct ReleaseCompletionWorkerOnDrop(Arc<AtomicBool>);
+
+    #[cfg(unix)]
+    impl Drop for ReleaseCompletionWorkerOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
+    #[cfg(unix)]
+    fn completion_request_for_test() -> CompletionRequest {
+        let mut state = AppState::new(env::current_dir().expect("test cwd"))
+            .expect("app state should initialize");
+        state.open_command_line();
+        let shell_request = state
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution should be queued");
+        state.handle_shell_resolution_response(resolve_shell_request_blocking(shell_request));
+        state
+            .handle_command_line_input(rc_core::CommandLineInput::Complete(
+                rc_core::CompletionIntent::Forward,
+            ))
+            .expect("completion input should be accepted");
+        state
+            .take_pending_completion_requests()
+            .pop()
+            .expect("completion request should be queued")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_resolution_runs_off_the_calling_thread() {
+        let release = Arc::new(AtomicBool::new(false));
+        let _release_on_drop = ReleaseCompletionWorkerOnDrop(Arc::clone(&release));
+        let worker_release = Arc::clone(&release);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let executor: ShellResolutionExecutor = Arc::new(move |request| {
+            let _ = entered_tx.send(());
+            while !worker_release.load(AtomicOrdering::Relaxed) {
+                thread::sleep(Duration::from_millis(2));
+            }
+            resolve_shell_request_blocking(request)
+        });
+        let mut resolver = ShellResolutionRuntime::spawn_with(executor)
+            .expect("shell-resolution lane should spawn");
+        let mut state = AppState::new(env::current_dir().expect("test cwd"))
+            .expect("app state should initialize");
+        state.open_command_line();
+
+        let started = Instant::now();
+        resolver.dispatch(&mut state);
+        let dispatch_elapsed = started.elapsed();
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resolver should start");
+
+        assert!(state.command_line_session().is_none());
+        assert!(
+            dispatch_elapsed < Duration::from_millis(100),
+            "dispatch blocked the calling thread for {dispatch_elapsed:?}"
+        );
+        release.store(true, AtomicOrdering::Relaxed);
+        let response = resolver
+            .event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resolver should finish after release");
+        state.handle_shell_resolution_response(response);
+        assert!(state.command_line_session().is_some());
+        resolver
+            .shutdown()
+            .expect("shell-resolution lane should shut down");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_shutdown_detaches_a_worker_that_cannot_observe_cancellation() {
+        let release = Arc::new(AtomicBool::new(false));
+        let _release_on_drop = ReleaseCompletionWorkerOnDrop(Arc::clone(&release));
+        let worker_release = Arc::clone(&release);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let executor: CompletionExecutor = Arc::new(move |request, _cancel| {
+            let _ = entered_tx.send(());
+            while !worker_release.load(AtomicOrdering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = finished_tx.send(());
+            unavailable_completion_response(request.clone(), "test worker released")
+        });
+        let mut completion =
+            CompletionRuntime::spawn_with(executor).expect("completion lane should spawn");
+        completion
+            .command_tx
+            .send(CompletionLaneCommand::Start(completion_request_for_test()))
+            .expect("completion request should dispatch");
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should start");
+
+        let started = Instant::now();
+        let shutdown = completion.shutdown();
+        let elapsed = started.elapsed();
+        release.store(true, AtomicOrdering::Relaxed);
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached test worker should be released");
+
+        shutdown.expect("completion coordinator should shut down cleanly");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "shutdown took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_shutdown_waits_for_cooperative_cleanup() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let executor: CompletionExecutor = Arc::new(move |request, cancel| {
+            let _ = entered_tx.send(());
+            while !cancel.load(AtomicOrdering::Relaxed) {
+                thread::sleep(Duration::from_millis(2));
+            }
+            thread::sleep(Duration::from_millis(40));
+            let _ = finished_tx.send(());
+            unavailable_completion_response(request.clone(), "test cleanup finished")
+        });
+        let mut completion =
+            CompletionRuntime::spawn_with(executor).expect("completion lane should spawn");
+        completion
+            .command_tx
+            .send(CompletionLaneCommand::Start(completion_request_for_test()))
+            .expect("completion request should dispatch");
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should start");
+
+        let started = Instant::now();
+        completion
+            .shutdown()
+            .expect("completion coordinator should shut down cleanly");
+        let elapsed = started.elapsed();
+
+        finished_rx
+            .recv_timeout(Duration::from_millis(10))
+            .expect("shutdown should wait for worker cleanup");
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "shutdown returned before cleanup after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "shutdown took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_coordinator_caps_uncooperative_workers_and_recovers_after_exit() {
+        let release = Arc::new(AtomicBool::new(false));
+        let _release_on_drop = ReleaseCompletionWorkerOnDrop(Arc::clone(&release));
+        let worker_release = Arc::clone(&release);
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let worker_call_count = Arc::clone(&call_count);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let executor: CompletionExecutor = Arc::new(move |request, _cancel| {
+            if worker_call_count.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
+                let _ = entered_tx.send(());
+                while !worker_release.load(AtomicOrdering::Relaxed) {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                let _ = finished_tx.send(());
+                return unavailable_completion_response(request.clone(), "first worker released");
+            }
+            unavailable_completion_response(request.clone(), "later request completed")
+        });
+        let timing = CompletionLaneTiming {
+            deadline: Duration::from_millis(120),
+            cleanup_grace: Duration::from_millis(40),
+            poll_interval: Duration::from_millis(5),
+        };
+        let mut completion = CompletionRuntime::spawn_with_timing(executor, timing)
+            .expect("completion lane should spawn");
+        let first_request = completion_request_for_test();
+        let mut second_request = first_request.clone();
+        second_request.request_id = second_request.request_id.saturating_add(1);
+        second_request.buffer_revision = second_request.buffer_revision.saturating_add(1);
+        let mut third_request = second_request.clone();
+        third_request.request_id = third_request.request_id.saturating_add(1);
+        third_request.buffer_revision = third_request.buffer_revision.saturating_add(1);
+
+        completion
+            .command_tx
+            .send(CompletionLaneCommand::Start(first_request.clone()))
+            .expect("first completion request should dispatch");
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first worker should start");
+        let timeout_response = completion
+            .event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("coordinator should time out the blocked worker");
+        assert_eq!(timeout_response.request_id, first_request.request_id);
+        assert!(matches!(
+            timeout_response.outcome,
+            rc_core::CompletionOutcome::Unavailable(ref message)
+                if message == "Completion timed out"
+        ));
+
+        completion
+            .command_tx
+            .send(CompletionLaneCommand::Start(second_request.clone()))
+            .expect("second completion request should dispatch");
+        let second_response = completion
+            .event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second request should be rejected while the first worker remains blocked");
+        assert_eq!(second_response.request_id, second_request.request_id);
+        assert!(matches!(
+            second_response.outcome,
+            rc_core::CompletionOutcome::Unavailable(ref message)
+                if message.contains("previous request did not stop")
+        ));
+        assert_eq!(
+            call_count.load(AtomicOrdering::Relaxed),
+            1,
+            "the lane must not spawn another native worker while one is blocked"
+        );
+
+        release.store(true, AtomicOrdering::Relaxed);
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retained test worker should be released");
+        completion
+            .command_tx
+            .send(CompletionLaneCommand::Start(third_request.clone()))
+            .expect("third completion request should dispatch");
+        let third_response = completion
+            .event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the lane should recover after the retained worker exits");
+        assert_eq!(third_response.request_id, third_request.request_id);
+        assert!(matches!(
+            third_response.outcome,
+            rc_core::CompletionOutcome::Unavailable(ref message)
+                if message == "later request completed"
+        ));
+        assert_eq!(call_count.load(AtomicOrdering::Relaxed), 2);
+        completion
+            .shutdown()
+            .expect("completion coordinator should shut down cleanly");
+    }
+
+    #[test]
+    fn desktop_open_shutdown_policy_cancels_only_unstarted_jobs() {
+        let request = JobRequest::OpenDesktop {
+            path: PathBuf::from("document.png"),
+        };
+
+        let policy = worker_runtime_shutdown_policy(&request);
+
+        assert_eq!(policy, RuntimeShutdownPolicy::CancelQueuedAndReleaseActive);
+        assert!(policy.cancel_queued());
+        assert!(!policy.cancel_active());
+        assert!(policy.release_active());
     }
 
     fn refresh_request(
@@ -1286,6 +2798,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id,
         }
     }
@@ -1638,6 +3151,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 99,
         });
         let high_job = manager.enqueue(JobRequest::LoadViewer {
@@ -1695,6 +3209,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 7,
         });
         let stale_age = FOUNDATION_SLO.queue_stale_warn_after + Duration::from_secs(1);
@@ -2117,6 +3632,285 @@ mod tests {
     }
 
     #[test]
+    fn desktop_open_worker_reports_launcher_result_without_blocking_the_ui_adapter() {
+        let root = make_temp_dir("desktop-open-worker");
+        let document = root.join("image.png");
+        fs::write(&document, "payload").expect("document should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_desktop_open_worker(
+            JobId(1),
+            document.clone(),
+            cancel_flag,
+            release_flag,
+            &worker_event_tx,
+            &background_event_tx,
+            |path, cancel_flag, release_flag| {
+                assert_eq!(path, document.as_path());
+                assert!(!cancel_flag.load(AtomicOrdering::Relaxed));
+                assert!(!release_flag.load(AtomicOrdering::Relaxed));
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no desktop handler",
+                ))
+            },
+        );
+
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Started { id: JobId(1) }
+        ));
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Err(error)
+            } if error.code == JobErrorCode::NotFound
+        ));
+        match background_event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("desktop result should be emitted")
+        {
+            BackgroundEvent::DesktopOpenFinished { path, result } => {
+                assert_eq!(path, document);
+                assert!(
+                    result
+                        .expect_err("injected opener should fail")
+                        .contains("no desktop handler")
+                );
+            }
+            other => panic!("expected desktop-open result, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_launcher_chain_skips_missing_and_failed_openers() {
+        let root = make_temp_dir("desktop-launcher-chain");
+        let commands = vec![
+            std::process::Command::new(root.join("missing-launcher")),
+            std::process::Command::new("false"),
+            std::process::Command::new("true"),
+        ];
+        let cancel_flag = AtomicBool::new(false);
+        let release_flag = AtomicBool::new(false);
+
+        run_status_aware_launcher_commands(
+            commands,
+            &cancel_flag,
+            &release_flag,
+            Duration::from_secs(1),
+        )
+        .expect("a later working opener should be attempted");
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_launcher_chain_reports_nonzero_statuses() {
+        let commands = vec![std::process::Command::new("false")];
+        let cancel_flag = AtomicBool::new(false);
+        let release_flag = AtomicBool::new(false);
+
+        let error = run_status_aware_launcher_commands(
+            commands,
+            &cancel_flag,
+            &release_flag,
+            Duration::from_secs(1),
+        )
+        .expect_err("a nonzero opener must not be reported as success");
+
+        assert!(error.to_string().contains("exited with"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_launcher_chain_honors_in_flight_cancellation() {
+        let commands = vec![{
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            command
+        }];
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let release_flag = AtomicBool::new(false);
+        let cancel_for_thread = Arc::clone(&cancel_flag);
+        let cancel_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            cancel_for_thread.store(true, AtomicOrdering::Relaxed);
+        });
+
+        let started = Instant::now();
+        let error = run_status_aware_launcher_commands(
+            commands,
+            cancel_flag.as_ref(),
+            &release_flag,
+            Duration::from_secs(5),
+        )
+        .expect_err("a canceled opener must stop promptly");
+        cancel_thread.join().expect("cancel thread should finish");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_launcher_chain_releases_in_flight_opener_on_runtime_shutdown() {
+        let root = make_temp_dir("desktop-launcher-shutdown-release");
+        let continue_marker = root.join("continue-application");
+        let survived_marker = root.join("application-survived");
+        let commands = vec![{
+            let mut command = std::process::Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "attempt=0; while [ ! -e \"$1\" ] && [ \"$attempt\" -lt 100 ]; do \
+                     sleep 0.02; attempt=$((attempt + 1)); done; printf survived > \"$2\"",
+                    "sh",
+                ])
+                .arg(&continue_marker)
+                .arg(&survived_marker);
+            command
+        }];
+        let cancel_flag = AtomicBool::new(false);
+        let release_flag = Arc::new(AtomicBool::new(false));
+        let release_for_thread = Arc::clone(&release_flag);
+        let release_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            release_for_thread.store(true, AtomicOrdering::Relaxed);
+        });
+
+        let started = Instant::now();
+        let error = run_status_aware_launcher_commands(
+            commands,
+            &cancel_flag,
+            release_flag.as_ref(),
+            Duration::from_secs(5),
+        )
+        .expect_err("runtime shutdown should release an in-flight desktop opener");
+        release_thread.join().expect("release thread should finish");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        fs::write(&continue_marker, "continue")
+            .expect("application continuation marker should be writable");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !survived_marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            fs::read_to_string(&survived_marker)
+                .expect("the released application should keep running"),
+            "survived"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_launcher_chain_releases_attached_opener_to_independent_reaper() {
+        let root = make_temp_dir("desktop-launcher-reaper");
+        let release = root.join("release-application");
+        let marker = root.join("application-survived");
+        let commands = vec![{
+            let mut command = std::process::Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "attempt=0; while [ ! -e \"$1\" ] && [ \"$attempt\" -lt 100 ]; do \
+                     sleep 0.02; attempt=$((attempt + 1)); done; printf survived > \"$2\"",
+                    "sh",
+                ])
+                .arg(&release)
+                .arg(&marker);
+            command
+        }];
+        let cancel_flag = AtomicBool::new(false);
+        let release_flag = AtomicBool::new(false);
+
+        run_status_aware_launcher_commands(
+            commands,
+            &cancel_flag,
+            &release_flag,
+            Duration::from_millis(20),
+        )
+        .expect("an attached opener should be accepted after bounded observation");
+        assert!(
+            !marker.exists(),
+            "the scheduler worker must return before the opened application exits"
+        );
+
+        // Runtime shutdown and later cancellation no longer own an opener after handoff.
+        cancel_flag.store(true, AtomicOrdering::Relaxed);
+        fs::write(&release, "continue").expect("application release marker should be writable");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            fs::read_to_string(&marker).expect("the accepted application should keep running"),
+            "survived"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn interrupted_desktop_open_does_not_enqueue_viewer_fallback() {
+        let root = make_temp_dir("desktop-open-canceled");
+        let document = root.join("image.png");
+        fs::write(&document, "payload").expect("document should be writable");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_desktop_open_worker(
+            JobId(1),
+            document,
+            cancel_flag,
+            release_flag,
+            &worker_event_tx,
+            &background_event_tx,
+            |_path, _cancel_flag, _release_flag| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "desktop open canceled",
+                ))
+            },
+        );
+
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Started { id: JobId(1) }
+        ));
+        assert!(matches!(
+            recv_event(&worker_event_rx, Duration::from_secs(1)),
+            JobEvent::Finished {
+                id: JobId(1),
+                result: Err(error)
+            } if error.code == JobErrorCode::Canceled
+        ));
+        assert!(
+            matches!(
+                background_event_rx.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "canceling a desktop opener must not trigger viewer fallback"
+        );
+
+        fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
     fn viewer_worker_reports_canceled_when_flag_is_set() {
         let root = make_temp_dir("viewer-canceled");
         let viewer_file = root.join("viewer.txt");
@@ -2405,6 +4199,7 @@ mod tests {
             filter: PanelFilter::default(),
             show_hidden_files: true,
             cached_panelized_entries: None,
+            home_directory: None,
             request_id: 17,
         });
         let job_id = job.id;
@@ -2431,6 +4226,99 @@ mod tests {
         ));
 
         fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn identity_canceled_before_start_emits_terminal_background_event() {
+        let root = make_temp_dir("identity-canceled-before-start");
+        let mut manager = JobManager::new();
+        let job = manager.enqueue(JobRequest::ResolvePanelIdentity {
+            panel: ActivePanel::Left,
+            cwd: root.clone(),
+            home_directory: Some(root.clone()),
+            request_id: 19,
+        });
+        let job_id = job.id;
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        finish_canceled_worker_before_start(&job, &worker_event_tx, &background_event_tx);
+
+        assert!(matches!(
+            background_event_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(BackgroundEvent::PanelIdentityResolved {
+                panel: ActivePanel::Left,
+                request_id: 19,
+                result: Err(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            worker_event_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(JobEvent::Finished {
+                id,
+                result: Err(error),
+            }) if id == job_id && error.code == JobErrorCode::Canceled
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn identity_worker_emits_only_identity_completion() {
+        let root = make_temp_dir("panel-identity-only");
+        for index in 0..250 {
+            fs::write(
+                root.join(format!("entry-{index:03}.txt")),
+                index.to_string(),
+            )
+            .expect("identity fixture should be writable");
+        }
+        let canonical_root = fs::canonicalize(&root).expect("fixture should canonicalize");
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (worker_event_tx, worker_event_rx) = mpsc::channel();
+        let (background_event_tx, background_event_rx) = mpsc::channel();
+
+        execute_panel_identity_worker_job(
+            JobId(18),
+            PanelIdentityWorkerRequest {
+                panel: ActivePanel::Left,
+                cwd: root.clone(),
+                home_directory: Some(root.clone()),
+                request_id: 23,
+            },
+            cancel_flag,
+            &worker_event_tx,
+            &background_event_tx,
+        );
+
+        let events = background_event_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(
+            events.len(),
+            1,
+            "identity work must not emit listing chunks"
+        );
+        assert!(matches!(
+            &events[0],
+            BackgroundEvent::PanelIdentityResolved {
+                panel: ActivePanel::Left,
+                cwd,
+                request_id: 23,
+                result: Ok(identity),
+            } if cwd == &root
+                && identity.canonical_cwd.as_deref() == Some(canonical_root.as_path())
+                && identity.canonical_home_directory.as_deref()
+                    == Some(canonical_root.as_path())
+        ));
+        assert!(matches!(
+            worker_event_rx.try_iter().last(),
+            Some(JobEvent::Finished {
+                id: JobId(18),
+                result: Ok(()),
+            })
+        ));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
     #[test]
@@ -2615,7 +4503,7 @@ mod tests {
     #[test]
     fn refresh_outcomes_map_permission_denied_to_elevated_retry_hint() {
         let cancel_flag = AtomicBool::new(false);
-        let (event_result, result) = refresh_outcomes(
+        let (event_result, result) = refresh_outcomes::<()>(
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "permission denied",

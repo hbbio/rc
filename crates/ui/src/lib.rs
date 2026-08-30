@@ -18,12 +18,13 @@ use rc_core::layout::{
     tree_layout, visible_window,
 };
 use rc_core::{
-    ActivePanel, AppCommand, AppState, DialogButtonFocus, DialogKind, DialogState, FileEntry,
-    FilterDialogField, FindDialogField, FindNameMode, FindResultsState, FindResultsStatus,
-    HelpSpan, HelpState, JobRecord, JobStatus, MenuState, NavigationMotion, NavigationTarget,
-    PairInputField, PanelCommand, PanelListingFormat, PanelState, PanelViewMode,
-    QuickCdSearchStatus, QuickViewState, Route, SelectionSizeState, SettingsScreenState,
-    TreeLoadState, TreeState, ViewerState, top_menus,
+    ActivePanel, AppCommand, AppState, CommandLineCompletionState, CommandLineSession,
+    DialogButtonFocus, DialogKind, DialogState, FileEntry, FilterDialogField, FindDialogField,
+    FindNameMode, FindResultsState, FindResultsStatus, HelpSpan, HelpState, JobRecord, JobStatus,
+    MenuState, NavigationMotion, NavigationTarget, PairInputField, PanelCommand,
+    PanelListingFormat, PanelState, PanelViewMode, QuickCdSearchStatus, QuickViewState, Route,
+    SelectionSizeState, SettingsScreenState, TreeLoadState, TreeState, ViewerState,
+    sanitize_display_field, top_menus,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -33,6 +34,7 @@ use syntect::highlighting::{
     Style as SyntectStyle, Theme,
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use skin::{UiSkin, current_skin};
@@ -132,24 +134,28 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         }
     }
 
-    let status = if state.show_debug_status() {
-        format!(
-            "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
-            state.key_context(),
-            state.route_depth(),
-            skin.name(),
-            job_counts.queued,
-            job_counts.running,
-            job_counts.succeeded,
-            job_counts.canceled,
-            job_counts.failed,
-            state.status_line
-        )
+    if let Some(session) = state.command_line_session() {
+        render_command_line_status(frame, root[2], state, session, skin.as_ref());
     } else {
-        state.status_line.clone()
-    };
-    let status = fit_single_line(status, root[2].width as usize);
-    frame.render_widget(Paragraph::new(status), root[2]);
+        let status = if state.show_debug_status() {
+            format!(
+                "context: {:?} | routes:{} | skin:{} | jobs q:{} r:{} ok:{} cx:{} err:{} | {}",
+                state.key_context(),
+                state.route_depth(),
+                skin.name(),
+                job_counts.queued,
+                job_counts.running,
+                job_counts.succeeded,
+                job_counts.canceled,
+                job_counts.failed,
+                state.status_line
+            )
+        } else {
+            state.status_line.clone()
+        };
+        let status = fit_single_line(status, root[2].width as usize);
+        frame.render_widget(Paragraph::new(status), root[2]);
+    }
     if state.show_button_bar() {
         render_button_bar(frame, root[3], skin.as_ref(), state);
     }
@@ -166,8 +172,297 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Route::Help(help) => render_help_screen(frame, state, help, skin.as_ref()),
         Route::Menu(menu) => render_menu_overlay(frame, state, menu, skin.as_ref()),
         Route::Settings(settings) => render_settings_screen(frame, settings, skin.as_ref()),
+        Route::CommandLine(session) => {
+            render_completion_pager(frame, root[1], session, skin.as_ref())
+        }
         Route::FileManager => {}
     }
+}
+
+fn render_command_line_status(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    session: &CommandLineSession,
+    skin: &UiSkin,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let model = state.command_line_model();
+    let layout = command_line_prompt_layout(state, session, area.width as usize);
+    let prefix = layout.prefix;
+    let prefix_width = layout.prefix_width;
+    let input_width = layout.input_width;
+    let scroll = layout.scroll;
+    let total_width = area.width as usize;
+    let visible_value = display_column_slice(model.value(), scroll, input_width);
+    let visible_value_width = UnicodeWidthStr::width(visible_value.as_str());
+    let mut remaining = input_width.saturating_sub(visible_value_width);
+
+    let base_style = skin.style("core", "_default_");
+    let mut spans = vec![
+        Span::styled(prefix, base_style),
+        Span::styled(visible_value, base_style),
+    ];
+    let transient_notice = match &session.completion {
+        CommandLineCompletionState::Pending(_) => Some("completing…"),
+        _ => session.notice.as_deref(),
+    };
+    if transient_notice.is_none()
+        && remaining > 0
+        && let Some(suggestion) = model.autosuggestion()
+        && let Some(suffix) = suggestion.strip_prefix(model.value())
+    {
+        let suffix = display_column_slice(suffix, 0, remaining);
+        remaining = remaining.saturating_sub(UnicodeWidthStr::width(suffix.as_str()));
+        spans.push(Span::styled(suffix, base_style.add_modifier(Modifier::DIM)));
+    }
+
+    if remaining > 2
+        && let Some(notice) = transient_notice
+    {
+        let notice = sanitize_display_field(notice);
+        let notice = fit_single_line(format!("  {notice}"), remaining);
+        spans.push(Span::styled(
+            notice,
+            base_style.fg(Color::Yellow).add_modifier(Modifier::DIM),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), area);
+    if input_width > 0 {
+        let cursor_in_input = model.visual_cursor().saturating_sub(scroll);
+        let cursor_x = prefix_width
+            .saturating_add(cursor_in_input)
+            .min(total_width.saturating_sub(1));
+        frame.set_cursor_position((area.x.saturating_add(cursor_x as u16), area.y));
+    } else {
+        frame.set_cursor_position((area.x.saturating_add(area.width.saturating_sub(1)), area.y));
+    }
+}
+
+struct CommandLinePromptLayout {
+    prefix: String,
+    prefix_width: usize,
+    input_width: usize,
+    scroll: usize,
+}
+
+fn command_line_prompt_layout(
+    state: &AppState,
+    session: &CommandLineSession,
+    total_width: usize,
+) -> CommandLinePromptLayout {
+    let model = state.command_line_model();
+    let cwd = format_panel_path(
+        &state.active_panel().cwd,
+        state.active_panel().home_directory(),
+        None,
+        state.active_panel().canonical_home_directory(),
+    );
+    let cwd = sanitize_display_field(&cwd);
+    let identity = sanitize_display_field(&session.shell.identity);
+    let shell_label = model.last_exit_status().map_or_else(
+        || format!("[{identity}]"),
+        |status| format!("[{identity}:{status}]"),
+    );
+    let prefix_budget = total_width.saturating_sub(1);
+    let shell_prompt = fit_shell_prompt(&shell_label, prefix_budget);
+    let shell_width = UnicodeWidthStr::width(shell_prompt.as_str());
+    let cwd_budget = prefix_budget.saturating_sub(shell_width);
+    let prefix = if cwd_budget > 1 {
+        format!(
+            "{} {shell_prompt}",
+            fit_single_line(cwd, cwd_budget.saturating_sub(1))
+        )
+    } else {
+        shell_prompt
+    };
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str()).min(total_width);
+    let input_width = total_width.saturating_sub(prefix_width);
+    let scroll = model.visual_scroll(input_width.saturating_sub(1));
+    CommandLinePromptLayout {
+        prefix,
+        prefix_width,
+        input_width,
+        scroll,
+    }
+}
+
+fn fit_shell_prompt(shell_label: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return String::from(">");
+    }
+    if width == 2 {
+        return String::from("> ");
+    }
+    let suffix = " > ";
+    let label = fit_single_line(shell_label, width.saturating_sub(3));
+    format!("{label}{suffix}")
+}
+
+pub fn command_line_cursor_for_column(
+    state: &AppState,
+    column: u16,
+    viewport_width: u16,
+) -> Option<usize> {
+    let session = state.command_line_session()?;
+    let layout = command_line_prompt_layout(state, session, viewport_width as usize);
+    let column = column as usize;
+    if column < layout.prefix_width {
+        return Some(0);
+    }
+    let target = layout.scroll.saturating_add(
+        column
+            .saturating_sub(layout.prefix_width)
+            .min(layout.input_width),
+    );
+    Some(codepoint_for_display_column(
+        state.command_line_model().value(),
+        target,
+    ))
+}
+
+fn codepoint_for_display_column(value: &str, target: usize) -> usize {
+    let mut column = 0_usize;
+    let mut codepoints = 0_usize;
+    for grapheme in value.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        if target < column.saturating_add(width) {
+            return codepoints;
+        }
+        column = column.saturating_add(width);
+        codepoints = codepoints.saturating_add(grapheme.chars().count());
+    }
+    codepoints
+}
+
+fn display_column_slice(value: &str, start: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut column = 0_usize;
+    let mut output_width = 0_usize;
+    let mut output = String::new();
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        let next_column = column.saturating_add(grapheme_width);
+        if next_column <= start {
+            column = next_column;
+            continue;
+        }
+        if column < start || output_width.saturating_add(grapheme_width) > width {
+            column = next_column;
+            continue;
+        }
+        output.push_str(grapheme);
+        output_width = output_width.saturating_add(grapheme_width);
+        column = next_column;
+        if output_width >= width {
+            break;
+        }
+    }
+    output
+}
+
+fn render_completion_pager(
+    frame: &mut Frame,
+    panel_area: Rect,
+    session: &CommandLineSession,
+    skin: &UiSkin,
+) {
+    let Some((candidates, selected)) = session.completion_candidates() else {
+        return;
+    };
+    if candidates.is_empty() || panel_area.width == 0 || panel_area.height == 0 {
+        return;
+    }
+    let selected = selected.min(candidates.len() - 1);
+    let selected_style = skin.style("core", "selected");
+    let base_style = skin.style("core", "_default_");
+    if panel_area.height <= 3 {
+        let Some(candidate) = candidates.get(selected) else {
+            return;
+        };
+        let display = sanitize_display_field(&candidate.display);
+        let line = fit_single_line(
+            format!("{display} ({}/{})", selected + 1, candidates.len()),
+            panel_area.width as usize,
+        );
+        let area = Rect::new(
+            panel_area.x,
+            panel_area
+                .y
+                .saturating_add(panel_area.height.saturating_sub(1)),
+            panel_area.width,
+            1,
+        );
+        frame.render_widget(Paragraph::new(line).style(selected_style), area);
+        return;
+    }
+
+    let visible_rows = candidates
+        .len()
+        .min(6)
+        .min(panel_area.height.saturating_sub(2) as usize);
+    let height = (visible_rows as u16)
+        .saturating_add(2)
+        .min(panel_area.height);
+    let width = panel_area.width.min(88);
+    let area = Rect::new(
+        panel_area.x,
+        panel_area
+            .y
+            .saturating_add(panel_area.height.saturating_sub(height)),
+        width,
+        height,
+    );
+    let first = selected
+        .saturating_sub(visible_rows / 2)
+        .min(candidates.len().saturating_sub(visible_rows));
+    let items = candidates
+        .iter()
+        .skip(first)
+        .take(visible_rows)
+        .enumerate()
+        .map(|(offset, candidate)| {
+            let mut value = sanitize_display_field(&candidate.display);
+            if let Some(description) = candidate.description.as_deref() {
+                let description = sanitize_display_field(description);
+                if !description.is_empty() {
+                    value.push_str(" — ");
+                    value.push_str(&description);
+                }
+            }
+            let value = fit_single_line(value, width.saturating_sub(2) as usize);
+            let style = if first + offset == selected {
+                selected_style
+            } else {
+                base_style
+            };
+            ListItem::new(value).style(style)
+        })
+        .collect::<Vec<_>>();
+    let title = fit_single_line(
+        format!("Completions {}/{}", selected + 1, candidates.len()),
+        width.saturating_sub(2) as usize,
+    );
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_set(skin.panel_border_set())
+                .border_style(selected_style)
+                .style(base_style),
+        )
+        .style(base_style);
+    frame.render_widget(Clear, area);
+    frame.render_widget(list, area);
 }
 
 fn uses_single_panel_layout(state: &AppState) -> bool {
@@ -211,6 +506,10 @@ fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, active_menu: Op
 fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppState) {
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
+    if matches!(state.top_route(), Route::CommandLine(_)) {
+        render_command_line_button_bar(frame, area, hotkey_style, button_style, state);
+        return;
+    }
     let (context, fallback_labels): (KeyContext, [&str; 10]) = match state.top_route() {
         Route::FindResults(results) => {
             let pause_label = if matches!(results.status, FindResultsStatus::Paused) {
@@ -264,11 +563,99 @@ fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppSt
     frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
 }
 
+fn render_command_line_button_bar(
+    frame: &mut Frame,
+    area: Rect,
+    hotkey_style: Style,
+    button_style: Style,
+    state: &AppState,
+) {
+    let primary = |context, command, fallback: &str| {
+        state
+            .keybinding_primary_label(context, command)
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let selected = state
+        .keybinding_labels(KeyContext::FileManager, AppCommand::PutCurrentSelected)
+        .and_then(|labels| {
+            labels
+                .iter()
+                .find(|label| label.as_str() == "Alt-Enter")
+                .or_else(|| labels.first())
+        })
+        .cloned()
+        .unwrap_or_else(|| String::from("Alt-Enter"));
+    let mut hints = vec![
+        (
+            primary(KeyContext::FileManager, AppCommand::OpenHelp, "F1"),
+            "Help",
+        ),
+        (String::from("Tab"), "Complete"),
+        (String::from("Enter"), "Run"),
+        (selected, "File"),
+        (
+            state
+                .xmap_keybinding_label(AppCommand::PutCurrentTagged)
+                .unwrap_or_else(|| String::from("Ctrl-X t")),
+            "Tagged",
+        ),
+        (
+            state
+                .xmap_keybinding_label(AppCommand::PutOtherTagged)
+                .unwrap_or_else(|| String::from("Ctrl-X Ctrl-T")),
+            "Other",
+        ),
+        (
+            primary(
+                KeyContext::FileManager,
+                AppCommand::PutCurrentFullSelected,
+                "Ctrl-Shift-Enter",
+            ),
+            "Path",
+        ),
+        (String::from("Up/Down"), "History"),
+        (String::from("Esc"), "Close"),
+    ];
+    let close = hints.pop().expect("command-line hints include close");
+    let close_width = UnicodeWidthStr::width(close.0.as_str()) + close.1.len();
+    let available = usize::from(area.width);
+    let mut visible = Vec::new();
+    let mut used = 0_usize;
+    for hint in hints {
+        let separator = usize::from(!visible.is_empty());
+        let hint_width = UnicodeWidthStr::width(hint.0.as_str()) + hint.1.len();
+        let close_separator = 1;
+        if used
+            .saturating_add(separator)
+            .saturating_add(hint_width)
+            .saturating_add(close_separator)
+            .saturating_add(close_width)
+            <= available
+        {
+            used = used.saturating_add(separator).saturating_add(hint_width);
+            visible.push(hint);
+        }
+    }
+    visible.push(close);
+
+    let mut spans = Vec::new();
+    for (index, (shortcut, label)) in visible.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", button_style));
+        }
+        spans.push(Span::styled(shortcut, hotkey_style));
+        spans.push(Span::styled(label, button_style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
+}
+
 fn button_bar_command_label(state: &AppState, command: AppCommand) -> Option<&'static str> {
     match command {
         AppCommand::OpenHelp => Some("Help"),
         AppCommand::OpenUserMenu => Some("Menu"),
-        AppCommand::OpenEntry => Some("View"),
+        AppCommand::OpenEntry => Some("Open"),
+        AppCommand::ViewEntry => Some("View"),
         AppCommand::EditEntry => Some("Edit"),
         AppCommand::Copy => Some("Copy"),
         AppCommand::Move => Some("RenMov"),
@@ -320,27 +707,134 @@ fn keybinding_joined_or(
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn panel_title(panel: &PanelState, format: PanelListingFormat) -> String {
-    let panelize_suffix = if panel.is_panelized() {
-        " | panelize"
-    } else {
-        ""
-    };
-    let filter_suffix = if panel.filter().is_active() {
-        format!(" | filter:{}", panel.filter().display_pattern())
-    } else {
-        String::new()
-    };
-    format!(
-        "{} | sort:{}{} | {}{} | tagged:{}{}",
-        format.title_label(),
-        panel.sort_label(),
-        filter_suffix,
-        panel.cwd.to_string_lossy(),
-        panelize_suffix,
-        panel.tagged_count(),
-        if panel.loading { " | loading..." } else { "" }
-    )
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PanelToplineTitles {
+    path: String,
+    summary: String,
+}
+
+const PANEL_TOPLINE_GAP_WIDTH: usize = 1;
+const MIN_USEFUL_PANEL_TITLE_WIDTH: usize = 4;
+
+fn panel_topline_titles(panel: &PanelState, format: PanelListingFormat) -> PanelToplineTitles {
+    panel_topline_titles_with_home(panel, format, panel.home_directory())
+}
+
+fn panel_topline_titles_with_home(
+    panel: &PanelState,
+    format: PanelListingFormat,
+    home: Option<&Path>,
+) -> PanelToplineTitles {
+    let mut summary = vec![
+        format.title_label().to_string(),
+        format!("sort:{}", panel.sort_label()),
+    ];
+    if panel.filter().is_active() {
+        summary.push(format!("filter:{}", panel.filter().display_pattern()));
+    }
+    if panel.is_panelized() {
+        summary.push(String::from("panelize"));
+    }
+    let tagged_count = panel.tagged_count();
+    if tagged_count > 0 {
+        summary.push(format!("tagged:{tagged_count}"));
+    }
+    if panel.loading {
+        summary.push(String::from("loading..."));
+    }
+
+    PanelToplineTitles {
+        path: format_panel_path(
+            &panel.cwd,
+            home,
+            panel.canonical_cwd(),
+            panel.canonical_home_directory(),
+        ),
+        summary: summary.join(" | "),
+    }
+}
+
+fn format_panel_path(
+    path: &Path,
+    home: Option<&Path>,
+    canonical_path: Option<&Path>,
+    canonical_home: Option<&Path>,
+) -> String {
+    let relative = home
+        .filter(|home| !home.as_os_str().is_empty())
+        .and_then(|home| path.strip_prefix(home).ok())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let canonical_path = canonical_path?;
+            let canonical_home = canonical_home.filter(|home| !home.as_os_str().is_empty())?;
+            canonical_path
+                .strip_prefix(canonical_home)
+                .ok()
+                .map(Path::to_path_buf)
+        });
+
+    match relative {
+        Some(relative) if relative.as_os_str().is_empty() => String::from("~"),
+        Some(relative) => format!("~/{}", relative.to_string_lossy()),
+        None => path.to_string_lossy().into_owned(),
+    }
+}
+
+fn fit_panel_topline_titles(titles: PanelToplineTitles, width: usize) -> PanelToplineTitles {
+    let path = sanitize_single_line(&titles.path);
+    let summary = sanitize_single_line(&titles.summary);
+    let path_width = UnicodeWidthStr::width(path.as_str());
+    let summary_width = UnicodeWidthStr::width(summary.as_str());
+
+    if summary_width == 0 {
+        return PanelToplineTitles {
+            path: fit_single_line(path, width),
+            summary,
+        };
+    }
+    if path_width == 0 {
+        return PanelToplineTitles {
+            path,
+            summary: fit_single_line(summary, width),
+        };
+    }
+    if path_width
+        .saturating_add(PANEL_TOPLINE_GAP_WIDTH)
+        .saturating_add(summary_width)
+        <= width
+    {
+        return PanelToplineTitles { path, summary };
+    }
+
+    let available = width.saturating_sub(PANEL_TOPLINE_GAP_WIDTH);
+    let minimum_path_width = path_width.min(MIN_USEFUL_PANEL_TITLE_WIDTH);
+    let minimum_summary_width = summary_width.min(MIN_USEFUL_PANEL_TITLE_WIDTH);
+    if available < minimum_path_width.saturating_add(minimum_summary_width) {
+        return PanelToplineTitles {
+            path: fit_single_line(path, width),
+            summary: String::new(),
+        };
+    }
+
+    // Preserve at least one third of constrained toplines for the path while allowing a short
+    // summary to use only the width it needs. This keeps both sides useful without overlap.
+    let reserved_path_width = path_width.min(MIN_USEFUL_PANEL_TITLE_WIDTH.max(available / 3));
+    let summary_budget = summary_width.min(available.saturating_sub(reserved_path_width));
+    let path_budget = available.saturating_sub(summary_budget);
+    PanelToplineTitles {
+        path: fit_single_line(path, path_budget),
+        summary: fit_single_line(summary, summary_budget),
+    }
+}
+
+fn with_panel_topline_titles<'a>(mut block: Block<'a>, titles: PanelToplineTitles) -> Block<'a> {
+    if !titles.path.is_empty() {
+        block = block.title_top(Line::raw(titles.path).left_aligned());
+    }
+    if !titles.summary.is_empty() {
+        block = block.title_top(Line::raw(titles.summary).right_aligned());
+    }
+    block
 }
 
 fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
@@ -359,12 +853,14 @@ fn fit_single_line(text: impl AsRef<str>, width: usize) -> String {
 
     let prefix_width = width - 3;
     let mut truncated = String::new();
-    for ch in sanitized.chars() {
-        truncated.push(ch);
-        if UnicodeWidthStr::width(truncated.as_str()) > prefix_width {
-            truncated.pop();
+    let mut truncated_width = 0_usize;
+    for grapheme in sanitized.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if truncated_width.saturating_add(grapheme_width) > prefix_width {
             break;
         }
+        truncated.push_str(grapheme);
+        truncated_width = truncated_width.saturating_add(grapheme_width);
     }
     truncated.push_str("...");
     debug_assert!(UnicodeWidthStr::width(truncated.as_str()) <= width);
@@ -406,17 +902,19 @@ fn render_panel(
     } else {
         configured_format
     };
-    let title = fit_single_line(
-        panel_title(panel, format),
+    let titles = fit_panel_topline_titles(
+        panel_topline_titles(panel, format),
         area.width.saturating_sub(2) as usize,
     );
 
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_set(skin.panel_border_set())
-        .border_style(skin.style("core", "_default_"))
-        .style(skin.style("core", "_default_"));
+    let block = with_panel_topline_titles(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_set(skin.panel_border_set())
+            .border_style(skin.style("core", "_default_"))
+            .style(skin.style("core", "_default_")),
+        titles,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2746,6 +3244,7 @@ mod tests {
     };
     use std::env;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -2761,6 +3260,35 @@ mod tests {
     fn render_to_text(state: &AppState, width: u16, height: u16) -> String {
         let buffer = render_to_buffer(state, width, height);
         buffer_to_text(&buffer)
+    }
+
+    #[cfg(unix)]
+    fn open_command_line_for_test(app: &mut AppState) {
+        app.open_command_line();
+        let request = app
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution should be queued");
+        app.handle_shell_resolution_response(rc_core::resolve_shell_request_blocking(request));
+        assert!(app.command_line_session().is_some());
+    }
+
+    fn render_panel_topline_to_text(titles: PanelToplineTitles, interior_width: u16) -> String {
+        let backend = TestBackend::new(interior_width.saturating_add(2), 2);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        terminal
+            .draw(|frame| {
+                let block = with_panel_topline_titles(
+                    Block::default().borders(Borders::ALL),
+                    titles.clone(),
+                );
+                frame.render_widget(block, frame.area());
+            })
+            .expect("topline should render");
+        buffer_to_text(terminal.backend().buffer())
+            .lines()
+            .next()
+            .expect("rendered block should have a top line")
+            .to_string()
     }
 
     fn buffer_to_text(buffer: &Buffer) -> String {
@@ -2812,6 +3340,7 @@ mod tests {
                                 filter,
                                 show_hidden_files,
                                 cached_panelized_entries,
+                                home_directory,
                                 request_id,
                             } => {
                                 let _ = event_tx.send(JobEvent::Started { id: job_id });
@@ -2825,6 +3354,7 @@ mod tests {
                                         filter: filter.clone(),
                                         show_hidden_files: *show_hidden_files,
                                         cached_panelized_entries: cached_panelized_entries.clone(),
+                                        home_directory: home_directory.clone(),
                                         request_id: *request_id,
                                     },
                                     cancel_flag.as_ref(),
@@ -3449,6 +3979,266 @@ mod tests {
     }
 
     #[test]
+    fn panel_topline_shortens_home_paths_with_tilde() {
+        let home = PathBuf::from("home").join("alice");
+        let relative = PathBuf::from("projects").join("rc");
+        let descendant = home.join(&relative);
+        let mut panel = PanelState::new(descendant.clone()).expect("panel should initialize");
+
+        let descendant_titles =
+            panel_topline_titles_with_home(&panel, PanelListingFormat::Full, Some(&home));
+        assert_eq!(
+            descendant_titles.path,
+            format!("~/{}", relative.to_string_lossy())
+        );
+
+        panel.cwd = home.clone();
+        let home_titles =
+            panel_topline_titles_with_home(&panel, PanelListingFormat::Full, Some(&home));
+        assert_eq!(home_titles.path, "~");
+
+        let lookalike = PathBuf::from("home").join("alice-backup");
+        assert_eq!(
+            format_panel_path(&lookalike, Some(&home), None, None),
+            lookalike.to_string_lossy()
+        );
+        assert_eq!(
+            format_panel_path(&descendant, None, None, None),
+            descendant.to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panel_topline_normalizes_filesystem_equivalent_home_aliases() {
+        let root = temp_root("topline-home-alias");
+        let home = root.join("Users").join("henri");
+        let sibling = root.join("Users").join("henri-backup");
+        let relative = PathBuf::from("projects").join("rc");
+        fs::create_dir_all(home.join(&relative)).expect("home fixture should be creatable");
+        fs::create_dir_all(&sibling).expect("sibling fixture should be creatable");
+        let home_alias = root.join("home-alias");
+        std::os::unix::fs::symlink(&home, &home_alias).expect("home alias should be creatable");
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+        let canonical_alias =
+            fs::canonicalize(&home_alias).expect("home alias should canonicalize");
+        let alias_descendant = home_alias.join(&relative);
+        let canonical_descendant =
+            fs::canonicalize(&alias_descendant).expect("alias descendant should canonicalize");
+        let canonical_sibling = fs::canonicalize(&sibling).expect("sibling should canonicalize");
+
+        assert_eq!(
+            format_panel_path(&home_alias, Some(&home), None, None),
+            home_alias.to_string_lossy(),
+            "an invalidated identity must not be recomputed by rendering"
+        );
+        assert_eq!(
+            format_panel_path(
+                &home_alias,
+                Some(&home),
+                Some(&canonical_alias),
+                Some(&canonical_home),
+            ),
+            "~"
+        );
+        assert_eq!(
+            format_panel_path(
+                &alias_descendant,
+                Some(&home),
+                Some(&canonical_descendant),
+                Some(&canonical_home),
+            ),
+            format!("~/{}", relative.to_string_lossy())
+        );
+        assert_eq!(
+            format_panel_path(
+                &sibling,
+                Some(&home),
+                Some(&canonical_sibling),
+                Some(&canonical_home),
+            ),
+            sibling.to_string_lossy(),
+            "a canonically normalized sibling must not be abbreviated"
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panel_topline_normalizes_case_variant_home_paths() {
+        let root = temp_root("topline-home-case");
+        let home = root.join("Users").join("henri");
+        let relative = PathBuf::from("Projects").join("rc");
+        fs::create_dir_all(home.join(&relative)).expect("home fixture should be creatable");
+        let case_variant = root.join("users").join("HENRI").join("projects").join("RC");
+
+        // Case-sensitive APFS volumes are valid too; this behavior applies only when the
+        // alternate spelling resolves to the same filesystem object.
+        if !case_variant
+            .try_exists()
+            .expect("case-variant path should be testable")
+        {
+            fs::remove_dir_all(root).expect("temp root should be removable");
+            return;
+        }
+
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+        let canonical_case_variant =
+            fs::canonicalize(&case_variant).expect("case variant should canonicalize");
+        assert_eq!(
+            format_panel_path(
+                &case_variant,
+                Some(&home),
+                Some(&canonical_case_variant),
+                Some(&canonical_home),
+            ),
+            format!("~/{}", relative.to_string_lossy())
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn panel_topline_normalizes_verbatim_windows_paths() {
+        let root = temp_root("topline-home-verbatim");
+        let home = root.join("Users").join("Henri");
+        let relative = PathBuf::from("Projects").join("rc");
+        let descendant = home.join(&relative);
+        fs::create_dir_all(&descendant).expect("home fixture should be creatable");
+        let case_variant = root.join("users").join("HENRI").join("projects").join("RC");
+        let verbatim_descendant = fs::canonicalize(&case_variant)
+            .expect("Windows path should have a canonical representation");
+        let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+
+        assert_eq!(
+            format_panel_path(
+                &verbatim_descendant,
+                Some(&home),
+                Some(&verbatim_descendant),
+                Some(&canonical_home),
+            ),
+            format!("~/{}", relative.to_string_lossy())
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn panel_topline_omits_zero_tags_and_includes_nonzero_tags() {
+        let root = temp_root("topline-tags");
+        let entry_path = root.join("entry.txt");
+        fs::write(&entry_path, "demo").expect("file should be creatable");
+        let mut app = app_with_loaded_panels(root.clone());
+        let format = app.panel_listing_format(app.active_panel);
+
+        let untagged_titles = panel_topline_titles(app.active_panel(), format);
+        assert!(
+            !untagged_titles.summary.contains("tagged:"),
+            "zero tags should not consume topline space: {}",
+            untagged_titles.summary
+        );
+
+        let entry_cursor = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == entry_path)
+            .expect("fixture should be listed");
+        app.active_panel_mut().cursor = entry_cursor;
+        assert!(app.active_panel_mut().toggle_tag_on_cursor());
+
+        let tagged_titles = panel_topline_titles(app.active_panel(), format);
+        assert!(
+            tagged_titles.summary.contains("tagged:1"),
+            "nonzero tag counts should remain visible: {}",
+            tagged_titles.summary
+        );
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn panel_topline_titles_fit_every_constrained_width_without_overlap() {
+        let samples = [
+            PanelToplineTitles {
+                path: String::from("~/projects/a-very-long-directory/rust-commander"),
+                summary: String::from(
+                    "full | sort:name asc | filter:*.rs | panelize | tagged:12 | loading...",
+                ),
+            },
+            PanelToplineTitles {
+                path: String::from("~/資料/非常に長いディレクトリ名"),
+                summary: String::from("brief | sort:extension desc | tagged:2"),
+            },
+        ];
+
+        for titles in samples {
+            for width in 0..=128 {
+                let fitted = fit_panel_topline_titles(titles.clone(), width);
+                let path_width = UnicodeWidthStr::width(fitted.path.as_str());
+                let summary_width = UnicodeWidthStr::width(fitted.summary.as_str());
+                let gap_width = usize::from(!fitted.path.is_empty() && !fitted.summary.is_empty());
+                assert!(
+                    path_width + gap_width + summary_width <= width,
+                    "titles overlap at width {width}: {fitted:?}"
+                );
+            }
+        }
+
+        let constrained = PanelToplineTitles {
+            path: String::from("~/a/long/path"),
+            summary: String::from("full | sort:name asc"),
+        };
+        assert!(
+            fit_panel_topline_titles(constrained.clone(), 8)
+                .summary
+                .is_empty(),
+            "the path should win when both sides cannot remain useful"
+        );
+        let first_split = fit_panel_topline_titles(constrained, 9);
+        assert!(!first_split.path.is_empty());
+        assert!(!first_split.summary.is_empty());
+    }
+
+    #[test]
+    fn panel_topline_renders_path_left_and_summary_right_at_every_width() {
+        let titles = PanelToplineTitles {
+            path: String::from("~/work/a-long-path"),
+            summary: String::from("full | sort:name asc | tagged:12"),
+        };
+
+        for interior_width in 0..=64_u16 {
+            let fitted = fit_panel_topline_titles(titles.clone(), usize::from(interior_width));
+            let rendered = render_panel_topline_to_text(fitted.clone(), interior_width);
+            assert_eq!(
+                UnicodeWidthStr::width(rendered.as_str()),
+                usize::from(interior_width) + 2,
+                "rendered border width changed at interior width {interior_width}: {rendered:?}"
+            );
+            assert!(
+                rendered.starts_with(&format!("┌{}", fitted.path)),
+                "path is not left aligned at interior width {interior_width}: {rendered:?}"
+            );
+            assert!(
+                rendered.ends_with(&format!("{}┐", fitted.summary)),
+                "summary is not right aligned at interior width {interior_width}: {rendered:?}"
+            );
+            if !fitted.path.is_empty() && !fitted.summary.is_empty() {
+                let between = rendered
+                    .strip_prefix(&format!("┌{}", fitted.path))
+                    .and_then(|line| line.strip_suffix(&format!("{}┐", fitted.summary)))
+                    .expect("aligned titles should leave the border between them");
+                assert!(
+                    UnicodeWidthStr::width(between) >= PANEL_TOPLINE_GAP_WIDTH,
+                    "titles touch at interior width {interior_width}: {rendered:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn render_status_line_sanitizes_newlines_and_clips_width() {
         let root = temp_root("status-clamp");
         let mut app = app_with_loaded_panels(root.clone());
@@ -3473,7 +4263,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn panel_title_marks_panelize_panels() {
+    fn panel_topline_marks_panelize_panels() {
         let root = temp_root("panelize-title");
         fs::write(root.join("entry.txt"), "demo").expect("file should be creatable");
         let mut app = app_with_loaded_panels(root.clone());
@@ -3483,13 +4273,13 @@ mod tests {
             .expect("default panelize preset should run");
         drain_background(&mut app);
 
-        let title = panel_title(
+        let titles = panel_topline_titles(
             app.active_panel(),
             app.panel_listing_format(app.active_panel),
         );
         assert!(
-            title.contains("panelize"),
-            "panel title should indicate panelize mode"
+            titles.summary.contains("panelize"),
+            "panel topline should indicate panelize mode"
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
@@ -3562,7 +4352,7 @@ mod tests {
             .position(|entry| entry.path == file_path)
             .expect("file should be listed");
         app.active_panel_mut().cursor = index;
-        app.apply(AppCommand::OpenEntry)
+        app.apply(AppCommand::ViewEntry)
             .expect("viewer command should succeed");
         drain_background(&mut app);
         app.apply(AppCommand::ViewerToggleHex)
@@ -3717,6 +4507,55 @@ OpenConfirmDialog = f2
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn command_line_button_bar_shows_only_operational_hints() {
+        let root = temp_root("command-line-button-bar");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap =
+            rc_core::keymap::Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+        open_command_line_for_test(&mut app);
+
+        let frame = render_to_text(&app, 160, 24);
+        for hint in [
+            "F1Help",
+            "TabComplete",
+            "EnterRun",
+            "Alt-EnterFile",
+            "Ctrl-x tTagged",
+            "Ctrl-x Ctrl-tOther",
+            "Ctrl-Shift-EnterPath",
+            "Up/DownHistory",
+            "EscClose",
+        ] {
+            assert!(frame.contains(hint), "missing {hint:?}\n{frame}");
+        }
+        for irrelevant in ["F3View", "F4Edit", "F5Copy", "F10Quit"] {
+            assert!(
+                !frame.contains(irrelevant),
+                "shell mode retained {irrelevant:?}\n{frame}"
+            );
+        }
+
+        let narrow_frame = render_to_text(&app, 60, 24);
+        for essential in [
+            "F1Help",
+            "TabComplete",
+            "EnterRun",
+            "Alt-EnterFile",
+            "EscClose",
+        ] {
+            assert!(
+                narrow_frame.contains(essential),
+                "narrow shell mode omitted {essential:?}\n{narrow_frame}"
+            );
+        }
+        assert!(!narrow_frame.contains("F4Edit"), "{narrow_frame}");
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
     #[test]
     fn render_draws_menu_overlay() {
         let root = temp_root("menu");
@@ -3781,5 +4620,179 @@ OpenConfirmDialog = f2
         );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_cursor_stays_visible_at_every_constrained_width() {
+        use rc_core::CommandLineInput;
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from(
+            "printf 'wide: 你好 e\u{301}' and-a-very-long-tail",
+        )))
+        .expect("paste");
+
+        for width in 1..=120 {
+            let backend = TestBackend::new(width, 8);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal.draw(|frame| render(frame, &app)).expect("render");
+            let cursor = terminal.get_cursor_position().expect("cursor");
+            assert!(cursor.x < width, "cursor escaped width {width}: {cursor:?}");
+            assert!(cursor.y < 8, "cursor escaped height at width {width}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_sanitizes_shell_and_completion_display_fields() {
+        use rc_core::{
+            CommandLineInput, CompletionCandidate, CompletionEdit, CompletionIntent,
+            CompletionOutcome, CompletionProvider, CompletionResponse, Settings, ShellDialect,
+            ShellHistoryMode, ShellSettings,
+        };
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        let settings = Settings {
+            shell: ShellSettings::custom(
+                "evil\u{1b}[31m-shell",
+                ShellDialect::Posix,
+                None,
+                ShellHistoryMode::Session,
+            )
+            .expect("custom shell"),
+            ..Settings::default()
+        };
+        app.replace_settings(settings);
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request");
+        let request = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("request");
+        app.handle_completion_response(CompletionResponse {
+            activation_id: request.activation_id,
+            request_id: request.request_id,
+            buffer_revision: request.buffer_revision,
+            original_buffer: request.buffer,
+            outcome: CompletionOutcome::Candidates {
+                provider: CompletionProvider::Generic,
+                candidates: vec![CompletionCandidate {
+                    edit: CompletionEdit {
+                        start_byte: 0,
+                        end_byte: 0,
+                        replacement: String::from("safe"),
+                    },
+                    display: String::from("candidate\u{1b}[2J"),
+                    description: Some(String::from("line\nnext")),
+                }],
+                notice: None,
+            },
+        });
+
+        let rendered = render_to_text(&app, 80, 12);
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("\\x1b"));
+        assert!(!rendered.contains("line\nnext"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_mouse_column_maps_to_grapheme_boundary() {
+        use rc_core::CommandLineInput;
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("ab好cd")))
+            .expect("paste");
+        let session = app.command_line_session().expect("session");
+        let layout = command_line_prompt_layout(&app, session, 100);
+        assert_eq!(
+            command_line_cursor_for_column(&app, (layout.prefix_width + 2) as u16, 100),
+            Some(2)
+        );
+        assert_eq!(
+            command_line_cursor_for_column(&app, (layout.prefix_width + 4) as u16, 100),
+            Some(3)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_prompt_preserves_shell_identity_before_long_cwd() {
+        use rc_core::{Settings, ShellDialect, ShellHistoryMode, ShellSettings};
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        app.replace_settings(Settings {
+            shell: ShellSettings::custom(
+                "fish",
+                ShellDialect::Fish,
+                None,
+                ShellHistoryMode::Session,
+            )
+            .expect("custom fish"),
+            ..Settings::default()
+        });
+        open_command_line_for_test(&mut app);
+        let session = app.command_line_session().expect("session");
+        let layout = command_line_prompt_layout(&app, session, 18);
+        assert!(layout.prefix.contains("[fish]"), "{}", layout.prefix);
+        assert!(layout.prefix.ends_with("> "), "{}", layout.prefix);
+        assert!(layout.prefix_width <= 17);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_pager_renders_at_every_tiny_height() {
+        use rc_core::{
+            CommandLineInput, CompletionCandidate, CompletionEdit, CompletionIntent,
+            CompletionOutcome, CompletionProvider, CompletionResponse,
+        };
+
+        let root = env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request");
+        let request = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("request");
+        app.handle_completion_response(CompletionResponse {
+            activation_id: request.activation_id,
+            request_id: request.request_id,
+            buffer_revision: request.buffer_revision,
+            original_buffer: request.buffer,
+            outcome: CompletionOutcome::Candidates {
+                provider: CompletionProvider::Generic,
+                candidates: (0..10)
+                    .map(|index| CompletionCandidate {
+                        edit: CompletionEdit {
+                            start_byte: 0,
+                            end_byte: 0,
+                            replacement: format!("candidate-{index}"),
+                        },
+                        display: format!("candidate-{index}"),
+                        description: Some(String::from("description")),
+                    })
+                    .collect(),
+                notice: None,
+            },
+        });
+
+        for height in 1..=10 {
+            let backend = TestBackend::new(24, height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal.draw(|frame| render(frame, &app)).expect("render");
+            let cursor = terminal.get_cursor_position().expect("cursor");
+            assert!(cursor.x < 24, "height {height}: {cursor:?}");
+            assert!(cursor.y < height, "height {height}: {cursor:?}");
+        }
     }
 }

@@ -33,6 +33,8 @@ fn panel_refresh_result(entries: Vec<FileEntry>) -> PanelRefreshResult {
     PanelRefreshResult {
         entries,
         panelized_entries: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
     }
 }
 
@@ -78,6 +80,7 @@ fn drain_background(app: &mut AppState) {
                             filter,
                             show_hidden_files,
                             cached_panelized_entries,
+                            home_directory,
                             request_id,
                         } => {
                             let _ = event_tx.send(JobEvent::Started { id: job_id });
@@ -91,6 +94,7 @@ fn drain_background(app: &mut AppState) {
                                     filter: filter.clone(),
                                     show_hidden_files: *show_hidden_files,
                                     cached_panelized_entries: cached_panelized_entries.clone(),
+                                    home_directory: home_directory.clone(),
                                     request_id: *request_id,
                                 },
                                 cancel_flag.as_ref(),
@@ -98,6 +102,36 @@ fn drain_background(app: &mut AppState) {
                             let _ = event_tx.send(JobEvent::Finished {
                                 id: job_id,
                                 result: Ok(()),
+                            });
+                        }
+                        JobRequest::ResolvePanelIdentity {
+                            panel,
+                            cwd,
+                            home_directory,
+                            request_id,
+                        } => {
+                            let _ = event_tx.send(JobEvent::Started { id: job_id });
+                            let cancel_flag = job.cancel_flag();
+                            let (result, job_result) = match resolve_panel_path_identity(
+                                cwd,
+                                home_directory.as_deref(),
+                                cancel_flag.as_ref(),
+                            ) {
+                                Ok(identity) => (Ok(identity), Ok(())),
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    (Err(message), Err(JobError::from_io(error)))
+                                }
+                            };
+                            app.handle_background_event(BackgroundEvent::PanelIdentityResolved {
+                                panel: *panel,
+                                cwd: cwd.clone(),
+                                request_id: *request_id,
+                                result,
+                            });
+                            let _ = event_tx.send(JobEvent::Finished {
+                                id: job_id,
+                                result: job_result,
                             });
                         }
                         JobRequest::Find { spec, max_results } => {
@@ -317,6 +351,9 @@ fn move_cursor_stays_in_bounds() {
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -473,6 +510,9 @@ fn toggle_and_invert_tags_work_for_non_parent_entries() {
         ],
         cursor: 0,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -512,6 +552,9 @@ fn page_home_end_navigation_stays_bounded() {
         entries,
         cursor: 1,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -541,6 +584,9 @@ fn sort_mode_cycles_and_toggles_direction() {
         entries: Vec::new(),
         cursor: 0,
         sort_mode: SortMode::default(),
+        home_directory: None,
+        canonical_cwd: None,
+        canonical_home_directory: None,
         filter: PanelFilter::default(),
         show_hidden_files: true,
         source: PanelListingSource::Directory,
@@ -1105,6 +1151,19 @@ fn quick_cd_menu_prefers_the_portable_slash_shortcut() {
 
 #[test]
 fn help_content_applies_keybinding_replacements() {
+    let flatten = |help: &HelpState| {
+        let mut content = String::new();
+        for line in help.lines() {
+            for span in &line.spans {
+                match span {
+                    HelpSpan::Text(text) => content.push_str(text),
+                    HelpSpan::Link { label, .. } => content.push_str(label),
+                }
+            }
+            content.push('\n');
+        }
+        content
+    };
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -1116,27 +1175,36 @@ fn help_content_applies_keybinding_replacements() {
     let keymap = Keymap::parse(
         r#"
 [filemanager]
+Help = f12
 OpenJobs = f6
+OpenCommandLine = f7
+PutCurrentSelected = f8
+PutCurrentFullSelected = f9
+ExtendedKeyMap = ctrl-g
+
+[filemanager:xmap]
+PutCurrentTagged = z
+PutOtherTagged = ctrl-z
 "#,
     )
     .expect("keymap should parse");
     app.set_keybinding_hints_from_keymap(&keymap);
+    let command_line_help =
+        HelpState::for_context_with_replacements(KeyContext::CommandLine, &app.help_replacements());
+    let command_line_content = flatten(&command_line_help);
+    assert!(
+        command_line_content.contains("F12 opens this command-line help"),
+        "command-line help should reflect the configured Help shortcut"
+    );
+    assert!(!command_line_content.contains("F1 opens this command-line help"));
+
     app.apply(AppCommand::OpenHelp)
         .expect("help route should open");
 
     let Route::Help(help) = app.top_route() else {
         panic!("top route should be help");
     };
-    let mut content = String::new();
-    for line in help.lines() {
-        for span in &line.spans {
-            match span {
-                HelpSpan::Text(text) => content.push_str(text),
-                HelpSpan::Link { label, .. } => content.push_str(label),
-            }
-        }
-        content.push('\n');
-    }
+    let content = flatten(help);
 
     assert!(
         !content.contains("{{"),
@@ -1145,6 +1213,26 @@ OpenJobs = f6
     assert!(
         content.contains("F6 open jobs screen"),
         "help should reflect keymap-derived shortcuts"
+    );
+    assert!(
+        content.contains("F7 open command line"),
+        "command-line help should reflect its configured shortcut"
+    );
+    assert!(
+        content.contains("F8 insert the selected file name"),
+        "selected-file help should reflect its configured shortcut"
+    );
+    assert!(
+        content.contains("F9 insert the selected file's full path"),
+        "full-path help should reflect its configured shortcut"
+    );
+    assert!(
+        content.contains("Ctrl-g z insert active-panel tagged names"),
+        "active tagged-file help should reflect its configured xmap sequence"
+    );
+    assert!(
+        content.contains("Ctrl-g Ctrl-z insert passive-panel tagged names"),
+        "passive tagged-file help should reflect its configured xmap sequence"
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");
@@ -1197,7 +1285,7 @@ fn menu_stub_action_reports_not_implemented_status() {
 }
 
 #[test]
-fn user_menu_command_is_reserved_for_milestone_five() {
+fn user_menu_command_reports_that_it_is_unavailable() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -1210,7 +1298,7 @@ fn user_menu_command_is_reserved_for_milestone_five() {
         .expect("user menu placeholder should be handled");
 
     assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert!(app.status_line.contains("planned for Milestone 5"));
+    assert_eq!(app.status_line, "User menu is not available");
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -2085,7 +2173,7 @@ fn set_status_sanitizes_controls_and_truncates_very_long_messages() {
     app.set_status(format!(
         "line1\nline2\t{}\r{}",
         '\u{1b}',
-        "x".repeat(MAX_STATUS_LINE_CHARS.saturating_add(128))
+        "x".repeat(rc_shell::DISPLAY_LINE_LIMIT_BYTES.saturating_add(128))
     ));
     assert!(
         !app.status_line.contains('\n')
@@ -2095,11 +2183,15 @@ fn set_status_sanitizes_controls_and_truncates_very_long_messages() {
         "status text should strip control characters before render"
     );
     assert!(
-        app.status_line.ends_with("..."),
+        app.status_line.contains("\\x1b"),
+        "terminal controls should be rendered visibly"
+    );
+    assert!(
+        app.status_line.ends_with('…'),
         "very long status text should be truncated with an ellipsis"
     );
     assert!(
-        app.status_line.chars().count() <= MAX_STATUS_LINE_CHARS.saturating_add(3),
+        app.status_line.len() <= rc_shell::DISPLAY_LINE_LIMIT_BYTES,
         "status text should be bounded to avoid pathological render costs"
     );
 

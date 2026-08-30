@@ -4,15 +4,18 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgAction, Parser};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode as CrosstermKeyCode, KeyEvent,
-    KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode as CrosstermKeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -23,7 +26,9 @@ use ratatui::backend::CrosstermBackend;
 use rc_core::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 use rc_core::settings_io;
 use rc_core::{
-    AppCommand, AppState, ApplyResult, ExternalEditRequest, JobRequest, MouseClickTarget, Settings,
+    AppCommand, AppState, ApplyResult, CommandLineInput, CompletionIntent, ExternalEditRequest,
+    ExternalExecuteRequest, ForegroundShellRequest, JobRequest, MouseClickTarget, Settings,
+    sanitize_display_field, sanitize_display_line,
 };
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
@@ -35,6 +40,7 @@ use runtime::RuntimeBridge;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_LOG_FILE_NAME: &str = "rc.log";
 const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
+static TERMINAL_RECOVERY_FAILED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct MouseClickTracker {
@@ -191,11 +197,37 @@ fn tracing_log_path(
         })
 }
 
-fn open_tracing_log(path: &Path) -> io::Result<File> {
+#[derive(Debug)]
+struct TracingLogWriter {
+    file: File,
+}
+
+impl io::Write for TracingLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt as _;
+
+            // FILE_WRITE_DATA is needed to truncate an oversized log, so the handle cannot be
+            // append-only. An offset of -1 is Windows' atomic "write to EOF" sentinel.
+            self.file.seek_write(buffer, u64::MAX)
+        }
+        #[cfg(not(windows))]
+        {
+            io::Write::write(&mut self.file, buffer)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.file)
+    }
+}
+
+fn open_tracing_log(path: &Path) -> io::Result<TracingLogWriter> {
     open_tracing_log_with_limit(path, MAX_LOG_FILE_BYTES)
 }
 
-fn open_tracing_log_with_limit(path: &Path, max_bytes: u64) -> io::Result<File> {
+fn open_tracing_log_with_limit(path: &Path, max_bytes: u64) -> io::Result<TracingLogWriter> {
     if max_bytes == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -210,27 +242,58 @@ fn open_tracing_log_with_limit(path: &Path, max_bytes: u64) -> io::Result<File> 
         fs::create_dir_all(parent)?;
     }
 
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.file_type().is_file() => Err(io::Error::new(
+    let file = open_tracing_log_file(path)?;
+    prepare_tracing_log_file(file, max_bytes).map(|file| TracingLogWriter { file })
+}
+
+fn open_tracing_log_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        // Rust's append-only access mask omits FILE_WRITE_DATA, which File::set_len requires.
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        // Open the reparse point itself so a final-component symlink cannot redirect the log.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options
+            .access_mode(GENERIC_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    options.open(path).map_err(|error| {
+        if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_file()) {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tracing log must be a regular file",
+            )
+        } else {
+            error
+        }
+    })
+}
+
+fn prepare_tracing_log_file(file: File, max_bytes: u64) -> io::Result<File> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "tracing log must be a regular file",
-        )),
-        Ok(metadata) if metadata.len() >= max_bytes => {
-            OpenOptions::new().write(true).truncate(true).open(path)
-        }
-        Ok(_) => OpenOptions::new().append(true).open(path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut options = OpenOptions::new();
-            options.create_new(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
-            }
-            options.open(path)
-        }
-        Err(error) => Err(error),
+        ));
     }
+    if metadata.len() >= max_bytes {
+        file.set_len(0)?;
+    }
+    Ok(file)
 }
 
 fn init_tracing(log_path: Option<&Path>) -> Option<io::Error> {
@@ -335,6 +398,9 @@ fn apply_env_overrides_with_lookup(
     {
         settings.configuration.macos_option_symbols = parsed;
     }
+    settings
+        .shell
+        .apply_environment_with(|name| lookup_env(name));
 }
 
 fn apply_cli_overrides(settings: &mut Settings, cli: &Cli) {
@@ -390,14 +456,39 @@ fn run_app(
 ) -> Result<()> {
     let mut runtime = RuntimeBridge::spawn()?;
 
-    enable_raw_mode().context("failed to enable raw mode")?;
+    install_emergency_terminal_panic_hook();
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("failed to enter alternate screen")?;
+    if let Err(error) = enter_tui_terminal_modes(&mut stdout) {
+        let shutdown_error = runtime.shutdown().err();
+        return Err(append_optional_error(
+            error,
+            shutdown_error,
+            "runtime shutdown",
+        ));
+    }
 
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).context("failed to create terminal backend")?;
-    terminal.clear().context("failed to clear terminal")?;
+    let mut terminal = match Terminal::new(backend).context("failed to create terminal backend") {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            emergency_restore_terminal();
+            let shutdown_error = runtime.shutdown().err();
+            return Err(append_optional_error(
+                error,
+                shutdown_error,
+                "runtime shutdown",
+            ));
+        }
+    };
+    if let Err(error) = terminal.clear().context("failed to clear terminal") {
+        emergency_restore_terminal();
+        let shutdown_error = runtime.shutdown().err();
+        return Err(append_optional_error(
+            error,
+            shutdown_error,
+            "runtime shutdown",
+        ));
+    }
 
     let loop_result = run_event_loop(
         &mut terminal,
@@ -417,21 +508,96 @@ fn run_app(
     Ok(())
 }
 
+fn enter_tui_terminal_modes(stdout: &mut io::Stdout) -> Result<()> {
+    if let Err(error) = enable_raw_mode().context("failed to enable raw mode") {
+        emergency_restore_terminal();
+        return Err(error);
+    }
+    if let Err(error) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("failed to enter alternate screen")
+    {
+        emergency_restore_terminal();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn append_optional_error(
+    primary: anyhow::Error,
+    secondary: Option<anyhow::Error>,
+    secondary_label: &str,
+) -> anyhow::Error {
+    match secondary {
+        Some(secondary) => anyhow!("{primary}; {secondary_label} failed: {secondary}"),
+        None => primary,
+    }
+}
+
 fn queue_deferred_save_before_shutdown(state: &mut AppState, runtime: &mut RuntimeBridge) {
     let _ = state.promote_deferred_persist_settings_request();
     runtime.dispatch_pending_commands(state);
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(
+    let mut errors = Vec::new();
+    if let Err(error) = execute!(terminal.backend_mut(), DisableBracketedPaste) {
+        errors.push(format!("failed to disable bracketed paste: {error}"));
+    }
+    if let Err(error) = disable_raw_mode() {
+        errors.push(format!("failed to disable raw mode: {error}"));
+    }
+    if let Err(error) = execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )
-    .context("failed to leave alternate screen")?;
-    terminal.show_cursor().context("failed to restore cursor")?;
-    Ok(())
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    ) {
+        errors.push(format!("failed to leave alternate screen: {error}"));
+    }
+    if let Err(error) = terminal.show_cursor() {
+        errors.push(format!("failed to restore cursor: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(errors.join("; ")))
+    }
+}
+
+fn install_emergency_terminal_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    let terminal_owner = thread::current().id();
+    INSTALLED.call_once(move || {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |information| {
+            // A panic hook runs even for worker panics that Tokio or a JoinHandle catches. Only
+            // the UI thread owns the terminal modes; restoring them from a recoverable worker
+            // panic would leave the still-running event loop drawing outside the alternate screen.
+            if panic_thread_owns_terminal(terminal_owner) {
+                emergency_restore_terminal();
+            }
+            previous(information);
+        }));
+    });
+}
+
+fn panic_thread_owns_terminal(terminal_owner: ThreadId) -> bool {
+    thread::current().id() == terminal_owner
+}
+
+fn emergency_restore_terminal() {
+    let mut stdout = io::stdout();
+    let _ = execute!(
+        stdout,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
 }
 
 fn run_event_loop(
@@ -451,6 +617,13 @@ fn run_event_loop(
         runtime.dispatch_pending_commands(state);
         state.expire_status_line();
         dispatch_pending_external_edit_requests(terminal, state);
+        dispatch_pending_external_execute_requests(terminal, state);
+        dispatch_pending_foreground_shell_requests(terminal, state);
+        if TERMINAL_RECOVERY_FAILED.load(AtomicOrdering::Relaxed) {
+            return Err(anyhow!(
+                "fatal terminal restoration or process-group cleanup failure"
+            ));
+        }
 
         terminal
             .draw(|frame| rc_ui::render(frame, state))
@@ -499,6 +672,11 @@ fn run_event_loop(
                 {
                     return Ok(());
                 }
+                Event::Paste(payload) if state.key_context() == KeyContext::CommandLine => {
+                    state.clear_xmap();
+                    state.handle_command_line_input(CommandLineInput::Paste(payload))?;
+                }
+                // Outside command-line mode paste is intentionally discarded as one event.
                 _ => {}
             }
         }
@@ -519,6 +697,25 @@ fn handle_key(
     input_compatibility: InputCompatibility,
 ) -> Result<bool> {
     let context = state.key_context();
+
+    if context == KeyContext::CommandLine {
+        if let Some(command) =
+            command_line_keymap_command(state, keymap, &key_event, input_compatibility)
+        {
+            return Ok(
+                apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit
+            );
+        }
+        if state.is_xmap_pending() {
+            state.clear_xmap();
+            state.set_status("Extended keymap command not found");
+            return Ok(false);
+        }
+        if let Some(input) = command_line_input(&key_event) {
+            state.handle_command_line_input(input)?;
+        }
+        return Ok(false);
+    }
 
     if matches!(context, KeyContext::Input | KeyContext::FindDialog)
         && let Some(command) = input_char_command(&key_event)
@@ -570,6 +767,39 @@ fn handle_key(
     Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
 
+fn command_line_keymap_command(
+    state: &AppState,
+    keymap: &Keymap,
+    key_event: &KeyEvent,
+    input_compatibility: InputCompatibility,
+) -> Option<AppCommand> {
+    if key_event
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    let context = if state.is_xmap_pending() {
+        KeyContext::FileManagerXMap
+    } else {
+        KeyContext::FileManager
+    };
+    let chord = map_key_event_to_chord(*key_event, input_compatibility)?;
+    let command = keymap
+        .resolve(context, chord)
+        .and_then(|key_command| AppCommand::from_key_command(context, key_command))?;
+    matches!(
+        command,
+        AppCommand::OpenHelp
+            | AppCommand::EnterXMap
+            | AppCommand::PutCurrentSelected
+            | AppCommand::PutCurrentFullSelected
+            | AppCommand::PutCurrentTagged
+            | AppCommand::PutOtherTagged
+    )
+    .then_some(command)
+}
+
 fn handle_mouse(
     state: &mut AppState,
     mouse_event: MouseEvent,
@@ -579,6 +809,22 @@ fn handle_mouse(
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
+    if state.key_context() == KeyContext::CommandLine {
+        state.clear_xmap();
+        click_tracker.clear();
+        let button_height = u16::from(state.show_button_bar());
+        let status_row = viewport_height
+            .saturating_sub(button_height)
+            .saturating_sub(1);
+        if matches!(mouse_event.kind, MouseEventKind::Down(MouseButton::Left))
+            && mouse_event.row == status_row
+            && let Some(cursor) =
+                rc_ui::command_line_cursor_for_column(state, mouse_event.column, viewport_width)
+        {
+            state.handle_command_line_input(CommandLineInput::SetCursor(cursor))?;
+        }
+        return Ok(false);
+    }
     match mouse_event.kind {
         MouseEventKind::Down(MouseButton::Left) => {}
         MouseEventKind::Down(_) => {
@@ -657,10 +903,128 @@ fn dispatch_pending_external_edit_requests(
     }
 }
 
+fn dispatch_pending_external_execute_requests(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) {
+    for request in state.take_pending_external_execute_requests() {
+        match run_external_execute_request(terminal, &request) {
+            Ok(()) => state.set_status(format!(
+                "Finished executing {}",
+                request.path.to_string_lossy()
+            )),
+            Err(error) => state.set_status(format!("Execution failed: {error}")),
+        }
+    }
+}
+
+fn dispatch_pending_foreground_shell_requests(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) {
+    for request in state.take_pending_foreground_shell_requests() {
+        let activation_id = request.activation_id;
+        let result = run_foreground_shell_request(terminal, &request)
+            .map(exit_status_number)
+            .map_err(|error| sanitize_display_field(&error.to_string()));
+        state.finish_foreground_shell_request(activation_id, result);
+        state.refresh_active_panel();
+    }
+}
+
+fn run_foreground_shell_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    request: &ForegroundShellRequest,
+) -> Result<ExitStatus> {
+    use std::io::{IsTerminal as _, Write as _};
+
+    suspend_terminal_for_external_command(terminal)?;
+    let invocation = request.shell.invocation(&request.command);
+    let mut command = Command::new(&invocation.program);
+    command
+        .args(&invocation.arguments)
+        .current_dir(&request.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let cwd = sanitize_display_field(&request.cwd.to_string_lossy());
+    let submitted = sanitize_display_field(&request.command);
+    let echo = sanitize_display_line(&format!("{cwd} > {submitted}"));
+    let run_result = run_interactive_process_after_prepare(&mut command, || {
+        println!("{echo}");
+        io::stdout().flush()
+    })
+    .with_context(|| {
+        format!(
+            "failed to launch {}",
+            sanitize_display_field(&request.shell.identity)
+        )
+    });
+
+    let acknowledgement_result = if let Ok(status) = &run_result {
+        let notice = sanitize_display_line(&format!(
+            "[{}:{}] Press Enter to return to rc",
+            sanitize_display_field(&request.shell.identity),
+            exit_status_number(*status)
+        ));
+        println!("{notice}");
+        let flush_result = io::stdout()
+            .flush()
+            .context("failed to flush command status");
+        if flush_result.is_ok() && io::stdin().is_terminal() {
+            let mut acknowledgement = String::new();
+            io::stdin()
+                .read_line(&mut acknowledgement)
+                .context("failed to read command acknowledgement")
+                .map(|_| ())
+        } else {
+            flush_result
+        }
+    } else {
+        Ok(())
+    };
+
+    let resume_result = resume_terminal_after_external_command(terminal);
+    match (run_result, acknowledgement_result, resume_result) {
+        (Ok(status), Ok(()), Ok(())) => Ok(status),
+        (Err(error), Ok(()), Ok(()))
+        | (Ok(_), Err(error), Ok(()))
+        | (Ok(_), Ok(()), Err(error)) => Err(error),
+        (run, acknowledgement, resume) => {
+            let errors = [run.err(), acknowledgement.err(), resume.err()]
+                .into_iter()
+                .flatten()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(anyhow!(errors))
+        }
+    }
+}
+
+fn exit_status_number(status: ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        status.signal().map_or(1, |signal| 128 + signal)
+    }
+    #[cfg(not(unix))]
+    {
+        1
+    }
+}
+
 fn run_external_editor_request(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     request: &ExternalEditRequest,
 ) -> Result<()> {
+    #[cfg(windows)]
+    let _console_control_guard = rc_platform::ParentConsoleControlGuard::acquire()
+        .context("failed to protect rc from external editor console interrupts")?;
     suspend_terminal_for_external_command(terminal)?;
     let run_result = run_external_editor_process(request);
     let resume_result = resume_terminal_after_external_command(terminal);
@@ -675,57 +1039,863 @@ fn run_external_editor_request(
     }
 }
 
+fn run_external_execute_request(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    request: &ExternalExecuteRequest,
+) -> Result<()> {
+    #[cfg(windows)]
+    let _console_control_guard = rc_platform::ParentConsoleControlGuard::acquire()
+        .context("failed to protect rc from executable console interrupts")?;
+    suspend_terminal_for_external_command(terminal)?;
+    let run_result = run_external_execute_process(request);
+    let resume_result = resume_terminal_after_external_command(terminal);
+
+    match (run_result, resume_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(run_error), Ok(())) => Err(run_error),
+        (Ok(()), Err(resume_error)) => Err(resume_error),
+        (Err(run_error), Err(resume_error)) => Err(anyhow!(
+            "executable failed: {run_error}; terminal restore failed: {resume_error}"
+        )),
+    }
+}
+
 fn suspend_terminal_for_external_command(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    disable_raw_mode().context("failed to disable raw mode for external editor")?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )
-    .context("failed to leave alternate screen for external editor")?;
-    terminal
-        .show_cursor()
-        .context("failed to show cursor for external editor")?;
+    let result = suspend_terminal_modes(terminal);
+    if let Err(suspend_error) = result {
+        let rollback_error = resume_terminal_modes(terminal).err();
+        if rollback_error.is_some() {
+            TERMINAL_RECOVERY_FAILED.store(true, AtomicOrdering::Relaxed);
+            emergency_restore_terminal();
+        }
+        return Err(append_optional_error(
+            suspend_error,
+            rollback_error,
+            "terminal suspension rollback",
+        ));
+    }
     Ok(())
 }
 
 fn resume_terminal_after_external_command(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    enable_raw_mode().context("failed to re-enable raw mode after external editor")?;
+    if TERMINAL_RECOVERY_FAILED.load(AtomicOrdering::Relaxed) {
+        emergency_restore_terminal();
+        return Err(anyhow!(
+            "terminal restoration was not confirmed; refusing to re-enter the TUI"
+        ));
+    }
+    match resume_terminal_modes(terminal) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            TERMINAL_RECOVERY_FAILED.store(true, AtomicOrdering::Relaxed);
+            emergency_restore_terminal();
+            Err(error)
+        }
+    }
+}
+
+fn suspend_terminal_modes(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    execute!(terminal.backend_mut(), DisableBracketedPaste)
+        .context("failed to disable bracketed paste for external command")?;
+    disable_raw_mode().context("failed to disable raw mode for external command")?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .context("failed to leave alternate screen for external command")?;
+    terminal
+        .show_cursor()
+        .context("failed to show cursor for external command")?;
+    Ok(())
+}
+
+fn resume_terminal_modes(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    enable_raw_mode().context("failed to re-enable raw mode after external command")?;
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableMouseCapture
+        EnableMouseCapture,
+        EnableBracketedPaste
     )
-    .context("failed to re-enter alternate screen after external editor")?;
+    .context("failed to re-enter alternate screen after external command")?;
     terminal
         .clear()
-        .context("failed to clear terminal after external editor")?;
+        .context("failed to clear terminal after external command")?;
     Ok(())
 }
 
 fn run_external_editor_process(request: &ExternalEditRequest) -> Result<()> {
     let command = resolve_external_editor_process_command(request)?;
-    let status = Command::new(&command.program)
+    let mut process = Command::new(&command.program);
+    process
         .args(&command.args)
         .current_dir(&request.cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to launch external editor command '{}'",
-                request.editor_command
-            )
-        })?;
+        .stderr(Stdio::inherit());
+    let status = run_interactive_process(&mut process).with_context(|| {
+        format!(
+            "failed to launch external editor command '{}'",
+            request.editor_command
+        )
+    })?;
     if !status.success() {
         return Err(anyhow!("external editor exited with {status}"));
     }
     Ok(())
+}
+
+fn run_external_execute_process(request: &ExternalExecuteRequest) -> Result<()> {
+    let mut process = Command::new(&request.path);
+    process
+        .current_dir(&request.cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let status = run_interactive_process(&mut process).with_context(|| {
+        format!(
+            "failed to launch executable '{}'",
+            request.path.to_string_lossy()
+        )
+    })?;
+    if !status.success() {
+        return Err(anyhow!("executable exited with {status}"));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct InteractiveProcessError {
+    error: io::Error,
+}
+
+impl InteractiveProcessError {
+    #[cfg(unix)]
+    fn terminal_fatal(error: io::Error) -> Self {
+        TERMINAL_RECOVERY_FAILED.store(true, AtomicOrdering::Relaxed);
+        eprintln!(
+            "rc: fatal terminal handoff failure: {}",
+            sanitize_display_field(&error.to_string())
+        );
+        Self { error }
+    }
+}
+
+impl From<io::Error> for InteractiveProcessError {
+    fn from(error: io::Error) -> Self {
+        Self { error }
+    }
+}
+
+impl std::fmt::Display for InteractiveProcessError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for InteractiveProcessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+type InteractiveProcessResult = Result<ExitStatus, InteractiveProcessError>;
+
+fn run_interactive_process(command: &mut Command) -> InteractiveProcessResult {
+    run_interactive_process_after_prepare(command, || Ok(()))
+}
+
+#[cfg(windows)]
+fn run_interactive_process_after_prepare(
+    command: &mut Command,
+    prepare: impl FnOnce() -> io::Result<()>,
+) -> InteractiveProcessResult {
+    let _console_control_guard =
+        rc_platform::ParentConsoleControlGuard::acquire().map_err(InteractiveProcessError::from)?;
+    prepare().map_err(InteractiveProcessError::from)?;
+    command.status().map_err(InteractiveProcessError::from)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn run_interactive_process_after_prepare(
+    command: &mut Command,
+    prepare: impl FnOnce() -> io::Result<()>,
+) -> InteractiveProcessResult {
+    prepare().map_err(InteractiveProcessError::from)?;
+    command.status().map_err(InteractiveProcessError::from)
+}
+
+#[cfg(unix)]
+fn run_interactive_process_after_prepare(
+    command: &mut Command,
+    prepare: impl FnOnce() -> io::Result<()>,
+) -> InteractiveProcessResult {
+    use std::os::unix::process::CommandExt as _;
+
+    use nix::errno::Errno;
+    use nix::sys::signal::Signal;
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    use nix::unistd::Pid;
+
+    // Crossterm raw mode has already been disabled. Capture the complete cooked state once,
+    // before display output or a child can mutate the controlling terminal.
+    let mut terminal = UnixTerminalHandoff::capture()
+        .map_err(|error| io_error_context(error, "failed to capture controlling terminal"))?;
+    if let Err(error) =
+        prepare().map_err(|error| io_error_context(error, "external-command preparation failed"))
+    {
+        return Err(finalize_interactive_error(terminal.as_mut(), error));
+    }
+
+    command.process_group(0);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let error = io_error_context(error, "failed to spawn interactive command");
+            return Err(finalize_interactive_error(terminal.as_mut(), error));
+        }
+    };
+    let child_pid = match i32::try_from(child.id()).map(Pid::from_raw) {
+        Ok(child_pid) => child_pid,
+        Err(_) => {
+            let kill_error = child.kill().err();
+            let wait_error = child.wait().err();
+            let cleanup_error = match (kill_error, wait_error) {
+                (Some(kill_error), Some(wait_error)) => Some(io::Error::other(format!(
+                    "failed to kill unrepresentable child: {kill_error}; failed to reap it: \
+                     {wait_error}"
+                ))),
+                (Some(error), None) | (None, Some(error)) => Some(error),
+                (None, None) => None,
+            };
+            let error = combine_io_errors(
+                io::Error::other("child process ID does not fit in pid_t"),
+                cleanup_error,
+                None,
+            );
+            return Err(finalize_interactive_error(terminal.as_mut(), error));
+        }
+    };
+
+    if let Some(terminal) = terminal.as_mut()
+        && let Err(error) = terminal.handoff(child_pid)
+    {
+        return Err(abort_interactive_process(
+            &mut child,
+            child_pid,
+            Some(terminal),
+            error,
+        ));
+    }
+
+    let status = loop {
+        match waitpid(child_pid, Some(WaitPidFlag::WUNTRACED)) {
+            Ok(WaitStatus::Exited(_, code)) => break unix_exit_status_from_code(code),
+            Ok(WaitStatus::Signaled(_, signal, dumped_core)) => {
+                break unix_exit_status_from_signal(signal, dumped_core);
+            }
+            Ok(WaitStatus::Stopped(_, Signal::SIGTTIN | Signal::SIGTTOU)) if terminal.is_some() => {
+                // The child can touch the terminal in the spawn-to-handoff race. It is now the
+                // foreground group, so this is internal and must not suspend rc visibly.
+                if let Err(error) = continue_process_group(child_pid) {
+                    return Err(abort_interactive_process(
+                        &mut child,
+                        child_pid,
+                        terminal.as_mut(),
+                        error,
+                    ));
+                }
+            }
+            Ok(WaitStatus::Stopped(_, _)) => {
+                let Some(terminal) = terminal.as_mut() else {
+                    return Err(abort_interactive_process(
+                        &mut child,
+                        child_pid,
+                        None,
+                        io::Error::other("non-terminal foreground command stopped"),
+                    ));
+                };
+                if let Err(error) = terminal.suspend_rc_and_resume_job(child_pid) {
+                    return Err(abort_interactive_process(
+                        &mut child,
+                        child_pid,
+                        Some(terminal),
+                        error,
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(Errno::EINTR) => {}
+            Err(error) => {
+                return Err(abort_interactive_process(
+                    &mut child,
+                    child_pid,
+                    terminal.as_mut(),
+                    io::Error::from(error),
+                ));
+            }
+        }
+    };
+
+    let cleanup_result = shutdown_process_group(child_pid);
+    let restore_result = terminal
+        .as_mut()
+        .map_or(Ok(()), UnixTerminalHandoff::finalize);
+    combine_finalizer_results(cleanup_result, restore_result)
+        .map_err(InteractiveProcessError::terminal_fatal)?;
+    Ok(status)
+}
+
+#[cfg(unix)]
+fn finalize_interactive_error(
+    terminal: Option<&mut UnixTerminalHandoff>,
+    error: io::Error,
+) -> InteractiveProcessError {
+    let restore_error = terminal.and_then(|terminal| terminal.finalize().err());
+    let fatal = restore_error.is_some();
+    let error = combine_io_errors(error, None, restore_error);
+    if fatal {
+        InteractiveProcessError::terminal_fatal(error)
+    } else {
+        InteractiveProcessError::from(error)
+    }
+}
+
+#[cfg(unix)]
+fn abort_interactive_process(
+    child: &mut std::process::Child,
+    process_group: nix::unistd::Pid,
+    terminal: Option<&mut UnixTerminalHandoff>,
+    error: io::Error,
+) -> InteractiveProcessError {
+    let cleanup_error = terminate_process_group(child, process_group).err();
+    let restore_error = terminal.and_then(|terminal| terminal.finalize().err());
+    let fatal = cleanup_error.is_some() || restore_error.is_some();
+    let error = combine_io_errors(error, cleanup_error, restore_error);
+    if fatal {
+        InteractiveProcessError::terminal_fatal(error)
+    } else {
+        InteractiveProcessError::from(error)
+    }
+}
+
+#[cfg(unix)]
+fn unix_exit_status_from_code(code: i32) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    ExitStatus::from_raw(code << 8)
+}
+
+#[cfg(unix)]
+fn unix_exit_status_from_signal(signal: nix::sys::signal::Signal, dumped_core: bool) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let core_dump_flag = if dumped_core { 0x80 } else { 0 };
+    ExitStatus::from_raw(signal as i32 | core_dump_flag)
+}
+
+#[cfg(unix)]
+fn continue_process_group(process_group: nix::unistd::Pid) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+
+    match killpg(process_group, Signal::SIGCONT) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(
+    child: &mut std::process::Child,
+    process_group: nix::unistd::Pid,
+) -> io::Result<()> {
+    use nix::sys::signal::Signal;
+
+    send_process_group_signal(process_group, Signal::SIGKILL)?;
+    let wait_result = child.wait();
+    let group_result = wait_for_process_group_exit(process_group, Duration::from_secs(1));
+    match (wait_result, group_result) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(wait_error), Err(group_error)) => Err(io::Error::other(format!(
+            "failed to reap command leader: {wait_error}; process group cleanup failed: \
+             {group_error}"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn shutdown_process_group(process_group: nix::unistd::Pid) -> io::Result<()> {
+    use nix::sys::signal::Signal;
+
+    if !process_group_exists(process_group)? {
+        return Ok(());
+    }
+    send_process_group_signal(process_group, Signal::SIGHUP)?;
+    send_process_group_signal(process_group, Signal::SIGCONT)?;
+    if wait_for_process_group_exit(process_group, Duration::from_millis(250)).is_ok() {
+        return Ok(());
+    }
+    send_process_group_signal(process_group, Signal::SIGTERM)?;
+    if wait_for_process_group_exit(process_group, Duration::from_millis(750)).is_ok() {
+        return Ok(());
+    }
+    send_process_group_signal(process_group, Signal::SIGKILL)?;
+    wait_for_process_group_exit(process_group, Duration::from_secs(1))
+}
+
+#[cfg(unix)]
+fn send_process_group_signal(
+    process_group: nix::unistd::Pid,
+    signal: nix::sys::signal::Signal,
+) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+
+    match killpg(process_group, signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+#[cfg(unix)]
+fn process_group_exists(process_group: nix::unistd::Pid) -> io::Result<bool> {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let group_target = Pid::from_raw(-process_group.as_raw());
+    match kill(group_target, None) {
+        Ok(()) | Err(Errno::EPERM) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(
+    process_group: nix::unistd::Pid,
+    timeout: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        reap_process_group_children(process_group)?;
+        if !process_group_exists(process_group)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "command process group {} did not exit within {} ms",
+                    process_group.as_raw(),
+                    timeout.as_millis()
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn reap_process_group_children(process_group: nix::unistd::Pid) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    use nix::unistd::Pid;
+
+    let group_target = Pid::from_raw(-process_group.as_raw());
+    loop {
+        match waitpid(group_target, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => {}
+            Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD) => return Ok(()),
+            Ok(_) => {}
+            Err(Errno::EINTR) => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalOwnership {
+    Rc,
+    Child,
+    Finalized,
+}
+
+#[cfg(unix)]
+struct UnixTerminalHandoff {
+    terminal: File,
+    rc_process_group: nix::unistd::Pid,
+    rc_termios: nix::sys::termios::Termios,
+    job_termios: Option<nix::sys::termios::Termios>,
+    ownership: TerminalOwnership,
+}
+
+#[cfg(unix)]
+impl UnixTerminalHandoff {
+    fn capture() -> io::Result<Option<Self>> {
+        use std::os::fd::AsRawFd as _;
+
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+        use nix::unistd::{getpgrp, tcgetpgrp};
+
+        let (terminal, tty_open_error) =
+            match OpenOptions::new().read(true).write(true).open("/dev/tty") {
+                Ok(terminal) => (terminal, None),
+                Err(tty_error) => match File::open("/dev/stdin") {
+                    // A separately opened standard-input descriptor is an acceptable fallback
+                    // only after tcgetpgrp below verifies that it is rc's controlling terminal.
+                    Ok(terminal) => (terminal, Some(tty_error)),
+                    Err(stdin_error)
+                        if is_not_a_terminal_error(&tty_error)
+                            && is_not_a_terminal_error(&stdin_error) =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(stdin_error) => {
+                        return Err(io::Error::new(
+                            tty_error.kind(),
+                            format!(
+                                "failed to open /dev/tty: {tty_error}; failed to open the stdin \
+                                 terminal fallback: {stdin_error}"
+                            ),
+                        ));
+                    }
+                },
+            };
+        let descriptor_flags = fcntl(terminal.as_raw_fd(), FcntlArg::F_GETFD)
+            .map(FdFlag::from_bits_truncate)
+            .map_err(io::Error::from)
+            .map_err(|error| io_error_context(error, "failed to read terminal descriptor flags"))?;
+        fcntl(
+            terminal.as_raw_fd(),
+            FcntlArg::F_SETFD(descriptor_flags | FdFlag::FD_CLOEXEC),
+        )
+        .map_err(io::Error::from)
+        .map_err(|error| io_error_context(error, "failed to set close-on-exec on terminal"))?;
+
+        let rc_process_group = getpgrp();
+        let foreground = match tcgetpgrp(&terminal).map_err(io::Error::from) {
+            Ok(foreground) => foreground,
+            Err(error)
+                if tty_open_error.as_ref().is_some_and(is_not_a_terminal_error)
+                    && is_not_a_terminal_error(&error) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                let error = tty_open_error.map_or_else(
+                    || error.to_string(),
+                    |tty_error| {
+                        format!(
+                            "failed to open /dev/tty: {tty_error}; stdin fallback was not a \
+                             usable controlling terminal: {error}"
+                        )
+                    },
+                );
+                return Err(io::Error::other(error));
+            }
+        };
+        if foreground != rc_process_group {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "rc is not the foreground process group of its controlling terminal",
+            ));
+        }
+        let rc_termios = terminal_attributes(&terminal)
+            .map_err(|error| io_error_context(error, "failed to capture cooked terminal state"))?;
+        Ok(Some(Self {
+            terminal,
+            rc_process_group,
+            rc_termios,
+            job_termios: None,
+            ownership: TerminalOwnership::Rc,
+        }))
+    }
+
+    fn handoff(&mut self, process_group: nix::unistd::Pid) -> io::Result<()> {
+        if self.ownership == TerminalOwnership::Finalized {
+            return Err(io::Error::other("terminal handoff guard is finalized"));
+        }
+        with_sigttou_blocked(|| {
+            set_terminal_process_group_after_spawn(&self.terminal, process_group).map_err(
+                |error| io_error_context(error, "failed to give terminal to command group"),
+            )?;
+            self.ownership = TerminalOwnership::Child;
+            Ok(())
+        })?;
+        continue_process_group(process_group)
+            .map_err(|error| io_error_context(error, "failed to continue command group"))
+    }
+
+    fn restore_rc(&mut self, final_restore: bool) -> io::Result<()> {
+        if self.ownership == TerminalOwnership::Finalized {
+            return Ok(());
+        }
+        let result = with_sigttou_blocked(|| {
+            let foreground_result =
+                set_terminal_process_group(&self.terminal, self.rc_process_group);
+            let termios_result = set_terminal_attributes(&self.terminal, &self.rc_termios);
+            match (foreground_result, termios_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(foreground_error), Err(termios_error)) => Err(io::Error::other(format!(
+                    "failed to reclaim terminal foreground group: {foreground_error}; \
+                     failed to restore cooked terminal state: {termios_error}"
+                ))),
+            }
+        });
+        if result.is_ok() {
+            self.ownership = if final_restore {
+                TerminalOwnership::Finalized
+            } else {
+                TerminalOwnership::Rc
+            };
+        }
+        result
+    }
+
+    fn finalize(&mut self) -> io::Result<()> {
+        self.restore_rc(true)
+    }
+
+    fn suspend_rc_and_resume_job(&mut self, process_group: nix::unistd::Pid) -> io::Result<()> {
+        use nix::sys::signal::Signal;
+
+        // Snapshot the stopped job before reclaiming or changing any terminal attributes.
+        self.job_termios = Some(terminal_attributes(&self.terminal)?);
+        self.restore_rc(false)?;
+        send_process_group_signal(self.rc_process_group, Signal::SIGTSTP)?;
+        self.wait_until_rc_is_foreground()?;
+
+        let job_termios = self
+            .job_termios
+            .as_ref()
+            .ok_or_else(|| io::Error::other("stopped job terminal snapshot is unavailable"))?;
+        with_sigttou_blocked(|| {
+            set_terminal_process_group(&self.terminal, process_group)?;
+            set_terminal_attributes(&self.terminal, job_termios)?;
+            self.ownership = TerminalOwnership::Child;
+            Ok(())
+        })?;
+        continue_process_group(process_group)
+    }
+
+    fn wait_until_rc_is_foreground(&self) -> io::Result<()> {
+        use nix::sys::signal::Signal;
+        use nix::unistd::tcgetpgrp;
+
+        loop {
+            let foreground = tcgetpgrp(&self.terminal).map_err(io::Error::from)?;
+            if foreground == self.rc_process_group {
+                return Ok(());
+            }
+            // A background SIGCONT must stop rc again instead of stealing the terminal.
+            send_process_group_signal(self.rc_process_group, Signal::SIGTTIN)?;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_not_a_terminal_error(error: &io::Error) -> bool {
+    use nix::errno::Errno;
+
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == Errno::ENXIO as i32
+                || code == Errno::ENODEV as i32
+                || code == Errno::ENOTTY as i32
+    )
+}
+
+#[cfg(unix)]
+impl Drop for UnixTerminalHandoff {
+    fn drop(&mut self) {
+        let _ = self.finalize();
+    }
+}
+
+#[cfg(unix)]
+struct SigttouMaskGuard {
+    previous: nix::sys::signal::SigSet,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl SigttouMaskGuard {
+    fn block() -> io::Result<Self> {
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+
+        let mut blocked = SigSet::empty();
+        blocked.add(Signal::SIGTTOU);
+        let mut previous = SigSet::empty();
+        pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&blocked), Some(&mut previous))
+            .map_err(io::Error::from)?;
+        Ok(Self {
+            previous,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        use nix::sys::signal::{SigmaskHow, pthread_sigmask};
+
+        if !self.active {
+            return Ok(());
+        }
+        pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&self.previous), None)
+            .map_err(io::Error::from)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SigttouMaskGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+#[cfg(unix)]
+fn with_sigttou_blocked<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let mut mask = SigttouMaskGuard::block()?;
+    let operation_result = operation();
+    let mask_result = mask.restore();
+    match (operation_result, mask_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(mask_error)) => Err(io::Error::other(format!(
+            "terminal operation failed: {operation_error}; failed to restore signal mask: \
+             {mask_error}"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn terminal_attributes(terminal: &File) -> io::Result<nix::sys::termios::Termios> {
+    use nix::errno::Errno;
+    use nix::sys::termios::tcgetattr;
+
+    loop {
+        match tcgetattr(terminal) {
+            Ok(attributes) => return Ok(attributes),
+            Err(Errno::EINTR) => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_terminal_attributes(
+    terminal: &File,
+    attributes: &nix::sys::termios::Termios,
+) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::termios::{SetArg, tcsetattr};
+
+    for attempt in 0..3 {
+        let set_arg = if attempt == 0 {
+            SetArg::TCSADRAIN
+        } else {
+            // Darwin may synthesize PENDIN while canonical mode is restored. Flushing pending
+            // child input on a retry lets the driver accept the saved flags byte-for-byte.
+            SetArg::TCSAFLUSH
+        };
+        loop {
+            match tcsetattr(terminal, set_arg, attributes) {
+                Ok(()) => break,
+                Err(Errno::EINTR) => {}
+                Err(error) => return Err(io::Error::from(error)),
+            }
+        }
+        let observed = terminal_attributes(terminal)?;
+        if observed == *attributes {
+            return Ok(());
+        }
+        if attempt == 2 {
+            return Err(io::Error::other(
+                "terminal driver did not accept the complete saved termios value",
+            ));
+        }
+    }
+    unreachable!("the bounded terminal-attribute loop always returns")
+}
+
+#[cfg(unix)]
+fn set_terminal_process_group(terminal: &File, process_group: nix::unistd::Pid) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::unistd::tcsetpgrp;
+
+    loop {
+        match tcsetpgrp(terminal, process_group) {
+            Ok(()) => return Ok(()),
+            Err(Errno::EINTR) => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_terminal_process_group_after_spawn(
+    terminal: &File,
+    process_group: nix::unistd::Pid,
+) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::unistd::tcsetpgrp;
+
+    // Darwin can briefly report EPERM while a freshly spawned process group becomes visible to
+    // the terminal driver. Keep that race internal, but leave genuine failures bounded.
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        match tcsetpgrp(terminal, process_group) {
+            Ok(()) => return Ok(()),
+            Err(Errno::EINTR) => {}
+            Err(Errno::EPERM) if Instant::now() < deadline => std::thread::yield_now(),
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn combine_finalizer_results(cleanup: io::Result<()>, restore: io::Result<()>) -> io::Result<()> {
+    match (cleanup, restore) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(cleanup_error), Err(restore_error)) => Err(io::Error::other(format!(
+            "process group cleanup failed: {cleanup_error}; terminal restoration failed: \
+             {restore_error}"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn combine_io_errors(
+    primary: io::Error,
+    cleanup: Option<io::Error>,
+    restore: Option<io::Error>,
+) -> io::Error {
+    let mut message = primary.to_string();
+    if let Some(error) = cleanup {
+        message.push_str(&format!("; process group cleanup failed: {error}"));
+    }
+    if let Some(error) = restore {
+        message.push_str(&format!("; terminal restoration failed: {error}"));
+    }
+    io::Error::new(primary.kind(), message)
+}
+
+#[cfg(unix)]
+fn io_error_context(error: io::Error, context: &str) -> io::Error {
+    io::Error::new(error.kind(), format!("{context}: {error}"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -912,6 +2082,66 @@ fn apply_pending_skin_revert(state: &mut AppState, skin_runtime: &SkinRuntimeCon
             state.set_status(format!("Skin '{}' unavailable: {error}", original_skin));
         }
     }
+}
+
+fn command_line_input(key_event: &KeyEvent) -> Option<CommandLineInput> {
+    use crossterm::event::KeyModifiers as CrosstermKeyModifiers;
+
+    if key_event
+        .modifiers
+        .intersects(CrosstermKeyModifiers::ALT | CrosstermKeyModifiers::SUPER)
+    {
+        return None;
+    }
+    let control = key_event.modifiers.contains(CrosstermKeyModifiers::CONTROL);
+    if control {
+        let CrosstermKeyCode::Char(character) = key_event.code else {
+            return None;
+        };
+        return match character.to_ascii_lowercase() {
+            'a' => Some(CommandLineInput::Home),
+            'e' => Some(CommandLineInput::End),
+            'w' => Some(CommandLineInput::DeletePreviousWord),
+            'u' => Some(CommandLineInput::DeleteFromStart),
+            'k' => Some(CommandLineInput::DeleteToEnd),
+            'c' => Some(CommandLineInput::Clear),
+            _ => None,
+        };
+    }
+
+    match key_event.code {
+        CrosstermKeyCode::Char(character) => Some(CommandLineInput::Character(
+            shifted_text_character(character, key_event.modifiers),
+        )),
+        CrosstermKeyCode::Left => Some(CommandLineInput::Left),
+        CrosstermKeyCode::Right => Some(CommandLineInput::Right),
+        CrosstermKeyCode::Home => Some(CommandLineInput::Home),
+        CrosstermKeyCode::End => Some(CommandLineInput::End),
+        CrosstermKeyCode::Backspace => Some(CommandLineInput::Backspace),
+        CrosstermKeyCode::Delete => Some(CommandLineInput::Delete),
+        CrosstermKeyCode::Up => Some(CommandLineInput::HistoryPrevious),
+        CrosstermKeyCode::Down => Some(CommandLineInput::HistoryNext),
+        CrosstermKeyCode::Tab if key_event.modifiers.contains(CrosstermKeyModifiers::SHIFT) => {
+            Some(CommandLineInput::Complete(CompletionIntent::Reverse))
+        }
+        CrosstermKeyCode::Tab => Some(CommandLineInput::Complete(CompletionIntent::Forward)),
+        CrosstermKeyCode::BackTab => Some(CommandLineInput::Complete(CompletionIntent::Reverse)),
+        CrosstermKeyCode::Enter => Some(CommandLineInput::Enter),
+        CrosstermKeyCode::Esc => Some(CommandLineInput::Escape),
+        _ => None,
+    }
+}
+
+fn shifted_text_character(mut character: char, modifiers: crossterm::event::KeyModifiers) -> char {
+    if !modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        return character;
+    }
+    if character.is_ascii_lowercase() {
+        character.make_ascii_uppercase();
+    } else if let Some(symbol) = map_shifted_ascii_symbol(character) {
+        character = symbol;
+    }
+    character
 }
 
 fn input_char_command(key_event: &KeyEvent) -> Option<AppCommand> {
@@ -1186,6 +2416,41 @@ mod tests {
             fs::read(&target).expect("read tracing log target"),
             b"preserve me",
             "rejecting the symlink must not truncate its target"
+        );
+        fs::remove_dir_all(root).expect("remove tracing log test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracing_log_size_check_uses_the_open_handle_after_a_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after the Unix epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-tracing-race-{stamp}"));
+        fs::create_dir_all(&root).expect("create tracing log test directory");
+        let path = root.join("rc.log");
+        let opened_path = root.join("opened.log");
+        let target = root.join("target.log");
+        fs::write(&path, b"oversized").expect("create original tracing log");
+        fs::write(&target, b"preserve me").expect("create symlink target");
+
+        let file = open_tracing_log_file(&path).expect("securely open the tracing log");
+        fs::rename(&path, &opened_path).expect("move the already-open log");
+        symlink(&target, &path).expect("replace the pathname with a symlink");
+        drop(prepare_tracing_log_file(file, 1).expect("prepare the opened log handle"));
+
+        assert!(
+            fs::read(&opened_path)
+                .expect("read the file behind the opened handle")
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read(&target).expect("read tracing log target"),
+            b"preserve me",
+            "a path swap must not redirect truncation to the symlink target"
         );
         fs::remove_dir_all(root).expect("remove tracing log test directory");
     }
@@ -1800,6 +3065,475 @@ mod tests {
         assert!(
             parts.is_none(),
             "unterminated windows-style quoting should fail to parse"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interactive_process_isolates_terminal_interrupts() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::sync::mpsc;
+        use std::thread;
+
+        const FIXTURE_ENV: &str = "RC_JOB_CONTROL_TEST_FIXTURE";
+        const READY_MARKER: &str = "RC_CHILD_READY";
+        const SURVIVED_MARKER: &str = "RC_PARENT_SURVIVED";
+
+        if env::var_os(FIXTURE_ENV).is_some() {
+            let terminal = File::open("/dev/stdin").expect("fixture stdin should be a PTY");
+            let before = terminal_attributes(&terminal).expect("baseline termios");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "stty -echo eof '^A'; printf 'RC_CHILD_READY\\n'; exec /bin/sleep 30",
+                ])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+            let status = run_interactive_process(&mut command)
+                .expect("interactive child should launch and return its signal status");
+            assert_eq!(status.signal(), Some(2), "child should receive SIGINT");
+            let after = terminal_attributes(&terminal).expect("restored termios");
+            assert_eq!(after, before, "signal exit must restore exact termios");
+            println!("{SURVIVED_MARKER}");
+            return;
+        }
+
+        // BSD `script` gives the nested test process a real controlling pseudo-terminal.
+        // Sending ETX through the master then exercises the kernel's foreground-process-group
+        // signal routing exactly as a user pressing Ctrl-C would.
+        let mut session = Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(env::current_exe().expect("test executable path should resolve"))
+            .args([
+                "--exact",
+                "tests::interactive_process_isolates_terminal_interrupts",
+                "--nocapture",
+            ])
+            .env(FIXTURE_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("pseudo-terminal fixture should launch");
+        let stdout = session
+            .stdout
+            .take()
+            .expect("fixture stdout should be piped");
+        let (line_tx, line_rx) = mpsc::channel();
+        let transcript_thread = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut transcript = String::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        transcript.push_str(&line);
+                        let _ = line_tx.send(line);
+                    }
+                    Err(error) => {
+                        transcript.push_str(&format!("<read error: {error}>"));
+                        break;
+                    }
+                }
+            }
+            transcript
+        });
+
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < ready_deadline {
+            let remaining = ready_deadline.saturating_duration_since(Instant::now());
+            match line_rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                Ok(line) if line.contains(READY_MARKER) => {
+                    ready = true;
+                    break;
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if ready {
+            // Let the parent complete tcsetpgrp after the child writes its marker.
+            thread::sleep(Duration::from_millis(100));
+            session
+                .stdin
+                .as_mut()
+                .expect("fixture stdin should be piped")
+                .write_all(&[3])
+                .expect("Ctrl-C should be written to the pseudo-terminal");
+        }
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        let mut status = None;
+        while Instant::now() < exit_deadline {
+            status = session
+                .try_wait()
+                .expect("fixture status should be readable");
+            if status.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let exited_promptly = status.is_some();
+        if !exited_promptly {
+            let _ = session.kill();
+        }
+        let _ = session.wait();
+        let transcript = transcript_thread
+            .join()
+            .expect("reader thread should finish");
+
+        assert!(
+            ready,
+            "child never became ready; transcript: {transcript:?}"
+        );
+        assert!(
+            exited_promptly,
+            "job-control fixture did not exit promptly; transcript: {transcript:?}"
+        );
+        assert!(
+            transcript.contains(SURVIVED_MARKER),
+            "Ctrl-C terminated rc's process group; transcript: {transcript:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_cleanup_kills_stopped_signal_resistant_group_within_bound() {
+        use std::os::unix::process::CommandExt as _;
+        use std::thread;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let ready = env::temp_dir().join(format!(
+            "rc-foreground-descendant-ready-{}-{stamp}",
+            std::process::id()
+        ));
+        let mut leader = Command::new("/bin/sh");
+        leader
+            .args([
+                "-c",
+                "/bin/sh -c 'trap \"\" HUP TERM; : > \"$1\"; sleep 0.2; kill -STOP $$; exec \
+                 sleep 30' rc-child \"$1\" & sleep 0.05",
+                "rc-test",
+            ])
+            .arg(&ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut leader = leader.spawn().expect("leader should spawn");
+        let process_group = nix::unistd::Pid::from_raw(
+            i32::try_from(leader.id()).expect("test PID should fit pid_t"),
+        );
+        let leader_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if leader
+                .try_wait()
+                .expect("leader status should be readable")
+                .is_some()
+            {
+                break;
+            }
+            if Instant::now() >= leader_deadline {
+                let _ = send_process_group_signal(process_group, nix::sys::signal::Signal::SIGKILL);
+                let _ = leader.wait();
+                panic!("shell leader did not exit after starting its background descendant");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let ready_deadline = Instant::now() + Duration::from_secs(1);
+        while !ready.exists() && Instant::now() < ready_deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.exists(), "background descendant should become ready");
+        assert!(
+            process_group_exists(process_group).expect("group existence should be readable"),
+            "the stopped descendant should outlive its shell leader"
+        );
+
+        let started = Instant::now();
+        shutdown_process_group(process_group).expect("bounded cleanup should remove the group");
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert!(!process_group_exists(process_group).expect("group check"));
+        let _ = fs::remove_file(ready);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interactive_process_restores_the_exact_cooked_termios_snapshot() {
+        const FIXTURE_ENV: &str = "RC_TERMIOS_RESTORE_TEST_FIXTURE";
+
+        if env::var_os(FIXTURE_ENV).is_some() {
+            let terminal = File::open("/dev/stdin").expect("fixture stdin should be a PTY");
+            for (script, expected_code) in [
+                ("stty -echo -icanon -isig eof '^A'", 0),
+                ("stty -echo -icanon -isig eof '^A'; exit 7", 7),
+            ] {
+                let before = terminal_attributes(&terminal).expect("baseline termios");
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", script])
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
+                let status = run_interactive_process(&mut command).expect("helper should run");
+                assert_eq!(status.code(), Some(expected_code));
+                let after = terminal_attributes(&terminal).expect("restored termios");
+                assert_eq!(after, before, "the complete termios value must be restored");
+            }
+            return;
+        }
+
+        use std::io::Read as _;
+        use std::thread;
+
+        let mut session = Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(env::current_exe().expect("test executable path should resolve"))
+            .args([
+                "--exact",
+                "tests::interactive_process_restores_the_exact_cooked_termios_snapshot",
+                "--nocapture",
+            ])
+            .env(FIXTURE_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("pseudo-terminal fixture should launch");
+        // Keep the script input open so it does not inject an EOF character and set Darwin's
+        // transient PENDIN terminal flag while the exact-state assertion is running.
+        let stdin_guard = session.stdin.take().expect("script stdin should be piped");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = session
+                .try_wait()
+                .expect("fixture status should be readable")
+            {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = session.kill();
+                break session.wait().expect("killed fixture should be reaped");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        drop(stdin_guard);
+        let mut stdout = Vec::new();
+        session
+            .stdout
+            .take()
+            .expect("script stdout should be piped")
+            .read_to_end(&mut stdout)
+            .expect("fixture stdout should be readable");
+        let mut stderr = Vec::new();
+        session
+            .stderr
+            .take()
+            .expect("script stderr should be piped")
+            .read_to_end(&mut stderr)
+            .expect("fixture stderr should be readable");
+        assert!(
+            status.success(),
+            "PTY fixture failed with {}: stdout={:?}, stderr={:?}",
+            status,
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr),
+        );
+    }
+
+    #[test]
+    fn command_line_key_translation_is_exclusive_and_complete() {
+        use crossterm::event::KeyModifiers as CrosstermKeyModifiers;
+
+        assert_eq!(
+            command_line_input(&KeyEvent::new(
+                CrosstermKeyCode::Tab,
+                CrosstermKeyModifiers::SHIFT,
+            )),
+            Some(CommandLineInput::Complete(CompletionIntent::Reverse))
+        );
+        assert_eq!(
+            command_line_input(&KeyEvent::new(
+                CrosstermKeyCode::Char('c'),
+                CrosstermKeyModifiers::CONTROL,
+            )),
+            Some(CommandLineInput::Clear)
+        );
+        assert_eq!(
+            command_line_input(&KeyEvent::new(
+                CrosstermKeyCode::Char('x'),
+                CrosstermKeyModifiers::ALT,
+            )),
+            None
+        );
+        assert_eq!(
+            command_line_input(&KeyEvent::new(
+                CrosstermKeyCode::Char('a'),
+                CrosstermKeyModifiers::SHIFT,
+            )),
+            Some(CommandLineInput::Character('A'))
+        );
+        assert_eq!(
+            command_line_input(&KeyEvent::new(
+                CrosstermKeyCode::Char('1'),
+                CrosstermKeyModifiers::SHIFT,
+            )),
+            Some(CommandLineInput::Character('!'))
+        );
+        assert_eq!(
+            command_line_input(&KeyEvent::new(
+                CrosstermKeyCode::Char('!'),
+                CrosstermKeyModifiers::SHIFT,
+            )),
+            Some(CommandLineInput::Character('!'))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mc_file_shortcuts_insert_from_panels_while_command_line_is_open() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-command-line-shortcuts-{stamp}"));
+        fs::create_dir_all(&root).expect("fixture directory");
+        fs::write(root.join("alpha"), b"a").expect("alpha fixture");
+        fs::write(root.join("beta"), b"b").expect("beta fixture");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .active_panel_mut()
+            .refresh()
+            .expect("active panel listing");
+        state.panels[rc_core::ActivePanel::Right.index()]
+            .refresh()
+            .expect("passive panel listing");
+        let select = |state: &AppState, panel: rc_core::ActivePanel, name: &str| {
+            state.panels[panel.index()]
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+                .expect("fixture entry")
+        };
+        state.active_panel_mut().cursor = select(&state, rc_core::ActivePanel::Left, "alpha");
+        state.open_command_line();
+        let request = state
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution request");
+        state.handle_shell_resolution_response(rc_core::resolve_shell_request_blocking(request));
+
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut press = |state: &mut AppState, code, modifiers| {
+            handle_key(
+                state,
+                &keymap,
+                KeyEvent::new(code, modifiers),
+                TEST_VIEWPORT_WIDTH,
+                &mut runtime,
+                &skin_runtime,
+                compat_enabled(),
+            )
+            .expect("shortcut should be handled");
+        };
+
+        press(&mut state, CrosstermKeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(state.command_line_model().value(), "alpha");
+
+        state
+            .handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear selected name");
+        for name in ["beta", "alpha"] {
+            state.active_panel_mut().cursor = select(&state, rc_core::ActivePanel::Left, name);
+            assert!(state.active_panel_mut().toggle_tag_on_cursor());
+        }
+        press(
+            &mut state,
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        );
+        assert!(state.is_xmap_pending());
+        press(&mut state, CrosstermKeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(state.command_line_model().value(), "alpha beta");
+        assert!(!state.is_xmap_pending());
+
+        state
+            .handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear tagged names");
+        state.panels[rc_core::ActivePanel::Right.index()].cursor =
+            select(&state, rc_core::ActivePanel::Right, "beta");
+        press(
+            &mut state,
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        );
+        press(
+            &mut state,
+            CrosstermKeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        );
+        assert_eq!(state.command_line_model().value(), "beta");
+
+        state
+            .handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear passive name");
+        state.active_panel_mut().cursor = select(&state, rc_core::ActivePanel::Left, "alpha");
+        press(
+            &mut state,
+            CrosstermKeyCode::Enter,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            state.command_line_model().value(),
+            root.join("alpha").to_string_lossy()
+        );
+
+        press(&mut state, CrosstermKeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(state.key_context(), KeyContext::Help);
+        let rc_core::Route::Help(help) = state.top_route() else {
+            panic!("F1 should open help over the command line");
+        };
+        assert_eq!(help.current_id(), "command-line");
+        state
+            .apply(AppCommand::CloseHelp)
+            .expect("help should return to the command line");
+        assert_eq!(state.key_context(), KeyContext::CommandLine);
+        assert_eq!(
+            state.command_line_model().value(),
+            root.join("alpha").to_string_lossy(),
+            "opening help must preserve the command draft"
+        );
+
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn only_the_ui_thread_owns_emergency_terminal_restoration() {
+        let terminal_owner = thread::current().id();
+        assert!(panic_thread_owns_terminal(terminal_owner));
+        assert!(
+            !thread::spawn(move || panic_thread_owns_terminal(terminal_owner))
+                .join()
+                .expect("ownership check thread should finish")
         );
     }
 

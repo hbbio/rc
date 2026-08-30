@@ -191,19 +191,29 @@ fn side_panel_menu_restores_external_panelize_results_and_operation_targets() {
         app.active_panel().is_tagged(&target),
         "restoring should preserve tagged results"
     );
-    let pending = app.take_pending_worker_commands();
+    let pending = &app.pending_worker_commands;
     assert!(
-        pending.iter().all(|command| matches!(
+        pending.iter().any(|command| matches!(
             command,
             WorkerCommand::Run(job)
-                if matches!(
-                    &job.request,
-                    JobRequest::MeasureSelection { paths, .. }
-                        if paths.as_slice() == std::slice::from_ref(&target)
-                )
+                if matches!(&job.request, JobRequest::ResolvePanelIdentity { .. })
         )),
-        "history restoration may remeasure restored tags but must not rerun the external command"
+        "history restoration should queue path identity resolution"
     );
+    assert!(
+        pending.iter().all(|command| match command {
+            WorkerCommand::Run(job) => match &job.request {
+                JobRequest::ResolvePanelIdentity { .. } => true,
+                JobRequest::MeasureSelection { paths, .. } => {
+                    paths.as_slice() == std::slice::from_ref(&target)
+                }
+                _ => false,
+            },
+            WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => false,
+        }),
+        "history restoration may resolve identity and remeasure tags, but must not rerun the external command"
+    );
+    drain_background(&mut app);
 
     app.apply(AppCommand::Copy)
         .expect("copy should open for a restored result");
@@ -218,6 +228,172 @@ fn side_panel_menu_restores_external_panelize_results_and_operation_targets() {
     }
 
     fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[cfg(unix)]
+#[test]
+fn restored_history_identity_resolution_preserves_large_listing_and_live_cursor() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-restore-large-{stamp}"));
+    fs::create_dir_all(&root).expect("temporary directory should be creatable");
+
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.start_panelize_command(String::from(
+        "index=0; while [ \"$index\" -lt 250 ]; do printf 'entry-%03d\\n' \"$index\"; index=$((index + 1)); done",
+    ));
+    drain_background(&mut app);
+    assert_eq!(app.active_panel().entries.len(), 250);
+
+    app.apply(AppCommand::CdUp)
+        .expect("leaving panelize mode should succeed");
+    drain_background(&mut app);
+    app.restore_panelized_results_for(ActivePanel::Left);
+
+    assert_eq!(app.active_panel().entries.len(), 250);
+    assert!(
+        !app.active_panel().loading,
+        "identity resolution must not put the restored listing into loading state"
+    );
+    assert!(app.pending_worker_commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Run(job)
+            if matches!(&job.request, JobRequest::ResolvePanelIdentity { .. })
+    )));
+    app.move_cursor(137);
+    let entries_before_resolution = app.active_panel().entries.clone();
+    let selected_before_resolution = app
+        .active_panel()
+        .selected_entry()
+        .map(|entry| entry.path.clone());
+
+    drain_background(&mut app);
+
+    assert_eq!(app.active_panel().entries, entries_before_resolution);
+    assert_eq!(
+        app.active_panel()
+            .selected_entry()
+            .map(|entry| entry.path.clone()),
+        selected_before_resolution,
+        "delayed identity completion must not reset intervening cursor movement"
+    );
+    assert!(!app.active_panel().loading);
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn restoring_panelize_history_refreshes_alias_identity_without_rerunning_source() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-panelize-restore-identity-{stamp}"));
+    let home = root.join("home");
+    let outside = root.join("outside");
+    fs::create_dir_all(&home).expect("home fixture should be creatable");
+    fs::create_dir_all(&outside).expect("outside fixture should be creatable");
+    fs::write(home.join("remembered.txt"), "home").expect("home result should be writable");
+    fs::write(outside.join("remembered.txt"), "outside")
+        .expect("outside result should be writable");
+    let alias = root.join("panel-path");
+    std::os::unix::fs::symlink(&home, &alias).expect("panel alias should be creatable");
+
+    let mut app = AppState::new(alias.clone()).expect("app should initialize");
+    for panel in &mut app.panels {
+        panel.set_home_directory(Some(home.clone()));
+    }
+    app.start_panelize_command(String::from(
+        "printf 'remembered.txt\n'; printf x >> panelize-runs.log",
+    ));
+    drain_background(&mut app);
+
+    let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+    assert_eq!(
+        app.active_panel().canonical_cwd(),
+        Some(canonical_home.as_path()),
+        "initial panelize refresh should resolve the home alias"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("panelize-runs.log")).expect("marker should exist"),
+        "x"
+    );
+
+    app.apply(AppCommand::CdUp)
+        .expect("leaving panelize mode should succeed");
+    drain_background(&mut app);
+    assert!(
+        app.set_active_panel_directory(root.clone())
+            .expect("holding directory should be accessible")
+    );
+    drain_background(&mut app);
+
+    app.restore_panelized_results_for(ActivePanel::Left);
+    assert!(app.active_panel().canonical_cwd().is_none());
+    assert!(app.active_panel().canonical_home_directory().is_none());
+    assert!(app.pending_worker_commands.iter().any(|command| matches!(
+        command,
+        WorkerCommand::Run(job)
+            if matches!(&job.request, JobRequest::ResolvePanelIdentity {
+                cwd,
+                home_directory: Some(request_home),
+                ..
+            } if cwd == &alias && request_home == &home)
+    )));
+    drain_background(&mut app);
+
+    assert_eq!(
+        app.active_panel().canonical_cwd(),
+        Some(canonical_home.as_path()),
+        "restored history should regain the home-equivalent identity"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("panelize-runs.log")).expect("marker should remain"),
+        "x",
+        "the cached identity refresh must not rerun the panelize command"
+    );
+
+    app.apply(AppCommand::CdUp)
+        .expect("restored panelize mode should be leaveable");
+    drain_background(&mut app);
+    assert!(
+        app.set_active_panel_directory(root.clone())
+            .expect("holding directory should remain accessible")
+    );
+    drain_background(&mut app);
+    fs::remove_file(&alias).expect("old alias should be removable");
+    std::os::unix::fs::symlink(&outside, &alias).expect("alias should be retargetable");
+
+    app.restore_panelized_results_for(ActivePanel::Left);
+    assert!(
+        app.active_panel().canonical_cwd().is_none(),
+        "restoration must not retain the alias's previous identity"
+    );
+    drain_background(&mut app);
+
+    let canonical_outside = fs::canonicalize(&outside).expect("outside should canonicalize");
+    assert_eq!(
+        app.active_panel().canonical_cwd(),
+        Some(canonical_outside.as_path()),
+        "restoration should observe the alias's current target"
+    );
+    assert_eq!(
+        app.active_panel().canonical_home_directory(),
+        Some(canonical_home.as_path())
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("panelize-runs.log")).expect("marker should remain"),
+        "x"
+    );
+    assert!(
+        !outside.join("panelize-runs.log").exists(),
+        "retargeted restoration must still use cached panelized entries"
+    );
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
 }
 
 #[cfg(unix)]

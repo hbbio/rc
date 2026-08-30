@@ -2,7 +2,8 @@ use crate::{
     FindNameMode, HotlistEntry, OverwritePolicy, PanelListingFormat, PanelizePreset, Settings,
     SortField,
 };
-use std::fs;
+use rc_shell::{ShellDialect, ShellHistoryMode, ShellMode, ShellSettings};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -120,28 +121,121 @@ fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("settings");
-    let tmp = path.with_file_name(format!("{stem}.tmp-{}", std::process::id()));
-    {
-        let mut tmp_file = fs::File::create(&tmp)?;
-        tmp_file.write_all(content.as_bytes())?;
-        tmp_file.sync_all()?;
-    }
+    let (tmp, tmp_file) = create_atomic_temp_file(path, stem)?;
+    let mut temp = AtomicTempCleanup::new(tmp, tmp_file);
+    temp.file_mut().write_all(content.as_bytes())?;
+    temp.file_mut().sync_all()?;
+    temp.close();
     #[cfg(windows)]
     {
-        match fs::rename(&tmp, path) {
+        match fs::rename(temp.path(), path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 fs::remove_file(path)?;
-                fs::rename(&tmp, path)?;
+                fs::rename(temp.path(), path)?;
             }
             Err(error) => return Err(error),
         }
     }
     #[cfg(not(windows))]
     {
-        fs::rename(&tmp, path)?;
+        fs::rename(temp.path(), path)?;
     }
+    temp.disarm();
     sync_parent_dir(path)
+}
+
+fn create_atomic_temp_file(path: &Path, stem: &str) -> io::Result<(PathBuf, fs::File)> {
+    const CREATE_ATTEMPTS: usize = 16;
+
+    for _ in 0..CREATE_ATTEMPTS {
+        let nonce = atomic_temp_nonce()?;
+        let tmp = path.with_file_name(format!("{stem}.tmp-{nonce:032x}"));
+        match open_new_atomic_temp(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique settings temp file",
+    ))
+}
+
+#[cfg(any(unix, windows))]
+fn atomic_temp_nonce() -> io::Result<u128> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| io::Error::other(format!("failed to generate temp-file name: {error}")))?;
+    Ok(u128::from_ne_bytes(random))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn atomic_temp_nonce() -> io::Result<u128> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(timestamp ^ u128::from(counter))
+}
+
+fn open_new_atomic_temp(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+struct AtomicTempCleanup {
+    path: PathBuf,
+    file: Option<fs::File>,
+    armed: bool,
+}
+
+impl AtomicTempCleanup {
+    fn new(path: PathBuf, file: fs::File) -> Self {
+        Self {
+            path,
+            file: Some(file),
+            armed: true,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn file_mut(&mut self) -> &mut fs::File {
+        self.file.as_mut().expect("atomic temp file is open")
+    }
+
+    fn close(&mut self) {
+        self.file.take();
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AtomicTempCleanup {
+    fn drop(&mut self) {
+        self.close();
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -262,6 +356,9 @@ fn escape_settings_field(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
+            character if character.is_whitespace() || character.is_control() => {
+                escaped.push_str(&format!("\\u{{{:x}}}", character as u32));
+            }
             _ => escaped.push(character),
         }
     }
@@ -282,6 +379,29 @@ fn unescape_settings_field(value: &str) -> Option<String> {
             't' => unescaped.push('\t'),
             'n' => unescaped.push('\n'),
             'r' => unescaped.push('\r'),
+            'u' => {
+                if characters.next()? != '{' {
+                    return None;
+                }
+                let mut value = 0_u32;
+                let mut digits = 0_usize;
+                loop {
+                    let character = characters.next()?;
+                    if character == '}' {
+                        if digits == 0 {
+                            return None;
+                        }
+                        break;
+                    }
+                    let digit = character.to_digit(16)?;
+                    value = value.checked_mul(16)?.checked_add(digit)?;
+                    digits += 1;
+                    if digits > 6 {
+                        return None;
+                    }
+                }
+                unescaped.push(char::from_u32(value)?);
+            }
             _ => return None,
         }
     }
@@ -294,6 +414,7 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
     let mut saw_hotlist = false;
     let mut saw_panelize_presets = false;
     let mut saw_skin_dirs = false;
+    let mut shell = RawShellSection::default();
 
     for raw_line in source.lines() {
         let line = raw_line.trim();
@@ -306,6 +427,9 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             if section == "configuration" {
                 saw_configuration_section = true;
             }
+            if section == "shell" {
+                shell.present = true;
+            }
             continue;
         }
 
@@ -316,6 +440,22 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
         let value = raw_value.trim();
 
         match (section.as_str(), key.as_str()) {
+            ("shell", "mode") => shell.mode = Some(value.to_string()),
+            ("shell", "program") => match unescape_settings_field(value) {
+                Some(program) => shell.program = Some(program),
+                None => {
+                    shell.invalid_field = Some(String::from("invalid escaped program value"));
+                }
+            },
+            ("shell", "dialect") => shell.dialect = Some(value.to_string()),
+            ("shell", "arg") => {
+                shell.saw_argument = true;
+                match unescape_settings_field(value) {
+                    Some(argument) => shell.arguments.push(argument),
+                    None => shell.invalid_field = Some(String::from("invalid escaped arg value")),
+                }
+            }
+            ("shell", "history") => shell.history = Some(value.to_string()),
             ("configuration", "overwrite_policy") => {
                 if let Some(policy) = parse_overwrite_policy(value) {
                     settings.configuration.default_overwrite_policy = policy;
@@ -603,6 +743,13 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
     if saw_configuration_section && !saw_panelize_presets {
         settings.configuration.panelize_presets.clear();
     }
+    if shell.present {
+        settings.shell = parse_shell_section(shell).unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "ignored invalid persisted shell configuration");
+            ShellSettings::default()
+                .with_diagnostic(format!("ignored invalid [shell] configuration: {error}"))
+        });
+    }
     for (panel_index, filter) in settings.panel_options.filters.iter_mut().enumerate() {
         if let Err(error) = filter.validate() {
             tracing::warn!(
@@ -647,6 +794,24 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
             render_panelize_preset(preset)
         ));
     }
+
+    lines.push(String::new());
+    lines.push(String::from("[shell]"));
+    match &settings.shell.mode {
+        ShellMode::Auto => lines.push(String::from("mode=auto")),
+        ShellMode::Custom(custom) => {
+            lines.push(String::from("mode=custom"));
+            lines.push(format!(
+                "program={}",
+                escape_settings_field(&custom.program)
+            ));
+            lines.push(format!("dialect={}", custom.dialect.label()));
+            for argument in &custom.arguments {
+                lines.push(format!("arg={}", escape_settings_field(argument)));
+            }
+        }
+    }
+    lines.push(format!("history={}", settings.shell.history.label()));
 
     lines.push(String::new());
     lines.push(String::from("[layout]"));
@@ -805,6 +970,63 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     let mut rendered = lines.join("\n");
     rendered.push('\n');
     rendered
+}
+
+#[derive(Default)]
+struct RawShellSection {
+    present: bool,
+    mode: Option<String>,
+    program: Option<String>,
+    dialect: Option<String>,
+    arguments: Vec<String>,
+    saw_argument: bool,
+    history: Option<String>,
+    invalid_field: Option<String>,
+}
+
+fn parse_shell_section(raw: RawShellSection) -> Result<ShellSettings, String> {
+    if let Some(error) = raw.invalid_field {
+        return Err(error);
+    }
+    let history = match raw.history.as_deref() {
+        Some(value) => ShellHistoryMode::parse(value)
+            .ok_or_else(|| format!("unsupported history mode '{value}'"))?,
+        None => ShellHistoryMode::Session,
+    };
+    match raw
+        .mode
+        .as_deref()
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "auto" => {
+            if raw.program.as_ref().is_some_and(|value| !value.is_empty())
+                || raw.dialect.as_ref().is_some_and(|value| !value.is_empty())
+                || raw.saw_argument
+            {
+                return Err(String::from(
+                    "mode=auto cannot include program, dialect, or arg values",
+                ));
+            }
+            Ok(ShellSettings::auto(history))
+        }
+        "custom" => {
+            let program = raw
+                .program
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| String::from("mode=custom requires program"))?;
+            let dialect_value = raw
+                .dialect
+                .ok_or_else(|| String::from("mode=custom requires dialect"))?;
+            let dialect = ShellDialect::parse(&dialect_value)
+                .ok_or_else(|| format!("unsupported shell dialect '{dialect_value}'"))?;
+            let arguments = raw.saw_argument.then_some(raw.arguments);
+            ShellSettings::custom(program, dialect, arguments, history)
+        }
+        other => Err(format!("unsupported shell mode '{other}'")),
+    }
 }
 
 fn parse_overwrite_policy(value: &str) -> Option<OverwritePolicy> {
@@ -1238,5 +1460,114 @@ skin=mc-skin
         );
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_temp_creation_is_exclusive_randomized_and_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::symlink;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-settings-temp-symlink-{stamp}"));
+        fs::create_dir_all(&root).expect("test directory should be created");
+        let target = root.join("target");
+        let tmp = root.join("settings.ini.tmp-attacker");
+        fs::write(&target, b"preserve me").expect("target should be writable");
+        symlink(&target, &tmp).expect("temp symlink should be creatable");
+
+        let error = open_new_atomic_temp(&tmp).expect_err("create_new must reject the symlink");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&target).expect("target should remain readable"),
+            b"preserve me"
+        );
+
+        let settings_path = root.join("settings.ini");
+        let (first_path, first_file) =
+            create_atomic_temp_file(&settings_path, "settings.ini").expect("create first temp");
+        let (second_path, second_file) =
+            create_atomic_temp_file(&settings_path, "settings.ini").expect("create second temp");
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            first_file
+                .metadata()
+                .expect("read temp metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop((first_file, second_file));
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn settings_field_codec_round_trips_unicode_whitespace_and_controls() {
+        let value = " \u{2003}line\nnext\r\t\u{0085}\\tail ";
+        let escaped = escape_settings_field(value);
+        assert!(!escaped.chars().any(char::is_whitespace));
+        assert_eq!(unescape_settings_field(&escaped).as_deref(), Some(value));
+        assert_eq!(unescape_settings_field("\\u{}"), None);
+        assert_eq!(unescape_settings_field("\\u{110000}"), None);
+    }
+
+    #[test]
+    fn shell_settings_round_trip_structured_arguments() {
+        let settings = Settings {
+            shell: ShellSettings::custom(
+                " \u{2003}/opt/Example Shell/bin/sh\nvariant\\name\u{0085} ",
+                ShellDialect::Posix,
+                Some(vec![
+                    String::from("--leading= value "),
+                    String::from("\\path"),
+                    String::from("{command}"),
+                ]),
+                ShellHistoryMode::Off,
+            )
+            .expect("custom shell should be valid"),
+            ..Settings::default()
+        };
+
+        let rendered = render_rc_settings_ini(&settings);
+        assert!(rendered.contains("program=\\s\\u{2003}/opt/Example\\sShell/bin/sh"));
+        assert!(rendered.contains("variant\\\\name\\u{85}\\s"));
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &rendered);
+        assert_eq!(parsed.shell.mode, settings.shell.mode);
+        assert_eq!(parsed.shell.history, ShellHistoryMode::Off);
+    }
+
+    #[test]
+    fn invalid_shell_section_is_rejected_as_one_unit() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(
+            &mut settings,
+            "[shell]\nmode=custom\nprogram=fish\ndialect=fish\narg=prefix-{command}\nhistory=off\n",
+        );
+        assert_eq!(settings.shell.mode, ShellMode::Auto);
+        assert_eq!(settings.shell.history, ShellHistoryMode::Session);
+        assert!(
+            settings
+                .shell
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic.contains("ignored invalid [shell]"))
+        );
+    }
+
+    #[test]
+    fn auto_shell_rejects_execution_fields_without_partially_applying_them() {
+        let mut settings = Settings::default();
+        apply_rc_settings_ini(
+            &mut settings,
+            "[shell]\nmode=auto\nprogram=fish\ndialect=fish\nhistory=off\n",
+        );
+        assert_eq!(settings.shell.mode, ShellMode::Auto);
+        assert_eq!(settings.shell.history, ShellHistoryMode::Session);
     }
 }

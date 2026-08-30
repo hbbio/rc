@@ -5,6 +5,7 @@ use std::fmt;
 pub enum KeyContext {
     FileManager,
     FileManagerXMap,
+    CommandLine,
     Help,
     Jobs,
     FindResults,
@@ -40,6 +41,7 @@ impl KeyContext {
 
         match base.as_str() {
             "filemanager" | "panel" => Some(Self::FileManager),
+            "commandline" | "command-line" | "shellprompt" => Some(Self::CommandLine),
             "help" => Some(Self::Help),
             "jobs" => Some(Self::Jobs),
             "find" | "findresults" => Some(Self::FindResults),
@@ -107,6 +109,11 @@ impl KeyChord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyCommand {
     OpenHelp,
+    OpenCommandLine,
+    PutCurrentSelected,
+    PutCurrentFullSelected,
+    PutCurrentTagged,
+    PutOtherTagged,
     OpenUserMenu,
     OpenMenuBar,
     Quit,
@@ -123,6 +130,7 @@ pub enum KeyCommand {
     Home,
     End,
     OpenEntry,
+    ViewEntry,
     EditEntry,
     CdUp,
     QuickCd,
@@ -198,6 +206,11 @@ impl KeyCommand {
 
         match normalized.as_str() {
             "help" => Self::OpenHelp,
+            "opencommandline" | "commandline" => Self::OpenCommandLine,
+            "putcurrentselected" => Self::PutCurrentSelected,
+            "putcurrentfullselected" => Self::PutCurrentFullSelected,
+            "putcurrenttagged" => Self::PutCurrentTagged,
+            "putothertagged" => Self::PutOtherTagged,
             "usermenu" => Self::OpenUserMenu,
             "menu" | "openmenu" | "pulldown" => Self::OpenMenuBar,
             "quit" => Self::Quit,
@@ -215,7 +228,8 @@ impl KeyCommand {
             "halfpageup" => Self::HelpHalfPageUp,
             "home" | "top" => Self::Home,
             "end" | "bottom" => Self::End,
-            "enter" | "view" | "viewfile" => Self::OpenEntry,
+            "enter" | "execute" | "executeentry" | "open" => Self::OpenEntry,
+            "view" | "viewfile" => Self::ViewEntry,
             "edit" => Self::EditEntry,
             "cdup" => Self::CdUp,
             "cdquick" | "quickcd" => Self::QuickCd,
@@ -1019,6 +1033,7 @@ OpenJobs = f3
 [filemanager]
 UserMenu = f2
 View = f3
+Enter = enter
 Edit = f4
 MakeDir = f7
 "#;
@@ -1030,6 +1045,10 @@ MakeDir = f7
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(3))),
+            Some(&KeyCommand::ViewEntry)
+        );
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Enter)),
             Some(&KeyCommand::OpenEntry)
         );
         assert_eq!(
@@ -1217,10 +1236,14 @@ Panelize = ctrl-p
         let source = r#"
 [filemanager]
 ExtendedKeyMap = ctrl-x
+PutCurrentSelected = alt-enter
+PutCurrentFullSelected = ctrl-shift-enter
 
 [filemanager:xmap]
 Jobs = j
 ExternalPanelize = exclamation
+PutCurrentTagged = t
+PutOtherTagged = ctrl-t
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -1238,6 +1261,34 @@ ExternalPanelize = exclamation
         );
         assert_eq!(
             keymap.resolve(
+                KeyContext::FileManager,
+                KeyChord {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers {
+                        ctrl: false,
+                        alt: true,
+                        shift: false,
+                    },
+                }
+            ),
+            Some(&KeyCommand::PutCurrentSelected)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManager,
+                KeyChord {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: true,
+                    },
+                }
+            ),
+            Some(&KeyCommand::PutCurrentFullSelected)
+        );
+        assert_eq!(
+            keymap.resolve(
                 KeyContext::FileManagerXMap,
                 KeyChord::new(KeyCode::Char('j'))
             ),
@@ -1249,6 +1300,27 @@ ExternalPanelize = exclamation
                 KeyChord::new(KeyCode::Char('!'))
             ),
             Some(&KeyCommand::OpenPanelizeDialog)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('t'))
+            ),
+            Some(&KeyCommand::PutCurrentTagged)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord {
+                    code: KeyCode::Char('t'),
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: false,
+                    },
+                }
+            ),
+            Some(&KeyCommand::PutOtherTagged)
         );
     }
 
@@ -1434,8 +1506,7 @@ Reread = ctrl-r
         );
         assert_eq!(
             keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Char('>'))),
-            None,
-            "greater-than is reserved for the future shell-command prompt"
+            Some(&KeyCommand::OpenCommandLine)
         );
     }
 
@@ -1446,8 +1517,13 @@ Reread = ctrl-r
             |number| keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::F(number)));
 
         assert_eq!(resolve_function_key(2), Some(&KeyCommand::OpenUserMenu));
+        assert_eq!(resolve_function_key(3), Some(&KeyCommand::ViewEntry));
         assert_eq!(resolve_function_key(6), Some(&KeyCommand::Move));
         assert_eq!(resolve_function_key(9), Some(&KeyCommand::OpenMenuBar));
+        assert_eq!(
+            keymap.resolve(KeyContext::FileManager, KeyChord::new(KeyCode::Enter)),
+            Some(&KeyCommand::OpenEntry)
+        );
     }
 
     #[test]
@@ -1592,6 +1668,10 @@ Reread = ctrl-r
             "PanelInfo",
             "PanelQuickView",
             "CycleListingFormat",
+            "PutCurrentSelected",
+            "PutCurrentFullSelected",
+            "PutCurrentTagged",
+            "PutOtherTagged",
         ] {
             assert!(
                 !report

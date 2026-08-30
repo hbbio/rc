@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::{OverwritePolicy, PanelFilter, PanelListingFormat, SortMode};
+use rc_shell::ShellSettings;
 
 pub const DEFAULT_PANELIZE_PRESETS: &[(&str, &str)] = &[
     ("All files", "find . -type f"),
@@ -41,6 +42,7 @@ impl SettingsCategory {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Settings {
     pub configuration: ConfigurationSettings,
+    pub shell: ShellSettings,
     pub layout: LayoutSettings,
     pub panel_options: PanelOptionsSettings,
     pub confirmation: ConfirmationSettings,

@@ -1,5 +1,71 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn reread_invalidates_canonical_paths_and_observes_symlink_retarget() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-path-identity-{stamp}"));
+    let home = root.join("home");
+    let outside = root.join("outside");
+    fs::create_dir_all(&home).expect("home fixture should be creatable");
+    fs::create_dir_all(&outside).expect("outside fixture should be creatable");
+    fs::write(home.join("home.txt"), "home").expect("home entry should be creatable");
+    fs::write(outside.join("outside.txt"), "outside").expect("outside entry should be creatable");
+    let alias = root.join("panel-path");
+    std::os::unix::fs::symlink(&home, &alias).expect("panel symlink should be creatable");
+
+    let mut app = AppState::new(alias.clone()).expect("app should initialize");
+    for panel in &mut app.panels {
+        panel.set_home_directory(Some(home.clone()));
+    }
+    app.refresh_panels();
+    drain_background(&mut app);
+
+    let canonical_home = fs::canonicalize(&home).expect("home should canonicalize");
+    assert_eq!(
+        app.active_panel().canonical_cwd(),
+        Some(canonical_home.as_path()),
+        "initial refresh should identify the alias as home"
+    );
+    assert_eq!(
+        app.active_panel().canonical_home_directory(),
+        Some(canonical_home.as_path())
+    );
+
+    fs::remove_file(&alias).expect("old panel symlink should be removable");
+    std::os::unix::fs::symlink(&outside, &alias).expect("panel symlink should be retargetable");
+    app.refresh_active_panel();
+
+    assert!(
+        app.active_panel().canonical_cwd().is_none(),
+        "reread must invalidate the previous filesystem identity immediately"
+    );
+    assert!(
+        app.active_panel().canonical_home_directory().is_none(),
+        "canonical home must be paired with the same completed refresh"
+    );
+
+    drain_background(&mut app);
+    let canonical_outside = fs::canonicalize(&outside).expect("outside should canonicalize");
+    assert_eq!(
+        app.active_panel().canonical_cwd(),
+        Some(canonical_outside.as_path()),
+        "completed reread should observe the retargeted symlink"
+    );
+    assert!(
+        app.active_panel()
+            .canonical_cwd()
+            .and_then(|cwd| cwd.strip_prefix(&canonical_home).ok())
+            .is_none(),
+        "retargeted path must no longer be identified as inside home"
+    );
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
 #[test]
 fn reread_coalesces_previous_refresh_for_same_panel() {
     use std::sync::atomic::Ordering as AtomicOrdering;
