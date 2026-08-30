@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
+### Added
+
+- Added a modal Unix command line in the active panel directory with configurable
+  Auto, Fish, and custom-shell execution, bounded history, draft preservation,
+  Fish-aware or generic completion, and synchronized literal `cd`.
+- Added cancelable background completion with live prefix filtering and
+  current-directory files ranked ahead of shell-provider candidates.
+- Added MC-compatible insertion of selected files, full paths, and tagged files
+  from either panel, with literal shell quoting.
+- Added contextual command-line help and a responsive bottom bar containing only
+  prompt actions.
+
 ### Changed
 
 - Abbreviate refresh-resolved, filesystem-equivalent current-home paths as `~` in pane toplines,
@@ -23,6 +37,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   reaper so shutdown never terminates the opened application. Windows delegates
   association-backed script formats to `ShellExecuteExW` instead of passing them to
   `CreateProcessW`.
+
+### Fixed
+
+- Kept terminal restoration owned by the UI thread after caught worker panics and
+  bounded completion shutdown independently of uncooperative filesystem calls.
+- Made literal `cd` normalize dot components, preserve symlink semantics, commit
+  only after panel refresh, preserve repeated-slash home expansion, and delegate
+  unsupported Fish escapes.
+- Corrected completion for prompt-relative `PATH` entries, directory symlinks,
+  terminal `.` and `..` components, and Fish keyword executables.
+- Finalized completion and literal `cd` transactions beneath Help overlays,
+  cleared successful `cd` drafts after closing the prompt, and rendered the
+  configured Help shortcut in command-line help.
+- Normalized shifted character input and kept command-line cursor metrics aligned
+  with rendered Unicode widths.
+- Escaped persisted custom-shell fields and quoted panel-derived filenames
+  literally, including a file named exactly `~`.
+
+### Documentation
+
+- Reworked the README around supported capabilities and default controls.
+- Consolidated unfinished product work into the root-level `ROADMAP.md` and
+  removed superseded planning documents.
 
 ## [0.1.1] - 2026-08-05
 
@@ -62,5 +99,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added bounded, cancelable, request-correlated background work throughout expensive
   filesystem workflows.
 
+[Unreleased]: https://github.com/hbbio/rc/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hbbio/rc/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hbbio/rc/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hbbio/rc/releases/tag/v0.1.0

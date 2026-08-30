@@ -9,7 +9,7 @@ publish = ["crates-io"]
 readme = "README.md"
 repository = "https://github.com/hbbio/rc"
 rust-version = "1.88.0"
-version = "0.1.1"
+version = "0.2.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -32,10 +32,10 @@ serde_json = "1.0"
 tui-input = { version = "0.15.4", default-features = false }
 unicode-segmentation = "1.13"
 
-rc-core = { package = "rust-commander-core", path = "crates/core", version = "0.1.1" }
-rc-platform = { package = "rust-commander-platform", path = "crates/platform", version = "0.1.1" }
-rc-shell = { package = "rust-commander-shell", path = "crates/shell", version = "0.1.1" }
-rc-ui = { package = "rust-commander-ui", path = "crates/ui", version = "0.1.1" }
+rc-core = { package = "rust-commander-core", path = "crates/core", version = "0.2.0" }
+rc-platform = { package = "rust-commander-platform", path = "crates/platform", version = "0.2.0" }
+rc-shell = { package = "rust-commander-shell", path = "crates/shell", version = "0.2.0" }
+rc-ui = { package = "rust-commander-ui", path = "crates/ui", version = "0.2.0" }
 
 [profile.dev]
 debug = "line-tables-only"
