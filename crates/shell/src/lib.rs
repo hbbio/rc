@@ -15,7 +15,7 @@ pub use completion::{
     COMPLETION_CANDIDATE_LIMIT, COMPLETION_DEADLINE, COMPLETION_FIELD_LIMIT_BYTES,
     COMPLETION_RETAINED_LIMIT_BYTES, COMPLETION_STDERR_LIMIT_BYTES, COMPLETION_STDOUT_LIMIT_BYTES,
     CompletionCandidate, CompletionEdit, CompletionOutcome, CompletionProvider, CompletionRequest,
-    CompletionResponse, complete_request, quote_token,
+    CompletionResponse, complete_request, quote_literal_token, quote_token,
 };
 pub use display::{
     DISPLAY_FIELD_LIMIT_BYTES, DISPLAY_LINE_LIMIT_BYTES, sanitize_display_field,

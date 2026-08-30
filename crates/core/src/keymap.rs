@@ -110,6 +110,10 @@ impl KeyChord {
 pub enum KeyCommand {
     OpenHelp,
     OpenCommandLine,
+    PutCurrentSelected,
+    PutCurrentFullSelected,
+    PutCurrentTagged,
+    PutOtherTagged,
     OpenUserMenu,
     OpenMenuBar,
     Quit,
@@ -203,6 +207,10 @@ impl KeyCommand {
         match normalized.as_str() {
             "help" => Self::OpenHelp,
             "opencommandline" | "commandline" => Self::OpenCommandLine,
+            "putcurrentselected" => Self::PutCurrentSelected,
+            "putcurrentfullselected" => Self::PutCurrentFullSelected,
+            "putcurrenttagged" => Self::PutCurrentTagged,
+            "putothertagged" => Self::PutOtherTagged,
             "usermenu" => Self::OpenUserMenu,
             "menu" | "openmenu" | "pulldown" => Self::OpenMenuBar,
             "quit" => Self::Quit,
@@ -1228,10 +1236,14 @@ Panelize = ctrl-p
         let source = r#"
 [filemanager]
 ExtendedKeyMap = ctrl-x
+PutCurrentSelected = alt-enter
+PutCurrentFullSelected = ctrl-shift-enter
 
 [filemanager:xmap]
 Jobs = j
 ExternalPanelize = exclamation
+PutCurrentTagged = t
+PutOtherTagged = ctrl-t
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -1249,6 +1261,34 @@ ExternalPanelize = exclamation
         );
         assert_eq!(
             keymap.resolve(
+                KeyContext::FileManager,
+                KeyChord {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers {
+                        ctrl: false,
+                        alt: true,
+                        shift: false,
+                    },
+                }
+            ),
+            Some(&KeyCommand::PutCurrentSelected)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManager,
+                KeyChord {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: true,
+                    },
+                }
+            ),
+            Some(&KeyCommand::PutCurrentFullSelected)
+        );
+        assert_eq!(
+            keymap.resolve(
                 KeyContext::FileManagerXMap,
                 KeyChord::new(KeyCode::Char('j'))
             ),
@@ -1260,6 +1300,27 @@ ExternalPanelize = exclamation
                 KeyChord::new(KeyCode::Char('!'))
             ),
             Some(&KeyCommand::OpenPanelizeDialog)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('t'))
+            ),
+            Some(&KeyCommand::PutCurrentTagged)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord {
+                    code: KeyCode::Char('t'),
+                    modifiers: KeyModifiers {
+                        ctrl: true,
+                        alt: false,
+                        shift: false,
+                    },
+                }
+            ),
+            Some(&KeyCommand::PutOtherTagged)
         );
     }
 
@@ -1607,6 +1668,10 @@ Reread = ctrl-r
             "PanelInfo",
             "PanelQuickView",
             "CycleListingFormat",
+            "PutCurrentSelected",
+            "PutCurrentFullSelected",
+            "PutCurrentTagged",
+            "PutOtherTagged",
         ] {
             assert!(
                 !report

@@ -1151,6 +1151,19 @@ fn quick_cd_menu_prefers_the_portable_slash_shortcut() {
 
 #[test]
 fn help_content_applies_keybinding_replacements() {
+    let flatten = |help: &HelpState| {
+        let mut content = String::new();
+        for line in help.lines() {
+            for span in &line.spans {
+                match span {
+                    HelpSpan::Text(text) => content.push_str(text),
+                    HelpSpan::Link { label, .. } => content.push_str(label),
+                }
+            }
+            content.push('\n');
+        }
+        content
+    };
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -1162,28 +1175,36 @@ fn help_content_applies_keybinding_replacements() {
     let keymap = Keymap::parse(
         r#"
 [filemanager]
+Help = f12
 OpenJobs = f6
 OpenCommandLine = f7
+PutCurrentSelected = f8
+PutCurrentFullSelected = f9
+ExtendedKeyMap = ctrl-g
+
+[filemanager:xmap]
+PutCurrentTagged = z
+PutOtherTagged = ctrl-z
 "#,
     )
     .expect("keymap should parse");
     app.set_keybinding_hints_from_keymap(&keymap);
+    let command_line_help =
+        HelpState::for_context_with_replacements(KeyContext::CommandLine, &app.help_replacements());
+    let command_line_content = flatten(&command_line_help);
+    assert!(
+        command_line_content.contains("F12 opens this command-line help"),
+        "command-line help should reflect the configured Help shortcut"
+    );
+    assert!(!command_line_content.contains("F1 opens this command-line help"));
+
     app.apply(AppCommand::OpenHelp)
         .expect("help route should open");
 
     let Route::Help(help) = app.top_route() else {
         panic!("top route should be help");
     };
-    let mut content = String::new();
-    for line in help.lines() {
-        for span in &line.spans {
-            match span {
-                HelpSpan::Text(text) => content.push_str(text),
-                HelpSpan::Link { label, .. } => content.push_str(label),
-            }
-        }
-        content.push('\n');
-    }
+    let content = flatten(help);
 
     assert!(
         !content.contains("{{"),
@@ -1196,6 +1217,22 @@ OpenCommandLine = f7
     assert!(
         content.contains("F7 open command line"),
         "command-line help should reflect its configured shortcut"
+    );
+    assert!(
+        content.contains("F8 insert the selected file name"),
+        "selected-file help should reflect its configured shortcut"
+    );
+    assert!(
+        content.contains("F9 insert the selected file's full path"),
+        "full-path help should reflect its configured shortcut"
+    );
+    assert!(
+        content.contains("Ctrl-g z insert active-panel tagged names"),
+        "active tagged-file help should reflect its configured xmap sequence"
+    );
+    assert!(
+        content.contains("Ctrl-g Ctrl-z insert passive-panel tagged names"),
+        "passive tagged-file help should reflect its configured xmap sequence"
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");
@@ -1248,7 +1285,7 @@ fn menu_stub_action_reports_not_implemented_status() {
 }
 
 #[test]
-fn user_menu_command_is_reserved_for_milestone_five() {
+fn user_menu_command_reports_that_it_is_unavailable() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -1261,7 +1298,7 @@ fn user_menu_command_is_reserved_for_milestone_five() {
         .expect("user menu placeholder should be handled");
 
     assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert!(app.status_line.contains("planned for Milestone 5"));
+    assert_eq!(app.status_line, "User menu is not available");
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }

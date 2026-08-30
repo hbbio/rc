@@ -385,7 +385,9 @@ fn render_completion_pager(
     let selected_style = skin.style("core", "selected");
     let base_style = skin.style("core", "_default_");
     if panel_area.height <= 3 {
-        let candidate = &candidates[selected];
+        let Some(candidate) = candidates.get(selected) else {
+            return;
+        };
         let display = sanitize_display_field(&candidate.display);
         let line = fit_single_line(
             format!("{display} ({}/{})", selected + 1, candidates.len()),
@@ -422,8 +424,10 @@ fn render_completion_pager(
     let first = selected
         .saturating_sub(visible_rows / 2)
         .min(candidates.len().saturating_sub(visible_rows));
-    let items = candidates[first..first + visible_rows]
+    let items = candidates
         .iter()
+        .skip(first)
+        .take(visible_rows)
         .enumerate()
         .map(|(offset, candidate)| {
             let mut value = sanitize_display_field(&candidate.display);
@@ -502,6 +506,10 @@ fn render_menu_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, active_menu: Op
 fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppState) {
     let hotkey_style = skin.style("buttonbar", "hotkey");
     let button_style = skin.style("buttonbar", "button");
+    if matches!(state.top_route(), Route::CommandLine(_)) {
+        render_command_line_button_bar(frame, area, hotkey_style, button_style, state);
+        return;
+    }
     let (context, fallback_labels): (KeyContext, [&str; 10]) = match state.top_route() {
         Route::FindResults(results) => {
             let pause_label = if matches!(results.status, FindResultsStatus::Paused) {
@@ -552,6 +560,93 @@ fn render_button_bar(frame: &mut Frame, area: Rect, skin: &UiSkin, state: &AppSt
         spans.push(Span::styled(label, button_style));
     }
 
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
+}
+
+fn render_command_line_button_bar(
+    frame: &mut Frame,
+    area: Rect,
+    hotkey_style: Style,
+    button_style: Style,
+    state: &AppState,
+) {
+    let primary = |context, command, fallback: &str| {
+        state
+            .keybinding_primary_label(context, command)
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let selected = state
+        .keybinding_labels(KeyContext::FileManager, AppCommand::PutCurrentSelected)
+        .and_then(|labels| {
+            labels
+                .iter()
+                .find(|label| label.as_str() == "Alt-Enter")
+                .or_else(|| labels.first())
+        })
+        .cloned()
+        .unwrap_or_else(|| String::from("Alt-Enter"));
+    let mut hints = vec![
+        (
+            primary(KeyContext::FileManager, AppCommand::OpenHelp, "F1"),
+            "Help",
+        ),
+        (String::from("Tab"), "Complete"),
+        (String::from("Enter"), "Run"),
+        (selected, "File"),
+        (
+            state
+                .xmap_keybinding_label(AppCommand::PutCurrentTagged)
+                .unwrap_or_else(|| String::from("Ctrl-X t")),
+            "Tagged",
+        ),
+        (
+            state
+                .xmap_keybinding_label(AppCommand::PutOtherTagged)
+                .unwrap_or_else(|| String::from("Ctrl-X Ctrl-T")),
+            "Other",
+        ),
+        (
+            primary(
+                KeyContext::FileManager,
+                AppCommand::PutCurrentFullSelected,
+                "Ctrl-Shift-Enter",
+            ),
+            "Path",
+        ),
+        (String::from("Up/Down"), "History"),
+        (String::from("Esc"), "Close"),
+    ];
+    let close = hints.pop().expect("command-line hints include close");
+    let close_width = UnicodeWidthStr::width(close.0.as_str()) + close.1.len();
+    let available = usize::from(area.width);
+    let mut visible = Vec::new();
+    let mut used = 0_usize;
+    for hint in hints {
+        let separator = usize::from(!visible.is_empty());
+        let hint_width = UnicodeWidthStr::width(hint.0.as_str()) + hint.1.len();
+        let close_separator = 1;
+        if used
+            .saturating_add(separator)
+            .saturating_add(hint_width)
+            .saturating_add(close_separator)
+            .saturating_add(close_width)
+            <= available
+        {
+            used = used.saturating_add(separator).saturating_add(hint_width);
+            visible.push(hint);
+        }
+    }
+    visible.push(close);
+
+    let mut spans = Vec::new();
+    for (index, (shortcut, label)) in visible.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", button_style));
+        }
+        spans.push(Span::styled(shortcut, hotkey_style));
+        spans.push(Span::styled(label, button_style));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(button_style), area);
 }
 
@@ -4408,6 +4503,55 @@ OpenConfirmDialog = f2
         let frame = render_to_text(&app, 120, 40);
         assert!(frame.contains("F2Rename"), "{frame}");
         assert!(!frame.contains("F2Menu"), "{frame}");
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_line_button_bar_shows_only_operational_hints() {
+        let root = temp_root("command-line-button-bar");
+        let mut app = AppState::new(root.clone()).expect("app should initialize");
+        let keymap =
+            rc_core::keymap::Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        app.set_keybinding_hints_from_keymap(&keymap);
+        open_command_line_for_test(&mut app);
+
+        let frame = render_to_text(&app, 160, 24);
+        for hint in [
+            "F1Help",
+            "TabComplete",
+            "EnterRun",
+            "Alt-EnterFile",
+            "Ctrl-x tTagged",
+            "Ctrl-x Ctrl-tOther",
+            "Ctrl-Shift-EnterPath",
+            "Up/DownHistory",
+            "EscClose",
+        ] {
+            assert!(frame.contains(hint), "missing {hint:?}\n{frame}");
+        }
+        for irrelevant in ["F3View", "F4Edit", "F5Copy", "F10Quit"] {
+            assert!(
+                !frame.contains(irrelevant),
+                "shell mode retained {irrelevant:?}\n{frame}"
+            );
+        }
+
+        let narrow_frame = render_to_text(&app, 60, 24);
+        for essential in [
+            "F1Help",
+            "TabComplete",
+            "EnterRun",
+            "Alt-EnterFile",
+            "EscClose",
+        ] {
+            assert!(
+                narrow_frame.contains(essential),
+                "narrow shell mode omitted {essential:?}\n{narrow_frame}"
+            );
+        }
+        assert!(!narrow_frame.contains("F4Edit"), "{narrow_frame}");
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }

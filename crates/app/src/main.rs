@@ -674,6 +674,7 @@ fn run_event_loop(
                 }
                 Event::Paste(payload) => {
                     if state.key_context() == KeyContext::CommandLine {
+                        state.clear_xmap();
                         state.handle_command_line_input(CommandLineInput::Paste(payload))?;
                     }
                     // Outside command-line mode paste is intentionally discarded as one event.
@@ -700,6 +701,18 @@ fn handle_key(
     let context = state.key_context();
 
     if context == KeyContext::CommandLine {
+        if let Some(command) =
+            command_line_keymap_command(state, keymap, &key_event, input_compatibility)
+        {
+            return Ok(
+                apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit
+            );
+        }
+        if state.is_xmap_pending() {
+            state.clear_xmap();
+            state.set_status("Extended keymap command not found");
+            return Ok(false);
+        }
         if let Some(input) = command_line_input(&key_event) {
             state.handle_command_line_input(input)?;
         }
@@ -756,6 +769,39 @@ fn handle_key(
     Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit)
 }
 
+fn command_line_keymap_command(
+    state: &AppState,
+    keymap: &Keymap,
+    key_event: &KeyEvent,
+    input_compatibility: InputCompatibility,
+) -> Option<AppCommand> {
+    if key_event
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::SUPER)
+    {
+        return None;
+    }
+    let context = if state.is_xmap_pending() {
+        KeyContext::FileManagerXMap
+    } else {
+        KeyContext::FileManager
+    };
+    let chord = map_key_event_to_chord(*key_event, input_compatibility)?;
+    let command = keymap
+        .resolve(context, chord)
+        .and_then(|key_command| AppCommand::from_key_command(context, key_command))?;
+    matches!(
+        command,
+        AppCommand::OpenHelp
+            | AppCommand::EnterXMap
+            | AppCommand::PutCurrentSelected
+            | AppCommand::PutCurrentFullSelected
+            | AppCommand::PutCurrentTagged
+            | AppCommand::PutOtherTagged
+    )
+    .then_some(command)
+}
+
 fn handle_mouse(
     state: &mut AppState,
     mouse_event: MouseEvent,
@@ -766,6 +812,7 @@ fn handle_mouse(
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
     if state.key_context() == KeyContext::CommandLine {
+        state.clear_xmap();
         click_tracker.clear();
         let button_height = u16::from(state.show_button_bar());
         let status_row = viewport_height
@@ -3353,6 +3400,132 @@ mod tests {
             )),
             Some(CommandLineInput::Character('!'))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mc_file_shortcuts_insert_from_panels_while_command_line_is_open() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-command-line-shortcuts-{stamp}"));
+        fs::create_dir_all(&root).expect("fixture directory");
+        fs::write(root.join("alpha"), b"a").expect("alpha fixture");
+        fs::write(root.join("beta"), b"b").expect("beta fixture");
+
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .active_panel_mut()
+            .refresh()
+            .expect("active panel listing");
+        state.panels[rc_core::ActivePanel::Right.index()]
+            .refresh()
+            .expect("passive panel listing");
+        let select = |state: &AppState, panel: rc_core::ActivePanel, name: &str| {
+            state.panels[panel.index()]
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+                .expect("fixture entry")
+        };
+        state.active_panel_mut().cursor = select(&state, rc_core::ActivePanel::Left, "alpha");
+        state.open_command_line();
+        let request = state
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution request");
+        state.handle_shell_resolution_response(rc_core::resolve_shell_request_blocking(request));
+
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut press = |state: &mut AppState, code, modifiers| {
+            handle_key(
+                state,
+                &keymap,
+                KeyEvent::new(code, modifiers),
+                TEST_VIEWPORT_WIDTH,
+                &mut runtime,
+                &skin_runtime,
+                compat_enabled(),
+            )
+            .expect("shortcut should be handled");
+        };
+
+        press(&mut state, CrosstermKeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(state.command_line_model().value(), "alpha");
+
+        state
+            .handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear selected name");
+        for name in ["beta", "alpha"] {
+            state.active_panel_mut().cursor = select(&state, rc_core::ActivePanel::Left, name);
+            assert!(state.active_panel_mut().toggle_tag_on_cursor());
+        }
+        press(
+            &mut state,
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        );
+        assert!(state.is_xmap_pending());
+        press(&mut state, CrosstermKeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(state.command_line_model().value(), "alpha beta");
+        assert!(!state.is_xmap_pending());
+
+        state
+            .handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear tagged names");
+        state.panels[rc_core::ActivePanel::Right.index()].cursor =
+            select(&state, rc_core::ActivePanel::Right, "beta");
+        press(
+            &mut state,
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        );
+        press(
+            &mut state,
+            CrosstermKeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        );
+        assert_eq!(state.command_line_model().value(), "beta");
+
+        state
+            .handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear passive name");
+        state.active_panel_mut().cursor = select(&state, rc_core::ActivePanel::Left, "alpha");
+        press(
+            &mut state,
+            CrosstermKeyCode::Enter,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            state.command_line_model().value(),
+            root.join("alpha").to_string_lossy()
+        );
+
+        press(&mut state, CrosstermKeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(state.key_context(), KeyContext::Help);
+        let rc_core::Route::Help(help) = state.top_route() else {
+            panic!("F1 should open help over the command line");
+        };
+        assert_eq!(help.current_id(), "command-line");
+        state
+            .apply(AppCommand::CloseHelp)
+            .expect("help should return to the command line");
+        assert_eq!(state.key_context(), KeyContext::CommandLine);
+        assert_eq!(
+            state.command_line_model().value(),
+            root.join("alpha").to_string_lossy(),
+            "opening help must preserve the command draft"
+        );
+
+        fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
     #[test]

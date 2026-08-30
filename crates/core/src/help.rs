@@ -15,6 +15,7 @@ const HELP_NODE_SPECS: &[(&str, &str, &str)] = &[
 Choose a topic:\n\
   [General movement keys](help-viewer)\n\
   [File manager](file-manager)\n\
+  [Command line](command-line)\n\
   [Panel controls](panel-controls)\n\
   [Options and setup](options)\n\
   [Viewer](viewer)\n\
@@ -51,6 +52,10 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
   {{fm_command_line}} open command line (Unix)\n\
+  {{fm_put_selected}} insert the selected file name\n\
+  {{fm_put_full_selected}} insert the selected file's full path\n\
+  {{fm_put_current_tagged}} insert active-panel tagged names (or selected name)\n\
+  {{fm_put_other_tagged}} insert passive-panel tagged names (or selected name)\n\
   {{fm_find}} open find/back to find results\n\
   {{fm_tree}} open directory tree\n\
   {{fm_hotlist}} open directory hotlist\n\
@@ -80,9 +85,38 @@ rc deliberately has no always-live shell input: file-manager keys remain\n\
 available for navigation. On Unix, use {{fm_command_line}} to open the modal command line\n\
 in the active panel directory. Tab/Shift-Tab completes, Up/Down browses history,\n\
 Enter submits the command, and Esc returns to the panels.\n\
+A file-insertion shortcut opens the prompt when necessary and shell-quotes every\n\
+inserted name. Tagged names are inserted in panel order, separated by spaces;\n\
+when that panel has no tags, its cursor entry is inserted instead.\n\
 A successful literal cd updates the active panel directory.\n\
 \n\
 More: [Panel controls](panel-controls), [Find results](find-results), [Panelize and VFS](panelize), [Directory tree](tree), [Directory hotlist](hotlist), [Options and setup](options).",
+    ),
+    (
+        "command-line",
+        "Command Line",
+        "The Unix command line runs in the active panel directory.\n\
+\n\
+Editing and execution:\n\
+  {{fm_help}} opens this command-line help\n\
+  Tab / Shift-Tab complete and cycle candidates\n\
+  Up / Down browse command history\n\
+  Left / Right / Home / End move or accept an autosuggestion\n\
+  Ctrl-A / Ctrl-E move to the start / end\n\
+  Ctrl-W deletes a word; Ctrl-U / Ctrl-K delete to start / end\n\
+  Enter accepts a completion or runs the command\n\
+  Esc closes the prompt and preserves its draft\n\
+\n\
+Panel insertion:\n\
+  {{fm_put_selected}} insert the active selected file name\n\
+  {{fm_put_full_selected}} insert its full path\n\
+  {{fm_put_current_tagged}} insert active-panel tagged names\n\
+  {{fm_put_other_tagged}} insert passive-panel tagged names\n\
+\n\
+Each panel-derived name is quoted literally for the selected shell. Tagged\n\
+names retain panel order and fall back to that panel's cursor entry.\n\
+\n\
+Back to [File manager](file-manager).",
     ),
     (
         "panel-controls",
@@ -108,8 +142,7 @@ keeps directories visible; matching can be case-sensitive or insensitive.\n\
 Filters are independent and persisted per panel. An empty pattern disables\n\
 the filter. Cached panelized results are filtered without rerunning commands.\n\
 \n\
-Encoding and remote-link entries remain unavailable until their dedicated\n\
-path, VFS, and subshell milestones.\n\
+Encoding and remote-link entries are disabled.\n\
 \n\
 Back to [File manager](file-manager) or [Panelize and VFS](panelize).",
     ),
@@ -489,6 +522,7 @@ impl HelpState {
 fn topic_for_context(context: KeyContext) -> &'static str {
     match context {
         KeyContext::FileManager | KeyContext::FileManagerXMap => "file-manager",
+        KeyContext::CommandLine => "command-line",
         KeyContext::Jobs => "jobs",
         KeyContext::FindResults => "find-results",
         KeyContext::Tree => "tree",
@@ -609,6 +643,11 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_parent", String::from("Backspace")),
         ("fm_quick_cd", String::from("/ or Alt-C")),
         ("fm_command_line", String::from(">")),
+        ("fm_help", String::from("F1")),
+        ("fm_put_selected", String::from("Alt-Enter / Ctrl-Enter")),
+        ("fm_put_full_selected", String::from("Ctrl-Shift-Enter")),
+        ("fm_put_current_tagged", String::from("Ctrl-X t")),
+        ("fm_put_other_tagged", String::from("Ctrl-X Ctrl-T")),
         ("fm_find", String::from("Alt-F")),
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
@@ -741,15 +780,37 @@ mod tests {
         assert!(content.contains("Tab switch panel"));
         assert!(content.contains("/ or Alt-C quick cd"));
         assert!(content.contains("> open command line"));
+        assert!(content.contains("Alt-Enter / Ctrl-Enter insert the selected file name"));
+        assert!(content.contains("Ctrl-Shift-Enter insert the selected file's full path"));
+        assert!(content.contains("Ctrl-X t insert active-panel tagged names"));
+        assert!(content.contains("Ctrl-X Ctrl-T insert passive-panel tagged names"));
         assert!(content.contains("case-insensitive directory search"));
         assert!(content.contains("use Up/Down to choose one"));
         assert!(content.contains("Tab/Shift-Tab completes"));
+        assert!(content.contains("shell-quotes"));
+        assert!(content.contains("inserted name"));
+        assert!(content.contains("Tagged names are"));
+        assert!(content.contains("inserted in panel order"));
         assert!(content.contains("successful literal cd updates the active panel directory"));
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));
         assert!(content.contains("Ctrl-X i show info in the passive panel"));
         assert!(content.contains("Alt-Shift-T cycle Full/Brief/Long listing formats"));
         assert!(content.contains("q/F10 quit"));
+    }
+
+    #[test]
+    fn command_line_context_opens_command_line_help() {
+        let help = HelpState::for_context(KeyContext::CommandLine);
+        assert_eq!(help.current_id(), "command-line");
+
+        let content = flatten_help_lines(help.lines());
+        assert!(content.contains("F1 opens this command-line help"));
+        assert!(content.contains("Tab / Shift-Tab"));
+        assert!(content.contains("Alt-Enter / Ctrl-Enter"));
+        assert!(content.contains("Ctrl-X t"));
+        assert!(content.contains("Ctrl-X Ctrl-T"));
+        assert!(content.contains("quoted literally"));
     }
 
     #[test]
@@ -782,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn milestone_four_help_covers_lifecycle_actions_and_mouse_controls() {
+    fn workflow_help_covers_lifecycle_actions_and_mouse_controls() {
         let mut help = HelpState::for_context(KeyContext::FileManager);
 
         help.open_topic("find-results", false);

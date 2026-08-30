@@ -5,14 +5,14 @@ use std::time::Instant;
 
 use rc_shell::{
     CompletionCandidate, CompletionEdit, CompletionOutcome, CompletionRequest, CompletionResponse,
-    LiteralCd, ResolvedShell, ShellHistoryMode, ShellResolution, ShellSettings, parse_literal_cd,
-    resolve_shell,
+    LiteralCd, ResolvedShell, ShellDialect, ShellHistoryMode, ShellResolution, ShellSettings,
+    parse_literal_cd, quote_literal_token, resolve_shell,
 };
 use tui_input::{Input, InputRequest};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::{AppState, Route, current_user_home_directory};
+use crate::{AppCommand, AppState, PanelState, Route, current_user_home_directory};
 
 pub const COMMAND_BUFFER_LIMIT_BYTES: usize = 64 * 1024;
 pub const PASTE_PAYLOAD_LIMIT_BYTES: usize = 64 * 1024;
@@ -381,11 +381,172 @@ pub struct PendingCompletion {
 
 #[derive(Clone, Debug)]
 pub struct OpenCompletion {
-    pub request_id: u64,
-    pub buffer_revision: u64,
-    pub original_buffer: String,
-    pub candidates: Vec<CompletionCandidate>,
-    pub selected: usize,
+    original_buffer: String,
+    candidates: Vec<CompletionCandidate>,
+    selected: usize,
+    visible_candidates: Vec<usize>,
+    refinement: Option<CompletionRefinement>,
+}
+
+#[derive(Clone, Debug)]
+struct CompletionRefinement {
+    start_byte: usize,
+    original_end_byte: usize,
+    current_end_byte: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CompletionCandidates<'a> {
+    completion: &'a OpenCompletion,
+}
+
+impl CompletionRefinement {
+    fn new(
+        original_buffer: &str,
+        cursor_byte: usize,
+        candidates: &[CompletionCandidate],
+    ) -> Option<Self> {
+        let edit = &candidates.first()?.edit;
+        if edit.end_byte != cursor_byte
+            || candidates.iter().any(|candidate| {
+                candidate.edit.start_byte != edit.start_byte
+                    || candidate.edit.end_byte != edit.end_byte
+            })
+            || original_buffer
+                .get(edit.start_byte..edit.end_byte)
+                .is_none()
+        {
+            return None;
+        }
+        Some(Self {
+            start_byte: edit.start_byte,
+            original_end_byte: edit.end_byte,
+            current_end_byte: edit.end_byte,
+        })
+    }
+
+    fn query<'a>(
+        &self,
+        original_buffer: &str,
+        buffer: &'a str,
+        cursor_byte: usize,
+    ) -> Option<&'a str> {
+        let original_prefix = original_buffer.get(..self.start_byte)?;
+        let original_query = original_buffer.get(self.start_byte..self.original_end_byte)?;
+        let original_suffix = original_buffer.get(self.original_end_byte..)?;
+        let prefix = buffer.get(..self.start_byte)?;
+        let query = buffer.get(self.start_byte..cursor_byte)?;
+        let suffix = buffer.get(cursor_byte..)?;
+        (prefix == original_prefix
+            && suffix == original_suffix
+            && query.starts_with(original_query))
+        .then_some(query)
+    }
+}
+
+impl OpenCompletion {
+    fn new(
+        original_buffer: String,
+        cursor_byte: usize,
+        candidates: Vec<CompletionCandidate>,
+        intent: CompletionIntent,
+    ) -> Self {
+        let selected = match intent {
+            CompletionIntent::Forward => 0,
+            CompletionIntent::Reverse => candidates.len().saturating_sub(1),
+        };
+        let visible_candidates = (0..candidates.len()).collect();
+        let refinement = CompletionRefinement::new(&original_buffer, cursor_byte, &candidates);
+        Self {
+            original_buffer,
+            candidates,
+            selected,
+            visible_candidates,
+            refinement,
+        }
+    }
+
+    fn candidate(&self, index: usize) -> Option<&CompletionCandidate> {
+        self.visible_candidates
+            .get(index)
+            .and_then(|candidate| self.candidates.get(*candidate))
+    }
+
+    fn cycle(&mut self, intent: CompletionIntent) -> bool {
+        let len = self.visible_candidates.len();
+        if len == 0 {
+            return false;
+        }
+        let selected = self.selected % len;
+        self.selected = match intent {
+            CompletionIntent::Forward if selected + 1 == len => 0,
+            CompletionIntent::Forward => selected + 1,
+            CompletionIntent::Reverse if selected == 0 => len - 1,
+            CompletionIntent::Reverse => selected - 1,
+        };
+        true
+    }
+
+    fn selected_edit(&self) -> Option<CompletionEdit> {
+        let mut edit = self.candidate(self.selected)?.edit.clone();
+        if let Some(refinement) = &self.refinement {
+            edit.end_byte = refinement.current_end_byte;
+        }
+        Some(edit)
+    }
+
+    fn refine(&mut self, buffer: &str, cursor_byte: usize) -> bool {
+        let Some(refinement) = &mut self.refinement else {
+            return false;
+        };
+        let Some(query) = refinement.query(&self.original_buffer, buffer, cursor_byte) else {
+            return false;
+        };
+        let selected_candidate = self.visible_candidates.get(self.selected).copied();
+        self.visible_candidates.clear();
+        self.visible_candidates
+            .extend(
+                self.candidates
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, candidate)| {
+                        candidate.display.starts_with(query).then_some(index)
+                    }),
+            );
+        if self.visible_candidates.is_empty() {
+            return false;
+        }
+        self.selected = selected_candidate
+            .and_then(|candidate| {
+                self.visible_candidates
+                    .iter()
+                    .position(|visible| *visible == candidate)
+            })
+            .unwrap_or(0);
+        refinement.current_end_byte = cursor_byte;
+        true
+    }
+}
+
+impl<'a> CompletionCandidates<'a> {
+    pub fn len(self) -> usize {
+        self.completion.visible_candidates.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.completion.visible_candidates.is_empty()
+    }
+
+    pub fn get(self, index: usize) -> Option<&'a CompletionCandidate> {
+        self.completion.candidate(index)
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = &'a CompletionCandidate> + 'a {
+        self.completion
+            .visible_candidates
+            .iter()
+            .filter_map(|index| self.completion.candidates.get(*index))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +567,7 @@ pub(crate) struct PendingShellResolution {
     transient_status_line: String,
     transient_status_expires_at: Option<Instant>,
     transient_status_generation: u64,
+    command_line_insertions: Vec<Vec<String>>,
 }
 
 impl CommandLineSession {
@@ -413,14 +575,14 @@ impl CommandLineSession {
         let CommandLineCompletionState::Open(completion) = &self.completion else {
             return None;
         };
-        completion.candidates.get(completion.selected)
+        completion.candidate(completion.selected)
     }
 
-    pub fn completion_candidates(&self) -> Option<(&[CompletionCandidate], usize)> {
+    pub fn completion_candidates(&self) -> Option<(CompletionCandidates<'_>, usize)> {
         let CommandLineCompletionState::Open(completion) = &self.completion else {
             return None;
         };
-        Some((&completion.candidates, completion.selected))
+        Some((CompletionCandidates { completion }, completion.selected))
     }
 }
 
@@ -434,6 +596,16 @@ impl AppState {
             return None;
         };
         Some(session)
+    }
+
+    fn command_line_session_by_activation_mut(
+        &mut self,
+        activation_id: u64,
+    ) -> Option<&mut CommandLineSession> {
+        self.routes.iter_mut().rev().find_map(|route| match route {
+            Route::CommandLine(session) if session.activation_id == activation_id => Some(session),
+            _ => None,
+        })
     }
 
     pub fn open_command_line(&mut self) {
@@ -483,6 +655,7 @@ impl AppState {
                 transient_status_line: self.status_line.clone(),
                 transient_status_expires_at: self.status_expires_at,
                 transient_status_generation: self.status_message_generation,
+                command_line_insertions: Vec::new(),
             });
             self.pending_shell_resolution_request = Some(ShellResolutionRequest {
                 request_id,
@@ -532,6 +705,7 @@ impl AppState {
 
         match response.result {
             Ok(resolution) => {
+                let command_line_insertions = pending.command_line_insertions;
                 let now = Instant::now();
                 let transient_status_expired = self.status_line.is_empty()
                     && self.status_expires_at.is_none()
@@ -562,6 +736,12 @@ impl AppState {
                     completion: CommandLineCompletionState::Closed,
                     notice: resolution.diagnostic,
                 }));
+                for arguments in command_line_insertions {
+                    if let Err(notice) = self.insert_command_line_arguments(&arguments) {
+                        self.set_command_line_notice(notice);
+                        break;
+                    }
+                }
             }
             Err(error) => self.set_status(format!("Command line unavailable: {error}")),
         }
@@ -571,6 +751,84 @@ impl AppState {
         if self.pending_shell_resolution.take().is_some() {
             self.pending_shell_resolution_request = None;
             self.set_status(format!("Command line unavailable: {message}"));
+        }
+    }
+
+    pub(crate) fn put_panel_files_on_command_line(&mut self, command: AppCommand) {
+        let arguments = match self.panel_file_arguments(command) {
+            Ok(arguments) => arguments,
+            Err(notice) => {
+                self.set_command_line_insertion_error(notice);
+                return;
+            }
+        };
+
+        if self.command_line_session().is_some() {
+            match self.insert_command_line_arguments(&arguments) {
+                Ok(()) => self.clear_command_line_notice(),
+                Err(notice) => self.set_command_line_notice(notice),
+            }
+            return;
+        }
+        if let Some(pending) = self.pending_shell_resolution.as_mut() {
+            pending.command_line_insertions.push(arguments);
+            return;
+        }
+
+        self.open_command_line();
+        if let Some(pending) = self.pending_shell_resolution.as_mut() {
+            pending.command_line_insertions.push(arguments);
+        }
+    }
+
+    fn panel_file_arguments(&self, command: AppCommand) -> Result<Vec<String>, &'static str> {
+        let panel = if command == AppCommand::PutOtherTagged {
+            self.passive_panel()
+        } else {
+            self.active_panel()
+        };
+        match command {
+            AppCommand::PutCurrentSelected => {
+                selected_panel_argument(panel, false).map(|arg| vec![arg])
+            }
+            AppCommand::PutCurrentFullSelected => {
+                selected_panel_argument(panel, true).map(|arg| vec![arg])
+            }
+            AppCommand::PutCurrentTagged | AppCommand::PutOtherTagged => {
+                let tagged = panel.tagged_paths_in_operation_order();
+                if tagged.is_empty() {
+                    return selected_panel_argument(panel, false).map(|arg| vec![arg]);
+                }
+                tagged.iter().map(|path| path_file_name(path)).collect()
+            }
+            _ => unreachable!("non-insertion command passed to panel insertion: {command:?}"),
+        }
+    }
+
+    fn insert_command_line_arguments(&mut self, arguments: &[String]) -> Result<(), &'static str> {
+        let dialect = self
+            .command_line_session()
+            .map(|session| session.shell.dialect)
+            .ok_or("Command line is not open")?;
+        let insertion = quote_command_line_arguments(arguments, dialect)?;
+        if self
+            .command_line
+            .value()
+            .len()
+            .saturating_add(insertion.len())
+            > COMMAND_BUFFER_LIMIT_BYTES
+        {
+            return Err("Selected files would exceed the 64 KiB command limit");
+        }
+        self.cancel_and_close_completion();
+        self.command_line.insert_paste(&insertion).map(|_| ())
+    }
+
+    fn set_command_line_insertion_error(&mut self, notice: &'static str) {
+        if self.command_line_session().is_some() {
+            self.set_command_line_notice(notice);
+        } else {
+            self.set_status(notice);
         }
     }
 
@@ -618,8 +876,17 @@ impl AppState {
                 }
             }
             input => {
-                self.cancel_and_close_completion();
+                let refine_completion = command_line_input_refines_completion(&input)
+                    && self.command_line_session().is_some_and(|session| {
+                        matches!(session.completion, CommandLineCompletionState::Open(_))
+                    });
+                if !refine_completion {
+                    self.cancel_and_close_completion();
+                }
                 self.apply_editor_input(input);
+                if refine_completion {
+                    self.refine_open_completion();
+                }
             }
         }
         Ok(())
@@ -683,15 +950,10 @@ impl AppState {
         match state {
             CommandLineCompletionState::Pending(_) => {}
             CommandLineCompletionState::Open(mut completion) => {
-                let len = completion.candidates.len();
-                if len == 0 {
+                if !completion.cycle(intent) {
                     self.close_completion_without_cancel();
                     return;
                 }
-                completion.selected = match intent {
-                    CompletionIntent::Forward => (completion.selected + 1) % len,
-                    CompletionIntent::Reverse => (completion.selected + len - 1) % len,
-                };
                 if let Some(Route::CommandLine(session)) = self.routes.last_mut() {
                     session.completion = CommandLineCompletionState::Open(completion);
                 }
@@ -733,11 +995,10 @@ impl AppState {
             .unwrap_or_default();
         match completion {
             CommandLineCompletionState::Open(completion) => {
-                let Some(candidate) = completion.candidates.get(completion.selected) else {
+                let Some(edit) = completion.selected_edit() else {
                     self.close_completion_without_cancel();
                     return Ok(());
                 };
-                let edit = candidate.edit.clone();
                 self.close_completion_without_cancel();
                 match self.command_line.apply_completion(&edit) {
                     Ok(()) => self.clear_command_line_notice(),
@@ -822,16 +1083,10 @@ impl AppState {
     ) {
         self.command_line
             .set_last_exit_status(if succeeded { 0 } else { 1 });
-        let active = self
-            .command_line_session()
-            .is_some_and(|session| session.activation_id == activation_id);
-        if !active {
-            return;
-        }
         if succeeded && self.command_line.revision() == buffer_revision {
             self.command_line.clear_after_success();
         }
-        if let Some(Route::CommandLine(session)) = self.routes.last_mut() {
+        if let Some(session) = self.command_line_session_by_activation_mut(activation_id) {
             session.completion = CommandLineCompletionState::Closed;
             session.notice = (!succeeded)
                 .then(|| String::from("cd: directory refresh failed; previous directory restored"));
@@ -851,20 +1106,20 @@ impl AppState {
     }
 
     pub fn handle_completion_response(&mut self, response: CompletionResponse) {
-        let Some(Route::CommandLine(session)) = self.routes.last_mut() else {
+        let model_matches = self.command_line.revision() == response.buffer_revision
+            && self.command_line.value() == response.original_buffer;
+        let cursor_byte = self.command_line.cursor_byte();
+        let Some(session) = self.command_line_session_by_activation_mut(response.activation_id)
+        else {
             return;
         };
-        if session.activation_id != response.activation_id {
-            return;
-        }
         let CommandLineCompletionState::Pending(pending) = &session.completion else {
             return;
         };
         if pending.request_id != response.request_id
             || pending.buffer_revision != response.buffer_revision
             || pending.original_buffer != response.original_buffer
-            || self.command_line.revision() != response.buffer_revision
-            || self.command_line.value() != response.original_buffer
+            || !model_matches
         {
             return;
         }
@@ -882,17 +1137,12 @@ impl AppState {
                 if candidates.is_empty() {
                     session.completion = CommandLineCompletionState::Closed;
                 } else {
-                    let selected = match pending.intent {
-                        CompletionIntent::Forward => 0,
-                        CompletionIntent::Reverse => candidates.len() - 1,
-                    };
-                    session.completion = CommandLineCompletionState::Open(OpenCompletion {
-                        request_id: response.request_id,
-                        buffer_revision: response.buffer_revision,
-                        original_buffer: response.original_buffer,
+                    session.completion = CommandLineCompletionState::Open(OpenCompletion::new(
+                        response.original_buffer,
+                        cursor_byte,
                         candidates,
-                        selected,
-                    });
+                        pending.intent,
+                    ));
                 }
                 session.notice = notice;
             }
@@ -943,6 +1193,20 @@ impl AppState {
         self.close_completion_without_cancel();
     }
 
+    fn refine_open_completion(&mut self) {
+        let buffer = self.command_line.value();
+        let cursor_byte = self.command_line.cursor_byte();
+        let Some(Route::CommandLine(session)) = self.routes.last_mut() else {
+            return;
+        };
+        let CommandLineCompletionState::Open(completion) = &mut session.completion else {
+            return;
+        };
+        if !completion.refine(buffer, cursor_byte) {
+            session.completion = CommandLineCompletionState::Closed;
+        }
+    }
+
     fn close_completion_without_cancel(&mut self) {
         if let Some(Route::CommandLine(session)) = self.routes.last_mut() {
             session.completion = CommandLineCompletionState::Closed;
@@ -959,6 +1223,77 @@ impl AppState {
         if let Some(Route::CommandLine(session)) = self.routes.last_mut() {
             session.notice = None;
         }
+    }
+}
+
+fn selected_panel_argument(panel: &PanelState, full_path: bool) -> Result<String, &'static str> {
+    let entry = panel.selected_entry().ok_or("No panel entry is selected")?;
+    if full_path {
+        return entry
+            .path
+            .to_str()
+            .map(ToString::to_string)
+            .ok_or("Selected path is not valid UTF-8 and cannot be inserted");
+    }
+    if entry.is_parent() {
+        return Ok(String::from(".."));
+    }
+    path_file_name(&entry.path)
+}
+
+fn path_file_name(path: &Path) -> Result<String, &'static str> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string)
+        .ok_or("Selected file name is not valid UTF-8 and cannot be inserted")
+}
+
+fn quote_command_line_arguments(
+    arguments: &[String],
+    dialect: ShellDialect,
+) -> Result<String, &'static str> {
+    if arguments.is_empty() {
+        return Err("No panel entry is selected");
+    }
+    let mut insertion = String::new();
+    for argument in arguments {
+        if argument.len() > COMMAND_BUFFER_LIMIT_BYTES {
+            return Err("Selected file list exceeds the 64 KiB command limit");
+        }
+        if sanitize_paste(argument).ok().as_deref() != Some(argument.as_str()) {
+            return Err("Selected file name contains unsupported control characters");
+        }
+        let quoted = quote_literal_token(argument, dialect);
+        let separator_len = usize::from(!insertion.is_empty());
+        if insertion
+            .len()
+            .saturating_add(separator_len)
+            .saturating_add(quoted.len())
+            > COMMAND_BUFFER_LIMIT_BYTES
+        {
+            return Err("Selected file list exceeds the 64 KiB command limit");
+        }
+        if separator_len != 0 {
+            insertion.push(' ');
+        }
+        insertion.push_str(&quoted);
+    }
+    Ok(insertion)
+}
+
+fn command_line_input_refines_completion(input: &CommandLineInput) -> bool {
+    match input {
+        CommandLineInput::Character(character) => {
+            character.is_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '-' | '.' | '/' | '@' | '+' | '=' | ':' | ','
+                )
+        }
+        CommandLineInput::Backspace
+        | CommandLineInput::Delete
+        | CommandLineInput::DeletePreviousWord => true,
+        _ => false,
     }
 }
 
@@ -1043,7 +1378,8 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::{
-        BackgroundEvent, JobError, JobRequest, PanelRefreshResult, WorkerCommand, WorkerJob,
+        ActivePanel, BackgroundEvent, JobError, JobRequest, PanelRefreshResult, WorkerCommand,
+        WorkerJob,
     };
     #[cfg(unix)]
     use rc_shell::CompletionProvider;
@@ -1060,6 +1396,61 @@ mod tests {
             .expect("shell resolution should be queued");
         app.handle_shell_resolution_response(resolve_shell_request_blocking(request));
         assert!(app.command_line_session().is_some());
+    }
+
+    #[cfg(unix)]
+    fn show_completions(
+        app: &mut AppState,
+        intent: CompletionIntent,
+        candidates: Vec<CompletionCandidate>,
+    ) {
+        app.handle_command_line_input(CommandLineInput::Complete(intent))
+            .expect("completion request");
+        let request = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("request");
+        app.handle_completion_response(CompletionResponse {
+            activation_id: request.activation_id,
+            request_id: request.request_id,
+            buffer_revision: request.buffer_revision,
+            original_buffer: request.buffer,
+            outcome: CompletionOutcome::Candidates {
+                provider: CompletionProvider::Generic,
+                candidates,
+                notice: None,
+            },
+        });
+    }
+
+    #[cfg(unix)]
+    fn completion_candidate(
+        start_byte: usize,
+        end_byte: usize,
+        replacement: &str,
+    ) -> CompletionCandidate {
+        CompletionCandidate {
+            edit: CompletionEdit {
+                start_byte,
+                end_byte,
+                replacement: replacement.to_string(),
+            },
+            display: replacement.to_string(),
+            description: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn visible_completion_displays(app: &AppState) -> Vec<&str> {
+        let (candidates, _) = app
+            .command_line_session()
+            .expect("session")
+            .completion_candidates()
+            .expect("open completion");
+        candidates
+            .iter()
+            .map(|candidate| candidate.display.as_str())
+            .collect()
     }
 
     #[cfg(unix)]
@@ -1183,6 +1574,196 @@ mod tests {
         assert_eq!(model.visual_scroll(1), 1);
     }
 
+    #[test]
+    fn panel_arguments_are_quoted_atomically_for_the_selected_shell() {
+        let arguments = vec![
+            String::from("plain"),
+            String::from("two words"),
+            String::from("a'b"),
+        ];
+        assert_eq!(
+            quote_command_line_arguments(&arguments, ShellDialect::Posix),
+            Ok(String::from("plain 'two words' 'a'\\''b'"))
+        );
+        assert_eq!(
+            quote_command_line_arguments(&arguments, ShellDialect::Fish),
+            Ok(String::from("plain 'two words' 'a\\'b'"))
+        );
+        assert_eq!(
+            quote_command_line_arguments(&[String::from("~")], ShellDialect::Posix),
+            Ok(String::from("'~'"))
+        );
+        assert_eq!(
+            quote_command_line_arguments(&[String::from("~")], ShellDialect::Fish),
+            Ok(String::from("'~'"))
+        );
+        assert_eq!(
+            quote_command_line_arguments(&[String::from("line\nbreak")], ShellDialect::Posix),
+            Err("Selected file name contains unsupported control characters")
+        );
+        assert_eq!(
+            quote_command_line_arguments(
+                &["x".repeat(COMMAND_BUFFER_LIMIT_BYTES + 1)],
+                ShellDialect::Posix,
+            ),
+            Err("Selected file list exceeds the 64 KiB command limit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mc_panel_file_actions_open_the_prompt_quote_and_preserve_tag_order() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("rc-command-line-files-{stamp}"));
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).expect("fixture directories");
+        for name in ["alpha", "two words's.txt", "line\nbreak", "~"] {
+            std::fs::write(root.join(name), name).expect("fixture file");
+        }
+        std::fs::write(other.join("passive file"), b"other").expect("passive fixture");
+
+        let mut app = AppState::new(root.clone()).expect("app");
+        let mut settings = app.settings().clone();
+        settings.shell = ShellSettings::custom(
+            "/bin/sh",
+            ShellDialect::Posix,
+            None,
+            ShellHistoryMode::Session,
+        )
+        .expect("POSIX shell settings");
+        app.replace_settings(settings);
+        app.active_panel_mut().refresh().expect("active listing");
+        app.panels[ActivePanel::Right.index()] = PanelState::new(other.clone()).expect("panel");
+        app.panels[ActivePanel::Right.index()]
+            .refresh()
+            .expect("passive listing");
+
+        let selected = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.name == "two words's.txt")
+            .expect("selected fixture");
+        app.active_panel_mut().cursor = selected;
+        app.apply(AppCommand::PutCurrentSelected)
+            .expect("selected name action");
+        let request = app
+            .take_pending_shell_resolution_request()
+            .expect("insertion should open the command line");
+        app.handle_shell_resolution_response(resolve_shell_request_blocking(request));
+        assert_eq!(app.command_line_model().value(), "'two words'\\''s.txt'");
+
+        app.handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear selected name");
+        let literal_tilde = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.name == "~")
+            .expect("literal tilde fixture");
+        app.active_panel_mut().cursor = literal_tilde;
+        app.apply(AppCommand::PutCurrentSelected)
+            .expect("literal tilde action");
+        assert_eq!(app.command_line_model().value(), "'~'");
+
+        app.handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear literal tilde");
+        app.active_panel_mut().cursor = selected;
+        app.apply(AppCommand::PutCurrentFullSelected)
+            .expect("full path action");
+        assert_eq!(
+            app.command_line_model().value(),
+            quote_literal_token(
+                root.join("two words's.txt")
+                    .to_str()
+                    .expect("UTF-8 fixture"),
+                ShellDialect::Posix,
+            )
+        );
+
+        for name in ["two words's.txt", "alpha"] {
+            let index = app
+                .active_panel()
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+                .expect("tag fixture");
+            app.active_panel_mut().cursor = index;
+            assert!(app.active_panel_mut().toggle_tag_on_cursor());
+        }
+        app.handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear full path");
+        app.apply(AppCommand::PutCurrentTagged)
+            .expect("tagged action");
+        assert_eq!(
+            app.command_line_model().value(),
+            "alpha 'two words'\\''s.txt'"
+        );
+
+        let passive_selected = app.panels[ActivePanel::Right.index()]
+            .entries
+            .iter()
+            .position(|entry| entry.name == "passive file")
+            .expect("passive fixture");
+        app.panels[ActivePanel::Right.index()].cursor = passive_selected;
+        app.handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear tagged names");
+        app.apply(AppCommand::PutOtherTagged)
+            .expect("passive selected fallback");
+        assert_eq!(app.command_line_model().value(), "'passive file'");
+
+        app.handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear passive name");
+        let active_selected = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.name == "alpha")
+            .expect("active fixture");
+        app.active_panel_mut().cursor = active_selected;
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("pending completion");
+        let completion = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("completion request");
+        app.apply(AppCommand::PutCurrentSelected)
+            .expect("insert while completion is pending");
+        assert_eq!(app.command_line_model().value(), "alpha");
+        assert_eq!(
+            app.take_pending_completion_cancellations(),
+            vec![CompletionCancellation {
+                activation_id: completion.activation_id,
+                request_id: completion.request_id,
+            }]
+        );
+
+        app.handle_command_line_input(CommandLineInput::Clear)
+            .expect("clear selected fallback");
+        let invalid = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.name == "line\nbreak")
+            .expect("control-character fixture");
+        app.active_panel_mut().cursor = invalid;
+        app.apply(AppCommand::PutCurrentSelected)
+            .expect("invalid insertion should be nonfatal");
+        assert_eq!(app.command_line_model().value(), "");
+        assert_eq!(
+            app.command_line_session()
+                .expect("session")
+                .notice
+                .as_deref(),
+            Some("Selected file name contains unsupported control characters")
+        );
+
+        std::fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
     #[cfg(unix)]
     #[test]
     fn repeated_slashes_after_tilde_stay_beneath_home() {
@@ -1227,6 +1808,68 @@ mod tests {
         assert_eq!(app.command_line_model().last_exit_status(), Some(0));
         assert!(app.active_panel_mut().go_parent());
         assert_eq!(app.active_panel().cwd, root.join("parent"));
+
+        std::fs::remove_dir_all(root).expect("fixture should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn literal_cd_finalizes_beneath_help_overlay() {
+        let (root, current, destination) = command_line_cd_fixture("help-overlay");
+        let mut app = AppState::new(current).expect("app");
+        app.take_pending_worker_commands();
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("cd ../destination")))
+            .expect("literal cd should be accepted");
+        app.handle_command_line_input(CommandLineInput::Enter)
+            .expect("literal cd should start");
+        let job = take_panel_refresh_job(&mut app);
+        app.apply(AppCommand::OpenHelp)
+            .expect("help should cover the command line");
+
+        finish_panel_refresh(&mut app, job, Ok(empty_panel_refresh_result()));
+
+        assert!(matches!(app.top_route(), Route::Help(_)));
+        assert_eq!(app.active_panel().cwd, destination);
+        assert_eq!(app.command_line_model().value(), "");
+        assert_eq!(app.command_line_model().last_exit_status(), Some(0));
+        app.apply(AppCommand::CloseHelp)
+            .expect("help should return to the command line");
+        let session = app
+            .command_line_session()
+            .expect("command line should remain open");
+        assert!(session.notice.is_none());
+        assert!(matches!(
+            session.completion,
+            CommandLineCompletionState::Closed
+        ));
+
+        std::fs::remove_dir_all(root).expect("fixture should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_literal_cd_clears_the_draft_after_escape() {
+        let (root, current, destination) = command_line_cd_fixture("escape");
+        let mut app = AppState::new(current).expect("app");
+        app.take_pending_worker_commands();
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("cd ../destination")))
+            .expect("literal cd should be accepted");
+        app.handle_command_line_input(CommandLineInput::Enter)
+            .expect("literal cd should start");
+        let job = take_panel_refresh_job(&mut app);
+        app.handle_command_line_input(CommandLineInput::Escape)
+            .expect("escape should close the command line");
+
+        finish_panel_refresh(&mut app, job, Ok(empty_panel_refresh_result()));
+
+        assert!(matches!(app.top_route(), Route::FileManager));
+        assert_eq!(app.active_panel().cwd, destination);
+        assert_eq!(app.command_line_model().value(), "");
+        assert_eq!(app.command_line_model().last_exit_status(), Some(0));
+        open_command_line_for_test(&mut app);
+        assert_eq!(app.command_line_model().value(), "");
 
         std::fs::remove_dir_all(root).expect("fixture should be removable");
     }
@@ -1433,6 +2076,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn completion_response_updates_the_session_beneath_help() {
+        let root = std::env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request");
+        let request = app
+            .take_pending_completion_requests()
+            .pop()
+            .expect("request");
+        app.apply(AppCommand::OpenHelp)
+            .expect("help should cover the command line");
+
+        app.handle_completion_response(CompletionResponse {
+            activation_id: request.activation_id,
+            request_id: request.request_id,
+            buffer_revision: request.buffer_revision,
+            original_buffer: request.buffer,
+            outcome: CompletionOutcome::Candidates {
+                provider: CompletionProvider::Generic,
+                candidates: ["echo", "env"]
+                    .into_iter()
+                    .map(|replacement| completion_candidate(0, 0, replacement))
+                    .collect(),
+                notice: None,
+            },
+        });
+
+        assert!(matches!(app.top_route(), Route::Help(_)));
+        app.apply(AppCommand::CloseHelp)
+            .expect("help should return to the command line");
+        assert_eq!(visible_completion_displays(&app), vec!["echo", "env"]);
+        let selected = app
+            .command_line_session()
+            .and_then(CommandLineSession::completion_candidates)
+            .map(|(_, selected)| selected)
+            .expect("completion should be open");
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion should continue cycling");
+        let cycled = app
+            .command_line_session()
+            .and_then(CommandLineSession::completion_candidates)
+            .map(|(_, selected)| selected)
+            .expect("completion should remain open");
+        assert_ne!(cycled, selected);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn completion_acceptance_is_one_edit_and_does_not_execute() {
         let root = std::env::current_dir().expect("cwd");
         let mut app = AppState::new(root).expect("app");
@@ -1564,6 +2256,160 @@ mod tests {
         app.handle_command_line_input(CommandLineInput::Character('x'))
             .expect("ordinary edit");
         assert_eq!(app.command_line_model().value(), "x");
+        assert!(matches!(
+            app.command_line_session().expect("session").completion,
+            CommandLineCompletionState::Closed
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_pager_filters_the_current_word_and_rebases_acceptance() {
+        let root = std::env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("git ")))
+            .expect("initial command");
+        show_completions(
+            &mut app,
+            CompletionIntent::Forward,
+            ["add", "checkout", "cherry-pick", "clone", "commit"]
+                .into_iter()
+                .map(|value| completion_candidate(4, 4, value))
+                .collect(),
+        );
+
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("select checkout");
+        app.handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("select cherry-pick");
+        app.handle_command_line_input(CommandLineInput::Character('c'))
+            .expect("filter by c");
+        assert_eq!(
+            visible_completion_displays(&app),
+            vec!["checkout", "cherry-pick", "clone", "commit"]
+        );
+        assert_eq!(
+            app.command_line_session()
+                .expect("session")
+                .selected_completion()
+                .expect("selected candidate")
+                .display,
+            "cherry-pick"
+        );
+
+        app.handle_command_line_input(CommandLineInput::Character('h'))
+            .expect("filter by ch");
+        assert_eq!(
+            visible_completion_displays(&app),
+            vec!["checkout", "cherry-pick"]
+        );
+        app.handle_command_line_input(CommandLineInput::Enter)
+            .expect("accept filtered completion");
+        assert_eq!(app.command_line_model().value(), "git cherry-pick");
+        assert!(app.pending_foreground_shell_requests.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_backspace_restores_only_the_authoritative_candidate_set() {
+        let root = std::env::current_dir().expect("cwd");
+        let mut app = AppState::new(root.clone()).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("git ")))
+            .expect("initial command");
+        show_completions(
+            &mut app,
+            CompletionIntent::Forward,
+            ["add", "checkout", "clone"]
+                .into_iter()
+                .map(|value| completion_candidate(4, 4, value))
+                .collect(),
+        );
+        app.handle_command_line_input(CommandLineInput::Character('c'))
+            .expect("filter by c");
+        assert_eq!(visible_completion_displays(&app), vec!["checkout", "clone"]);
+        app.handle_command_line_input(CommandLineInput::Backspace)
+            .expect("restore original query");
+        assert_eq!(
+            visible_completion_displays(&app),
+            vec!["add", "checkout", "clone"]
+        );
+
+        let mut prefixed = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut prefixed);
+        prefixed
+            .handle_command_line_input(CommandLineInput::Paste(String::from("git ch")))
+            .expect("prefixed command");
+        show_completions(
+            &mut prefixed,
+            CompletionIntent::Forward,
+            ["checkout", "cherry-pick"]
+                .into_iter()
+                .map(|value| completion_candidate(4, 6, value))
+                .collect(),
+        );
+        prefixed
+            .handle_command_line_input(CommandLineInput::Backspace)
+            .expect("edit before authoritative prefix");
+        assert_eq!(prefixed.command_line_model().value(), "git c");
+        assert!(matches!(
+            prefixed.command_line_session().expect("session").completion,
+            CommandLineCompletionState::Closed
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_refinement_preserves_suffix_and_quoted_replacement() {
+        let root = std::env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste(String::from("git  --verbose")))
+            .expect("initial command");
+        app.handle_command_line_input(CommandLineInput::SetCursor(4))
+            .expect("place cursor in empty argument");
+        let mut candidate = completion_candidate(4, 4, "'你好 world'");
+        candidate.display = String::from("你好 world");
+        show_completions(&mut app, CompletionIntent::Forward, vec![candidate]);
+
+        app.handle_command_line_input(CommandLineInput::Character('你'))
+            .expect("filter quoted candidate by its display form");
+        assert_eq!(visible_completion_displays(&app), vec!["你好 world"]);
+        app.handle_command_line_input(CommandLineInput::Enter)
+            .expect("accept completion");
+        assert_eq!(
+            app.command_line_model().value(),
+            "git '你好 world' --verbose"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completion_refinement_closes_on_cursor_moves_and_shell_syntax() {
+        let root = std::env::current_dir().expect("cwd");
+        let mut app = AppState::new(root).expect("app");
+        open_command_line_for_test(&mut app);
+        show_completions(
+            &mut app,
+            CompletionIntent::Forward,
+            vec![completion_candidate(0, 0, "echo")],
+        );
+        app.handle_command_line_input(CommandLineInput::Left)
+            .expect("cursor move");
+        assert!(matches!(
+            app.command_line_session().expect("session").completion,
+            CommandLineCompletionState::Closed
+        ));
+
+        show_completions(
+            &mut app,
+            CompletionIntent::Forward,
+            vec![completion_candidate(0, 0, "echo command")],
+        );
+        app.handle_command_line_input(CommandLineInput::Character(' '))
+            .expect("shell word boundary");
+        assert_eq!(app.command_line_model().value(), " ");
         assert!(matches!(
             app.command_line_session().expect("session").completion,
             CommandLineCompletionState::Closed

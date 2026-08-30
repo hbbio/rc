@@ -12,9 +12,13 @@ impl AppState {
                 self.set_status(format!("{label} is not implemented yet"));
             }
             AppCommand::OpenUserMenu => {
-                self.set_status("User menu is not implemented yet (planned for Milestone 5)");
+                self.set_status("User menu is not available");
             }
             AppCommand::OpenCommandLine => self.open_command_line(),
+            AppCommand::PutCurrentSelected
+            | AppCommand::PutCurrentFullSelected
+            | AppCommand::PutCurrentTagged
+            | AppCommand::PutOtherTagged => self.put_panel_files_on_command_line(command),
             AppCommand::OpenMenuBar => self.open_menu_bar(0),
             AppCommand::OpenMenuBarAt(index) => self.open_menu_bar(index),
             AppCommand::CloseMenu => self.close_menu(),

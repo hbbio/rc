@@ -136,13 +136,18 @@ impl AppState {
         ordered.join(" or ")
     }
 
-    fn xmap_sequence_or_fallback(&self, command: AppCommand, fallback: &str) -> String {
+    pub fn xmap_keybinding_label(&self, command: AppCommand) -> Option<String> {
         let prefix = self.keybinding_primary_label(KeyContext::FileManager, AppCommand::EnterXMap);
         let suffix = self.keybinding_primary_label(KeyContext::FileManagerXMap, command);
         match (prefix, suffix) {
-            (Some(prefix), Some(suffix)) => format!("{prefix} {suffix}"),
-            _ => fallback.to_string(),
+            (Some(prefix), Some(suffix)) => Some(format!("{prefix} {suffix}")),
+            _ => None,
         }
+    }
+
+    fn xmap_sequence_or_fallback(&self, command: AppCommand, fallback: &str) -> String {
+        self.xmap_keybinding_label(command)
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     pub(crate) fn help_replacements(&self) -> HashMap<&'static str, String> {
@@ -269,6 +274,39 @@ impl AppState {
                 AppCommand::OpenCommandLine,
                 ">",
             ),
+        );
+        replacements.insert(
+            "fm_help",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenHelp,
+                "F1",
+            ),
+        );
+        replacements.insert(
+            "fm_put_selected",
+            self.keybinding_joined_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::PutCurrentSelected,
+                "Alt-Enter / Ctrl-Enter",
+                2,
+            ),
+        );
+        replacements.insert(
+            "fm_put_full_selected",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::PutCurrentFullSelected,
+                "Ctrl-Shift-Enter",
+            ),
+        );
+        replacements.insert(
+            "fm_put_current_tagged",
+            self.xmap_sequence_or_fallback(AppCommand::PutCurrentTagged, "Ctrl-X t"),
+        );
+        replacements.insert(
+            "fm_put_other_tagged",
+            self.xmap_sequence_or_fallback(AppCommand::PutOtherTagged, "Ctrl-X Ctrl-T"),
         );
         replacements.insert(
             "fm_find",

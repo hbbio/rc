@@ -51,9 +51,9 @@ pub use background::{
 pub use command_line::{
     COMMAND_BUFFER_LIMIT_BYTES, COMMAND_HISTORY_LIMIT_BYTES, COMMAND_HISTORY_LIMIT_ENTRIES,
     CommandLineCompletionState, CommandLineInput, CommandLineModel, CommandLineSession,
-    CompletionCancellation, CompletionIntent, ForegroundShellRequest, OpenCompletion,
-    PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest, ShellResolutionResponse,
-    resolve_shell_request_blocking, sanitize_paste,
+    CompletionCancellation, CompletionCandidates, CompletionIntent, ForegroundShellRequest,
+    OpenCompletion, PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest,
+    ShellResolutionResponse, resolve_shell_request_blocking, sanitize_paste,
 };
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
@@ -133,6 +133,10 @@ const VIEWER_TEXT_PREVIEW_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 pub enum AppCommand {
     OpenHelp,
     OpenCommandLine,
+    PutCurrentSelected,
+    PutCurrentFullSelected,
+    PutCurrentTagged,
+    PutOtherTagged,
     CloseHelp,
     OpenUserMenu,
     OpenMenuBar,
@@ -358,6 +362,10 @@ impl AppCommand {
         match self {
             Self::OpenHelp
             | Self::OpenCommandLine
+            | Self::PutCurrentSelected
+            | Self::PutCurrentFullSelected
+            | Self::PutCurrentTagged
+            | Self::PutOtherTagged
             | Self::CloseHelp
             | Self::OpenUserMenu
             | Self::OpenMenuBar

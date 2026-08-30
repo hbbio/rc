@@ -482,6 +482,10 @@ impl AppState {
         self.xmap_pending = false;
     }
 
+    pub fn is_xmap_pending(&self) -> bool {
+        self.xmap_pending
+    }
+
     pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
         self.keybinding_hints = KeybindingHints::from_keymap(keymap);
     }

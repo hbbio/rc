@@ -119,15 +119,38 @@ fn complete_with_fish_then_generic(
     else {
         return generic_completion(request, cancel);
     };
+    let prefix = &request.buffer[start_byte..request.cursor_byte];
+    let command_position = request.buffer[..start_byte].trim().is_empty();
+    let local_candidates = if command_position && !prefix.contains('/') && !prefix.starts_with('~')
+    {
+        cwd_command_candidates(
+            prefix,
+            &request.cwd,
+            start_byte,
+            end_byte,
+            request.shell.dialect,
+            cancel,
+            Instant::now(),
+        )
+    } else {
+        Vec::new()
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return CompletionOutcome::Canceled;
+    }
     match run_fish_completion(request, start_byte, end_byte, cancel) {
-        Ok(candidates) if candidates.is_empty() => {
-            CompletionOutcome::Empty(CompletionProvider::Fish)
+        Ok(candidates) => {
+            let candidates = merge_prioritized_candidates(local_candidates, candidates);
+            if candidates.is_empty() {
+                CompletionOutcome::Empty(CompletionProvider::Fish)
+            } else {
+                CompletionOutcome::Candidates {
+                    provider: CompletionProvider::Fish,
+                    candidates,
+                    notice: None,
+                }
+            }
         }
-        Ok(candidates) => CompletionOutcome::Candidates {
-            provider: CompletionProvider::Fish,
-            candidates,
-            notice: None,
-        },
         Err(FishCompletionError::Canceled) => CompletionOutcome::Canceled,
         Err(FishCompletionError::Failed(error)) => {
             if cancel.load(Ordering::Relaxed) {
@@ -502,8 +525,7 @@ fn parse_fish_output(
         .map_err(|_| String::from("fish completion output was not UTF-8"))?;
     let mut framed = false;
     let mut finished = false;
-    let mut candidates = Vec::new();
-    let mut retained = 0_usize;
+    let mut candidates = CandidateCollector::default();
     for raw_line in output.lines() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         if !framed {
@@ -519,9 +541,6 @@ fn parse_fish_output(
         let Some(record) = line.strip_prefix(record_marker) else {
             continue;
         };
-        if candidates.len() >= COMPLETION_CANDIDATE_LIMIT {
-            return Err(String::from("fish returned too many completion candidates"));
-        }
         let (replacement, description) = record
             .split_once('\t')
             .map_or((record, None), |(candidate, description)| {
@@ -530,12 +549,6 @@ fn parse_fish_output(
         validate_candidate_field(replacement)?;
         if let Some(description) = description {
             validate_candidate_field(description)?;
-        }
-        retained = retained
-            .saturating_add(replacement.len().saturating_mul(2))
-            .saturating_add(description.map_or(0, str::len));
-        if retained > COMPLETION_RETAINED_LIMIT_BYTES {
-            return Err(String::from("fish completion data limit exceeded"));
         }
         candidates.push(CompletionCandidate {
             edit: CompletionEdit {
@@ -552,7 +565,7 @@ fn parse_fish_output(
             "fish completion protocol markers were missing",
         ));
     }
-    Ok(candidates)
+    Ok(candidates.into_candidates())
 }
 
 fn validate_candidate_field(value: &str) -> Result<(), String> {
@@ -571,6 +584,75 @@ fn is_candidate_control(character: char) -> bool {
     matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f)
 }
 
+#[derive(Default)]
+struct CandidateCollector {
+    candidates: Vec<CompletionCandidate>,
+    replacements: HashSet<String>,
+    retained_bytes: usize,
+}
+
+impl CandidateCollector {
+    fn push(&mut self, candidate: CompletionCandidate) {
+        if self.candidates.len() >= COMPLETION_CANDIDATE_LIMIT
+            || self.replacements.contains(&candidate.edit.replacement)
+        {
+            return;
+        }
+        let retained_bytes = candidate
+            .edit
+            .replacement
+            .len()
+            .saturating_add(candidate.display.len())
+            .saturating_add(candidate.description.as_ref().map_or(0, String::len));
+        if self.retained_bytes.saturating_add(retained_bytes) > COMPLETION_RETAINED_LIMIT_BYTES {
+            return;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.replacements.insert(candidate.edit.replacement.clone());
+        self.candidates.push(candidate);
+    }
+
+    fn extend(&mut self, candidates: impl IntoIterator<Item = CompletionCandidate>) {
+        for candidate in candidates {
+            self.push(candidate);
+        }
+    }
+
+    fn into_candidates(self) -> Vec<CompletionCandidate> {
+        self.candidates
+    }
+}
+
+fn merge_sorted_candidate_sources(
+    sources: impl IntoIterator<Item = Vec<CompletionCandidate>>,
+) -> Vec<CompletionCandidate> {
+    let mut collector = CandidateCollector::default();
+    for mut candidates in sources {
+        candidates.sort_by(|left, right| {
+            left.display
+                .cmp(&right.display)
+                .then_with(|| left.edit.replacement.cmp(&right.edit.replacement))
+        });
+        collector.extend(candidates);
+    }
+    collector.into_candidates()
+}
+
+fn merge_prioritized_candidates(
+    mut prioritized: Vec<CompletionCandidate>,
+    remaining: Vec<CompletionCandidate>,
+) -> Vec<CompletionCandidate> {
+    prioritized.sort_by(|left, right| {
+        left.display
+            .cmp(&right.display)
+            .then_with(|| left.edit.replacement.cmp(&right.edit.replacement))
+    });
+    let mut collector = CandidateCollector::default();
+    collector.extend(prioritized);
+    collector.extend(remaining);
+    collector.into_candidates()
+}
+
 fn generic_completion(request: &CompletionRequest, cancel: &AtomicBool) -> CompletionOutcome {
     let started = Instant::now();
     if cancel.load(Ordering::Relaxed) {
@@ -583,29 +665,40 @@ fn generic_completion(request: &CompletionRequest, cancel: &AtomicBool) -> Compl
     };
     let prefix = &request.buffer[start_byte..request.cursor_byte];
     let command_position = request.buffer[..start_byte].trim().is_empty();
-    let mut candidates = if let Some(variable_prefix) = prefix.strip_prefix('$')
+    let candidates = if let Some(variable_prefix) = prefix.strip_prefix('$')
         && !variable_prefix.contains('/')
     {
-        environment_candidates(
+        merge_sorted_candidate_sources([environment_candidates(
             variable_prefix,
             start_byte,
             end_byte,
             request.shell.dialect,
             cancel,
             started,
-        )
+        )])
     } else if command_position && !prefix.contains('/') && !prefix.starts_with('~') {
-        executable_candidates(
-            prefix,
-            &request.cwd,
-            start_byte,
-            end_byte,
-            request.shell.dialect,
-            cancel,
-            started,
-        )
+        merge_sorted_candidate_sources([
+            cwd_command_candidates(
+                prefix,
+                &request.cwd,
+                start_byte,
+                end_byte,
+                request.shell.dialect,
+                cancel,
+                started,
+            ),
+            executable_candidates(
+                prefix,
+                &request.cwd,
+                start_byte,
+                end_byte,
+                request.shell.dialect,
+                cancel,
+                started,
+            ),
+        ])
     } else {
-        filesystem_candidates(
+        merge_sorted_candidate_sources([filesystem_candidates(
             prefix,
             &request.cwd,
             start_byte,
@@ -613,7 +706,7 @@ fn generic_completion(request: &CompletionRequest, cancel: &AtomicBool) -> Compl
             request.shell.dialect,
             cancel,
             started,
-        )
+        )])
     };
 
     if cancel.load(Ordering::Relaxed) {
@@ -622,23 +715,6 @@ fn generic_completion(request: &CompletionRequest, cancel: &AtomicBool) -> Compl
     if started.elapsed() >= COMPLETION_DEADLINE {
         return CompletionOutcome::Unavailable(String::from("generic completion timed out"));
     }
-    candidates.sort_by(|left, right| left.display.cmp(&right.display));
-    candidates.dedup_by(|left, right| left.edit.replacement == right.edit.replacement);
-    let mut retained = 0_usize;
-    candidates.retain(|candidate| {
-        let candidate_bytes = candidate
-            .edit
-            .replacement
-            .len()
-            .saturating_add(candidate.display.len())
-            .saturating_add(candidate.description.as_ref().map_or(0, String::len));
-        if retained.saturating_add(candidate_bytes) > COMPLETION_RETAINED_LIMIT_BYTES {
-            return false;
-        }
-        retained = retained.saturating_add(candidate_bytes);
-        true
-    });
-    candidates.truncate(COMPLETION_CANDIDATE_LIMIT);
     if candidates.is_empty() {
         CompletionOutcome::Empty(CompletionProvider::Generic)
     } else {
@@ -712,6 +788,61 @@ fn ambiguous_completion_character(character: char) -> bool {
             | '\r'
             | '\0'
     ) || character.is_control()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cwd_command_candidates(
+    prefix: &str,
+    cwd: &Path,
+    start_byte: usize,
+    end_byte: usize,
+    dialect: ShellDialect,
+    cancel: &AtomicBool,
+    started: Instant,
+) -> Vec<CompletionCandidate> {
+    let Ok(entries) = fs::read_dir(cwd) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        if completion_should_stop(cancel, started) || candidates.len() >= COMPLETION_CANDIDATE_LIMIT
+        {
+            break;
+        }
+        let Some(name) = entry.file_name().to_str().map(ToString::to_string) else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let is_directory = path.metadata().is_ok_and(|metadata| metadata.is_dir());
+        let (raw_replacement, description) = if is_directory {
+            (format!("{name}/"), String::from("directory"))
+        } else if is_executable_file(&path) {
+            (
+                format!("./{name}"),
+                String::from("current directory executable"),
+            )
+        } else {
+            continue;
+        };
+        let Some(mut candidate) = make_candidate(
+            raw_replacement,
+            Some(description),
+            start_byte,
+            end_byte,
+            dialect,
+            TokenRole::CommandName,
+        ) else {
+            continue;
+        };
+        if !is_directory {
+            candidate.display = name;
+        }
+        candidates.push(candidate);
+    }
+    candidates
 }
 
 fn executable_candidates(
@@ -974,8 +1105,14 @@ fn make_candidate(
     })
 }
 
+/// Quotes a completion argument while preserving a leading `~` home expansion.
 pub fn quote_token(value: &str, dialect: ShellDialect) -> String {
     quote_token_for_role(value, dialect, TokenRole::Argument)
+}
+
+/// Quotes shell data literally, without preserving completion-oriented home expansion.
+pub fn quote_literal_token(value: &str, dialect: ShellDialect) -> String {
+    quote_token_without_home_prefix(value, dialect, TokenRole::Argument)
 }
 
 fn quote_token_for_role(value: &str, dialect: ShellDialect, role: TokenRole) -> String {
@@ -1134,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn fish_protocol_enforces_candidate_controls_count_and_retained_bytes() {
+    fn fish_protocol_rejects_controls_and_truncates_bounded_data() {
         assert!(
             parse_fish_output(
                 b"START\nRECORDbad\x1b\nEND\n",
@@ -1147,20 +1284,59 @@ mod tests {
             .is_err()
         );
 
-        let too_many = format!(
-            "START\n{}END\n",
-            "RECORDx\n".repeat(COMPLETION_CANDIDATE_LIMIT + 1)
-        );
-        assert!(parse_fish_output(too_many.as_bytes(), "START", "RECORD", "END", 0, 0).is_err());
+        let records = (0..=COMPLETION_CANDIDATE_LIMIT)
+            .map(|index| format!("RECORDcandidate-{index}\n"))
+            .collect::<String>();
+        let too_many = format!("START\n{records}END\n");
+        let candidates = parse_fish_output(too_many.as_bytes(), "START", "RECORD", "END", 0, 0)
+            .expect("candidate overflow should retain the highest-priority prefix");
+        assert_eq!(candidates.len(), COMPLETION_CANDIDATE_LIMIT);
+        assert_eq!(candidates[0].display, "candidate-0");
 
-        let field = "x".repeat(COMPLETION_FIELD_LIMIT_BYTES);
         let records = (0..33)
-            .map(|_| format!("RECORD{field}\n"))
+            .map(|index| {
+                let field = format!(
+                    "{index:04}{}",
+                    "x".repeat(COMPLETION_FIELD_LIMIT_BYTES.saturating_sub(4))
+                );
+                format!("RECORD{field}\n")
+            })
             .collect::<String>();
         let retained = format!("START\n{records}END\n");
+        let candidates = parse_fish_output(retained.as_bytes(), "START", "RECORD", "END", 0, 0)
+            .expect("retained-data overflow should be truncated");
+        let retained_bytes = candidates
+            .iter()
+            .map(|candidate| candidate.edit.replacement.len() + candidate.display.len())
+            .sum::<usize>();
+        assert_eq!(candidates.len(), 32);
+        assert!(retained_bytes <= COMPLETION_RETAINED_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn prioritized_merge_keeps_local_candidates_ahead_of_provider_overflow() {
+        let candidate = |replacement: String, display: String| CompletionCandidate {
+            edit: CompletionEdit {
+                start_byte: 0,
+                end_byte: 0,
+                replacement,
+            },
+            display,
+            description: None,
+        };
+        let local = candidate(String::from("local/"), String::from("local/"));
+        let provider = (0..COMPLETION_CANDIDATE_LIMIT)
+            .map(|index| candidate(format!("provider-{index}"), format!("provider-{index}")))
+            .collect();
+
+        let candidates = merge_prioritized_candidates(vec![local], provider);
+
+        assert_eq!(candidates.len(), COMPLETION_CANDIDATE_LIMIT);
+        assert_eq!(candidates[0].edit.replacement, "local/");
         assert!(
-            parse_fish_output(retained.as_bytes(), "START", "RECORD", "END", 0, 0).is_err(),
-            "the edit and display copies both count toward retained candidate data"
+            candidates
+                .iter()
+                .all(|candidate| candidate.edit.replacement != "provider-511")
         );
     }
 
@@ -1202,6 +1378,54 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.edit.replacement.starts_with('$'))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_command_completion_prioritizes_valid_cwd_paths() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = completion_temp_dir("cwd-command-priority");
+        fs::create_dir(root.join("zz-local-directory"))
+            .expect("local directory fixture should be creatable");
+        let executable = root.join("zz-local-executable");
+        fs::write(&executable, "#!/bin/sh\n").expect("local executable fixture should be writable");
+        let mut permissions = executable
+            .metadata()
+            .expect("local executable metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions)
+            .expect("local executable should be executable");
+        fs::write(root.join("zz-local-regular-file"), "not executable")
+            .expect("regular file fixture should be writable");
+
+        let request = CompletionRequest {
+            activation_id: 1,
+            request_id: 2,
+            buffer_revision: 3,
+            buffer: String::new(),
+            cursor_byte: 0,
+            cwd: root.clone(),
+            shell: shell(ShellDialect::Posix),
+        };
+        let CompletionOutcome::Candidates { candidates, .. } =
+            generic_completion(&request, &AtomicBool::new(false))
+        else {
+            panic!("the local command paths should produce candidates");
+        };
+        assert_eq!(candidates[0].display, "zz-local-directory/");
+        assert_eq!(candidates[0].edit.replacement, "zz-local-directory/");
+        assert_eq!(candidates[1].display, "zz-local-executable");
+        assert_eq!(candidates[1].edit.replacement, "./zz-local-executable");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.display != "zz-local-regular-file"),
+            "a non-executable file is not a valid command"
+        );
+
+        fs::remove_dir_all(root).expect("completion temp directory should be removed");
     }
 
     #[test]
@@ -1544,6 +1768,16 @@ mod tests {
         assert_eq!(quote_token("~/a'b", ShellDialect::Fish), "~/'a\\'b'");
         assert_eq!(quote_token("~someone", ShellDialect::Posix), "'~someone'");
         assert_eq!(quote_token("%self", ShellDialect::Fish), "'%self'");
+        assert_eq!(quote_literal_token("~", ShellDialect::Posix), "'~'");
+        assert_eq!(
+            quote_literal_token("~/file", ShellDialect::Posix),
+            "'~/file'"
+        );
+        assert_eq!(quote_literal_token("~", ShellDialect::Fish), "'~'");
+        assert_eq!(
+            quote_literal_token("~/file", ShellDialect::Fish),
+            "'~/file'"
+        );
         assert_eq!(
             quote_token_for_role("if", ShellDialect::Fish, TokenRole::CommandName),
             "'if'"
