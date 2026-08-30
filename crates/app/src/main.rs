@@ -672,13 +672,11 @@ fn run_event_loop(
                 {
                     return Ok(());
                 }
-                Event::Paste(payload) => {
-                    if state.key_context() == KeyContext::CommandLine {
-                        state.clear_xmap();
-                        state.handle_command_line_input(CommandLineInput::Paste(payload))?;
-                    }
-                    // Outside command-line mode paste is intentionally discarded as one event.
+                Event::Paste(payload) if state.key_context() == KeyContext::CommandLine => {
+                    state.clear_xmap();
+                    state.handle_command_line_input(CommandLineInput::Paste(payload))?;
                 }
+                // Outside command-line mode paste is intentionally discarded as one event.
                 _ => {}
             }
         }
