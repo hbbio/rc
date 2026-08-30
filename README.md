@@ -1,79 +1,77 @@
 # rust commander (rc)
 
-![Rust Commander dual-pane terminal interface](https://raw.githubusercontent.com/hbbio/rc/main/doc/rc.png)
+![Rust Commander dual-pane terminal interface](https://raw.githubusercontent.com/hbbio/rc/main/assets/rc.png)
 
-*rust commander* is an in-progress Rust TUI file manager inspired by GNU Midnight
-Commander. I'm already using it as a daily driver and, even after 20 years of using `mc`,
-I find it improves over the original in multiple ways:
+*rust commander* is a Rust terminal file manager inspired by GNU Midnight
+Commander. It keeps the familiar dual-pane workflow and MC-style default
+keybindings while adding responsive background operations, a modal shell prompt,
+and fast directory navigation.
 
-- faster startup
-- async operations
-- better keybindings due to the removal of immediate shell
-- Quick CD is really quick (keybinding: `/`)
+## Features
 
-The goal is to provide mc-inspired behavior and keymaps, with a modern internal
-architecture that keeps the UI responsive while long operations run, without requiring a
-strict 1:1 reimplementation of every mc subsystem.
+### Panels and navigation
 
-## Current status
+- Two independent directory panels with Full, Brief, and Long layouts.
+- Per-panel sorting, reverse order, glob or regular-expression filters, hidden-file
+  control, and persisted configuration.
+- Tagging for batch operations, recursive selection totals, responsive Brief-mode
+  columns, and mouse selection or activation.
+- Quick view and file information in the passive panel.
+- Quick CD for exact paths, `~`, Unix `~user`, `cd -`, and ranked
+  case-insensitive directory search.
+- Directory tree navigation with static or dynamic movement, incremental search,
+  subtree rescan, and subtree forgetting.
+- A labeled, persistent directory hotlist with add, edit, remove, and quick-add.
 
-This repository is actively developed with AI assistance but human oversight and already
-usable for core workflows.
+### Files and jobs
 
-Implemented milestones:
+- Copy, move, rename, mkdir, and delete for individual or tagged entries.
+- Background execution with progress, cancellation, overwrite policies, and a jobs
+  screen.
+- Metadata preservation, symlink-aware operations, validation against recursive
+  destinations, and rollback when an overwrite fails.
+- Incremental, cancelable directory refreshes that preserve selection and tags.
 
-- Milestone 0: workspace skeleton, app loop, tracing, CLI
-- Milestone 1: dual panels, navigation, sorting, tagging, dialogs
-- Milestone 2: copy/move/mkdir/delete with background jobs, progress, overwrite
-  policies, and cancellation
-- Milestone 3: read-only viewer with search, goto, wrap, syntax highlighting
-- Milestone 4: complete find workflow, directory tree, labeled hotlist, external/find
-  panelize, Quick CD, mouse interaction, and core Left/Right panel controls
-- Settings overhaul (partial): mc-shaped Options menu, typed settings model, Save setup
-  persistence
-- External editor workflow: deterministic resolution, terminal suspend/resume, command
-  templates
-- Product direction update: external-editor-first workflow, command-based diff output,
-  optional FTP/SFTP support
-- Deliberate shell-key policy: there is no always-live shell input, so file-manager
-  keys remain available; `/` opens Quick CD and `>` is reserved for a future explicit
-  shell-command prompt
+### Find and panelize
 
-Recent Milestone 4 and reliability progress:
+- Filename search with shell patterns or regular expressions.
+- Optional content search, whole-word matching, ignored directories, pause,
+  cancellation, and bounded partial-result reporting.
+- Find results can be opened directly or placed into a panel.
+- External panelize streams command output into a virtual panel and supports named,
+  persistent presets and per-panel result history.
 
-- Find compiles glob or regular-expression matchers once per search, supports optional
-  whole-word content matching and ignored directories, streams stable selections, and reports
-  truncation and bounded read errors distinctly from cancellation or failure.
-- Tree scanning is iterative, cancellation-aware, request-correlated, sorted in preorder, and
-  indexed for parent/child/subtree operations. Static/dynamic navigation, incremental search,
-  rescan/forget, and file operations are complete.
-- Hotlist entries persist editable labels and paths with legacy migration, duplicate/path
-  validation, optional deletion confirmation, and `Ctrl-X H` quick-add.
-- External panelize uses named presets, bounded adaptive streaming, exact-job cancellation, and
-  per-panel result history; find results use the same virtual-panel layer.
-- Quick CD supports quoted relative/absolute paths, `~`, Unix `~user`, and per-panel
-  `cd -` history. Arbitrary case-insensitive substrings search directories from the
-  current directory, home, and filesystem root in a bounded, cancelable background scan;
-  ranked results stream into an arrow-selectable list.
-- Find results, tree, hotlist, and panelize preset lists support click selection and double-click
-  activation from a renderer-shared hit-test layout.
-- Left/Right menus provide targeted File listing, Quick view, Info, Tree, Panelize, and Rescan
-  actions; persisted Full/Brief/Long formats, complete sort fields, and glob/regex filters are
-  independent for each panel.
-- Quick view uses cancelable request-correlated background reads. Listing filters preserve hidden
-  tags and selection where possible, and reuse cached panelized results instead of rerunning a
-  command.
-- Tagged selection totals use cancelable background traversal and include complete directory
-  contents, while overlapping trees are counted once and unreadable entries are reported as a
-  partial total.
+### Viewer and external programs
 
-The remaining inactive Left/Right entries are explicitly later work: user-defined listing
-formats in Milestone 5, FTP/SFTP in Milestone 8, Shell links in Milestone 9, and lossless legacy
-filename transcoding in Milestone 10.
+- Internal text and hex viewer with syntax highlighting, search in both directions,
+  goto, wrapping, and bounded previews for large files.
+- External editing through a configured command, `$EDITOR`, `$VISUAL`, or
+  detected editors (`hx`, `nvim`, `vim`, `vi`, `emacs`).
+- Executables run in the terminal; documents open with the operating system's
+  configured application and fall back to the internal viewer when needed.
+- Terminal state is restored around foreground programs and after fatal errors.
 
-Planned next major milestones include `mc.ext.ini`, user menu, command-based diff
-integration (`difftastic`/`diff`), optional remote VFS, and subshell integration.
-See [doc/roadmap.md](doc/roadmap.md).
+### Unix command line
+
+- `>` opens a modal prompt in the active panel directory.
+- Fish-aware or generic completion, live prefix filtering, bounded history, and
+  draft preservation.
+- Successful literal `cd` commands refresh and synchronize the active panel.
+- `Alt-Enter` / `Ctrl-Enter` inserts the selected name,
+  `Ctrl-Shift-Enter` inserts its full path, and `Ctrl-X t` /
+  `Ctrl-X Ctrl-T` inserts tagged names from either panel.
+- Panel-derived arguments are quoted literally for the configured shell.
+- The bottom hint bar switches to prompt actions, and `F1` opens contextual
+  command-line help without discarding the draft.
+
+### Configuration and interface
+
+- MC-style top menus, contextual help, mouse support, and a parsed
+  `mc.default.keymap` with user overrides.
+- Bundled MC skins plus custom and system skin discovery.
+- Typed settings for layout, panels, confirmations, appearance, display, shell,
+  and command history.
+- Atomic settings persistence and terminal-safe tracing.
 
 ## Installation
 
@@ -82,142 +80,140 @@ Requirements:
 - Rust 1.88.0 or newer
 - A terminal with ANSI support
 
-Install Rust Commander from [`crates.io`](https://crates.io/crates/rust-commander):
+Install from [crates.io](https://crates.io/crates/rust-commander):
 
 ```bash
 cargo install rust-commander --locked
 ```
 
-Then launch it with:
+The package is named `rust-commander`; the installed executable is `rc`.
 
-```bash
-rc
-```
-
-The package is named `rust-commander`; the installed executable is intentionally named
-`rc`.
-
-To build and run from a local checkout instead:
+Run a local checkout with:
 
 ```bash
 cargo run -p rust-commander --locked
 ```
 
-Optional arguments:
+Useful launch options:
 
 ```bash
 rc --path /some/start/dir --tick-rate-ms 200
-```
-
-Select an `mc` skin:
-
-```bash
 rc --skin modarin256
 rc --skin julia256 --skin-dir /path/to/mc/skins
 ```
 
-`rc` embeds its bundled original skins in the binary and also discovers custom and system
-skins in locations such as `/usr/share/mc/skins` and Homebrew paths.
+## Settings
 
-## Settings and setup
+The Options menu configures layout, panels, confirmations, appearance, display,
+and setup persistence.
 
-- Options menu now follows MC categories: `Configuration`, `Layout`, `Panel options`,
-  `Confirmation`, `Appearance`, `Display bits`, `Learn keys`, `Virtual FS`, and
-  `Save setup`.
+Settings use this precedence:
 
-- Settings are loaded with deterministic precedence: built-in defaults -> persisted
-  config -> environment overrides -> CLI flags.
+```text
+built-in defaults -> persisted configuration -> environment -> CLI
+```
 
-- `Save setup` persists to:
-  - `~/.config/rc/settings.ini` for rc-owned settings.
-  - `~/.config/mc/ini` for MC-compatible skin key.
+`Save setup` writes rc-owned settings to `~/.config/rc/settings.ini` and the
+MC-compatible skin choice to `~/.config/mc/ini`.
 
-- Skin discovery uses ordered search roots: custom configured dirs, then bundled/system
-  MC skin directories.
+Runtime tracing is written to `~/.config/rc/rc.log`. Set `RC_LOG_FILE` to use
+another path and `RUST_LOG` to change the default `warn` filter. The log is
+kept away from the terminal so diagnostics cannot corrupt the alternate-screen
+interface.
 
-## Key controls (current defaults)
+## Default controls
 
-Main file manager:
+### File manager
 
-- `Tab`: switch active panel
-- `Enter`: open a directory, run an executable in the terminal, or open a document with
-  the operating system's configured application; falls back to the internal viewer when
-  no default application or desktop launcher is available
-- `F3`: open the selected file in the internal viewer
-- `F4`: edit file using `editor_command`, `$EDITOR`, `$VISUAL`, or PATH probes (`hx`,
-  `nvim`, `vim`, `vi`, `emacs`)
-- `Space` / `Insert` / `Ctrl-T`: toggle selected item
-- `Backspace`: go to parent directory
-- `/` or `Alt-C`: Quick CD; enter an exact path (`~`, Unix `~user`, relative,
-  absolute, or `-` for previous) or any substring, then choose ranked matches with
-  `Up`/`Down`
-- `>`: reserved for a future explicit shell-command prompt; rc has no always-live shell
-  input
-- `F2`: reserved for the MC-compatible user menu coming in Milestone 5
-- `F5` copy, `F6` rename/move, `F7` mkdir, `F8` delete
-- `Ctrl-J`: open jobs screen
-- `Alt-J`: cancel latest/selected job
-- `Alt-F`, `M-?`, `Ctrl-/`: open find dialog
-- `Alt-T`: open tree
-- `Alt-H`: open hotlist
-- `Alt-P` / `Ctrl-P` or `Ctrl-X` then `!`: open external panelize
-- `F9`: open menus; Left/Right configure either panel's view, format, sort, and filter
-- `Ctrl-X i` / `Ctrl-X q`: show Info / Quick view in the passive panel
-- `Alt-Shift-T`: cycle Full, Brief, and Long formats on the active panel
-- `Left` / `Right`: move across responsive columns in Brief format
-- `Shift-F6` / `Shift-F8`: cycle sort field / toggle reverse order
-- `q` / `Esc`: quit
+| Keys | Action |
+| --- | --- |
+| `Tab` | Switch active panel |
+| `Enter` | Enter a directory, run an executable, or open a document |
+| `Backspace` | Go to the parent directory |
+| `Space` / `Insert` / `Ctrl-T` | Toggle the selected entry |
+| `/` / `Alt-C` | Open Quick CD |
+| `>` | Open the Unix command line |
+| `F3` | View the selected file internally |
+| `F4` | Edit with the configured external editor |
+| `F5` / `F6` / `F7` / `F8` | Copy / move or rename / mkdir / delete |
+| `Ctrl-J` / `Alt-J` | Open jobs / cancel the latest or selected job |
+| `Alt-F` / `Alt-?` / `Ctrl-/` | Find files |
+| `Alt-T` | Open the directory tree |
+| `Alt-H` | Open the directory hotlist |
+| `Alt-P` / `Ctrl-P` / `Ctrl-X !` | Open external panelize |
+| `Ctrl-X i` / `Ctrl-X q` | Show Info / Quick view in the passive panel |
+| `Alt-Shift-T` | Cycle Full, Brief, and Long panel layouts |
+| `Shift-F6` / `Shift-F8` | Cycle sort field / reverse sort order |
+| `F9` | Open the menu bar |
+| `q` / `Esc` / `F10` | Quit |
 
-On Unix, rc gives an executed command its own foreground terminal process group. On Windows, it
-temporarily handles console-control events in the parent while the child retains its normal
-interrupt behavior. In both cases, `Ctrl-C` interrupts the command, then rc restores its terminal
-and resumes. Linux desktop opens use the portal when available; accepted legacy launchers are
-reaped independently and are never terminated when rc exits.
+### Command line
 
-Milestone 4 screens:
+| Keys | Action |
+| --- | --- |
+| `Tab` / `Shift-Tab` | Complete and cycle candidates |
+| `Up` / `Down` | Browse command history |
+| `Enter` | Accept a completion or run the command |
+| `Alt-Enter` / `Ctrl-Enter` | Insert the active panel's selected name |
+| `Ctrl-Shift-Enter` | Insert the selected entry's full path |
+| `Ctrl-X t` | Insert active-panel tagged names, or its selected name |
+| `Ctrl-X Ctrl-T` | Insert passive-panel tagged names, or its selected name |
+| `F1` | Open command-line help |
+| `Esc` | Return to the panels while preserving the draft |
 
-- Find results: `F4` search again, `F5` panelize, `F6` pause/continue, `Alt-J` cancel
-  the exact search.
-- Tree: arrows navigate, `F2` rescan, `F3` forget subtree, `F4` static/dynamic mode,
-  `F5`/`F6`/`F7`/`F8` copy/move/mkdir/delete.
-- Hotlist: `a` add, `e`/`F4` edit, `d`/`Delete` remove, `Enter` open.
-- Panelize presets: `Tab` custom command, `F2` add, `F4` edit, `F8` remove,
-  `Enter` run. The side-panel `Panelize` menu entry restores that panel's latest results.
-- Mouse: click a result/list entry to select it; double-click to open or run it.
+### Find, tree, hotlist, and panelize
 
-Viewer:
+- Find results: `F4` searches again, `F5` panelizes, `F6`
+  pauses or continues, and `Alt-J` cancels the search.
+- Tree: arrows navigate; `F2` rescans, `F3` forgets a subtree, `F4`
+  changes navigation mode, and `F5`–`F8` perform file operations.
+- Hotlist: `a` adds, `e` / `F4` edits, `d` / `Delete` removes,
+  and `Enter` opens.
+- Panelize presets: `Tab` selects custom input, `F2` adds, `F4`
+  edits, `F8` removes, and `Enter` runs.
 
-- `F7` / `Ctrl-S`: search
-- `Shift-F7`: search backward
-- `n` / `Shift-n`: continue search forward/backward
-- `g` / `Alt-L`: goto
-- `w`: toggle wrap
-- `h`: toggle hex/text mode
-- `Esc` / `q` / `F10`: close viewer
+### Viewer
 
-Notes:
+| Keys | Action |
+| --- | --- |
+| `F7` / `Ctrl-S` | Search forward |
+| `Shift-F7` | Search backward |
+| `n` / `Shift-N` | Continue forward / backward |
+| `g` / `Alt-L` | Go to a line or offset |
+| `w` | Toggle wrapping |
+| `h` | Toggle text / hex mode |
+| `Esc` / `q` / `F10` | Close |
 
-- Default bindings are loaded from `crates/core/assets/mc.default.keymap`.
-- Common macOS Option-symbol variants are normalized for keymap matching.
+Default bindings live in
+`crates/core/assets/mc.default.keymap`. Common macOS Option-symbol variants are
+normalized before keymap matching.
+
+## Platform behavior
+
+The modal command line is available on Unix. Foreground commands receive their
+own terminal process group so `Ctrl-C` interrupts the command without terminating
+rc. Windows foreground programs retain normal console interrupt behavior while rc
+temporarily handles control events in the parent.
+
+Linux desktop opens prefer the desktop portal. Accepted legacy launchers are reaped
+independently and are not terminated when rc exits.
 
 ## Project layout
 
-- `crates/app` (`rust-commander`): terminal app entrypoint, event loop, input normalization
-- `crates/core` (`rust-commander-core`): domain model, commands, routes, operations, jobs
-- `crates/ui` (`rust-commander-ui`): ratatui rendering and bundled skin support
-- `crates/shell` (`rust-commander-shell`): cancelable process backend primitives
-- `doc/roadmap.md`: feature plan and milestone breakdown
-- `doc/architecture/`: bounded contexts, crate contracts, ownership map
-- `doc/adr/`: architecture decision records
+- `crates/app` (`rust-commander`): terminal lifecycle, event loop, and input
+  normalization
+- `crates/core` (`rust-commander-core`): state, commands, routes, jobs, and
+  filesystem workflows
+- `crates/platform` (`rust-commander-platform`): platform-specific terminal and
+  process integration
+- `crates/ui` (`rust-commander-ui`): Ratatui rendering and skin support
+- `crates/shell` (`rust-commander-shell`): shell selection, completion, and
+  cancelable process primitives
+- [ROADMAP.md](https://github.com/hbbio/rc/blob/main/ROADMAP.md): remaining product work
 
 ## Development
 
-Runtime tracing is written to `~/.config/rc/rc.log` instead of the terminal so
-diagnostics cannot corrupt the alternate-screen UI. Set `RC_LOG_FILE` to use a
-different path and `RUST_LOG` to change the default `warn` filter. Logs at or
-above 8 MiB are reset on the next startup.
-
-Run baseline checks locally:
+Run the same baseline checks used by CI:
 
 ```bash
 cargo fmt --all -- --check
@@ -225,31 +221,11 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 ```
 
-Additional local equivalents of CI policy/perf checks (requires extra cargo tools):
-
-```bash
-cargo +1.88.0 check --workspace --all-targets --locked
-cargo nextest run --workspace --all-targets --all-features --locked
-./scripts/validate_rust_advisory_waivers.sh
-cargo deny check bans licenses sources
-./scripts/run_cargo_deny.sh \
-  --manifest-path Cargo.toml --all-features --locked \
-  check --config deny.toml advisories
-./scripts/verify_release_packages.sh
-cargo +nightly udeps --workspace --all-targets --all-features --locked
-mkdir -p target/coverage
-cargo llvm-cov --workspace --all-targets --all-features --locked --json --output-path target/coverage/llvm-cov.json
-./scripts/coverage_trend.sh target/coverage/llvm-cov.json .github/coverage-baseline.json
-```
-
-CI runs all required gates on pushes and pull requests via:
-
-- `.github/workflows/ci.yml`
-- `.github/workflows/rust-security.yml`, which also runs weekly against the latest RustSec
-  advisory database
+Security, dependency-policy, coverage, and release-package checks live in
+`scripts/` and `.github/workflows/`.
 
 ## License
 
-GPL-3.0-or-later, as this project is derived from the original
-[midnight commander](https://github.com/MidnightCommander/mc).
-See [LICENSE](LICENSE) for the complete terms.
+GPL-3.0-or-later, as the project derives from
+[Midnight Commander](https://github.com/MidnightCommander/mc). See
+[LICENSE](LICENSE) for the complete terms.
