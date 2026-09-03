@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::*;
@@ -270,6 +270,47 @@ impl AppState {
 
     pub fn refresh_active_panel(&mut self) {
         self.queue_panel_refresh(self.active_panel);
+    }
+
+    pub fn refresh_panels_in_directory(&mut self, cwd: &Path) {
+        let panels = [ActivePanel::Left, ActivePanel::Right];
+        let target_panels = panels.map(|panel| self.panels[panel.index()].cwd == cwd);
+        let canonical_cwd = panels
+            .into_iter()
+            .zip(target_panels)
+            .filter(|(_, is_target)| *is_target)
+            .find_map(|(panel, _)| {
+                self.panels[panel.index()]
+                    .canonical_cwd()
+                    .map(Path::to_path_buf)
+            });
+        let target_identity_pending = panels
+            .into_iter()
+            .zip(target_panels)
+            .filter(|(_, is_target)| *is_target)
+            .any(|(panel, _)| {
+                let panel_state = &self.panels[panel.index()];
+                panel_state.canonical_cwd().is_none() && self.panel_refresh_job_id(panel).is_some()
+            });
+        let matching_panels = panels.map(|panel| {
+            let panel_state = &self.panels[panel.index()];
+            panel_state.cwd == cwd
+                // Directory refreshes and identity-only jobs both temporarily clear the
+                // canonical identity. Treat an unresolved side as a possible alias so a result
+                // started before the command cannot leave either panel stale.
+                || target_identity_pending
+                || (panel_state.canonical_cwd().is_none()
+                    && self.panel_refresh_job_id(panel).is_some())
+                || canonical_cwd.as_ref().is_some_and(|canonical_cwd| {
+                    panel_state.canonical_cwd() == Some(canonical_cwd.as_path())
+                })
+        });
+
+        for (panel, matches_directory) in panels.into_iter().zip(matching_panels) {
+            if matches_directory {
+                self.queue_panel_refresh(panel);
+            }
+        }
     }
 
     pub fn refresh_panels(&mut self) {

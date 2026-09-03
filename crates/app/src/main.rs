@@ -942,7 +942,7 @@ fn dispatch_pending_foreground_shell_requests(
             .map(exit_status_number)
             .map_err(|error| sanitize_display_field(&error.to_string()));
         state.finish_foreground_shell_request(activation_id, result);
-        state.refresh_active_panel();
+        state.refresh_panels_in_directory(&request.cwd);
     }
 }
 
