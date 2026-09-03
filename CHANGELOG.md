@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Added `Ctrl-X y` to copy the active selected entry's full path to the terminal
+  clipboard via OSC 52.
+
 ## [0.2.0] - 2026-08-30
 
 ### Added

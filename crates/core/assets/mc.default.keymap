@@ -76,6 +76,7 @@ PutCurrentPath = p
 PutOtherPath = ctrl-p
 PutCurrentTagged = t
 PutOtherTagged = ctrl-t
+CopySelectedPath = y
 PutCurrentLink = r
 PutOtherLink = ctrl-r
 

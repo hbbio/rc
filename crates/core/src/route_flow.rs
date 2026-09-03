@@ -19,6 +19,7 @@ impl AppState {
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged
             | AppCommand::PutOtherTagged => self.put_panel_files_on_command_line(command),
+            AppCommand::CopySelectedPath => self.copy_selected_path_to_clipboard(),
             AppCommand::OpenMenuBar => self.open_menu_bar(0),
             AppCommand::OpenMenuBarAt(index) => self.open_menu_bar(index),
             AppCommand::CloseMenu => self.close_menu(),

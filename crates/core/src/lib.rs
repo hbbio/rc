@@ -137,6 +137,7 @@ pub enum AppCommand {
     PutCurrentFullSelected,
     PutCurrentTagged,
     PutOtherTagged,
+    CopySelectedPath,
     CloseHelp,
     OpenUserMenu,
     OpenMenuBar,
@@ -366,6 +367,7 @@ impl AppCommand {
             | Self::PutCurrentFullSelected
             | Self::PutCurrentTagged
             | Self::PutOtherTagged
+            | Self::CopySelectedPath
             | Self::CloseHelp
             | Self::OpenUserMenu
             | Self::OpenMenuBar
@@ -2034,6 +2036,11 @@ pub struct ExternalExecuteRequest {
     pub cwd: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardCopyRequest {
+    pub text: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecuteSelectionResult {
     OpenedExternal,
@@ -2183,6 +2190,7 @@ pub struct AppState {
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     pending_external_execute_requests: Vec<ExternalExecuteRequest>,
+    pending_clipboard_copy_requests: Vec<ClipboardCopyRequest>,
     panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
     previous_panel_directories: [Option<PathBuf>; 2],
     quick_cd_search: QuickCdSearchWorkflow,

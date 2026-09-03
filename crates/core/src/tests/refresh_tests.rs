@@ -1,5 +1,247 @@
 use super::*;
 
+#[test]
+fn directory_refresh_updates_both_panels_showing_the_shell_working_directory() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-shared-directory-{stamp}"));
+    fs::create_dir_all(&root).expect("refresh fixture should be creatable");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+
+    app.refresh_panels_in_directory(&root);
+
+    assert!(
+        app.panel_refresh_job_id_at(ActivePanel::Left.index())
+            .is_some()
+    );
+    assert!(
+        app.panel_refresh_job_id_at(ActivePanel::Right.index())
+            .is_some(),
+        "the passive panel must refresh when it shows the shell working directory"
+    );
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[test]
+fn directory_refresh_leaves_a_panel_showing_another_directory_untouched() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-independent-directory-{stamp}"));
+    let other = root.join("other");
+    fs::create_dir_all(&other).expect("refresh fixture should be creatable");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.panels[ActivePanel::Right.index()] =
+        PanelState::new(other).expect("other panel should initialize");
+
+    app.refresh_panels_in_directory(&root);
+
+    assert!(
+        app.panel_refresh_job_id_at(ActivePanel::Left.index())
+            .is_some()
+    );
+    assert!(
+        app.panel_refresh_job_id_at(ActivePanel::Right.index())
+            .is_none()
+    );
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_refresh_supersedes_an_alias_refresh_while_its_identity_is_cleared() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-in-flight-alias-{stamp}"));
+    let real = root.join("real");
+    let alias = root.join("alias");
+    fs::create_dir_all(&real).expect("refresh fixture should be creatable");
+    fs::write(real.join("before.txt"), "before").expect("initial entry should be writable");
+    std::os::unix::fs::symlink(&real, &alias).expect("panel alias should be creatable");
+
+    let mut app = AppState::new(real.clone()).expect("app should initialize");
+    app.panels[ActivePanel::Right.index()].cwd = alias;
+    for panel in &mut app.panels {
+        panel.set_home_directory(Some(real.clone()));
+    }
+    app.refresh_panels();
+    drain_background(&mut app);
+    let canonical_real = fs::canonicalize(&real).expect("real directory should canonicalize");
+    assert_eq!(
+        app.panels[ActivePanel::Right.index()].canonical_cwd(),
+        Some(canonical_real.as_path()),
+        "precondition: the passive panel should resolve to the active directory"
+    );
+
+    app.queue_panel_refresh(ActivePanel::Right);
+    assert!(
+        app.panels[ActivePanel::Right.index()]
+            .canonical_cwd()
+            .is_none(),
+        "an in-flight refresh should temporarily clear the displayed identity"
+    );
+    let stale_job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            matches!(
+                &job.request,
+                JobRequest::RefreshPanel {
+                    panel: ActivePanel::Right,
+                    ..
+                }
+            )
+            .then_some(*job)
+        })
+        .expect("passive refresh should have been dispatched");
+    let stale_job_id = stale_job.id;
+    let JobRequest::RefreshPanel {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        filter,
+        request_id,
+        ..
+    } = stale_job.request
+    else {
+        unreachable!("the extracted job must be a panel refresh");
+    };
+    let stale_entries = read_entries_with_visibility(&cwd, sort_mode, true)
+        .expect("stale listing should be readable");
+    fs::write(real.join("after.txt"), "after").expect("shell mutation should be writable");
+
+    app.refresh_panels_in_directory(&real);
+
+    let replacement_job_id = app
+        .panel_refresh_job_id_at(ActivePanel::Right.index())
+        .expect("the passive alias should receive a replacement refresh");
+    assert_ne!(replacement_job_id, stale_job_id);
+    app.handle_background_event(BackgroundEvent::PanelRefreshed {
+        panel,
+        cwd,
+        source,
+        sort_mode,
+        filter,
+        request_id,
+        disk_usage: None,
+        result: Ok(panel_refresh_result(stale_entries)),
+    });
+    assert!(
+        app.panels[ActivePanel::Right.index()].loading,
+        "the superseded pre-command completion must be rejected"
+    );
+
+    drain_background(&mut app);
+    assert!(
+        app.panels[ActivePanel::Right.index()]
+            .entries
+            .iter()
+            .any(|entry| entry.name == "after.txt"),
+        "the replacement refresh should observe the shell mutation"
+    );
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_refresh_includes_real_path_while_alias_identity_job_is_in_flight() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-refresh-identity-only-alias-{stamp}"));
+    let real = root.join("real");
+    let alias = root.join("alias");
+    fs::create_dir_all(&real).expect("refresh fixture should be creatable");
+    fs::write(real.join("before.txt"), "before").expect("initial entry should be writable");
+    std::os::unix::fs::symlink(&real, &alias).expect("panel alias should be creatable");
+
+    let mut app = AppState::new(alias.clone()).expect("app should initialize");
+    app.panels[ActivePanel::Right.index()].cwd = real.clone();
+    for panel in &mut app.panels {
+        panel.set_home_directory(Some(real.clone()));
+    }
+    app.refresh_panels();
+    drain_background(&mut app);
+
+    app.queue_panel_identity_resolution(ActivePanel::Left);
+    assert!(
+        !app.active_panel().loading,
+        "identity-only resolution must not mark the panel as loading"
+    );
+    assert!(app.active_panel().canonical_cwd().is_none());
+    let identity_job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            let WorkerCommand::Run(job) = command else {
+                return None;
+            };
+            matches!(&job.request, JobRequest::ResolvePanelIdentity { .. }).then_some(*job)
+        })
+        .expect("identity-only job should have been dispatched");
+    let identity_job_id = identity_job.id;
+    let JobRequest::ResolvePanelIdentity {
+        panel,
+        cwd,
+        request_id,
+        ..
+    } = identity_job.request
+    else {
+        unreachable!("the extracted job must resolve panel identity");
+    };
+    fs::write(real.join("after.txt"), "after").expect("shell mutation should be writable");
+
+    app.refresh_panels_in_directory(&alias);
+
+    assert_ne!(
+        app.panel_refresh_job_id_at(ActivePanel::Left.index()),
+        Some(identity_job_id),
+        "the identity-only request should be superseded by a full refresh"
+    );
+    assert!(
+        app.panel_refresh_job_id_at(ActivePanel::Right.index())
+            .is_some(),
+        "the real-path panel must be refreshed while the alias identity is unresolved"
+    );
+    app.handle_background_event(BackgroundEvent::PanelIdentityResolved {
+        panel,
+        cwd,
+        request_id,
+        result: Ok(PanelPathIdentity {
+            canonical_cwd: Some(real.clone()),
+            canonical_home_directory: Some(real.clone()),
+        }),
+    });
+    assert!(
+        app.active_panel().loading,
+        "the superseded identity-only completion must not finish the replacement refresh"
+    );
+
+    drain_background(&mut app);
+    assert!(
+        app.panels[ActivePanel::Right.index()]
+            .entries
+            .iter()
+            .any(|entry| entry.name == "after.txt"),
+        "the real-path panel should observe the shell mutation"
+    );
+
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
 #[cfg(unix)]
 #[test]
 fn reread_invalidates_canonical_paths_and_observes_symlink_retarget() {

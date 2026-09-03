@@ -142,6 +142,7 @@ interface.
 | `Alt-H` | Open the directory hotlist |
 | `Alt-P` / `Ctrl-P` / `Ctrl-X !` | Open external panelize |
 | `Ctrl-X i` / `Ctrl-X q` | Show Info / Quick view in the passive panel |
+| `Ctrl-X y` | Copy the active selected entry's full path to the clipboard |
 | `Alt-Shift-T` | Cycle Full, Brief, and Long panel layouts |
 | `Shift-F6` / `Shift-F8` | Cycle sort field / reverse sort order |
 | `F9` | Open the menu bar |
@@ -158,6 +159,7 @@ interface.
 | `Ctrl-Shift-Enter` | Insert the selected entry's full path |
 | `Ctrl-X t` | Insert active-panel tagged names, or its selected name |
 | `Ctrl-X Ctrl-T` | Insert passive-panel tagged names, or its selected name |
+| `Ctrl-X y` | Copy the active selected entry's full path to the clipboard |
 | `F1` | Open command-line help |
 | `Esc` | Return to the panels while preserving the draft |
 
@@ -197,6 +199,9 @@ temporarily handles control events in the parent.
 
 Linux desktop opens prefer the desktop portal. Accepted legacy launchers are reaped
 independently and are not terminated when rc exits.
+
+Clipboard copying uses the OSC 52 terminal sequence. The terminal emulator and any
+intermediate multiplexer must allow OSC 52 clipboard writes.
 
 ## Project layout
 
