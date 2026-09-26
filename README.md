@@ -12,6 +12,9 @@ and fast directory navigation.
 ### Panels and navigation
 
 - Two independent directory panels with Full, Brief, and Long layouts.
+- Native filesystem notifications automatically refresh both panels and the open
+  directory tree, including changes made by other programs. Updates are coalesced
+  and scanned in the background while preserving selection and tags.
 - Per-panel sorting, reverse order, glob or regular-expression filters, hidden-file
   control, and persisted configuration.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
@@ -31,6 +34,15 @@ and fast directory navigation.
 - Metadata preservation, symlink-aware operations, validation against recursive
   destinations, and rollback when an overwrite fails.
 - Incremental, cancelable directory refreshes that preserve selection and tags.
+
+Automatic refresh uses FSEvents on macOS, inotify on Linux, and
+ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
+the tree only refreshes affected cached subtrees. Native notifications may be
+unavailable on network or virtual filesystems; use manual refresh there. Watch
+registration failures are reported in the status line and retried in the background.
+Writes to the active tracing log are excluded from automatic invalidations so
+refresh logging cannot trigger another refresh. Log creation, deletion, and
+renaming still update the panels.
 
 ### Find and panelize
 

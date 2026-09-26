@@ -34,6 +34,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 mod clipboard;
+mod filesystem_watch;
 mod runtime;
 
 use runtime::RuntimeBridge;
@@ -123,7 +124,7 @@ struct InputCompatibility {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings_paths = settings_io::settings_paths();
-    let tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
+    let mut tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
     if let Some(error) = init_tracing(tracing_log_path.as_deref())
         && let Some(path) = tracing_log_path.as_deref()
     {
@@ -131,6 +132,7 @@ fn main() -> Result<()> {
             "rc: failed to open tracing log '{}': {error}; logging is disabled",
             path.display()
         );
+        tracing_log_path = None;
     }
 
     let mut settings = settings_io::load_settings(&settings_paths).unwrap_or_else(|error| {
@@ -179,6 +181,7 @@ fn main() -> Result<()> {
         &keymap,
         Duration::from_millis(cli.tick_rate_ms),
         &skin_runtime,
+        tracing_log_path,
     )
 }
 
@@ -454,6 +457,7 @@ fn run_app(
     keymap: &Keymap,
     tick_rate: Duration,
     skin_runtime: &SkinRuntimeConfig,
+    tracing_log: Option<PathBuf>,
 ) -> Result<()> {
     let mut runtime = RuntimeBridge::spawn()?;
 
@@ -498,6 +502,7 @@ fn run_app(
         tick_rate,
         &mut runtime,
         skin_runtime,
+        tracing_log,
     );
     queue_deferred_save_before_shutdown(state, &mut runtime);
     let shutdown_result = runtime.shutdown();
@@ -608,12 +613,15 @@ fn run_event_loop(
     tick_rate: Duration,
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
+    tracing_log: Option<PathBuf>,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
     let mut mouse_click_tracker = MouseClickTracker::default();
+    let mut filesystem_watch = filesystem_watch::FilesystemWatch::spawn(tracing_log)?;
 
     loop {
         runtime.drain_events(state);
+        filesystem_watch.poll(state);
         state.poll_deferred_work();
         runtime.dispatch_pending_commands(state);
         state.expire_status_line();

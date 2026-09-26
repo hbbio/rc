@@ -6,6 +6,7 @@ pub(crate) struct PanelRefreshWorkflow {
     request_ids: [u64; 2],
     partial_entry_count: [usize; 2],
     selection_targets: [Option<PathBuf>; 2],
+    automatic: [bool; 2],
     next_request_id: u64,
 }
 
@@ -59,6 +60,7 @@ impl Default for PanelRefreshWorkflow {
             request_ids: [0; 2],
             partial_entry_count: [0; 2],
             selection_targets: [None, None],
+            automatic: [false; 2],
             next_request_id: 1,
         }
     }
@@ -72,6 +74,7 @@ impl PanelRefreshWorkflow {
         self.request_ids[panel_index] = request_id;
         self.partial_entry_count[panel_index] = 0;
         self.selection_targets[panel_index] = selection_target;
+        self.automatic[panel_index] = false;
         request_id
     }
 
@@ -114,6 +117,7 @@ impl PanelRefreshWorkflow {
         self.job_ids[panel_index] = None;
         self.partial_entry_count[panel_index] = 0;
         self.selection_targets[panel_index] = None;
+        self.automatic[panel_index] = false;
     }
 
     fn selection_target(&self, panel: ActivePanel) -> Option<PathBuf> {
@@ -192,6 +196,20 @@ impl PanelRefreshPostWorkflow {
 }
 
 impl AppState {
+    /// Refresh an invalidated directory without interrupting a scan or navigation.
+    /// False means the caller must retain the invalidation and retry once idle.
+    pub fn refresh_directory_if_idle(&mut self, panel: ActivePanel) -> bool {
+        if self.panels[panel.index()].source.is_panelized() {
+            return true;
+        }
+        if self.panel_refresh.job_id(panel).is_some() || self.panels[panel.index()].loading {
+            return false;
+        }
+        self.queue_panel_refresh(panel);
+        self.panel_refresh.automatic[panel.index()] = true;
+        true
+    }
+
     pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
         let panel_index = panel.index();
         if self.panels[panel_index].source.is_panelized() {
@@ -484,6 +502,11 @@ impl AppState {
         if !self.panel_refresh_is_current_request(panel, request_id) {
             return;
         }
+        // Keep the existing listing interactive until the complete automatic
+        // refresh arrives. Streaming replacements would move the cursor mid-scan.
+        if self.panel_refresh.automatic[panel.index()] {
+            return;
+        }
         let panel_state = &self.panels[panel.index()];
         let still_current = panel_state.cwd == cwd
             && panel_state.source == source
@@ -547,7 +570,13 @@ impl AppState {
         }
 
         let focus_target = self.panel_refresh_post.focus_target_for_panel(panel);
-        let selection_target = self.panel_refresh.selection_target(panel);
+        let selection_target = if self.panel_refresh.automatic[panel.index()] {
+            self.panels[panel.index()]
+                .selected_entry()
+                .map(|entry| entry.path.clone())
+        } else {
+            self.panel_refresh.selection_target(panel)
+        };
         let has_streamed_entries = !self.panel_refresh_is_first_chunk(panel);
         let refresh_failed = result.is_err();
         let mut clear_focus_target = false;

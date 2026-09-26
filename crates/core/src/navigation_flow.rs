@@ -789,6 +789,25 @@ impl AppState {
         }
     }
 
+    /// The open tree, including while an operation dialog is covering it.
+    pub fn directory_tree(&self) -> Option<&TreeState> {
+        self.routes.iter().rev().find_map(|route| match route {
+            Route::Tree(tree) => Some(tree.as_ref()),
+            _ => None,
+        })
+    }
+
+    pub fn refresh_tree_if_idle(&mut self, directories: &[PathBuf]) -> bool {
+        if self
+            .directory_tree()
+            .is_some_and(|tree| tree.scan_job_id().is_some())
+        {
+            return false;
+        }
+        self.rescan_tree_for_impacts(directories);
+        true
+    }
+
     fn queue_tree_rescan(&mut self, plan: TreeRescanPlan, status: String) {
         let pending_job = self.routes.iter().rev().find_map(|route| match route {
             Route::Tree(tree) => tree.scan_job_id(),

@@ -26,6 +26,7 @@ tokio-util = "0.7"
 unicode-width = "0.1.14"
 shlex = "1.3"
 open = { version = "5.4.1", features = ["shellexecute-on-windows"] }
+notify = "8.2"
 futures-util = "0.3"
 getrandom = "0.4"
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }

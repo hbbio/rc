@@ -216,6 +216,7 @@ pub(crate) struct TreeScanCompletion {
 #[derive(Clone, Debug)]
 pub struct TreeState {
     root: PathBuf,
+    entries_revision: u64,
     entries: Vec<TreeEntry>,
     cursor: usize,
     load_state: TreeLoadState,
@@ -231,6 +232,7 @@ impl TreeState {
         let entries = vec![TreeEntry::new(root.clone(), 0)];
         let mut tree = Self {
             root: root.clone(),
+            entries_revision: 0,
             entries,
             cursor: 0,
             load_state: TreeLoadState::Loading,
@@ -258,6 +260,11 @@ impl TreeState {
 
     pub fn entries(&self) -> &[TreeEntry] {
         &self.entries
+    }
+
+    /// Revision of the cached entries, unaffected by cursor or search changes.
+    pub fn entries_revision(&self) -> u64 {
+        self.entries_revision
     }
 
     pub fn load_state(&self) -> &TreeLoadState {
@@ -416,6 +423,7 @@ impl TreeState {
             }
         }
 
+        self.entries_revision = self.entries_revision.wrapping_add(1);
         self.index = TreeIndex::build(&self.entries);
         let fallback_path = root.to_path_buf();
         self.cursor = selected_path
@@ -648,6 +656,7 @@ impl TreeState {
     }
 
     fn rebuild_index_and_projection(&mut self) {
+        self.entries_revision = self.entries_revision.wrapping_add(1);
         self.index = TreeIndex::build(&self.entries);
         self.cursor = self.cursor.min(self.entries.len().saturating_sub(1));
         self.rebuild_projection();

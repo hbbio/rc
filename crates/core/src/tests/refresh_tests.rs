@@ -1,6 +1,136 @@
 use super::*;
 
 #[test]
+fn automatic_refresh_waits_for_scans_and_preserves_live_selection_and_tags() {
+    let root = env::temp_dir().join(format!(
+        "rc-auto-refresh-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    for name in ["a", "b", "c"] {
+        fs::write(root.join(name), name).unwrap();
+    }
+    let mut app = AppState::new(root.clone()).unwrap();
+    app.refresh_panels();
+    drain_background(&mut app);
+    let panel = ActivePanel::Left;
+    app.panels[0].cursor = 1;
+    app.panels[0].tagged.insert(root.join("b"));
+    assert!(app.refresh_directory_if_idle(panel));
+    let pending = app.take_pending_worker_commands();
+    let request_id = pending
+        .iter()
+        .find_map(|command| match command {
+            WorkerCommand::Run(job) => match job.request {
+                JobRequest::RefreshPanel { request_id, .. } => Some(request_id),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    app.restore_pending_worker_commands(pending);
+    let job_id = app.panel_refresh_job_id(panel);
+    assert!(!app.refresh_directory_if_idle(panel));
+    assert_eq!(app.panel_refresh_job_id(panel), job_id);
+
+    app.handle_panel_entries_chunk(PanelEntriesChunk {
+        panel,
+        cwd: root.clone(),
+        source: PanelListingSource::Directory,
+        sort_mode: app.panels[0].sort_mode,
+        filter: app.panels[0].filter.clone(),
+        request_id,
+        entries: vec![FileEntry::file(
+            String::from("partial"),
+            root.join("partial"),
+            0,
+            None,
+        )],
+    });
+    assert!(
+        app.panels[0]
+            .entries
+            .iter()
+            .any(|entry| entry.path == root.join("b"))
+    );
+    assert!(
+        !app.panels[0]
+            .entries
+            .iter()
+            .any(|entry| entry.name == "partial")
+    );
+    app.panels[0].cursor = app.panels[0]
+        .entries
+        .iter()
+        .position(|entry| entry.path == root.join("c"))
+        .unwrap();
+    fs::write(root.join("aa"), "new entry before the selection").unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.panels[0].selected_entry().unwrap().path, root.join("c"));
+    assert!(app.panels[0].tagged.contains(&root.join("b")));
+    assert!(
+        app.panels[0]
+            .entries
+            .iter()
+            .any(|entry| entry.path == root.join("aa"))
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn automatic_refresh_does_not_execute_panelize_commands() {
+    let root = env::temp_dir();
+    let mut app = AppState::new(root.clone()).unwrap();
+    app.panels[0].source = PanelListingSource::Panelize {
+        command: String::from("must not run"),
+    };
+    assert!(app.refresh_directory_if_idle(ActivePanel::Left));
+    assert!(app.take_pending_worker_commands().is_empty());
+}
+
+#[test]
+fn automatic_tree_refresh_waits_for_an_active_scan_then_rescans_the_affected_subtree() {
+    let root = env::temp_dir().join(format!(
+        "rc-auto-tree-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let child = root.join("child");
+    fs::create_dir_all(&child).unwrap();
+    fs::create_dir(root.join("sibling")).unwrap();
+    let mut app = AppState::new(root.clone()).unwrap();
+    app.apply(AppCommand::OpenTree).unwrap();
+    let original_job = app.directory_tree().unwrap().scan_job_id();
+    assert!(!app.refresh_tree_if_idle(std::slice::from_ref(&child)));
+    assert_eq!(app.directory_tree().unwrap().scan_job_id(), original_job);
+    drain_background(&mut app);
+    fs::create_dir(child.join("new")).unwrap();
+    assert!(app.refresh_tree_if_idle(std::slice::from_ref(&child)));
+    let pending = app.take_pending_worker_commands();
+    assert!(
+        pending
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Run(job)
+        if matches!(&job.request, JobRequest::BuildTree { root, .. } if root == &child)))
+    );
+    app.restore_pending_worker_commands(pending);
+    drain_background(&mut app);
+    let tree = app.directory_tree().unwrap();
+    assert!(tree.entries().iter().any(|e| e.path == child.join("new")));
+    assert!(
+        tree.entries()
+            .iter()
+            .any(|e| e.path == root.join("sibling"))
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn directory_refresh_updates_both_panels_showing_the_shell_working_directory() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
