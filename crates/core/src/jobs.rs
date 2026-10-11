@@ -1379,7 +1379,7 @@ fn copy_path(
     if metadata.is_dir() {
         validate_directory_destination_not_inside_source(source, destination, "copy")?;
 
-        if destination.exists() {
+        if path_entry_exists(destination)? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(
@@ -1402,7 +1402,7 @@ fn copy_path(
         return Ok(());
     }
 
-    if destination.exists() {
+    if path_entry_exists(destination)? {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
@@ -1427,13 +1427,14 @@ fn copy_file(
     destination: &Path,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
-    let staged_destination = destination_staging_path(destination);
+    let mut source_file = fs::File::open(source)?;
+    let staged_destination = destination_staging_path(destination)?;
+    // Only clean up a staging entry after we have successfully created it.
+    let mut destination_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_destination)?;
     let write_result = (|| -> io::Result<()> {
-        let mut source_file = fs::File::open(source)?;
-        let mut destination_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged_destination)?;
         let mut buffer = [0_u8; COPY_BUFFER_SIZE];
 
         loop {
@@ -1448,6 +1449,7 @@ fn copy_file(
         destination_file.flush()?;
         Ok(())
     })();
+    drop(destination_file);
     if let Err(error) = write_result {
         let _ = fs::remove_file(&staged_destination);
         return Err(error);
@@ -1461,7 +1463,15 @@ fn copy_file(
     Ok(())
 }
 
-fn destination_staging_path(destination: &Path) -> PathBuf {
+fn path_entry_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn destination_staging_path(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
@@ -1470,8 +1480,8 @@ fn destination_staging_path(destination: &Path) -> PathBuf {
 
     for index in 1_usize.. {
         let candidate = parent.join(format!(".{file_name}.rc-stage-{index}"));
-        if !candidate.exists() {
-            return candidate;
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
         }
     }
 
@@ -1526,7 +1536,7 @@ fn resolve_destination(
     if source == destination {
         match overwrite {
             OverwritePolicy::Rename => {
-                destination = renamed_destination(&destination);
+                destination = renamed_destination(&destination)?;
             }
             OverwritePolicy::Overwrite | OverwritePolicy::Skip => {
                 progress.advance_totals(source, source_totals);
@@ -1535,10 +1545,10 @@ fn resolve_destination(
         }
     }
 
-    if destination.exists() {
+    if path_entry_exists(&destination)? {
         match overwrite {
             OverwritePolicy::Overwrite => {
-                let backup = destination_backup_path(&destination);
+                let backup = destination_backup_path(&destination)?;
                 fs::rename(&destination, &backup)?;
                 return Ok(Some(ResolvedDestination {
                     path: destination,
@@ -1550,7 +1560,7 @@ fn resolve_destination(
                 return Ok(None);
             }
             OverwritePolicy::Rename => {
-                destination = renamed_destination(&destination);
+                destination = renamed_destination(&destination)?;
             }
         }
     }
@@ -1561,7 +1571,7 @@ fn resolve_destination(
     }))
 }
 
-fn renamed_destination(destination: &Path) -> PathBuf {
+fn renamed_destination(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
@@ -1575,8 +1585,8 @@ fn renamed_destination(destination: &Path) -> PathBuf {
             format!("copy{index}")
         };
         let candidate = parent.join(format!("{file_name}.{suffix}"));
-        if !candidate.exists() {
-            return candidate;
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
         }
     }
 
@@ -1745,7 +1755,7 @@ impl ResolvedDestination {
         match operation_result {
             Ok(()) => remove_path(&backup),
             Err(operation_error) => {
-                if self.path.exists() {
+                if path_entry_exists(&self.path)? {
                     remove_path(&self.path)?;
                 }
                 fs::rename(&backup, &self.path)?;
@@ -1755,7 +1765,7 @@ impl ResolvedDestination {
     }
 }
 
-fn destination_backup_path(destination: &Path) -> PathBuf {
+fn destination_backup_path(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
@@ -1764,8 +1774,8 @@ fn destination_backup_path(destination: &Path) -> PathBuf {
 
     for index in 1_usize.. {
         let candidate = parent.join(format!(".{file_name}.rc-backup-{index}"));
-        if !candidate.exists() {
-            return candidate;
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
         }
     }
 
@@ -2550,6 +2560,114 @@ mod tests {
         assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
 
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_move_policies_handle_dangling_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_dir("dangling-destinations");
+        for moving in [false, true] {
+            for overwrite in [
+                OverwritePolicy::Skip,
+                OverwritePolicy::Rename,
+                OverwritePolicy::Overwrite,
+            ] {
+                let dir = root.join(format!("{moving}-{overwrite:?}"));
+                let destination_dir = dir.join("destination");
+                fs::create_dir_all(&destination_dir).unwrap();
+                let source = dir.join("file");
+                fs::write(&source, "source").unwrap();
+                let destination = destination_dir.join("file");
+                let alternate = destination_dir.join("file.copy");
+                let stage = destination_dir.join(".file.rc-stage-1");
+                let backup = destination_dir.join(".file.rc-backup-1");
+                for path in [&destination, &alternate, &stage, &backup] {
+                    symlink("missing", path).unwrap();
+                }
+                let request = if moving {
+                    JobRequest::Move {
+                        sources: vec![source.clone()],
+                        destination_dir: destination_dir.clone(),
+                        destination_names: None,
+                        overwrite,
+                    }
+                } else {
+                    JobRequest::Copy {
+                        sources: vec![source.clone()],
+                        destination_dir: destination_dir.clone(),
+                        overwrite,
+                    }
+                };
+                let mut manager = JobManager::new();
+                let (tx, rx) = mpsc::channel();
+                execute_worker_job(manager.enqueue(request), &tx);
+                assert!(matches!(
+                    recv_until_finished(&rx, &mut manager),
+                    JobEvent::Finished { result: Ok(()), .. }
+                ));
+                for path in [&alternate, &stage, &backup] {
+                    assert_eq!(fs::read_link(path).unwrap(), Path::new("missing"));
+                }
+                match overwrite {
+                    OverwritePolicy::Overwrite => {
+                        assert_eq!(fs::read_to_string(&destination).unwrap(), "source")
+                    }
+                    OverwritePolicy::Skip | OverwritePolicy::Rename => {
+                        assert_eq!(fs::read_link(&destination).unwrap(), Path::new("missing"));
+                        if overwrite == OverwritePolicy::Rename {
+                            assert_eq!(
+                                fs::read_to_string(destination_dir.join("file.copy2")).unwrap(),
+                                "source"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(
+                    source.exists(),
+                    !moving || overwrite == OverwritePolicy::Skip
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_candidates_propagate_metadata_errors() {
+        let root = make_temp_dir("destination-metadata-errors");
+        let parent = root.join("file");
+        fs::write(&parent, "not a directory").unwrap();
+        let destination = parent.join("child");
+        assert!(path_entry_exists(&destination).is_err());
+        assert!(renamed_destination(&destination).is_err());
+        assert!(destination_staging_path(&destination).is_err());
+        assert!(destination_backup_path(&destination).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_rollback_removes_partial_dangling_symlink() {
+        let root = make_temp_dir("dangling-rollback");
+        let destination = root.join("destination");
+        let backup = root.join("backup");
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("original"), "preserved").unwrap();
+        std::os::unix::fs::symlink("missing", &destination).unwrap();
+        let error = ResolvedDestination {
+            path: destination.clone(),
+            overwrite_backup: Some(backup),
+        }
+        .finish(Err(io::Error::other("copy failed")))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "copy failed");
+        assert_eq!(
+            fs::read_to_string(destination.join("original")).unwrap(),
+            "preserved"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
