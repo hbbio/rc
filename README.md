@@ -233,12 +233,12 @@ intermediate multiplexer must allow OSC 52 clipboard writes.
 
 ## Development
 
-Run the same baseline checks used by CI:
+With `cargo-nextest` installed, run the same baseline checks used by CI:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
+cargo nextest run --workspace --all-targets --all-features --locked
 ```
 
 Security, dependency-policy, coverage, and release-package checks live in
