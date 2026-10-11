@@ -132,6 +132,21 @@ impl ViewerState {
         &self.content
     }
 
+    /// Access a text line without scanning the preceding contents, even in hex mode.
+    pub fn text_line(&self, index: usize) -> Option<&str> {
+        let start = *self.line_offsets.get(index)?;
+        let end = self
+            .line_offsets
+            .get(index + 1)
+            .copied()
+            .unwrap_or(self.content.len());
+        let line = &self.content[start..end];
+        Some(match line.strip_suffix('\n') {
+            Some(line) => line.strip_suffix('\r').unwrap_or(line),
+            None => line,
+        })
+    }
+
     pub fn text_is_preview(&self) -> bool {
         self.text_is_preview
     }
@@ -507,6 +522,22 @@ mod tests {
                 assert_eq!(viewer.start_search(String::new(), direction), None);
                 assert_eq!(viewer.start_search("absent".into(), direction), None);
             }
+        }
+    }
+
+    #[test]
+    fn indexed_text_lines_match_string_lines() {
+        for content in ["", "\n", "a\r\nb\né\n", "a\r", "a\n\n"] {
+            let viewer = viewer(content.as_bytes());
+            let expected: Vec<_> = if content.is_empty() {
+                vec![""]
+            } else {
+                content.lines().collect()
+            };
+            for (index, line) in expected.iter().enumerate() {
+                assert_eq!(viewer.text_line(index), Some(*line));
+            }
+            assert_eq!(viewer.text_line(expected.len()), None);
         }
     }
 }
