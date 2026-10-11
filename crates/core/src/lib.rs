@@ -1264,12 +1264,14 @@ impl PanelState {
         self.mouse_viewport = None;
         self.entries = entries;
         // Filters are views: tags hidden by a filter must reappear when it is cleared.
-        if !self.filter.is_active() {
-            self.tagged.retain(|tag| {
-                self.entries
-                    .iter()
-                    .any(|entry| !entry.is_parent() && entry.path == *tag)
-            });
+        if !self.filter.is_active() && !self.tagged.is_empty() {
+            let paths: HashSet<&Path> = self
+                .entries
+                .iter()
+                .filter(|entry| !entry.is_parent())
+                .map(|entry| entry.path.as_path())
+                .collect();
+            self.tagged.retain(|tag| paths.contains(tag.as_path()));
         }
         if self.entries.is_empty() {
             self.cursor = 0;
