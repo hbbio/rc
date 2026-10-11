@@ -4,6 +4,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+use memchr::memmem;
+
 use crate::{FOUNDATION_SLO, JOB_CANCELED_MESSAGE, VIEWER_TEXT_PREVIEW_LIMIT_BYTES};
 
 const VIEWER_READ_CHUNK_BYTES: usize = 64 * 1024;
@@ -130,6 +132,21 @@ impl ViewerState {
         &self.content
     }
 
+    /// Access a text line without scanning the preceding contents, even in hex mode.
+    pub fn text_line(&self, index: usize) -> Option<&str> {
+        let start = *self.line_offsets.get(index)?;
+        let end = self
+            .line_offsets
+            .get(index + 1)
+            .copied()
+            .unwrap_or(self.content.len());
+        let line = &self.content[start..end];
+        Some(match line.strip_suffix('\n') {
+            Some(line) => line.strip_suffix('\r').unwrap_or(line),
+            None => line,
+        })
+    }
+
     pub fn text_is_preview(&self) -> bool {
         self.text_is_preview
     }
@@ -178,6 +195,8 @@ impl ViewerState {
     pub fn toggle_hex_mode(&mut self) {
         self.hex_mode = !self.hex_mode;
         self.scroll = self.scroll.min(self.line_count().saturating_sub(1));
+        // Raw bytes and lossy text do not necessarily share the same offsets.
+        self.last_search_match_offset = None;
     }
 
     pub(crate) fn start_search(
@@ -209,9 +228,14 @@ impl ViewerState {
                 .last_search_match_offset
                 .unwrap_or_else(|| self.current_line_offset()),
         };
+        let content = if self.hex_mode {
+            self.bytes.as_slice()
+        } else {
+            self.content.as_bytes()
+        };
         let found = match direction {
-            ViewerSearchDirection::Forward => find_forward_wrap(&self.content, query, start),
-            ViewerSearchDirection::Backward => find_backward_wrap(&self.content, query, start),
+            ViewerSearchDirection::Forward => find_forward_wrap(content, query.as_bytes(), start),
+            ViewerSearchDirection::Backward => find_backward_wrap(content, query.as_bytes(), start),
         }?;
 
         self.last_search_match_offset = Some(found);
@@ -352,28 +376,32 @@ fn should_default_to_hex_mode(bytes: &[u8]) -> bool {
     suspicious.saturating_mul(100) / sample.len() > 30
 }
 
-fn find_forward_wrap(content: &str, query: &str, start: usize) -> Option<usize> {
+fn find_forward_wrap(content: &[u8], query: &[u8], start: usize) -> Option<usize> {
     let start = start.min(content.len());
-    if let Some(relative) = content[start..].find(query) {
+    if let Some(relative) = memmem::find(&content[start..], query) {
         return Some(start + relative);
     }
     if start == 0 {
         return None;
     }
-    content[..start].find(query)
+    // A match starting before the cursor may extend across it.
+    memmem::find(content, query)
 }
 
-fn find_backward_wrap(content: &str, query: &str, start: usize) -> Option<usize> {
+fn find_backward_wrap(content: &[u8], query: &[u8], start: usize) -> Option<usize> {
     let start = start.min(content.len());
-    if let Some(index) = content[..start].rfind(query) {
-        return Some(index);
+    if start > 0 {
+        let end = start
+            .saturating_add(query.len().saturating_sub(1))
+            .min(content.len());
+        if let Some(index) = memmem::rfind(&content[..end], query) {
+            return Some(index);
+        }
     }
     if start >= content.len() {
         return None;
     }
-    content[start..]
-        .rfind(query)
-        .map(|relative| start + relative)
+    memmem::rfind(&content[start..], query).map(|relative| start + relative)
 }
 
 fn parse_viewer_goto_target(input: &str) -> Result<ViewerGotoTarget, String> {
@@ -419,4 +447,97 @@ fn parse_viewer_goto_target(input: &str) -> Result<ViewerGotoTarget, String> {
         .parse::<usize>()
         .map_err(|_| String::from("invalid line number"))?;
     Ok(ViewerGotoTarget::Line(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn viewer(bytes: &[u8]) -> ViewerState {
+        let content = String::from_utf8_lossy(bytes).into_owned();
+        ViewerState {
+            path: PathBuf::from("fixture"),
+            bytes: bytes.to_vec(),
+            line_offsets: compute_line_offsets(&content),
+            content,
+            text_is_preview: false,
+            content_fingerprint: 0,
+            path_fingerprint: 0,
+            scroll: 0,
+            wrap: false,
+            hex_mode: true,
+            last_search_query: None,
+            last_search_match_offset: None,
+            last_search_direction: ViewerSearchDirection::Forward,
+        }
+    }
+
+    #[test]
+    fn hex_search_handles_utf8_and_matches_crossing_the_cursor() {
+        let content = format!("{}é target", "a".repeat(15));
+        for direction in [
+            ViewerSearchDirection::Forward,
+            ViewerSearchDirection::Backward,
+        ] {
+            for (query, expected_offset) in [("é", 15), ("target", 18)] {
+                let mut viewer = viewer(content.as_bytes());
+                viewer.move_lines(1);
+                assert!(viewer.start_search(query.into(), direction).is_some());
+                assert_eq!(viewer.last_search_match_offset, Some(expected_offset));
+                assert!(viewer.continue_search(None).is_some(), "search should wrap");
+                assert_eq!(viewer.last_search_match_offset, Some(expected_offset));
+            }
+        }
+    }
+
+    #[test]
+    fn hex_search_uses_raw_offsets_and_resets_them_on_mode_switch() {
+        let mut bytes = vec![0xff; 15];
+        bytes.extend_from_slice(b"target target");
+        let mut viewer = viewer(&bytes);
+        assert_eq!(
+            viewer.start_search("target".into(), ViewerSearchDirection::Forward),
+            Some(0)
+        );
+        assert_eq!(viewer.last_search_match_offset, Some(15));
+        assert_eq!(viewer.continue_search(None), Some(1));
+        assert_eq!(viewer.last_search_match_offset, Some(22));
+        viewer.toggle_hex_mode();
+        assert!(viewer.last_search_match_offset.is_none());
+        assert_eq!(viewer.continue_search(None), Some(0));
+        assert_eq!(viewer.last_search_match_offset, Some(45));
+        viewer.toggle_hex_mode();
+        assert_eq!(viewer.continue_search(None), Some(0));
+        assert_eq!(viewer.last_search_match_offset, Some(15));
+    }
+
+    #[test]
+    fn search_handles_empty_files_queries_and_missing_matches() {
+        for bytes in [&b""[..], &b"contents"[..]] {
+            for direction in [
+                ViewerSearchDirection::Forward,
+                ViewerSearchDirection::Backward,
+            ] {
+                let mut viewer = viewer(bytes);
+                assert_eq!(viewer.start_search(String::new(), direction), None);
+                assert_eq!(viewer.start_search("absent".into(), direction), None);
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_text_lines_match_string_lines() {
+        for content in ["", "\n", "a\r\nb\né\n", "a\r", "a\n\n"] {
+            let viewer = viewer(content.as_bytes());
+            let expected: Vec<_> = if content.is_empty() {
+                vec![""]
+            } else {
+                content.lines().collect()
+            };
+            for (index, line) in expected.iter().enumerate() {
+                assert_eq!(viewer.text_line(index), Some(*line));
+            }
+            assert_eq!(viewer.text_line(expected.len()), None);
+        }
+    }
 }

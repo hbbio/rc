@@ -158,7 +158,9 @@ fn run_shell_command_streaming_impl(
         if child_status.is_none() {
             child_status = child.try_wait()?;
         }
-        if child_status.is_some() && stdout_done {
+        // Descendants may retain either capture pipe after the shell exits.
+        // Keep polling cancellation and output limits until both readers finish.
+        if child_status.is_some() && stdout_done && stderr_handle.is_finished() {
             break;
         }
         if stdout_done {
@@ -389,5 +391,56 @@ mod tests {
             start.elapsed() >= Duration::from_millis(40),
             "test command should stay alive after stdout closes"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_runner_cancels_descendants_retaining_either_capture_pipe() {
+        for command in ["sleep 2 >/dev/null &", "sleep 2 2>/dev/null &", "sleep 2 &"] {
+            let cancel = AtomicBool::new(false);
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    thread::sleep(Duration::from_millis(200));
+                    cancel.store(true, Ordering::Relaxed);
+                });
+                let start = std::time::Instant::now();
+                let error = run_shell_command_streaming_impl(
+                    Path::new("."),
+                    command,
+                    Some(&cancel),
+                    "canceled",
+                    ProcessOutputLimits {
+                        stdout_bytes: 1024,
+                        stderr_bytes: 1024,
+                    },
+                    &mut |_| Ok(()),
+                )
+                .expect_err("cancellation must remain active after the shell exits");
+                assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+                assert!(
+                    start.elapsed() < Duration::from_secs(1),
+                    "{command} ignored cancellation"
+                );
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_runner_collects_stderr_after_shell_exit() {
+        let exit = run_shell_command_streaming_impl(
+            Path::new("."),
+            "(sleep 0.05; printf late >&2) >/dev/null &",
+            None,
+            "canceled",
+            ProcessOutputLimits {
+                stdout_bytes: 1024,
+                stderr_bytes: 1024,
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(exit.success);
+        assert_eq!(exit.stderr, b"late");
     }
 }

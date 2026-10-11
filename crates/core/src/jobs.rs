@@ -1379,7 +1379,7 @@ fn copy_path(
     if metadata.is_dir() {
         validate_directory_destination_not_inside_source(source, destination, "copy")?;
 
-        if destination.exists() {
+        if path_entry_exists(destination)? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(
@@ -1402,7 +1402,11 @@ fn copy_path(
         return Ok(());
     }
 
-    if destination.exists() {
+    if !metadata.is_file() {
+        return Err(unsupported_copy_source(source));
+    }
+
+    if path_entry_exists(destination)? {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!(
@@ -1427,13 +1431,25 @@ fn copy_file(
     destination: &Path,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
-    let staged_destination = destination_staging_path(destination);
+    let mut source_options = fs::OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Do not block if a regular file was replaced by a FIFO after inspection.
+        source_options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+    let mut source_file = source_options.open(source)?;
+    if !source_file.metadata()?.is_file() {
+        return Err(unsupported_copy_source(source));
+    }
+    let staged_destination = destination_staging_path(destination)?;
+    // Only clean up a staging entry after we have successfully created it.
+    let mut destination_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_destination)?;
     let write_result = (|| -> io::Result<()> {
-        let mut source_file = fs::File::open(source)?;
-        let mut destination_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged_destination)?;
         let mut buffer = [0_u8; COPY_BUFFER_SIZE];
 
         loop {
@@ -1448,6 +1464,7 @@ fn copy_file(
         destination_file.flush()?;
         Ok(())
     })();
+    drop(destination_file);
     if let Err(error) = write_result {
         let _ = fs::remove_file(&staged_destination);
         return Err(error);
@@ -1461,7 +1478,25 @@ fn copy_file(
     Ok(())
 }
 
-fn destination_staging_path(destination: &Path) -> PathBuf {
+fn unsupported_copy_source(source: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "copy supports regular files, directories, and symlinks only: {}",
+            source.display()
+        ),
+    )
+}
+
+fn path_entry_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn destination_staging_path(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
@@ -1470,8 +1505,8 @@ fn destination_staging_path(destination: &Path) -> PathBuf {
 
     for index in 1_usize.. {
         let candidate = parent.join(format!(".{file_name}.rc-stage-{index}"));
-        if !candidate.exists() {
-            return candidate;
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
         }
     }
 
@@ -1526,7 +1561,7 @@ fn resolve_destination(
     if source == destination {
         match overwrite {
             OverwritePolicy::Rename => {
-                destination = renamed_destination(&destination);
+                destination = renamed_destination(&destination)?;
             }
             OverwritePolicy::Overwrite | OverwritePolicy::Skip => {
                 progress.advance_totals(source, source_totals);
@@ -1535,10 +1570,10 @@ fn resolve_destination(
         }
     }
 
-    if destination.exists() {
+    if path_entry_exists(&destination)? {
         match overwrite {
             OverwritePolicy::Overwrite => {
-                let backup = destination_backup_path(&destination);
+                let backup = destination_backup_path(&destination)?;
                 fs::rename(&destination, &backup)?;
                 return Ok(Some(ResolvedDestination {
                     path: destination,
@@ -1550,7 +1585,7 @@ fn resolve_destination(
                 return Ok(None);
             }
             OverwritePolicy::Rename => {
-                destination = renamed_destination(&destination);
+                destination = renamed_destination(&destination)?;
             }
         }
     }
@@ -1561,7 +1596,7 @@ fn resolve_destination(
     }))
 }
 
-fn renamed_destination(destination: &Path) -> PathBuf {
+fn renamed_destination(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
@@ -1575,8 +1610,8 @@ fn renamed_destination(destination: &Path) -> PathBuf {
             format!("copy{index}")
         };
         let candidate = parent.join(format!("{file_name}.{suffix}"));
-        if !candidate.exists() {
-            return candidate;
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
         }
     }
 
@@ -1745,7 +1780,7 @@ impl ResolvedDestination {
         match operation_result {
             Ok(()) => remove_path(&backup),
             Err(operation_error) => {
-                if self.path.exists() {
+                if path_entry_exists(&self.path)? {
                     remove_path(&self.path)?;
                 }
                 fs::rename(&backup, &self.path)?;
@@ -1755,7 +1790,7 @@ impl ResolvedDestination {
     }
 }
 
-fn destination_backup_path(destination: &Path) -> PathBuf {
+fn destination_backup_path(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
@@ -1764,8 +1799,8 @@ fn destination_backup_path(destination: &Path) -> PathBuf {
 
     for index in 1_usize.. {
         let candidate = parent.join(format!(".{file_name}.rc-backup-{index}"));
-        if !candidate.exists() {
-            return candidate;
+        if !path_entry_exists(&candidate)? {
+            return Ok(candidate);
         }
     }
 
@@ -2344,132 +2379,119 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_worker_shutdown_finishes_active_and_queued_jobs_as_canceled() {
+    fn worker_rejects_fifo_copy_without_blocking_queue_or_shutdown() {
         use nix::sys::stat::Mode;
 
-        let root = make_temp_dir("shutdown-active-and-queued-cancel");
-        let source_dir = root.join("source");
-        let destination = root.join("destination");
-        fs::create_dir_all(&source_dir).expect("source dir should exist");
-        fs::create_dir_all(&destination).expect("destination dir should exist");
-
-        let fifo_source = source_dir.join("blocked.pipe");
-        nix::unistd::mkfifo(&fifo_source, Mode::S_IRUSR | Mode::S_IWUSR)
-            .expect("fifo source should be creatable");
-
+        let root = make_temp_dir("fifo-copy");
+        let fifo = root.join("blocked.pipe");
+        nix::unistd::mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
-
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_worker(command_rx, event_tx);
+            done_tx.send(()).unwrap();
+        });
         let mut manager = JobManager::new();
-        let active_job = manager.enqueue(JobRequest::Copy {
-            sources: vec![fifo_source.clone()],
-            destination_dir: destination,
+        let copy = manager.enqueue(JobRequest::Copy {
+            sources: vec![fifo],
+            destination_dir: root.join("destination"),
             overwrite: OverwritePolicy::Skip,
         });
-        let active_id = active_job.id;
-        let queued_job = manager.enqueue(JobRequest::Mkdir {
+        let copy_id = copy.id;
+        let mkdir = manager.enqueue(JobRequest::Mkdir {
             path: root.join("queued"),
         });
-        let queued_id = queued_job.id;
-
+        let mkdir_id = mkdir.id;
+        command_tx.send(WorkerCommand::Run(Box::new(copy))).unwrap();
         command_tx
-            .send(WorkerCommand::Run(Box::new(active_job)))
-            .expect("active job command should send");
-        loop {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("active worker should emit a start event");
-            manager.handle_event(&event);
-            match event {
-                JobEvent::Started { id } if id == active_id => break,
-                JobEvent::Finished { .. } => panic!("active job finished before shutdown"),
-                _ => {}
+            .send(WorkerCommand::Run(Box::new(mkdir)))
+            .unwrap();
+        let mut finished = 0;
+        while finished < 2 {
+            if let JobEvent::Finished { id, result } =
+                event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                if id == copy_id {
+                    assert_eq!(result.unwrap_err().code, JobErrorCode::Unsupported);
+                } else {
+                    assert_eq!(id, mkdir_id);
+                    result.unwrap();
+                }
+                finished += 1;
             }
         }
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(!root.join("destination").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
-        let (writer_release_tx, writer_release_rx) = mpsc::channel();
-        let writer = thread::spawn({
-            let fifo_source = fifo_source.clone();
-            move || {
-                let mut fifo = fs::OpenOptions::new()
-                    .write(true)
-                    .open(fifo_source)
-                    .expect("fifo writer should connect to active copy");
-                writer_ready_tx
-                    .send(())
-                    .expect("fifo writer should report readiness");
-                writer_release_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("fifo writer should receive release signal");
-                let _ = std::io::Write::write_all(&mut fifo, b"x");
+    #[cfg(unix)]
+    #[test]
+    fn copy_rejects_nested_special_files_and_restores_overwritten_destination() {
+        use nix::sys::stat::Mode;
+        use std::os::unix::net::UnixListener;
+
+        let root = make_temp_dir("sp");
+        let source = root.join("s");
+        let destination_dir = root.join("destination");
+        let destination = destination_dir.join("s");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination_dir).unwrap();
+        fs::write(&destination, "original").unwrap();
+        let special = source.join("x");
+        for fifo in [true, false] {
+            let listener = if fifo {
+                nix::unistd::mkfifo(&special, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+                None
+            } else {
+                Some(UnixListener::bind(&special).unwrap())
+            };
+            let mut manager = JobManager::new();
+            let job = manager.enqueue(JobRequest::Copy {
+                sources: vec![source.clone()],
+                destination_dir: destination_dir.clone(),
+                overwrite: OverwritePolicy::Overwrite,
+            });
+            let (tx, rx) = mpsc::channel();
+            execute_worker_job(job, &tx);
+            match recv_until_finished(&rx, &mut manager) {
+                JobEvent::Finished {
+                    result: Err(error), ..
+                } => assert_eq!(error.code, JobErrorCode::Unsupported),
+                event => panic!("unexpected event: {event:?}"),
             }
-        });
-        writer_ready_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("active copy should open the fifo reader");
-
-        command_tx
-            .send(WorkerCommand::Run(Box::new(queued_job)))
-            .expect("queued job command should send");
-        command_tx
-            .send(WorkerCommand::Shutdown)
-            .expect("shutdown command should send");
-
-        let mut active_finished = false;
-        loop {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("queued job should finish during shutdown");
-            manager.handle_event(&event);
-            match event {
-                JobEvent::Finished { id, result } if id == queued_id => {
-                    let error = result.expect_err("queued job should not succeed during shutdown");
-                    assert!(error.is_canceled(), "queued job should be canceled");
-                    break;
-                }
-                JobEvent::Finished { id, result } if id == active_id => {
-                    let error = result.expect_err("active job should not succeed during shutdown");
-                    assert!(error.is_canceled(), "active job should be canceled");
-                    active_finished = true;
-                }
-                _ => {}
-            }
+            assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+            drop(listener);
+            fs::remove_file(&special).unwrap();
         }
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        writer_release_tx
-            .send(())
-            .expect("fifo writer should be released after queued cancellation");
-
-        while !active_finished {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("active job should finish after fifo unblocks");
-            manager.handle_event(&event);
-            match event {
-                JobEvent::Finished { id, result } if id == active_id => {
-                    let error = result.expect_err("active job should not succeed during shutdown");
-                    assert!(error.is_canceled(), "active job should be canceled");
-                    active_finished = true;
-                }
-                JobEvent::Finished { id, .. } if id == queued_id => {
-                    panic!("queued job finished more than once")
-                }
-                _ => {}
-            }
-        }
-
-        writer.join().expect("fifo writer should finish");
-        worker
-            .join()
-            .expect("worker thread should terminate cleanly");
-
-        let counts = manager.status_counts();
-        assert_eq!(counts.canceled, 2);
-        assert_eq!(counts.queued, 0);
-        assert_eq!(counts.running, 0);
-        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_rechecks_opened_source_without_blocking_on_fifo() {
+        let root = make_temp_dir("fifo-open");
+        let fifo = root.join("source");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let destination = root.join("destination");
+        let (tx, _rx) = mpsc::channel();
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals::default(),
+            &tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            copy_file(&fifo, &destination, &mut progress)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2550,6 +2572,114 @@ mod tests {
         assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
 
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_move_policies_handle_dangling_destinations() {
+        use std::os::unix::fs::symlink;
+
+        let root = make_temp_dir("dangling-destinations");
+        for moving in [false, true] {
+            for overwrite in [
+                OverwritePolicy::Skip,
+                OverwritePolicy::Rename,
+                OverwritePolicy::Overwrite,
+            ] {
+                let dir = root.join(format!("{moving}-{overwrite:?}"));
+                let destination_dir = dir.join("destination");
+                fs::create_dir_all(&destination_dir).unwrap();
+                let source = dir.join("file");
+                fs::write(&source, "source").unwrap();
+                let destination = destination_dir.join("file");
+                let alternate = destination_dir.join("file.copy");
+                let stage = destination_dir.join(".file.rc-stage-1");
+                let backup = destination_dir.join(".file.rc-backup-1");
+                for path in [&destination, &alternate, &stage, &backup] {
+                    symlink("missing", path).unwrap();
+                }
+                let request = if moving {
+                    JobRequest::Move {
+                        sources: vec![source.clone()],
+                        destination_dir: destination_dir.clone(),
+                        destination_names: None,
+                        overwrite,
+                    }
+                } else {
+                    JobRequest::Copy {
+                        sources: vec![source.clone()],
+                        destination_dir: destination_dir.clone(),
+                        overwrite,
+                    }
+                };
+                let mut manager = JobManager::new();
+                let (tx, rx) = mpsc::channel();
+                execute_worker_job(manager.enqueue(request), &tx);
+                assert!(matches!(
+                    recv_until_finished(&rx, &mut manager),
+                    JobEvent::Finished { result: Ok(()), .. }
+                ));
+                for path in [&alternate, &stage, &backup] {
+                    assert_eq!(fs::read_link(path).unwrap(), Path::new("missing"));
+                }
+                match overwrite {
+                    OverwritePolicy::Overwrite => {
+                        assert_eq!(fs::read_to_string(&destination).unwrap(), "source")
+                    }
+                    OverwritePolicy::Skip | OverwritePolicy::Rename => {
+                        assert_eq!(fs::read_link(&destination).unwrap(), Path::new("missing"));
+                        if overwrite == OverwritePolicy::Rename {
+                            assert_eq!(
+                                fs::read_to_string(destination_dir.join("file.copy2")).unwrap(),
+                                "source"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(
+                    source.exists(),
+                    !moving || overwrite == OverwritePolicy::Skip
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_candidates_propagate_metadata_errors() {
+        let root = make_temp_dir("destination-metadata-errors");
+        let parent = root.join("file");
+        fs::write(&parent, "not a directory").unwrap();
+        let destination = parent.join("child");
+        assert!(path_entry_exists(&destination).is_err());
+        assert!(renamed_destination(&destination).is_err());
+        assert!(destination_staging_path(&destination).is_err());
+        assert!(destination_backup_path(&destination).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_rollback_removes_partial_dangling_symlink() {
+        let root = make_temp_dir("dangling-rollback");
+        let destination = root.join("destination");
+        let backup = root.join("backup");
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("original"), "preserved").unwrap();
+        std::os::unix::fs::symlink("missing", &destination).unwrap();
+        let error = ResolvedDestination {
+            path: destination.clone(),
+            overwrite_backup: Some(backup),
+        }
+        .finish(Err(io::Error::other("copy failed")))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "copy failed");
+        assert_eq!(
+            fs::read_to_string(destination.join("original")).unwrap(),
+            "preserved"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
