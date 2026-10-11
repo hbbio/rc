@@ -2,6 +2,7 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
@@ -11,8 +12,13 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
+    # Preserve the existing status-check name; nextest runs the test suite below.
     name: fmt-clippy-test
     runs-on: ubuntu-latest
     steps:
@@ -32,9 +38,6 @@ jobs:
 
       - name: Lint with clippy
         run: cargo --locked clippy --all-targets --all-features -- -D warnings
-
-      - name: Run tests
-        run: cargo --locked test --all-targets --all-features
 
   nextest:
     name: nextest

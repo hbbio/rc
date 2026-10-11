@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
@@ -27,6 +28,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 shlex.workspace = true
 open.workspace = true
+notify.workspace = true
 rc-core.workspace = true
 rc-ui.workspace = true
 

@@ -351,6 +351,7 @@ fn move_cursor_stays_in_bounds() {
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
         sort_mode: SortMode::default(),
+        mouse_viewport: None,
         home_directory: None,
         canonical_cwd: None,
         canonical_home_directory: None,
@@ -510,6 +511,7 @@ fn toggle_and_invert_tags_work_for_non_parent_entries() {
         ],
         cursor: 0,
         sort_mode: SortMode::default(),
+        mouse_viewport: None,
         home_directory: None,
         canonical_cwd: None,
         canonical_home_directory: None,
@@ -552,6 +554,7 @@ fn page_home_end_navigation_stays_bounded() {
         entries,
         cursor: 1,
         sort_mode: SortMode::default(),
+        mouse_viewport: None,
         home_directory: None,
         canonical_cwd: None,
         canonical_home_directory: None,
@@ -584,6 +587,7 @@ fn sort_mode_cycles_and_toggles_direction() {
         entries: Vec::new(),
         cursor: 0,
         sort_mode: SortMode::default(),
+        mouse_viewport: None,
         home_directory: None,
         canonical_cwd: None,
         canonical_home_directory: None,
@@ -1185,6 +1189,7 @@ ExtendedKeyMap = ctrl-g
 [filemanager:xmap]
 PutCurrentTagged = z
 PutOtherTagged = ctrl-z
+CopySelectedPath = y
 "#,
     )
     .expect("keymap should parse");
@@ -1233,6 +1238,10 @@ PutOtherTagged = ctrl-z
     assert!(
         content.contains("Ctrl-g Ctrl-z insert passive-panel tagged names"),
         "passive tagged-file help should reflect its configured xmap sequence"
+    );
+    assert!(
+        content.contains("Ctrl-g y copy the selected entry's full path to the clipboard"),
+        "clipboard help should reflect its configured xmap sequence"
     );
 
     fs::remove_dir_all(&root).expect("must remove temp root");

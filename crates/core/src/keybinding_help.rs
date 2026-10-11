@@ -309,6 +309,10 @@ impl AppState {
             self.xmap_sequence_or_fallback(AppCommand::PutOtherTagged, "Ctrl-X Ctrl-T"),
         );
         replacements.insert(
+            "fm_copy_selected_path",
+            self.xmap_sequence_or_fallback(AppCommand::CopySelectedPath, "Ctrl-X y"),
+        );
+        replacements.insert(
             "fm_find",
             self.keybinding_joined_or_fallback(
                 KeyContext::FileManager,

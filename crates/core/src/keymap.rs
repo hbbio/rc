@@ -114,6 +114,7 @@ pub enum KeyCommand {
     PutCurrentFullSelected,
     PutCurrentTagged,
     PutOtherTagged,
+    CopySelectedPath,
     OpenUserMenu,
     OpenMenuBar,
     Quit,
@@ -211,6 +212,7 @@ impl KeyCommand {
             "putcurrentfullselected" => Self::PutCurrentFullSelected,
             "putcurrenttagged" => Self::PutCurrentTagged,
             "putothertagged" => Self::PutOtherTagged,
+            "copyselectedpath" | "copycurrentselectedpath" => Self::CopySelectedPath,
             "usermenu" => Self::OpenUserMenu,
             "menu" | "openmenu" | "pulldown" => Self::OpenMenuBar,
             "quit" => Self::Quit,
@@ -1244,6 +1246,7 @@ Jobs = j
 ExternalPanelize = exclamation
 PutCurrentTagged = t
 PutOtherTagged = ctrl-t
+CopySelectedPath = y
 "#;
 
         let keymap = Keymap::parse(source).expect("keymap should parse");
@@ -1321,6 +1324,13 @@ PutOtherTagged = ctrl-t
                 }
             ),
             Some(&KeyCommand::PutOtherTagged)
+        );
+        assert_eq!(
+            keymap.resolve(
+                KeyContext::FileManagerXMap,
+                KeyChord::new(KeyCode::Char('y'))
+            ),
+            Some(&KeyCommand::CopySelectedPath)
         );
     }
 
@@ -1672,6 +1682,7 @@ Reread = ctrl-r
             "PutCurrentFullSelected",
             "PutCurrentTagged",
             "PutOtherTagged",
+            "CopySelectedPath",
         ] {
             assert!(
                 !report

@@ -54,6 +54,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_command_line}} open command line (Unix)\n\
   {{fm_put_selected}} insert the selected file name\n\
   {{fm_put_full_selected}} insert the selected file's full path\n\
+  {{fm_copy_selected_path}} copy the selected entry's full path to the clipboard\n\
   {{fm_put_current_tagged}} insert active-panel tagged names (or selected name)\n\
   {{fm_put_other_tagged}} insert passive-panel tagged names (or selected name)\n\
   {{fm_find}} open find/back to find results\n\
@@ -110,6 +111,7 @@ Editing and execution:\n\
 Panel insertion:\n\
   {{fm_put_selected}} insert the active selected file name\n\
   {{fm_put_full_selected}} insert its full path\n\
+  {{fm_copy_selected_path}} copy its full path to the clipboard\n\
   {{fm_put_current_tagged}} insert active-panel tagged names\n\
   {{fm_put_other_tagged}} insert passive-panel tagged names\n\
 \n\
@@ -648,6 +650,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("fm_put_full_selected", String::from("Ctrl-Shift-Enter")),
         ("fm_put_current_tagged", String::from("Ctrl-X t")),
         ("fm_put_other_tagged", String::from("Ctrl-X Ctrl-T")),
+        ("fm_copy_selected_path", String::from("Ctrl-X y")),
         ("fm_find", String::from("Alt-F")),
         ("fm_tree", String::from("Alt-T")),
         ("fm_hotlist", String::from("Alt-H")),
@@ -784,6 +787,8 @@ mod tests {
         assert!(content.contains("Ctrl-Shift-Enter insert the selected file's full path"));
         assert!(content.contains("Ctrl-X t insert active-panel tagged names"));
         assert!(content.contains("Ctrl-X Ctrl-T insert passive-panel tagged names"));
+        assert!(content.contains("Ctrl-X y copy the selected entry's full path to the clipboard"));
+        assert!(!content.contains("{{"));
         assert!(content.contains("case-insensitive directory search"));
         assert!(content.contains("use Up/Down to choose one"));
         assert!(content.contains("Tab/Shift-Tab completes"));

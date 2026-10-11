@@ -12,6 +12,9 @@ and fast directory navigation.
 ### Panels and navigation
 
 - Two independent directory panels with Full, Brief, and Long layouts.
+- Native filesystem notifications automatically refresh both panels and the open
+  directory tree, including changes made by other programs. Updates are coalesced
+  and scanned in the background while preserving selection and tags.
 - Per-panel sorting, reverse order, glob or regular-expression filters, hidden-file
   control, and persisted configuration.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
@@ -31,6 +34,15 @@ and fast directory navigation.
 - Metadata preservation, symlink-aware operations, validation against recursive
   destinations, and rollback when an overwrite fails.
 - Incremental, cancelable directory refreshes that preserve selection and tags.
+
+Automatic refresh uses FSEvents on macOS, inotify on Linux, and
+ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
+the tree only refreshes affected cached subtrees. Native notifications may be
+unavailable on network or virtual filesystems; use manual refresh there. Watch
+registration failures are reported in the status line and retried in the background.
+Writes to the active tracing log are excluded from automatic invalidations so
+refresh logging cannot trigger another refresh. Log creation, deletion, and
+renaming still update the panels.
 
 ### Find and panelize
 
@@ -142,10 +154,14 @@ interface.
 | `Alt-H` | Open the directory hotlist |
 | `Alt-P` / `Ctrl-P` / `Ctrl-X !` | Open external panelize |
 | `Ctrl-X i` / `Ctrl-X q` | Show Info / Quick view in the passive panel |
+| `Ctrl-X y` | Copy the active selected entry's full path to the clipboard |
 | `Alt-Shift-T` | Cycle Full, Brief, and Long panel layouts |
 | `Shift-F6` / `Shift-F8` | Cycle sort field / reverse sort order |
 | `F9` | Open the menu bar |
 | `q` / `Esc` / `F10` | Quit |
+
+Left-click an entry in either pane to select it and make that pane active.
+Double-click to open the entry.
 
 ### Command line
 
@@ -158,6 +174,7 @@ interface.
 | `Ctrl-Shift-Enter` | Insert the selected entry's full path |
 | `Ctrl-X t` | Insert active-panel tagged names, or its selected name |
 | `Ctrl-X Ctrl-T` | Insert passive-panel tagged names, or its selected name |
+| `Ctrl-X y` | Copy the active selected entry's full path to the clipboard |
 | `F1` | Open command-line help |
 | `Esc` | Return to the panels while preserving the draft |
 
@@ -198,6 +215,9 @@ temporarily handles control events in the parent.
 Linux desktop opens prefer the desktop portal. Accepted legacy launchers are reaped
 independently and are not terminated when rc exits.
 
+Clipboard copying uses the OSC 52 terminal sequence. The terminal emulator and any
+intermediate multiplexer must allow OSC 52 clipboard writes.
+
 ## Project layout
 
 - `crates/app` (`rust-commander`): terminal lifecycle, event loop, and input
@@ -213,12 +233,12 @@ independently and are not terminated when rc exits.
 
 ## Development
 
-Run the same baseline checks used by CI:
+With `cargo-nextest` installed, run the same baseline checks used by CI:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
+cargo nextest run --workspace --all-targets --all-features --locked
 ```
 
 Security, dependency-policy, coverage, and release-package checks live in

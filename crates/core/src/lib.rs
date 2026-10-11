@@ -137,6 +137,7 @@ pub enum AppCommand {
     PutCurrentFullSelected,
     PutCurrentTagged,
     PutOtherTagged,
+    CopySelectedPath,
     CloseHelp,
     OpenUserMenu,
     OpenMenuBar,
@@ -250,7 +251,13 @@ pub enum AppCommand {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
     SetView(PanelViewMode),
+    /// Focus this listing panel and select an entry by index.
     SelectAt(usize),
+    /// Select a clicked entry while retaining the visible listing window.
+    SelectAtInViewport {
+        index: usize,
+        viewport: PanelViewport,
+    },
     OpenTree,
     OpenListingFormat,
     OpenSortOrder,
@@ -265,6 +272,14 @@ pub enum PanelViewMode {
     Listing,
     QuickView,
     Info,
+}
+
+/// Visible rows of a listing; Brief mode shares the row offset across columns.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PanelViewport {
+    pub first_row: usize,
+    pub rows: usize,
+    pub columns: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -366,6 +381,7 @@ impl AppCommand {
             | Self::PutCurrentFullSelected
             | Self::PutCurrentTagged
             | Self::PutOtherTagged
+            | Self::CopySelectedPath
             | Self::CloseHelp
             | Self::OpenUserMenu
             | Self::OpenMenuBar
@@ -415,6 +431,7 @@ impl AppCommand {
                 _,
                 PanelCommand::SetView(_)
                 | PanelCommand::SelectAt(_)
+                | PanelCommand::SelectAtInViewport { .. }
                 | PanelCommand::RestorePanelizedResults
                 | PanelCommand::Reread,
             )
@@ -760,6 +777,7 @@ pub enum ApplyResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MouseClickTarget {
     Command(AppCommand),
+    PanelEntry(ActivePanel, PathBuf),
     TreeEntry(PathBuf),
 }
 
@@ -1165,6 +1183,7 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    mouse_viewport: Option<PanelViewport>,
     home_directory: Option<PathBuf>,
     canonical_cwd: Option<PathBuf>,
     canonical_home_directory: Option<PathBuf>,
@@ -1184,6 +1203,7 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            mouse_viewport: None,
             home_directory: None,
             canonical_cwd: None,
             canonical_home_directory: None,
@@ -1241,6 +1261,7 @@ impl PanelState {
     }
 
     fn apply_entries(&mut self, entries: Vec<FileEntry>) {
+        self.mouse_viewport = None;
         self.entries = entries;
         // Filters are views: tags hidden by a filter must reappear when it is cleared.
         if !self.filter.is_active() {
@@ -1258,6 +1279,7 @@ impl PanelState {
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
+        self.mouse_viewport = None;
         if self.entries.is_empty() {
             self.cursor = 0;
             return;
@@ -1273,11 +1295,31 @@ impl PanelState {
     }
 
     pub(crate) fn select_at(&mut self, index: usize) -> bool {
+        self.mouse_viewport = None;
         if index >= self.entries.len() || index == self.cursor {
             return false;
         }
         self.cursor = index;
         true
+    }
+
+    /// Share the visible rows between rendering and mouse hit testing.
+    pub fn visible_window(&self, viewport_rows: usize, columns: usize) -> (usize, usize) {
+        let total_rows = self.entries.len().div_ceil(columns.max(1));
+        let selected_row =
+            self.cursor.min(self.entries.len().saturating_sub(1)) % total_rows.max(1);
+        if let Some(viewport) = self.mouse_viewport
+            && viewport.rows == viewport_rows
+            && viewport.columns == columns
+        {
+            let visible = viewport_rows.min(total_rows);
+            let start = viewport.first_row.min(total_rows.saturating_sub(visible));
+            let end = start + visible;
+            if (start..end).contains(&selected_row) {
+                return (start, end);
+            }
+        }
+        layout::visible_window(total_rows, selected_row, viewport_rows)
     }
 
     pub fn move_cursor_page(&mut self, pages: isize, page_step: usize) {
@@ -1325,10 +1367,12 @@ impl PanelState {
     }
 
     pub fn move_cursor_home(&mut self) {
+        self.mouse_viewport = None;
         self.cursor = 0;
     }
 
     pub fn move_cursor_end(&mut self) {
+        self.mouse_viewport = None;
         if self.entries.is_empty() {
             self.cursor = 0;
         } else {
@@ -1436,7 +1480,7 @@ impl PanelState {
 
         self.cwd = path;
         self.clear_canonical_paths();
-        self.cursor = 0;
+        self.move_cursor_home();
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
         self.tagged.clear();
@@ -1452,7 +1496,7 @@ impl PanelState {
 
         self.cwd = parent.to_path_buf();
         self.clear_canonical_paths();
-        self.cursor = 0;
+        self.move_cursor_home();
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
         self.tagged.clear();
@@ -1466,7 +1510,7 @@ impl PanelState {
             return false;
         }
 
-        self.cursor = 0;
+        self.move_cursor_home();
         self.source = PanelListingSource::Directory;
         self.panelized_entries = None;
         self.tagged.clear();
@@ -1480,7 +1524,7 @@ impl PanelState {
         let previous_panelized_entries = self.panelized_entries.clone();
         self.source = PanelListingSource::Panelize { command };
         self.panelized_entries = None;
-        self.cursor = 0;
+        self.move_cursor_home();
         self.tagged.clear();
 
         if let Err(error) = self.refresh() {
@@ -2034,6 +2078,11 @@ pub struct ExternalExecuteRequest {
     pub cwd: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardCopyRequest {
+    pub text: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecuteSelectionResult {
     OpenedExternal,
@@ -2183,6 +2232,7 @@ pub struct AppState {
     pending_worker_commands: Vec<WorkerCommand>,
     pending_external_edit_requests: Vec<ExternalEditRequest>,
     pending_external_execute_requests: Vec<ExternalExecuteRequest>,
+    pending_clipboard_copy_requests: Vec<ClipboardCopyRequest>,
     panelized_result_history: [Option<PanelizedResultSnapshot>; 2],
     previous_panel_directories: [Option<PathBuf>; 2],
     quick_cd_search: QuickCdSearchWorkflow,

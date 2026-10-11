@@ -33,6 +33,8 @@ use rc_core::{
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
+mod clipboard;
+mod filesystem_watch;
 mod runtime;
 
 use runtime::RuntimeBridge;
@@ -122,7 +124,7 @@ struct InputCompatibility {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings_paths = settings_io::settings_paths();
-    let tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
+    let mut tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
     if let Some(error) = init_tracing(tracing_log_path.as_deref())
         && let Some(path) = tracing_log_path.as_deref()
     {
@@ -130,6 +132,7 @@ fn main() -> Result<()> {
             "rc: failed to open tracing log '{}': {error}; logging is disabled",
             path.display()
         );
+        tracing_log_path = None;
     }
 
     let mut settings = settings_io::load_settings(&settings_paths).unwrap_or_else(|error| {
@@ -178,6 +181,7 @@ fn main() -> Result<()> {
         &keymap,
         Duration::from_millis(cli.tick_rate_ms),
         &skin_runtime,
+        tracing_log_path,
     )
 }
 
@@ -453,6 +457,7 @@ fn run_app(
     keymap: &Keymap,
     tick_rate: Duration,
     skin_runtime: &SkinRuntimeConfig,
+    tracing_log: Option<PathBuf>,
 ) -> Result<()> {
     let mut runtime = RuntimeBridge::spawn()?;
 
@@ -497,6 +502,7 @@ fn run_app(
         tick_rate,
         &mut runtime,
         skin_runtime,
+        tracing_log,
     );
     queue_deferred_save_before_shutdown(state, &mut runtime);
     let shutdown_result = runtime.shutdown();
@@ -607,15 +613,19 @@ fn run_event_loop(
     tick_rate: Duration,
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
+    tracing_log: Option<PathBuf>,
 ) -> Result<()> {
     let mut last_tick = Instant::now();
     let mut mouse_click_tracker = MouseClickTracker::default();
+    let mut filesystem_watch = filesystem_watch::FilesystemWatch::spawn(tracing_log)?;
 
     loop {
         runtime.drain_events(state);
+        filesystem_watch.poll(state);
         state.poll_deferred_work();
         runtime.dispatch_pending_commands(state);
         state.expire_status_line();
+        dispatch_pending_clipboard_copy_requests(terminal.backend_mut(), state);
         dispatch_pending_external_edit_requests(terminal, state);
         dispatch_pending_external_execute_requests(terminal, state);
         dispatch_pending_foreground_shell_requests(terminal, state);
@@ -796,6 +806,7 @@ fn command_line_keymap_command(
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged
             | AppCommand::PutOtherTagged
+            | AppCommand::CopySelectedPath
     )
     .then_some(command)
 }
@@ -834,7 +845,8 @@ fn handle_mouse(
         _ => return Ok(false),
     }
 
-    let Some(commands) = state.commands_for_left_click(
+    let Some(commands) = rc_ui::commands_for_left_click(
+        state,
         mouse_event.column,
         mouse_event.row,
         viewport_width,
@@ -892,6 +904,17 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
     });
 }
 
+fn dispatch_pending_clipboard_copy_requests(writer: &mut impl io::Write, state: &mut AppState) {
+    for request in state.take_pending_clipboard_copy_requests() {
+        match clipboard::write_text(writer, &request.text) {
+            Ok(()) => state.set_command_feedback("Copied selected path to clipboard"),
+            Err(error) => {
+                state.set_command_feedback(format!("Clipboard copy failed: {error}"));
+            }
+        }
+    }
+}
+
 fn dispatch_pending_external_edit_requests(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -928,7 +951,7 @@ fn dispatch_pending_foreground_shell_requests(
             .map(exit_status_number)
             .map_err(|error| sanitize_display_field(&error.to_string()));
         state.finish_foreground_shell_request(activation_id, result);
-        state.refresh_active_panel();
+        state.refresh_panels_in_directory(&request.cwd);
     }
 }
 
@@ -2309,8 +2332,9 @@ fn map_shifted_ascii_symbol(ch: char) -> Option<char> {
 mod tests {
     use super::*;
     use crate::runtime::{self, RuntimeCommand};
+    use base64::Engine as _;
     use crossterm::event::{KeyCode as CrosstermKeyCode, KeyEvent, KeyModifiers};
-    use rc_core::{WorkerCommand, build_tree_ready_event};
+    use rc_core::{ActivePanel, WorkerCommand, build_tree_ready_event};
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
@@ -2456,6 +2480,168 @@ mod tests {
     }
 
     #[test]
+    fn panel_click_focuses_either_pane_and_double_click_opens_its_entry() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panel-click-{stamp}"));
+        let target = root.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let mut state = AppState::new(root.clone()).unwrap();
+        for panel in &mut state.panels {
+            panel.refresh().unwrap();
+        }
+        let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(8);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+        // Return to an already-selected row to verify that it still gains focus.
+        for panel in [ActivePanel::Right, ActivePanel::Left, ActivePanel::Right] {
+            let column = if panel == ActivePanel::Left { 1 } else { 61 };
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse(
+                &mut state,
+                click,
+                120,
+                40,
+                &mut tracker,
+                &mut runtime,
+                &skin_runtime,
+            )
+            .unwrap();
+            assert_eq!(state.active_panel, panel);
+            assert_eq!(state.active_panel().selected_entry().unwrap().path, target);
+            assert_eq!(
+                state.active_panel().cwd,
+                root,
+                "a single click must only select"
+            );
+        }
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 61,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert_eq!(state.active_panel, ActivePanel::Right);
+        assert_eq!(state.active_panel().cwd, target);
+        assert_eq!(state.panels[ActivePanel::Left.index()].cwd, root);
+        assert!(
+            matches!(command_rx.try_recv(), Ok(RuntimeCommand::Worker { command: WorkerCommand::Run(job), .. })
+            if matches!(&job.request, JobRequest::RefreshPanel { cwd, .. } if cwd == &target))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overflowing_panel_double_click_opens_the_original_entry_in_both_panes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panel-overflow-click-{stamp}"));
+        for index in 0..60 {
+            fs::create_dir_all(root.join(format!("d{index:02}"))).unwrap();
+        }
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        for format in rc_core::PanelListingFormat::ALL {
+            for panel in [ActivePanel::Left, ActivePanel::Right] {
+                let mut state = AppState::new(root.clone()).unwrap();
+                let mut settings = state.settings().clone();
+                settings.panel_options.listing_formats = [format; 2];
+                state.replace_settings(settings);
+                for panel_state in &mut state.panels {
+                    panel_state.refresh().unwrap();
+                }
+                let column = if format == rc_core::PanelListingFormat::Long {
+                    state.active_panel = panel;
+                    1
+                } else if panel == ActivePanel::Left {
+                    1
+                } else {
+                    61
+                };
+                let click = MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: 7,
+                    modifiers: KeyModifiers::NONE,
+                };
+                let target_index = if format == rc_core::PanelListingFormat::Brief {
+                    5
+                } else {
+                    4
+                };
+                let expected_target = state.panels[panel.index()].entries[target_index]
+                    .path
+                    .clone();
+                let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(8);
+                let mut tracker = MouseClickTracker::default();
+                handle_mouse(
+                    &mut state,
+                    click,
+                    120,
+                    12,
+                    &mut tracker,
+                    &mut runtime,
+                    &skin_runtime,
+                )
+                .unwrap();
+                assert_eq!(state.active_panel, panel);
+                assert_eq!(state.active_panel().cursor, target_index);
+                assert_eq!(state.active_panel().cwd, root);
+                handle_mouse(
+                    &mut state,
+                    click,
+                    120,
+                    12,
+                    &mut tracker,
+                    &mut runtime,
+                    &skin_runtime,
+                )
+                .unwrap();
+                assert_eq!(
+                    state.active_panel().cwd,
+                    expected_target,
+                    "double-click failed in {panel:?} {format:?}"
+                );
+                assert_eq!(state.panels[panel.other().index()].cwd, root);
+                assert!(
+                    matches!(command_rx.try_recv(), Ok(RuntimeCommand::Worker { command: WorkerCommand::Run(job), .. })
+                    if matches!(&job.request, JobRequest::RefreshPanel { cwd, .. } if cwd == &expected_target))
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn mouse_click_tracker_requires_matching_recent_clicks() {
         let started_at = Instant::now();
         let mut tracker = MouseClickTracker::default();
@@ -2509,6 +2695,29 @@ mod tests {
             tree_target,
             started_at + DOUBLE_CLICK_INTERVAL + Duration::from_secs(1),
         ));
+
+        tracker.clear();
+        for (offset, (panel, path, expected_double_click)) in [
+            (ActivePanel::Left, "/files/first", false),
+            (ActivePanel::Left, "/files/replacement", false),
+            (ActivePanel::Right, "/files/replacement", false),
+            (ActivePanel::Right, "/files/replacement", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                tracker.register(
+                    1,
+                    7,
+                    KeyContext::FileManager,
+                    MouseClickTarget::PanelEntry(panel, PathBuf::from(path)),
+                    started_at + Duration::from_millis(offset as u64 * 50),
+                ),
+                expected_double_click,
+                "double-click requires the same path in the same pane"
+            );
+        }
     }
 
     #[test]
@@ -3828,6 +4037,175 @@ mod tests {
         assert!(state.status_line.contains("Add hotlist entry"));
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn ctrl_x_y_copies_the_selected_absolute_path_via_osc52() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-ctrlx-copy-path-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let selected = root.join("selected file.txt");
+        fs::write(&selected, "data").expect("selected fixture should be writable");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state.panels[ActivePanel::Left.index()]
+            .refresh()
+            .expect("left panel should refresh");
+        state.active_panel_mut().cursor = state
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == selected)
+            .expect("selected fixture should be listed");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('x'), KeyModifiers::CONTROL),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("ctrl-x should enter xmap mode");
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::Char('y'), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .expect("ctrl-x y should queue the selected path");
+
+        let mut output = Vec::new();
+        dispatch_pending_clipboard_copy_requests(&mut output, &mut state);
+        assert_eq!(
+            output,
+            format!(
+                "\x1b]52;c;{}\x1b\\",
+                base64::engine::general_purpose::STANDARD.encode(
+                    selected
+                        .to_str()
+                        .expect("temporary path should be valid UTF-8")
+                )
+            )
+            .into_bytes()
+        );
+        assert_eq!(state.status_line, "Copied selected path to clipboard");
+        assert_eq!(state.key_context(), KeyContext::FileManager);
+
+        fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_results_are_visible_in_the_command_line_notice() {
+        struct FailingWriter;
+
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("test clipboard write failure"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-command-line-clipboard-{stamp}"));
+        fs::create_dir_all(&root).expect("must create temp root");
+        let selected = root.join("selected.txt");
+        fs::write(&selected, "data").expect("selected fixture should be writable");
+        let mut state = AppState::new(root.clone()).expect("app should initialize");
+        state
+            .active_panel_mut()
+            .refresh()
+            .expect("active panel should refresh");
+        state.active_panel_mut().cursor = state
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == selected)
+            .expect("selected fixture should be listed");
+        state.open_command_line();
+        let request = state
+            .take_pending_shell_resolution_request()
+            .expect("shell resolution should be queued");
+        state.handle_shell_resolution_response(rc_core::resolve_shell_request_blocking(request));
+        state
+            .handle_command_line_input(CommandLineInput::Complete(CompletionIntent::Forward))
+            .expect("completion request should be queued");
+        let completion_request = state
+            .take_pending_completion_requests()
+            .pop()
+            .expect("completion should be pending");
+
+        state
+            .apply(AppCommand::CopySelectedPath)
+            .expect("clipboard request should be queued");
+        let cancellations = state.take_pending_completion_cancellations();
+        assert_eq!(cancellations.len(), 1);
+        assert_eq!(
+            cancellations[0].activation_id,
+            completion_request.activation_id
+        );
+        assert_eq!(cancellations[0].request_id, completion_request.request_id);
+        assert_eq!(
+            state
+                .command_line_session()
+                .and_then(|session| session.notice.as_deref()),
+            Some("Copying selected path to clipboard...")
+        );
+
+        let mut output = Vec::new();
+        dispatch_pending_clipboard_copy_requests(&mut output, &mut state);
+        state.handle_completion_response(rc_core::CompletionResponse {
+            activation_id: completion_request.activation_id,
+            request_id: completion_request.request_id,
+            buffer_revision: completion_request.buffer_revision,
+            original_buffer: completion_request.buffer,
+            outcome: rc_core::CompletionOutcome::Candidates {
+                provider: rc_core::CompletionProvider::Generic,
+                candidates: Vec::new(),
+                notice: Some(String::from("late completion notice")),
+            },
+        });
+        assert_eq!(
+            state
+                .command_line_session()
+                .and_then(|session| session.notice.as_deref()),
+            Some("Copied selected path to clipboard")
+        );
+
+        state
+            .apply(AppCommand::CopySelectedPath)
+            .expect("second clipboard request should be queued");
+        dispatch_pending_clipboard_copy_requests(&mut FailingWriter, &mut state);
+        assert_eq!(
+            state
+                .command_line_session()
+                .and_then(|session| session.notice.as_deref()),
+            Some("Clipboard copy failed: test clipboard write failure")
+        );
+
+        fs::remove_dir_all(root).expect("must remove temp root");
     }
 
     #[test]

@@ -26,6 +26,10 @@ impl AppCommand {
                 KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
                 KeyCommand::PutOtherTagged,
             ) => Some(Self::PutOtherTagged),
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
+                KeyCommand::CopySelectedPath,
+            ) => Some(Self::CopySelectedPath),
             (KeyContext::FileManager, KeyCommand::OpenUserMenu) => Some(Self::OpenUserMenu),
             (KeyContext::FileManager, KeyCommand::OpenMenuBar) => Some(Self::OpenMenuBar),
             (KeyContext::Menu, KeyCommand::Quit) => Some(Self::CloseMenu),

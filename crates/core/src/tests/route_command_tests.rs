@@ -39,6 +39,92 @@ fn set_active_panel_cursor_to_path(app: &mut AppState, target: &Path) {
 }
 
 #[test]
+fn copy_selected_path_queues_its_absolute_clipboard_text() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-copy-selected-path-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let selected = root.join("selected file.txt");
+    fs::write(&selected, "data").expect("selected fixture should be writable");
+
+    let mut app = app_with_loaded_panels(root.clone());
+    set_active_panel_cursor_to_path(&mut app, &selected);
+    app.apply(AppCommand::EnterXMap)
+        .expect("xmap mode should activate");
+    app.apply(AppCommand::CopySelectedPath)
+        .expect("clipboard request should be queued");
+
+    assert_eq!(app.key_context(), KeyContext::FileManager);
+    assert_eq!(
+        app.take_pending_clipboard_copy_requests(),
+        vec![ClipboardCopyRequest {
+            text: selected
+                .to_str()
+                .expect("temporary path should be valid UTF-8")
+                .to_string(),
+        }]
+    );
+    assert!(app.status_line.contains("Copying selected path"));
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
+fn copy_selected_parent_from_a_relative_initial_path_uses_its_resolved_path() {
+    let current_dir = env::current_dir().expect("current directory should resolve");
+    let expected_parent = current_dir
+        .parent()
+        .expect("test directory should have a parent")
+        .to_path_buf();
+    let mut app = AppState::new(PathBuf::from(".")).expect("app should initialize");
+
+    assert_eq!(app.active_panel().cwd, current_dir);
+    app.active_panel_mut()
+        .refresh()
+        .expect("relative panel listing should refresh");
+    let selected = app
+        .active_panel()
+        .selected_entry()
+        .expect("parent entry should be selected");
+    assert!(selected.is_parent());
+    assert_eq!(selected.path, expected_parent);
+
+    app.apply(AppCommand::CopySelectedPath)
+        .expect("parent path should be queued for copying");
+
+    assert_eq!(
+        app.take_pending_clipboard_copy_requests(),
+        vec![ClipboardCopyRequest {
+            text: expected_parent
+                .to_str()
+                .expect("parent path should be valid UTF-8")
+                .to_string(),
+        }]
+    );
+}
+
+#[test]
+fn copy_selected_path_reports_an_empty_panel_without_queuing_output() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic")
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rc-copy-selected-path-empty-{stamp}"));
+    fs::create_dir_all(&root).expect("must create temp root");
+    let mut app = AppState::new(root.clone()).expect("app should initialize");
+
+    app.apply(AppCommand::CopySelectedPath)
+        .expect("empty clipboard command should be handled");
+
+    assert!(app.take_pending_clipboard_copy_requests().is_empty());
+    assert_eq!(app.status_line, "No entry selected");
+
+    fs::remove_dir_all(&root).expect("must remove temp root");
+}
+
+#[test]
 fn tree_screen_selects_directory_for_active_panel() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -997,6 +1083,10 @@ fn app_command_mapping_is_context_aware() {
     assert_eq!(
         AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::PanelQuickView),
         Some(AppCommand::SetOtherPanelView(PanelViewMode::QuickView))
+    );
+    assert_eq!(
+        AppCommand::from_key_command(KeyContext::FileManagerXMap, &KeyCommand::CopySelectedPath),
+        Some(AppCommand::CopySelectedPath)
     );
     assert_eq!(
         AppCommand::from_key_command(KeyContext::Menu, &KeyCommand::CursorUp),
