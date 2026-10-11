@@ -5,6 +5,24 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Preserved dangling symlinks under Skip and Rename copy/move policies and corrected
+  related staging, backup, and rollback handling.
+- Fixed hex-view search crashes and incorrect match offsets around multibyte or
+  invalid UTF-8, including cursor-crossing matches and switches between text and hex modes.
+- Rejected named pipes and other unsupported special files before copying, preventing
+  FIFO opens from blocking cancellation and shutdown even if the source is replaced before opening.
+- Kept panelize cancellation active after the shell exits while descendants retain
+  captured output streams.
+- Removed quadratic tag-retention work from directory refreshes without discarding
+  tags hidden by active filters.
+- Kept large viewer jumps responsive with incremental syntax-highlighting budgets
+  and indexed access to visible lines, showing plain text while highlighting catches
+  up or after an oversized line. Syntax detection now uses the loaded file contents.
+
 ## [0.2.1] - 2026-10-11
 
 ### Added
