@@ -524,6 +524,7 @@ impl AppState {
         let partial_count = self.panel_refresh_add_partial_entries(panel, entries.len());
         let panel_state = &mut self.panels[panel_index];
         if is_first_chunk {
+            panel_state.mouse_viewport = None;
             panel_state.entries.clear();
             if matches!(source, PanelListingSource::Directory)
                 && let Some(parent) = cwd.parent()

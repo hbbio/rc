@@ -160,6 +160,9 @@ interface.
 | `F9` | Open the menu bar |
 | `q` / `Esc` / `F10` | Quit |
 
+Left-click an entry in either pane to select it and make that pane active.
+Double-click to open the entry.
+
 ### Command line
 
 | Keys | Action |

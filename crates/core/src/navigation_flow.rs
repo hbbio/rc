@@ -19,9 +19,10 @@ impl AppState {
                 self.set_panel_view_mode(panel, mode);
             }
             AppCommand::Panel(panel, PanelCommand::SelectAt(index)) => {
-                if self.panels[panel.index()].select_at(index) {
-                    self.sync_quick_view_from(panel, false);
-                }
+                self.select_panel_entry(panel, index, None);
+            }
+            AppCommand::Panel(panel, PanelCommand::SelectAtInViewport { index, viewport }) => {
+                self.select_panel_entry(panel, index, Some(viewport));
             }
             AppCommand::SetOtherPanelView(mode) => {
                 self.set_panel_view_mode(self.active_panel.other(), mode);
@@ -217,6 +218,25 @@ impl AppState {
         }
 
         Ok(CommandOutcome::Continue)
+    }
+
+    fn select_panel_entry(
+        &mut self,
+        panel: ActivePanel,
+        index: usize,
+        viewport: Option<PanelViewport>,
+    ) {
+        if self.panel_view_mode(panel) != PanelViewMode::Listing
+            || index >= self.panels[panel.index()].entries.len()
+        {
+            return;
+        }
+        self.active_panel = panel;
+        let changed = self.panels[panel.index()].select_at(index);
+        self.panels[panel.index()].mouse_viewport = viewport;
+        if changed {
+            self.sync_quick_view_from(panel, false);
+        }
     }
 
     fn apply_file_manager_navigation(&mut self, motion: NavigationMotion) {
@@ -652,7 +672,7 @@ impl AppState {
                 paths,
             };
             panel.panelized_entries = None;
-            panel.cursor = 0;
+            panel.move_cursor_home();
             panel.tagged.clear();
             panel.loading = true;
         }
@@ -1047,7 +1067,7 @@ impl AppState {
         let panel = &mut self.panels[panel_index];
         panel.cwd = destination;
         panel.clear_canonical_paths();
-        panel.cursor = 0;
+        panel.move_cursor_home();
         panel.source = PanelListingSource::Directory;
         panel.panelized_entries = None;
         panel.tagged.clear();

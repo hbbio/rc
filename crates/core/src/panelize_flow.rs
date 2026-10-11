@@ -86,6 +86,7 @@ impl AppState {
         panel.panelized_entries = Some(panelized_entries);
         panel.entries = entries;
         panel.cursor = restored_cursor;
+        panel.mouse_viewport = None;
         panel.tagged = tagged;
         panel.loading = false;
         panel.disk_usage = disk_usage;
@@ -423,7 +424,7 @@ impl AppState {
             let panel = self.active_panel_mut();
             panel.source = PanelListingSource::Panelize { command };
             panel.panelized_entries = None;
-            panel.cursor = 0;
+            panel.move_cursor_home();
             panel.tagged.clear();
             panel.loading = true;
         }

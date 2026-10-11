@@ -845,7 +845,8 @@ fn handle_mouse(
         _ => return Ok(false),
     }
 
-    let Some(commands) = state.commands_for_left_click(
+    let Some(commands) = rc_ui::commands_for_left_click(
+        state,
         mouse_event.column,
         mouse_event.row,
         viewport_width,
@@ -2479,6 +2480,168 @@ mod tests {
     }
 
     #[test]
+    fn panel_click_focuses_either_pane_and_double_click_opens_its_entry() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panel-click-{stamp}"));
+        let target = root.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let mut state = AppState::new(root.clone()).unwrap();
+        for panel in &mut state.panels {
+            panel.refresh().unwrap();
+        }
+        let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(8);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+        // Return to an already-selected row to verify that it still gains focus.
+        for panel in [ActivePanel::Right, ActivePanel::Left, ActivePanel::Right] {
+            let column = if panel == ActivePanel::Left { 1 } else { 61 };
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse(
+                &mut state,
+                click,
+                120,
+                40,
+                &mut tracker,
+                &mut runtime,
+                &skin_runtime,
+            )
+            .unwrap();
+            assert_eq!(state.active_panel, panel);
+            assert_eq!(state.active_panel().selected_entry().unwrap().path, target);
+            assert_eq!(
+                state.active_panel().cwd,
+                root,
+                "a single click must only select"
+            );
+        }
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 61,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            },
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert_eq!(state.active_panel, ActivePanel::Right);
+        assert_eq!(state.active_panel().cwd, target);
+        assert_eq!(state.panels[ActivePanel::Left.index()].cwd, root);
+        assert!(
+            matches!(command_rx.try_recv(), Ok(RuntimeCommand::Worker { command: WorkerCommand::Run(job), .. })
+            if matches!(&job.request, JobRequest::RefreshPanel { cwd, .. } if cwd == &target))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overflowing_panel_double_click_opens_the_original_entry_in_both_panes() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-panel-overflow-click-{stamp}"));
+        for index in 0..60 {
+            fs::create_dir_all(root.join(format!("d{index:02}"))).unwrap();
+        }
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        for format in rc_core::PanelListingFormat::ALL {
+            for panel in [ActivePanel::Left, ActivePanel::Right] {
+                let mut state = AppState::new(root.clone()).unwrap();
+                let mut settings = state.settings().clone();
+                settings.panel_options.listing_formats = [format; 2];
+                state.replace_settings(settings);
+                for panel_state in &mut state.panels {
+                    panel_state.refresh().unwrap();
+                }
+                let column = if format == rc_core::PanelListingFormat::Long {
+                    state.active_panel = panel;
+                    1
+                } else if panel == ActivePanel::Left {
+                    1
+                } else {
+                    61
+                };
+                let click = MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: 7,
+                    modifiers: KeyModifiers::NONE,
+                };
+                let target_index = if format == rc_core::PanelListingFormat::Brief {
+                    5
+                } else {
+                    4
+                };
+                let expected_target = state.panels[panel.index()].entries[target_index]
+                    .path
+                    .clone();
+                let (mut runtime, mut command_rx) = runtime::test_runtime_bridge_with_capacity(8);
+                let mut tracker = MouseClickTracker::default();
+                handle_mouse(
+                    &mut state,
+                    click,
+                    120,
+                    12,
+                    &mut tracker,
+                    &mut runtime,
+                    &skin_runtime,
+                )
+                .unwrap();
+                assert_eq!(state.active_panel, panel);
+                assert_eq!(state.active_panel().cursor, target_index);
+                assert_eq!(state.active_panel().cwd, root);
+                handle_mouse(
+                    &mut state,
+                    click,
+                    120,
+                    12,
+                    &mut tracker,
+                    &mut runtime,
+                    &skin_runtime,
+                )
+                .unwrap();
+                assert_eq!(
+                    state.active_panel().cwd,
+                    expected_target,
+                    "double-click failed in {panel:?} {format:?}"
+                );
+                assert_eq!(state.panels[panel.other().index()].cwd, root);
+                assert!(
+                    matches!(command_rx.try_recv(), Ok(RuntimeCommand::Worker { command: WorkerCommand::Run(job), .. })
+                    if matches!(&job.request, JobRequest::RefreshPanel { cwd, .. } if cwd == &expected_target))
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn mouse_click_tracker_requires_matching_recent_clicks() {
         let started_at = Instant::now();
         let mut tracker = MouseClickTracker::default();
@@ -2532,6 +2695,29 @@ mod tests {
             tree_target,
             started_at + DOUBLE_CLICK_INTERVAL + Duration::from_secs(1),
         ));
+
+        tracker.clear();
+        for (offset, (panel, path, expected_double_click)) in [
+            (ActivePanel::Left, "/files/first", false),
+            (ActivePanel::Left, "/files/replacement", false),
+            (ActivePanel::Right, "/files/replacement", false),
+            (ActivePanel::Right, "/files/replacement", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                tracker.register(
+                    1,
+                    7,
+                    KeyContext::FileManager,
+                    MouseClickTarget::PanelEntry(panel, PathBuf::from(path)),
+                    started_at + Duration::from_millis(offset as u64 * 50),
+                ),
+                expected_double_click,
+                "double-click requires the same path in the same pane"
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
 mod bundled_skins;
+mod mouse;
 mod skin;
+
+pub use mouse::commands_for_left_click;
 
 use chrono::{DateTime, Local};
 use ratatui::Frame;
@@ -76,17 +79,7 @@ struct CachedViewerHighlight {
 pub fn render(frame: &mut Frame, state: &AppState) {
     let skin = current_skin();
     let job_counts = state.jobs_status_counts();
-    let menu_height = if state.show_menu_bar() { 1 } else { 0 };
-    let button_height = if state.show_button_bar() { 1 } else { 0 };
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(menu_height),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(button_height),
-        ])
-        .split(frame.area());
+    let root = root_areas(frame.area(), state);
 
     let active_menu = match state.top_route() {
         Route::Menu(menu) => Some(menu.active_menu),
@@ -463,6 +456,31 @@ fn render_completion_pager(
         .style(base_style);
     frame.render_widget(Clear, area);
     frame.render_widget(list, area);
+}
+
+fn root_areas(area: Rect, state: &AppState) -> [Rect; 4] {
+    Layout::vertical([
+        Constraint::Length(u16::from(state.show_menu_bar())),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(u16::from(state.show_button_bar())),
+    ])
+    .areas(area)
+}
+
+fn panel_content_areas(inner: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner)
+}
+
+fn panel_display_format(app: &AppState, panel: ActivePanel) -> PanelListingFormat {
+    let configured = app.panel_listing_format(panel);
+    if configured == PanelListingFormat::Long
+        && app.panel_view_mode(panel.other()) != PanelViewMode::Listing
+    {
+        PanelListingFormat::Full
+    } else {
+        configured
+    }
 }
 
 fn uses_single_panel_layout(state: &AppState) -> bool {
@@ -894,14 +912,7 @@ fn render_panel(
         PanelViewMode::Listing => {}
     }
 
-    let configured_format = app.panel_listing_format(panel_id);
-    let format = if configured_format == PanelListingFormat::Long
-        && app.panel_view_mode(panel_id.other()) != PanelViewMode::Listing
-    {
-        PanelListingFormat::Full
-    } else {
-        configured_format
-    };
+    let format = panel_display_format(app, panel_id);
     let titles = fit_panel_topline_titles(
         panel_topline_titles(panel, format),
         area.width.saturating_sub(2) as usize,
@@ -918,10 +929,7 @@ fn render_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let panel_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
+    let panel_layout = panel_content_areas(inner);
 
     if panel.entries.is_empty() {
         let placeholder = if panel.loading {
@@ -984,8 +992,7 @@ fn render_full_panel_entries(
     skin: &UiSkin,
 ) {
     let viewport_rows = area.height.saturating_sub(1).max(1) as usize;
-    let (window_start, window_end) =
-        visible_window(panel.entries.len(), panel.cursor, viewport_rows);
+    let (window_start, window_end) = panel.visible_window(viewport_rows, 1);
     let selected_row = panel
         .cursor
         .saturating_sub(window_start)
@@ -1061,6 +1068,10 @@ impl BriefGrid {
         (index < self.entry_count).then_some(index)
     }
 
+    fn column_widths(self) -> Vec<Constraint> {
+        vec![Constraint::Ratio(1, self.columns as u32); self.columns]
+    }
+
     fn left_of(self, cursor: usize) -> Option<usize> {
         if self.rows == 0 {
             return None;
@@ -1129,10 +1140,8 @@ fn render_brief_panel_entries(
 ) {
     let grid = BriefGrid::new(panel.entries.len(), area.width);
     let columns = grid.columns;
-    let total_rows = grid.rows;
-    let selected_row = panel.cursor % total_rows.max(1);
     let viewport_rows = usize::from(area.height.max(1));
-    let (window_start, window_end) = visible_window(total_rows, selected_row, viewport_rows);
+    let (window_start, window_end) = panel.visible_window(viewport_rows, grid.columns);
     let cell_width = usize::from(area.width)
         .saturating_sub(columns.saturating_sub(1))
         .checked_div(columns)
@@ -1158,9 +1167,8 @@ fn render_brief_panel_entries(
         });
         Row::new(cells)
     });
-    let widths = vec![Constraint::Ratio(1, columns as u32); columns];
     frame.render_widget(
-        Table::new(rows, widths)
+        Table::new(rows, grid.column_widths())
             .style(skin.style("core", "_default_"))
             .column_spacing(1),
         area,
@@ -1175,8 +1183,7 @@ fn render_long_panel_entries(
     skin: &UiSkin,
 ) {
     let viewport_rows = area.height.saturating_sub(1).max(1) as usize;
-    let (window_start, window_end) =
-        visible_window(panel.entries.len(), panel.cursor, viewport_rows);
+    let (window_start, window_end) = panel.visible_window(viewport_rows, 1);
     let selected_row = panel
         .cursor
         .saturating_sub(window_start)
@@ -3233,6 +3240,8 @@ fn terminal_rect(area: ScreenRect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    mod mouse_tests;
+
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

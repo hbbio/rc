@@ -5,12 +5,15 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-10-11
 
 ### Added
 
-- Added `Ctrl-X y` to copy the active selected entry's full path to the terminal
-  clipboard via OSC 52.
+- Added automatic refresh of both file panes and the open directory tree when
+  filesystem changes occur, including changes made by other programs, while
+  preserving selection and tags.
+- Added click-to-select and double-click activation in either file pane across
+  Full, Brief, and Long layouts, preserving the visible window during mouse selection.
 
 ## [0.2.0] - 2026-08-30
 
@@ -25,6 +28,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   from either panel, with literal shell quoting.
 - Added contextual command-line help and a responsive bottom bar containing only
   prompt actions.
+- Added `Ctrl-X y` to copy the active selected entry's full path to the terminal
+  clipboard via OSC 52.
 
 ### Changed
 
@@ -104,7 +109,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added bounded, cancelable, request-correlated background work throughout expensive
   filesystem workflows.
 
-[Unreleased]: https://github.com/hbbio/rc/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hbbio/rc/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/hbbio/rc/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/hbbio/rc/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hbbio/rc/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hbbio/rc/releases/tag/v0.1.0

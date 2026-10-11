@@ -148,6 +148,7 @@ impl AppState {
         let show_hidden_files = self.settings.panel_options.show_hidden_files;
         self.panel_listing_formats = self.settings.panel_options.listing_formats;
         for (index, panel) in self.panels.iter_mut().enumerate() {
+            panel.mouse_viewport = None;
             panel.sort_mode = self.settings.panel_options.sort_modes[index];
             panel.filter = self.settings.panel_options.filters[index].clone();
             panel.set_show_hidden_files(show_hidden_files);
@@ -203,6 +204,7 @@ impl AppState {
         self.deactivate_quick_view(panel);
         self.panel_views[panel.index()] = PanelViewMode::Listing;
         self.panel_listing_formats[panel.index()] = format;
+        self.panels[panel.index()].mouse_viewport = None;
         self.settings.panel_options.listing_formats[panel.index()] = format;
         self.settings.mark_dirty();
         self.active_panel = panel;
