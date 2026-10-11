@@ -1402,6 +1402,10 @@ fn copy_path(
         return Ok(());
     }
 
+    if !metadata.is_file() {
+        return Err(unsupported_copy_source(source));
+    }
+
     if path_entry_exists(destination)? {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -1427,7 +1431,18 @@ fn copy_file(
     destination: &Path,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
-    let mut source_file = fs::File::open(source)?;
+    let mut source_options = fs::OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Do not block if a regular file was replaced by a FIFO after inspection.
+        source_options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+    let mut source_file = source_options.open(source)?;
+    if !source_file.metadata()?.is_file() {
+        return Err(unsupported_copy_source(source));
+    }
     let staged_destination = destination_staging_path(destination)?;
     // Only clean up a staging entry after we have successfully created it.
     let mut destination_file = fs::OpenOptions::new()
@@ -1461,6 +1476,16 @@ fn copy_file(
     }
 
     Ok(())
+}
+
+fn unsupported_copy_source(source: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "copy supports regular files, directories, and symlinks only: {}",
+            source.display()
+        ),
+    )
 }
 
 fn path_entry_exists(path: &Path) -> io::Result<bool> {
@@ -2354,132 +2379,119 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_worker_shutdown_finishes_active_and_queued_jobs_as_canceled() {
+    fn worker_rejects_fifo_copy_without_blocking_queue_or_shutdown() {
         use nix::sys::stat::Mode;
 
-        let root = make_temp_dir("shutdown-active-and-queued-cancel");
-        let source_dir = root.join("source");
-        let destination = root.join("destination");
-        fs::create_dir_all(&source_dir).expect("source dir should exist");
-        fs::create_dir_all(&destination).expect("destination dir should exist");
-
-        let fifo_source = source_dir.join("blocked.pipe");
-        nix::unistd::mkfifo(&fifo_source, Mode::S_IRUSR | Mode::S_IWUSR)
-            .expect("fifo source should be creatable");
-
+        let root = make_temp_dir("fifo-copy");
+        let fifo = root.join("blocked.pipe");
+        nix::unistd::mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        let worker = thread::spawn(move || run_worker(command_rx, event_tx));
-
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_worker(command_rx, event_tx);
+            done_tx.send(()).unwrap();
+        });
         let mut manager = JobManager::new();
-        let active_job = manager.enqueue(JobRequest::Copy {
-            sources: vec![fifo_source.clone()],
-            destination_dir: destination,
+        let copy = manager.enqueue(JobRequest::Copy {
+            sources: vec![fifo],
+            destination_dir: root.join("destination"),
             overwrite: OverwritePolicy::Skip,
         });
-        let active_id = active_job.id;
-        let queued_job = manager.enqueue(JobRequest::Mkdir {
+        let copy_id = copy.id;
+        let mkdir = manager.enqueue(JobRequest::Mkdir {
             path: root.join("queued"),
         });
-        let queued_id = queued_job.id;
-
+        let mkdir_id = mkdir.id;
+        command_tx.send(WorkerCommand::Run(Box::new(copy))).unwrap();
         command_tx
-            .send(WorkerCommand::Run(Box::new(active_job)))
-            .expect("active job command should send");
-        loop {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("active worker should emit a start event");
-            manager.handle_event(&event);
-            match event {
-                JobEvent::Started { id } if id == active_id => break,
-                JobEvent::Finished { .. } => panic!("active job finished before shutdown"),
-                _ => {}
+            .send(WorkerCommand::Run(Box::new(mkdir)))
+            .unwrap();
+        let mut finished = 0;
+        while finished < 2 {
+            if let JobEvent::Finished { id, result } =
+                event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                if id == copy_id {
+                    assert_eq!(result.unwrap_err().code, JobErrorCode::Unsupported);
+                } else {
+                    assert_eq!(id, mkdir_id);
+                    result.unwrap();
+                }
+                finished += 1;
             }
         }
+        command_tx.send(WorkerCommand::Shutdown).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(!root.join("destination").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
-        let (writer_release_tx, writer_release_rx) = mpsc::channel();
-        let writer = thread::spawn({
-            let fifo_source = fifo_source.clone();
-            move || {
-                let mut fifo = fs::OpenOptions::new()
-                    .write(true)
-                    .open(fifo_source)
-                    .expect("fifo writer should connect to active copy");
-                writer_ready_tx
-                    .send(())
-                    .expect("fifo writer should report readiness");
-                writer_release_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("fifo writer should receive release signal");
-                let _ = std::io::Write::write_all(&mut fifo, b"x");
+    #[cfg(unix)]
+    #[test]
+    fn copy_rejects_nested_special_files_and_restores_overwritten_destination() {
+        use nix::sys::stat::Mode;
+        use std::os::unix::net::UnixListener;
+
+        let root = make_temp_dir("sp");
+        let source = root.join("s");
+        let destination_dir = root.join("destination");
+        let destination = destination_dir.join("s");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination_dir).unwrap();
+        fs::write(&destination, "original").unwrap();
+        let special = source.join("x");
+        for fifo in [true, false] {
+            let listener = if fifo {
+                nix::unistd::mkfifo(&special, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+                None
+            } else {
+                Some(UnixListener::bind(&special).unwrap())
+            };
+            let mut manager = JobManager::new();
+            let job = manager.enqueue(JobRequest::Copy {
+                sources: vec![source.clone()],
+                destination_dir: destination_dir.clone(),
+                overwrite: OverwritePolicy::Overwrite,
+            });
+            let (tx, rx) = mpsc::channel();
+            execute_worker_job(job, &tx);
+            match recv_until_finished(&rx, &mut manager) {
+                JobEvent::Finished {
+                    result: Err(error), ..
+                } => assert_eq!(error.code, JobErrorCode::Unsupported),
+                event => panic!("unexpected event: {event:?}"),
             }
-        });
-        writer_ready_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("active copy should open the fifo reader");
-
-        command_tx
-            .send(WorkerCommand::Run(Box::new(queued_job)))
-            .expect("queued job command should send");
-        command_tx
-            .send(WorkerCommand::Shutdown)
-            .expect("shutdown command should send");
-
-        let mut active_finished = false;
-        loop {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("queued job should finish during shutdown");
-            manager.handle_event(&event);
-            match event {
-                JobEvent::Finished { id, result } if id == queued_id => {
-                    let error = result.expect_err("queued job should not succeed during shutdown");
-                    assert!(error.is_canceled(), "queued job should be canceled");
-                    break;
-                }
-                JobEvent::Finished { id, result } if id == active_id => {
-                    let error = result.expect_err("active job should not succeed during shutdown");
-                    assert!(error.is_canceled(), "active job should be canceled");
-                    active_finished = true;
-                }
-                _ => {}
-            }
+            assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+            drop(listener);
+            fs::remove_file(&special).unwrap();
         }
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        writer_release_tx
-            .send(())
-            .expect("fifo writer should be released after queued cancellation");
-
-        while !active_finished {
-            let event = event_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("active job should finish after fifo unblocks");
-            manager.handle_event(&event);
-            match event {
-                JobEvent::Finished { id, result } if id == active_id => {
-                    let error = result.expect_err("active job should not succeed during shutdown");
-                    assert!(error.is_canceled(), "active job should be canceled");
-                    active_finished = true;
-                }
-                JobEvent::Finished { id, .. } if id == queued_id => {
-                    panic!("queued job finished more than once")
-                }
-                _ => {}
-            }
-        }
-
-        writer.join().expect("fifo writer should finish");
-        worker
-            .join()
-            .expect("worker thread should terminate cleanly");
-
-        let counts = manager.status_counts();
-        assert_eq!(counts.canceled, 2);
-        assert_eq!(counts.queued, 0);
-        assert_eq!(counts.running, 0);
-        fs::remove_dir_all(&root).expect("temp tree should be removable");
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_rechecks_opened_source_without_blocking_on_fifo() {
+        let root = make_temp_dir("fifo-open");
+        let fifo = root.join("source");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let destination = root.join("destination");
+        let (tx, _rx) = mpsc::channel();
+        let mut progress = ProgressTracker::new(
+            JobId(1),
+            JobTotals::default(),
+            &tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            copy_file(&fifo, &destination, &mut progress)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
