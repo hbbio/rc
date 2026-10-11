@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 filetime = "0.2"
 globset = "0.4"
+memchr = "2"
 rc-shell.workspace = true
 regex = "1.11"
 shlex.workspace = true
