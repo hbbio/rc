@@ -1778,7 +1778,19 @@ impl ResolvedDestination {
         };
 
         match operation_result {
-            Ok(()) => remove_path(&backup),
+            Ok(()) => {
+                // The transfer has committed. Cleanup may already have removed
+                // part of the backup, so its failure must not trigger a retry or rollback.
+                if let Err(error) = remove_path(&backup) {
+                    tracing::warn!(
+                        destination = %self.path.display(),
+                        backup = %backup.display(),
+                        %error,
+                        "transfer completed but overwrite backup cleanup failed"
+                    );
+                }
+                Ok(())
+            }
             Err(operation_error) => {
                 if path_entry_exists(&self.path)? {
                     remove_path(&self.path)?;
@@ -2775,6 +2787,83 @@ mod tests {
             .join()
             .expect("worker thread should terminate cleanly");
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn committed_destination_survives_backup_cleanup_error() {
+        let root = make_temp_dir("cleanup-error");
+        let destination = root.join("destination");
+        let invalid_parent = root.join("not-a-directory");
+        fs::write(&destination, "committed").unwrap();
+        fs::write(&invalid_parent, "file").unwrap();
+        let backup = invalid_parent.join("backup");
+        assert!(remove_path(&backup).is_err());
+        ResolvedDestination {
+            path: destination.clone(),
+            overwrite_backup: Some(backup),
+        }
+        .finish(Ok(()))
+        .expect("backup cleanup must not change a committed transfer's result");
+        assert_eq!(fs::read_to_string(destination).unwrap(), "committed");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_move_continue_after_readonly_backup_cleanup_fails() {
+        if nix::unistd::geteuid().is_root() {
+            return; // Root can remove entries from read-only directories.
+        }
+        let root = make_temp_dir("readonly-backup-cleanup");
+        for moving in [false, true] {
+            let dir = root.join(format!("{moving}"));
+            let destination_dir = dir.join("destination");
+            let destination = destination_dir.join("first");
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(destination.join("original"), "original").unwrap();
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o555)).unwrap();
+            let first = dir.join("first");
+            let second = dir.join("second");
+            fs::write(&first, "replacement").unwrap();
+            fs::write(&second, "next file").unwrap();
+            let sources = vec![first.clone(), second.clone()];
+            let request = if moving {
+                JobRequest::Move {
+                    sources,
+                    destination_dir: destination_dir.clone(),
+                    destination_names: None,
+                    overwrite: OverwritePolicy::Overwrite,
+                }
+            } else {
+                JobRequest::Copy {
+                    sources,
+                    destination_dir: destination_dir.clone(),
+                    overwrite: OverwritePolicy::Overwrite,
+                }
+            };
+            let mut manager = JobManager::new();
+            let (tx, rx) = mpsc::channel();
+            execute_worker_job(manager.enqueue(request), &tx);
+            assert!(matches!(
+                recv_until_finished(&rx, &mut manager),
+                JobEvent::Finished { result: Ok(()), .. }
+            ));
+            assert_eq!(manager.status_counts().succeeded, 1);
+            assert_eq!(fs::read_to_string(&destination).unwrap(), "replacement");
+            assert_eq!(
+                fs::read_to_string(destination_dir.join("second")).unwrap(),
+                "next file"
+            );
+            assert_eq!(first.exists(), !moving);
+            assert_eq!(second.exists(), !moving);
+            let backup = destination_dir.join(".first.rc-backup-1");
+            assert_eq!(
+                fs::read_to_string(backup.join("original")).unwrap(),
+                "original"
+            );
+            fs::set_permissions(backup, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

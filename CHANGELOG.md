@@ -5,10 +5,12 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.2] - 2026-10-12
 
 ### Fixed
 
+- Kept completed overwrite copies and moves successful when backup cleanup fails,
+  logging the leftover backup path instead of reporting a failed transfer.
 - Preserved dangling symlinks under Skip and Rename copy/move policies and corrected
   related staging, backup, and rollback handling.
 - Fixed hex-view search crashes and incorrect match offsets around multibyte or
@@ -127,7 +129,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added bounded, cancelable, request-correlated background work throughout expensive
   filesystem workflows.
 
-[Unreleased]: https://github.com/hbbio/rc/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/hbbio/rc/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/hbbio/rc/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/hbbio/rc/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/hbbio/rc/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hbbio/rc/compare/v0.1.0...v0.1.1
