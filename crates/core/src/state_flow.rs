@@ -327,11 +327,19 @@ impl AppState {
     pub fn open_selected_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
+        let archive_parent = self.active_panel().is_archive()
+            && self
+                .active_panel()
+                .selected_entry()
+                .is_some_and(FileEntry::is_parent);
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().open_selected_directory();
         if opened {
             self.schedule_panel_refresh_revert(panel, revert);
+            if archive_parent {
+                self.set_pending_panel_focus_target(panel, previous_directory.clone());
+            }
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
@@ -342,14 +350,59 @@ impl AppState {
         opened
     }
 
+    pub(crate) fn open_selected_zip(&mut self) -> bool {
+        if self.active_panel().is_archive() {
+            return false;
+        }
+        let Some(path) = self
+            .selected_non_parent_entry()
+            .filter(|entry| {
+                !entry.is_dir()
+                    && entry
+                        .path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+            })
+            .map(|entry| entry.path.clone())
+        else {
+            return false;
+        };
+        let panel = self.active_panel;
+        let revert = self.panel_refresh_revert_snapshot(panel);
+        let snapshot = self.completed_panelized_result_snapshot(panel);
+        let previous = self.active_panel().cwd.clone();
+        let location = ZipLocation::root(path);
+        let state = self.active_panel_mut();
+        state.cwd = location.path();
+        state.source = PanelListingSource::Zip(location);
+        state.clear_canonical_paths();
+        state.entries.clear();
+        state.tagged.clear();
+        state.panelized_entries = None;
+        state.move_cursor_home();
+        state.loading = true;
+        self.schedule_panel_refresh_revert(panel, revert);
+        if let Some(snapshot) = snapshot {
+            self.panelized_result_history[panel.index()] = Some(snapshot);
+        }
+        self.remember_previous_directory(panel, previous);
+        self.sync_quick_view_from(panel, false);
+        self.sync_selection_size(panel, false);
+        true
+    }
+
     pub fn go_parent_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
+        let was_archive = self.active_panel().is_archive();
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().go_parent();
         if opened {
             self.schedule_panel_refresh_revert(panel, revert);
+            if was_archive {
+                self.set_pending_panel_focus_target(panel, previous_directory.clone());
+            }
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }

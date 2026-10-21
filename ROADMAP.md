@@ -42,7 +42,7 @@ in the project [README](README.md).
 
 - Introduce a path and backend model that can represent local, archive, helper, and
   remote locations without weakening local-filesystem behavior.
-- Browse TAR and ZIP archives as directories and support nested archive paths.
+- Browse TAR archives as directories and support nested archive paths.
 - Support MC-style extfs helpers for additional archive and package formats.
 - Add optional SFTP, FTP, and shell links with secure credential handling, host
   verification, cancellation, and reconnect behavior.

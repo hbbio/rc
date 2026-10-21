@@ -1100,6 +1100,7 @@ async fn run_runtime_loop(
                                 (Arc::clone(&settings_limit), "settings")
                             }
                             JobRequest::Copy { .. }
+                            | JobRequest::ExtractZip { .. }
                             | JobRequest::Move { .. }
                             | JobRequest::Delete { .. }
                             | JobRequest::Mkdir { .. }
@@ -1110,6 +1111,7 @@ async fn run_runtime_loop(
                             | JobRequest::QuickCdSearch { .. }
                             | JobRequest::ResolvePanelIdentity { .. }
                             | JobRequest::MeasureSelection { .. }
+                            | JobRequest::MeasureZipSelection { .. }
                             | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan")
                             }
@@ -1117,6 +1119,7 @@ async fn run_runtime_loop(
                                 (Arc::clone(&desktop_open_limit), "desktop_open")
                             }
                             JobRequest::LoadViewer { .. }
+                            | JobRequest::LoadZipViewer { .. }
                             | JobRequest::LoadQuickView { .. } => {
                                 (Arc::clone(&background_process_limit), "process")
                             }
@@ -1529,6 +1532,27 @@ fn execute_runtime_worker_job(
             worker_event_tx,
             background_event_tx,
         ),
+        JobRequest::LoadZipViewer {
+            location,
+            path,
+            quick_view,
+        } => execute_viewer_load_worker(
+            worker_job.id,
+            path,
+            Some(&location),
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+            |path, result| match quick_view {
+                Some((panel, request_id)) => BackgroundEvent::QuickViewLoaded {
+                    panel,
+                    path,
+                    request_id,
+                    result,
+                },
+                None => BackgroundEvent::ViewerLoaded { path, result },
+            },
+        ),
         JobRequest::LoadQuickView {
             panel,
             path,
@@ -1551,6 +1575,22 @@ fn execute_runtime_worker_job(
             panel,
             paths,
             request_id,
+            None,
+            cancel_flag,
+            worker_event_tx,
+            background_event_tx,
+        ),
+        JobRequest::MeasureZipSelection {
+            location,
+            panel,
+            paths,
+            request_id,
+        } => execute_selection_size_worker_job(
+            worker_job.id,
+            panel,
+            paths,
+            request_id,
+            Some(&location),
             cancel_flag,
             worker_event_tx,
             background_event_tx,
@@ -2213,6 +2253,7 @@ fn execute_viewer_worker_job(
     execute_viewer_load_worker(
         job_id,
         path,
+        None,
         cancel_flag,
         worker_event_tx,
         background_event_tx,
@@ -2233,6 +2274,7 @@ fn execute_quick_view_worker_job(
     execute_viewer_load_worker(
         job_id,
         path,
+        None,
         cancel_flag,
         worker_event_tx,
         background_event_tx,
@@ -2248,6 +2290,7 @@ fn execute_quick_view_worker_job(
 fn execute_viewer_load_worker(
     job_id: JobId,
     path: std::path::PathBuf,
+    zip: Option<&rc_core::ZipLocation>,
     cancel_flag: Arc<AtomicBool>,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
@@ -2261,7 +2304,12 @@ fn execute_viewer_load_worker(
         });
         return;
     }
-    let viewer_result = rc_core::ViewerState::open_cancellable(path.clone(), cancel_flag.as_ref());
+    let viewer_result = match zip {
+        Some(location) => {
+            rc_core::ViewerState::open_zip_cancellable(location, path.clone(), cancel_flag.as_ref())
+        }
+        None => rc_core::ViewerState::open_cancellable(path.clone(), cancel_flag.as_ref()),
+    };
     if is_canceled(cancel_flag.as_ref()) {
         let _ = worker_event_tx.send(JobEvent::Finished {
             id: job_id,
@@ -2294,12 +2342,17 @@ fn execute_selection_size_worker_job(
     panel: rc_core::ActivePanel,
     paths: Vec<std::path::PathBuf>,
     request_id: u64,
+    zip: Option<&rc_core::ZipLocation>,
     cancel_flag: Arc<AtomicBool>,
     worker_event_tx: &Sender<JobEvent>,
     background_event_tx: &Sender<BackgroundEvent>,
 ) {
     let _ = worker_event_tx.send(JobEvent::Started { id: job_id });
-    let report = match rc_core::measure_selection_size(&paths, cancel_flag.as_ref()) {
+    let report_result = match zip {
+        Some(location) => rc_core::measure_zip_selection(location, &paths, cancel_flag.as_ref()),
+        None => rc_core::measure_selection_size(&paths, cancel_flag.as_ref()),
+    };
+    let report = match report_result {
         Ok(report) if !is_canceled(cancel_flag.as_ref()) => report,
         Ok(_) => {
             let _ = worker_event_tx.send(JobEvent::Finished {
@@ -2395,11 +2448,13 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
         WorkerCommand::Run(job) => match job.request {
             JobRequest::OpenDesktop { .. }
             | JobRequest::LoadViewer { .. }
+            | JobRequest::LoadZipViewer { .. }
             | JobRequest::LoadQuickView { .. } => CommandPriority::High,
             JobRequest::RefreshPanel { .. }
             | JobRequest::ResolvePanelIdentity { .. }
             | JobRequest::QuickCdSearch { .. }
             | JobRequest::MeasureSelection { .. } => CommandPriority::Low,
+            JobRequest::MeasureZipSelection { .. } => CommandPriority::Low,
             _ => CommandPriority::Medium,
         },
     }
@@ -3375,6 +3430,102 @@ mod tests {
     }
 
     #[test]
+    fn canceled_zip_scan_releases_its_permit_and_allows_shutdown() {
+        use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+        let root = make_temp_dir("zip-cancel-permit");
+        let archive = root.join("large.zip");
+        let mut writer = ZipWriter::new(fs::File::create(&archive).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let suffix = "x".repeat(192);
+        for index in 0..20_000 {
+            writer
+                .start_file(format!("folder/{index:05}-{suffix}.txt"), options)
+                .unwrap();
+        }
+        writer.finish().unwrap();
+
+        let (command_tx, worker_event_rx, _background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let pause = Arc::new(AtomicBool::new(true));
+        let mut paused_ids = Vec::new();
+        for _ in 0..SCAN_CONCURRENCY_LIMIT - 1 {
+            let job = enqueue_paused_find_job(&mut manager, &root, Arc::clone(&pause));
+            paused_ids.push(job.id);
+            send_run(&command_tx, job);
+        }
+        let mut started = 0;
+        while started < paused_ids.len() {
+            if let JobEvent::Started { .. } = recv_event(&worker_event_rx, Duration::from_secs(2)) {
+                started += 1;
+            }
+        }
+        let location = rc_core::ZipLocation::root(archive);
+        let job = manager.enqueue(JobRequest::RefreshPanel {
+            panel: ActivePanel::Left,
+            cwd: location.path(),
+            source: PanelListingSource::Zip(location),
+            sort_mode: SortMode::default(),
+            filter: PanelFilter::default(),
+            show_hidden_files: true,
+            cached_panelized_entries: None,
+            home_directory: None,
+            request_id: 1,
+        });
+        let scan_id = job.id;
+        send_run(&command_tx, job);
+        loop {
+            if matches!(recv_event(&worker_event_rx, Duration::from_secs(2)), JobEvent::Started { id } if id == scan_id)
+            {
+                break;
+            }
+        }
+        // The deterministic read-boundary tests cover exact cancellation sites;
+        // this exercises a real scan after it has acquired the last scan permit.
+        thread::sleep(Duration::from_millis(1));
+        send_cancel(&command_tx, scan_id);
+        let probe = manager.enqueue(JobRequest::ResolvePanelIdentity {
+            panel: ActivePanel::Right,
+            cwd: root.clone(),
+            home_directory: None,
+            request_id: 2,
+        });
+        let probe_id = probe.id;
+        send_run(&command_tx, probe);
+        let mut scan_finished = false;
+        let mut probe_finished = false;
+        while !scan_finished || !probe_finished {
+            match recv_event(&worker_event_rx, Duration::from_secs(3)) {
+                JobEvent::Finished { id, result } if id == scan_id => {
+                    assert_eq!(result.unwrap_err().code, JobErrorCode::Canceled);
+                    scan_finished = true;
+                }
+                JobEvent::Finished { id, result } if id == probe_id => {
+                    result.expect("the probe must acquire the released scan permit");
+                    probe_finished = true;
+                }
+                _ => {}
+            }
+        }
+        command_tx.blocking_send(RuntimeCommand::Shutdown).unwrap();
+        let mut finished = 0;
+        while finished < paused_ids.len() {
+            if let JobEvent::Finished { id, result } =
+                recv_event(&worker_event_rx, Duration::from_secs(3))
+            {
+                assert!(paused_ids.contains(&id));
+                assert_eq!(result.unwrap_err().code, JobErrorCode::Canceled);
+                finished += 1;
+            }
+        }
+        runtime_handle
+            .join()
+            .expect("runtime must shut down after ZIP cancellation");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn shutdown_finishes_persist_settings_jobs_in_submission_order() {
         let root = make_temp_dir("shutdown-persist-settings");
         let settings_paths = settings_io::SettingsPaths {
@@ -4013,6 +4164,7 @@ mod tests {
             ActivePanel::Right,
             vec![selected],
             73,
+            None,
             cancel_flag,
             &worker_event_tx,
             &background_event_tx,
@@ -4044,6 +4196,107 @@ mod tests {
         ));
 
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn zip_runtime_workers_load_previews_and_measure_metadata_with_request_identity() {
+        use rc_core::ZipLocation;
+        use std::io::Write;
+        use zip::{ZipWriter, write::SimpleFileOptions};
+
+        let root = make_temp_dir("zip-runtime");
+        let archive = root.join("input.zip");
+        let mut writer = ZipWriter::new(fs::File::create(&archive).unwrap());
+        writer
+            .start_file("folder/file.txt", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"zip payload").unwrap();
+        writer.finish().unwrap();
+        let path = archive.join("folder/file.txt");
+        let location = ZipLocation::root(archive.clone());
+        for request in [
+            JobRequest::LoadZipViewer {
+                location: location.clone(),
+                path: path.clone(),
+                quick_view: None,
+            },
+            JobRequest::LoadZipViewer {
+                location: location.clone(),
+                path: path.clone(),
+                quick_view: Some((ActivePanel::Right, 42)),
+            },
+            JobRequest::MeasureZipSelection {
+                location,
+                panel: ActivePanel::Left,
+                paths: vec![archive.join("folder")],
+                request_id: 73,
+            },
+        ] {
+            let mut manager = rc_core::JobManager::new();
+            let job = manager.enqueue(request.clone());
+            let (worker_tx, worker_rx) = mpsc::channel();
+            let (background_tx, background_rx) = mpsc::channel();
+            execute_runtime_worker_job(
+                job,
+                Arc::new(AtomicBool::new(false)),
+                &worker_tx,
+                &background_tx,
+            );
+            assert!(matches!(
+                recv_event(&worker_rx, Duration::from_secs(1)),
+                JobEvent::Started { .. }
+            ));
+            assert!(matches!(
+                recv_event(&worker_rx, Duration::from_secs(1)),
+                JobEvent::Finished { result: Ok(()), .. }
+            ));
+            match (
+                request,
+                background_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ) {
+                (
+                    JobRequest::LoadZipViewer {
+                        quick_view: None, ..
+                    },
+                    BackgroundEvent::ViewerLoaded {
+                        path: loaded,
+                        result: Ok(viewer),
+                    },
+                ) => {
+                    assert_eq!(loaded, path);
+                    assert_eq!(viewer.content(), "zip payload");
+                }
+                (
+                    JobRequest::LoadZipViewer {
+                        quick_view: Some(_),
+                        ..
+                    },
+                    BackgroundEvent::QuickViewLoaded {
+                        panel: ActivePanel::Right,
+                        path: loaded,
+                        request_id: 42,
+                        result: Ok(viewer),
+                    },
+                ) => {
+                    assert_eq!(loaded, path);
+                    assert_eq!(viewer.content(), "zip payload");
+                }
+                (
+                    JobRequest::MeasureZipSelection { .. },
+                    BackgroundEvent::SelectionSizeMeasured {
+                        panel: ActivePanel::Left,
+                        request_id: 73,
+                        report,
+                    },
+                ) => {
+                    assert_eq!(report.apparent_bytes, 11);
+                    assert_eq!(report.unreadable_entries, 0);
+                }
+                (_, event) => panic!("unexpected ZIP worker event: {event:?}"),
+            }
+        }
+        assert!(!root.join("folder").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

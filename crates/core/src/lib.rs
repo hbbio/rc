@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod archive;
 mod background;
 mod command_dispatch;
 mod command_line;
@@ -43,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
+pub use archive::{ZipLocation, measure_zip_selection};
 pub use background::{
     BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
     build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,
@@ -1130,6 +1132,7 @@ impl FileEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PanelListingSource {
     Directory,
+    Zip(ZipLocation),
     Panelize {
         command: String,
     },
@@ -1148,7 +1151,7 @@ pub struct DiskUsageSummary {
 
 impl PanelListingSource {
     fn is_panelized(&self) -> bool {
-        !matches!(self, Self::Directory)
+        matches!(self, Self::Panelize { .. } | Self::FindResults { .. })
     }
 }
 
@@ -1220,6 +1223,10 @@ impl PanelState {
     pub fn refresh(&mut self) -> io::Result<()> {
         self.clear_canonical_paths();
         let (entries, panelized_entries) = match &self.source {
+            PanelListingSource::Zip(location) => (
+                location.read_entries(self.sort_mode, self.show_hidden_files, None)?,
+                None,
+            ),
             PanelListingSource::Directory => {
                 let entries = read_entries_with_visibility(
                     &self.cwd,
@@ -1475,15 +1482,31 @@ impl PanelState {
         else {
             return false;
         };
-        let is_dir = is_dir_hint || fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+        let is_dir = is_dir_hint
+            || (!self.is_archive() && fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()));
         if !is_dir {
             return false;
         }
 
+        let source = if let Some(location) = self.zip_location() {
+            if path == location.parent_path() && location.directory.as_os_str().is_empty() {
+                PanelListingSource::Directory
+            } else {
+                let Ok(directory) = location.member_path(&path) else {
+                    return false;
+                };
+                PanelListingSource::Zip(ZipLocation {
+                    archive: location.archive.clone(),
+                    directory,
+                })
+            }
+        } else {
+            PanelListingSource::Directory
+        };
         self.cwd = path;
         self.clear_canonical_paths();
         self.move_cursor_home();
-        self.source = PanelListingSource::Directory;
+        self.source = source;
         self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
@@ -1492,14 +1515,26 @@ impl PanelState {
     }
 
     pub fn go_parent(&mut self) -> bool {
-        let Some(parent) = self.cwd.parent() else {
+        let parent_path = self.zip_location().map(ZipLocation::parent_path);
+        let Some(parent) = parent_path.as_deref().or_else(|| self.cwd.parent()) else {
             return false;
         };
 
+        let source = if let Some(location) = self.zip_location() {
+            match location.directory.parent() {
+                Some(directory) => PanelListingSource::Zip(ZipLocation {
+                    archive: location.archive.clone(),
+                    directory: directory.to_path_buf(),
+                }),
+                None => PanelListingSource::Directory,
+            }
+        } else {
+            PanelListingSource::Directory
+        };
         self.cwd = parent.to_path_buf();
         self.clear_canonical_paths();
         self.move_cursor_home();
-        self.source = PanelListingSource::Directory;
+        self.source = source;
         self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
@@ -1547,6 +1582,17 @@ impl PanelState {
 
     pub fn is_panelized(&self) -> bool {
         self.source.is_panelized()
+    }
+
+    pub fn zip_location(&self) -> Option<&ZipLocation> {
+        match &self.source {
+            PanelListingSource::Zip(location) => Some(location),
+            _ => None,
+        }
+    }
+
+    pub fn is_archive(&self) -> bool {
+        self.zip_location().is_some()
     }
 }
 

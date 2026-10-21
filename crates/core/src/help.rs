@@ -47,7 +47,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
         "File Manager",
         "File manager quick keys:\n\
   {{fm_switch_panel}} switch panel\n\
-  {{fm_open_entry}} enter directory, run executable, or open file\n\
+  {{fm_open_entry}} enter directory/ZIP, run executable, or open file\n\
   {{fm_view_entry}} view file internally\n\
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
@@ -232,6 +232,18 @@ The side-panel Panelize entry restores that panel's latest completed results.\n\
 How this differs from VFS:\n\
   VFS mounts archives/remote locations as browsable trees.\n\
   Panelize does not mount filesystems; it only lists paths.\n\
+\n\
+ZIP archives:\n\
+  Enter opens a local ZIP in the current panel without decompressing files.\n\
+  Enter opens folders or previews a file; F3 and Quick view also preview files.\n\
+  Backspace or .. goes up and leaves the archive at its root.\n\
+  F5 copies selected/tagged entries out, decompressing only those files\n\
+  and the descendants of selected directories.\n\
+  ZIP contents are read-only: edit, move, delete, rename, mkdir and writes\n\
+  into the archive are blocked. Shell, Find, tree, external panelize and\n\
+  adding the current directory to the hotlist require a local directory.\n\
+  Stored/Deflate files are supported; encrypted files and archive symlinks\n\
+  cannot be extracted or viewed. Refresh manually after external changes.\n\
 \n\
 Back to [File manager](file-manager) or [Find results](find-results).",
     ),

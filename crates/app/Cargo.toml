@@ -42,3 +42,6 @@ zbus.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 rc-platform.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

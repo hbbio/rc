@@ -411,6 +411,33 @@ impl AppState {
         overwrite: OverwritePolicy,
         origin: OperationOrigin,
     ) {
+        if self
+            .panels
+            .iter()
+            .filter_map(PanelState::zip_location)
+            .any(|location| destination_dir.starts_with(&location.archive))
+        {
+            self.set_status("ZIP archives are read-only; choose a local destination directory");
+            return;
+        }
+        if let OperationOrigin::Panel(panel) = origin
+            && let Some(location) = self.panels[panel.index()].zip_location().cloned()
+        {
+            if kind != TransferKind::Copy {
+                self.set_status("ZIP archives are read-only; use F5 to copy entries out");
+                return;
+            }
+            self.queue_filesystem_job(
+                JobRequest::ExtractZip {
+                    location,
+                    sources,
+                    destination_dir,
+                    overwrite,
+                },
+                origin,
+            );
+            return;
+        }
         let request = match kind {
             TransferKind::Copy => JobRequest::Copy {
                 sources,
@@ -436,6 +463,20 @@ impl AppState {
         overwrite: OverwritePolicy,
         origin: OperationOrigin,
     ) {
+        if kind == TransferKind::Copy {
+            self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite, origin);
+            return;
+        }
+        if self
+            .panels
+            .iter()
+            .filter_map(PanelState::zip_location)
+            .any(|location| destination_dir.starts_with(&location.archive))
+            || matches!(origin, OperationOrigin::Panel(panel) if self.panels[panel.index()].is_archive())
+        {
+            self.set_status("ZIP archives are read-only; choose a local destination directory");
+            return;
+        }
         let request = match kind {
             TransferKind::Copy => JobRequest::Copy {
                 sources,
@@ -755,6 +796,9 @@ fn tree_mutation_impacts(request: &JobRequest) -> Vec<PathBuf> {
     let mut impacts = Vec::new();
     match request {
         JobRequest::Copy {
+            destination_dir, ..
+        }
+        | JobRequest::ExtractZip {
             destination_dir, ..
         } => impacts.push(destination_dir.clone()),
         JobRequest::Move {

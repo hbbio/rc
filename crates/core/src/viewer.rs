@@ -70,11 +70,50 @@ impl ViewerState {
         total_size: u64,
         cancel_flag: Option<&AtomicBool>,
     ) -> io::Result<Self> {
-        let path_fingerprint = fingerprint(&path);
         let text_limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
         let (bytes, hit_read_limit) = read_file_prefix(&path, text_limit, cancel_flag)?;
+        Ok(Self::from_prefix(path, total_size, bytes, hit_read_limit))
+    }
+
+    pub fn open_zip_cancellable(
+        location: &crate::ZipLocation,
+        path: PathBuf,
+        cancel: &AtomicBool,
+    ) -> io::Result<Self> {
+        let mut reader = crate::archive::ZipReader::open(location, Some(cancel))?;
+        let member_path = location.member_path(&path)?;
+        let member = reader.members.get(&member_path).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "ZIP member no longer exists")
+        })?;
+        if member.is_dir {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "viewer supports files only",
+            ));
+        }
+        member.ensure_extractable()?;
+        let size = member.size;
+        let mut input = crate::archive::normalize_zip_io_result(
+            reader
+                .archive
+                .by_index(member.index.expect("file has an archive index"))
+                .map_err(crate::archive::zip_error),
+            Some(cancel),
+        )?;
+        let limit = FOUNDATION_SLO
+            .viewer_memory_soft_limit_bytes
+            .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
+        let (bytes, hit_limit) = crate::archive::normalize_zip_io_result(
+            read_prefix(&mut input, limit, Some(cancel)),
+            Some(cancel),
+        )?;
+        Ok(Self::from_prefix(path, size, bytes, hit_limit))
+    }
+
+    fn from_prefix(path: PathBuf, total_size: u64, bytes: Vec<u8>, hit_read_limit: bool) -> Self {
+        let path_fingerprint = fingerprint(&path);
         let observed_size = if hit_read_limit {
             total_size.max(bytes.len().saturating_add(1) as u64)
         } else {
@@ -91,7 +130,7 @@ impl ViewerState {
         };
         let line_offsets = compute_line_offsets(&content);
 
-        Ok(Self {
+        Self {
             path,
             bytes,
             content,
@@ -105,7 +144,7 @@ impl ViewerState {
             last_search_query: None,
             last_search_match_offset: None,
             last_search_direction: ViewerSearchDirection::Forward,
-        })
+        }
     }
 
     #[cfg(test)]
@@ -309,6 +348,14 @@ fn read_file_prefix(
 ) -> io::Result<(Vec<u8>, bool)> {
     ensure_viewer_not_canceled(cancel_flag)?;
     let mut file = fs::File::open(path)?;
+    read_prefix(&mut file, byte_limit, cancel_flag)
+}
+
+fn read_prefix(
+    file: &mut impl Read,
+    byte_limit: usize,
+    cancel_flag: Option<&AtomicBool>,
+) -> io::Result<(Vec<u8>, bool)> {
     let probe_limit = byte_limit.saturating_add(1);
     let mut bytes = Vec::with_capacity(byte_limit);
     let mut buffer = [0_u8; VIEWER_READ_CHUNK_BYTES];

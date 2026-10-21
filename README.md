@@ -12,6 +12,8 @@ and fast directory navigation.
 ### Panels and navigation
 
 - Two independent directory panels with Full, Brief, and Long layouts.
+- Browse ZIP archives as read-only folders, with normal navigation, sorting,
+  filtering, and tagging.
 - Native filesystem notifications automatically refresh both panels and the open
   directory tree, including changes made by other programs. Updates are coalesced
   and scanned in the background while preserving selection and tags.
@@ -34,6 +36,28 @@ and fast directory navigation.
 - Metadata preservation, symlink-aware operations, validation against recursive
   destinations, and rollback when an overwrite fails.
 - Incremental, cancelable directory refreshes that preserve selection and tags.
+
+### ZIP archives
+
+Press `Enter` on a `.zip` file to browse it in the current pane. `Enter` opens
+folders and previews files; `F3` and Quick view also preview individual files.
+`Backspace` or `..` goes up, leaving the archive at its root. Browsing reads the
+ZIP directory metadata without decompressing its file contents.
+Unsorted mode follows the order stored in the archive. Folders without their own
+ZIP entry use their newest descendant's modification time for date sorting.
+
+Use `F5` to copy the selected file or directory, or tagged entries, to a local
+directory. Only those entries and the descendants of selected directories are
+decompressed. Copy jobs support progress, cancellation, and the existing Skip,
+Rename, and Overwrite policies. Move, delete, rename, edit, mkdir, and copying into
+archives are blocked; ZIP panes are labeled read-only. The command line, Find,
+directory tree, external panelize, and adding the current directory to the hotlist
+require a local directory.
+
+Stored and Deflate-compressed entries are supported. Encrypted file contents,
+archive symlinks and special files, and browsing ZIPs inside other ZIPs are not
+supported. Unsafe member paths are omitted. Use manual refresh if another program
+changes an open archive.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
@@ -140,7 +164,7 @@ interface.
 | Keys | Action |
 | --- | --- |
 | `Tab` | Switch active panel |
-| `Enter` | Enter a directory, run an executable, or open a document |
+| `Enter` | Enter a directory or ZIP archive, run an executable, or open a document |
 | `Backspace` | Go to the parent directory |
 | `Space` / `Insert` / `Ctrl-T` | Toggle the selected entry |
 | `/` / `Alt-C` | Open Quick CD |

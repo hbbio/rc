@@ -756,6 +756,9 @@ fn panel_topline_titles_with_home(
     if panel.is_panelized() {
         summary.push(String::from("panelize"));
     }
+    if panel.is_archive() {
+        summary.push(String::from("ZIP read-only"));
+    }
     let tagged_count = panel.tagged_count();
     if tagged_count > 0 {
         summary.push(format!("tagged:{tagged_count}"));

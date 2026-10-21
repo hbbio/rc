@@ -15,6 +15,7 @@ use nix::errno::Errno;
 #[cfg(unix)]
 use nix::unistd::{Gid, Uid, chown};
 
+use crate::ZipLocation;
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
 };
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+mod zip_extract;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -92,6 +94,23 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    ExtractZip {
+        location: ZipLocation,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+        overwrite: OverwritePolicy,
+    },
+    LoadZipViewer {
+        location: ZipLocation,
+        path: PathBuf,
+        quick_view: Option<(ActivePanel, u64)>,
+    },
+    MeasureZipSelection {
+        location: ZipLocation,
+        panel: ActivePanel,
+        paths: Vec<PathBuf>,
+        request_id: u64,
+    },
     Copy {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
@@ -168,6 +187,15 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::ExtractZip { .. } => JobKind::Copy,
+            Self::LoadZipViewer { quick_view, .. } => {
+                if quick_view.is_some() {
+                    JobKind::LoadQuickView
+                } else {
+                    JobKind::LoadViewer
+                }
+            }
+            Self::MeasureZipSelection { .. } => JobKind::MeasureSelection,
             Self::Copy { .. } => JobKind::Copy,
             Self::Move { .. } => JobKind::Move,
             Self::Delete { .. } => JobKind::Delete,
@@ -187,6 +215,9 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::ExtractZip { sources, .. } => sources.len(),
+            Self::LoadZipViewer { .. } => 1,
+            Self::MeasureZipSelection { paths, .. } => paths.len(),
             Self::Copy { sources, .. } => sources.len(),
             Self::Move { sources, .. } => sources.len(),
             Self::Delete { targets } => targets.len(),
@@ -206,6 +237,21 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::ExtractZip {
+                sources,
+                destination_dir,
+                overwrite,
+                ..
+            } => format!(
+                "extract {} ZIP item(s) -> {} [{}]",
+                sources.len(),
+                destination_dir.display(),
+                overwrite.label()
+            ),
+            Self::LoadZipViewer { path, .. } => format!("view ZIP member {}", path.display()),
+            Self::MeasureZipSelection { paths, .. } => {
+                format!("measure {} selected ZIP item(s)", paths.len())
+            }
             Self::Copy {
                 sources,
                 destination_dir,
@@ -265,6 +311,7 @@ impl JobRequest {
                 ..
             } => {
                 let source_label = match source {
+                    PanelListingSource::Zip(_) => "zip",
                     PanelListingSource::Directory => "directory",
                     PanelListingSource::Panelize { .. } => "panelize",
                     PanelListingSource::FindResults { .. } => "find-results",
@@ -950,6 +997,18 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
+        JobRequest::ExtractZip {
+            location,
+            sources,
+            destination_dir,
+            overwrite,
+        } => zip_extract::extract_zip(&location, &sources, &destination_dir, overwrite, progress),
+        JobRequest::LoadZipViewer { .. } | JobRequest::MeasureZipSelection { .. } => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "ZIP preview and size jobs are executed by the runtime adapter",
+            ))
+        }
         JobRequest::Copy {
             sources,
             destination_dir,
@@ -1890,6 +1949,9 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
+        JobRequest::ExtractZip {
+            location, sources, ..
+        } => zip_extract::measure_zip_totals(location, sources, cancel_flag),
         JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
@@ -1901,6 +1963,8 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::LoadZipViewer { .. }
+        | JobRequest::MeasureZipSelection { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),

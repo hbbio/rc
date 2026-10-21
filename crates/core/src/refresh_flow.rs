@@ -199,7 +199,9 @@ impl AppState {
     /// Refresh an invalidated directory without interrupting a scan or navigation.
     /// False means the caller must retain the invalidation and retry once idle.
     pub fn refresh_directory_if_idle(&mut self, panel: ActivePanel) -> bool {
-        if self.panels[panel.index()].source.is_panelized() {
+        if self.panels[panel.index()].source.is_panelized()
+            || self.panels[panel.index()].is_archive()
+        {
             return true;
         }
         if self.panel_refresh.job_id(panel).is_some() || self.panels[panel.index()].loading {

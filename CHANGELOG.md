@@ -5,6 +5,15 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Browse ZIP archives as read-only folders in either pane without decompressing
+  their contents. Copy selected or tagged files and directories out with F5,
+  decompressing only those entries, and preview individual files with Enter,
+  F3, or Quick view.
+
 ## [0.2.2] - 2026-10-12
 
 ### Fixed
