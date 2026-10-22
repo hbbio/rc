@@ -1,12 +1,12 @@
 use super::*;
-use crate::archive::{ZipMember, ZipReader, normalize_zip_io_result, zip_error};
+use crate::archive::{ArchiveIndex, ArchiveMember, ArchiveReader, normalize_archive_io_result};
 
-pub(super) fn measure_zip_totals(
-    location: &ZipLocation,
+pub(super) fn measure_archive_totals(
+    location: &ArchiveLocation,
     sources: &[PathBuf],
     cancel: &AtomicBool,
 ) -> io::Result<JobTotals> {
-    let reader = ZipReader::open(location, Some(cancel))?;
+    let reader = ArchiveIndex::open(location, Some(cancel))?;
     let selected = reader.selections(location, sources)?;
     let mut totals = JobTotals::default();
     for source in selected {
@@ -21,16 +21,22 @@ pub(super) fn measure_zip_totals(
     Ok(totals)
 }
 
-pub(super) fn extract_zip(
-    location: &ZipLocation,
+pub(super) fn extract_archive(
+    location: &ArchiveLocation,
     sources: &[PathBuf],
     destination_dir: &Path,
     overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
     let cancel = Arc::clone(&progress.cancel_flag);
-    let mut reader = ZipReader::open(location, Some(cancel.as_ref()))?;
-    let selected = reader.selections(location, sources)?;
+    let mut reader = ArchiveReader::open(location, Some(cancel.as_ref()))?;
+    let mut selected = reader.selections(location, sources)?;
+    selected.sort_by_key(|path| {
+        reader
+            .subtree(path)
+            .filter_map(|(_, member)| member.index)
+            .min()
+    });
     let archive_path = fs::canonicalize(&location.archive)?;
     for source in selected {
         progress.ensure_not_canceled()?;
@@ -66,7 +72,10 @@ pub(super) fn extract_zip(
                 OverwritePolicy::Overwrite => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "cannot extract over the source ZIP archive",
+                        format!(
+                            "cannot extract over the source {} archive",
+                            location.format()?.label()
+                        ),
                     ));
                 }
             }
@@ -96,10 +105,10 @@ pub(super) fn extract_zip(
 }
 
 fn extract_selection(
-    reader: &mut ZipReader<'_>,
-    location: &ZipLocation,
+    reader: &mut ArchiveReader<'_>,
+    location: &ArchiveLocation,
     source: &Path,
-    members: &[(PathBuf, ZipMember)],
+    members: &[(PathBuf, ArchiveMember)],
     destination: &Path,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
@@ -118,7 +127,16 @@ fn extract_selection(
             .open(&stage)?;
     }
     let result = (|| {
-        for (member_path, member) in members {
+        let mut ordered = members.iter().collect::<Vec<_>>();
+        // Create parents first, then read payloads in physical archive order.
+        // Adjacent TAR files share a decoder instead of replaying checkpoints.
+        ordered.sort_by_key(|(_, member)| {
+            (
+                !member.is_dir,
+                if member.is_dir { None } else { member.index },
+            )
+        });
+        for (member_path, member) in ordered {
             progress.ensure_not_canceled()?;
             let path = if member_path == source {
                 stage.clone()
@@ -141,18 +159,15 @@ fn extract_selection(
                     options.create_new(true);
                 }
                 let mut output = options.open(&path)?;
-                let mut input = normalize_zip_io_result(
-                    reader
-                        .archive
-                        .by_index(member.index.expect("file has an archive index"))
-                        .map_err(zip_error),
+                let mut input = normalize_archive_io_result(
+                    reader.open_member(member),
                     Some(progress.cancel_flag.as_ref()),
                 )?;
                 let mut buffer = [0_u8; COPY_BUFFER_SIZE];
                 let mut written = 0_u64;
                 loop {
                     progress.ensure_not_canceled()?;
-                    let length = normalize_zip_io_result(
+                    let length = normalize_archive_io_result(
                         input.read(&mut buffer),
                         Some(progress.cancel_flag.as_ref()),
                     )?;
@@ -161,11 +176,11 @@ fn extract_selection(
                     }
                     written = written
                         .checked_add(length as u64)
-                        .ok_or_else(|| io::Error::other("ZIP size overflow"))?;
+                        .ok_or_else(|| io::Error::other("archive size overflow"))?;
                     if written > member.size {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "ZIP member exceeds its declared size",
+                            "archive member exceeds its declared size",
                         ));
                     }
                     output.write_all(&buffer[..length])?;
@@ -174,7 +189,7 @@ fn extract_selection(
                 if written != member.size {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
-                        "ZIP member is shorter than its declared size",
+                        "archive member is shorter than its declared size",
                     ));
                 }
                 output.flush()?;
@@ -200,6 +215,7 @@ fn extract_selection(
             }
         }
         progress.ensure_not_canceled()?;
+        reader.verify_source()?;
         fs::rename(&stage, destination)
     })();
     if result.is_err() {

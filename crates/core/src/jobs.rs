@@ -15,7 +15,7 @@ use nix::errno::Errno;
 #[cfg(unix)]
 use nix::unistd::{Gid, Uid, chown};
 
-use crate::ZipLocation;
+use crate::ArchiveLocation;
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
 };
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
-mod zip_extract;
+mod archive_extract;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -94,19 +94,19 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
-    ExtractZip {
-        location: ZipLocation,
+    ExtractArchive {
+        location: ArchiveLocation,
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
         overwrite: OverwritePolicy,
     },
-    LoadZipViewer {
-        location: ZipLocation,
+    LoadArchiveViewer {
+        location: ArchiveLocation,
         path: PathBuf,
         quick_view: Option<(ActivePanel, u64)>,
     },
-    MeasureZipSelection {
-        location: ZipLocation,
+    MeasureArchiveSelection {
+        location: ArchiveLocation,
         panel: ActivePanel,
         paths: Vec<PathBuf>,
         request_id: u64,
@@ -187,15 +187,15 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
-            Self::ExtractZip { .. } => JobKind::Copy,
-            Self::LoadZipViewer { quick_view, .. } => {
+            Self::ExtractArchive { .. } => JobKind::Copy,
+            Self::LoadArchiveViewer { quick_view, .. } => {
                 if quick_view.is_some() {
                     JobKind::LoadQuickView
                 } else {
                     JobKind::LoadViewer
                 }
             }
-            Self::MeasureZipSelection { .. } => JobKind::MeasureSelection,
+            Self::MeasureArchiveSelection { .. } => JobKind::MeasureSelection,
             Self::Copy { .. } => JobKind::Copy,
             Self::Move { .. } => JobKind::Move,
             Self::Delete { .. } => JobKind::Delete,
@@ -215,9 +215,9 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
-            Self::ExtractZip { sources, .. } => sources.len(),
-            Self::LoadZipViewer { .. } => 1,
-            Self::MeasureZipSelection { paths, .. } => paths.len(),
+            Self::ExtractArchive { sources, .. } => sources.len(),
+            Self::LoadArchiveViewer { .. } => 1,
+            Self::MeasureArchiveSelection { paths, .. } => paths.len(),
             Self::Copy { sources, .. } => sources.len(),
             Self::Move { sources, .. } => sources.len(),
             Self::Delete { targets } => targets.len(),
@@ -237,20 +237,22 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
-            Self::ExtractZip {
+            Self::ExtractArchive {
                 sources,
                 destination_dir,
                 overwrite,
                 ..
             } => format!(
-                "extract {} ZIP item(s) -> {} [{}]",
+                "extract {} archive item(s) -> {} [{}]",
                 sources.len(),
                 destination_dir.display(),
                 overwrite.label()
             ),
-            Self::LoadZipViewer { path, .. } => format!("view ZIP member {}", path.display()),
-            Self::MeasureZipSelection { paths, .. } => {
-                format!("measure {} selected ZIP item(s)", paths.len())
+            Self::LoadArchiveViewer { path, .. } => {
+                format!("view archive member {}", path.display())
+            }
+            Self::MeasureArchiveSelection { paths, .. } => {
+                format!("measure {} selected archive item(s)", paths.len())
             }
             Self::Copy {
                 sources,
@@ -311,7 +313,7 @@ impl JobRequest {
                 ..
             } => {
                 let source_label = match source {
-                    PanelListingSource::Zip(_) => "zip",
+                    PanelListingSource::Archive(_) => "archive",
                     PanelListingSource::Directory => "directory",
                     PanelListingSource::Panelize { .. } => "panelize",
                     PanelListingSource::FindResults { .. } => "find-results",
@@ -997,16 +999,34 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
-        JobRequest::ExtractZip {
+        JobRequest::ExtractArchive {
             location,
             sources,
             destination_dir,
             overwrite,
-        } => zip_extract::extract_zip(&location, &sources, &destination_dir, overwrite, progress),
-        JobRequest::LoadZipViewer { .. } | JobRequest::MeasureZipSelection { .. } => {
+        } => archive_extract::extract_archive(
+            &location,
+            &sources,
+            &destination_dir,
+            overwrite,
+            progress,
+        )
+        .map_err(|error| {
+            #[cfg(unix)]
+            if error.raw_os_error() == Some(Errno::EILSEQ as i32) {
+                return io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "destination filesystem cannot represent an archive member name: {error}"
+                    ),
+                );
+            }
+            error
+        }),
+        JobRequest::LoadArchiveViewer { .. } | JobRequest::MeasureArchiveSelection { .. } => {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "ZIP preview and size jobs are executed by the runtime adapter",
+                "Archive preview and size jobs are executed by the runtime adapter",
             ))
         }
         JobRequest::Copy {
@@ -1659,8 +1679,7 @@ fn renamed_destination(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from("item"));
+        .unwrap_or_else(|| std::ffi::OsStr::new("item"));
 
     for index in 1_usize.. {
         let suffix = if index == 1 {
@@ -1668,7 +1687,9 @@ fn renamed_destination(destination: &Path) -> io::Result<PathBuf> {
         } else {
             format!("copy{index}")
         };
-        let candidate = parent.join(format!("{file_name}.{suffix}"));
+        let mut candidate_name = file_name.to_os_string();
+        candidate_name.push(format!(".{suffix}"));
+        let candidate = parent.join(candidate_name);
         if !path_entry_exists(&candidate)? {
             return Ok(candidate);
         }
@@ -1949,9 +1970,9 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
-        JobRequest::ExtractZip {
+        JobRequest::ExtractArchive {
             location, sources, ..
-        } => zip_extract::measure_zip_totals(location, sources, cancel_flag),
+        } => archive_extract::measure_archive_totals(location, sources, cancel_flag),
         JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
@@ -1963,8 +1984,8 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
-        | JobRequest::LoadZipViewer { .. }
-        | JobRequest::MeasureZipSelection { .. }
+        | JobRequest::LoadArchiveViewer { .. }
+        | JobRequest::MeasureArchiveSelection { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),

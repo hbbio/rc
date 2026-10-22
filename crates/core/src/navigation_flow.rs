@@ -105,7 +105,7 @@ impl AppState {
             }
             AppCommand::RestorePanelizedResults => self.restore_panelized_results(),
             AppCommand::OpenEntry => {
-                if self.open_selected_zip() || self.open_selected_directory() {
+                if self.open_selected_archive() || self.open_selected_directory() {
                     self.queue_panel_refresh(self.active_panel);
                     self.set_status("Loading selected directory...");
                 } else if self.active_panel().is_archive() {

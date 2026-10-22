@@ -232,7 +232,7 @@ impl AppState {
         let destination_dir = self.passive_panel().cwd.clone();
         let source_base_dir = self
             .active_panel()
-            .zip_location()
+            .archive_location()
             .and_then(|location| location.archive.parent())
             .unwrap_or(&self.active_panel().cwd)
             .to_path_buf();

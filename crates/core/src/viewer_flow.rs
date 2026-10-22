@@ -100,8 +100,8 @@ impl AppState {
             return false;
         }
 
-        let request = match self.active_panel().zip_location() {
-            Some(location) => JobRequest::LoadZipViewer {
+        let request = match self.active_panel().archive_location() {
+            Some(location) => JobRequest::LoadArchiveViewer {
                 location: location.clone(),
                 path: entry.path.clone(),
                 quick_view: None,

@@ -14,7 +14,7 @@ impl AppState {
                     | AppCommand::OpenInputDialog
             )
         {
-            return Some("ZIP archives are read-only; use F5 to copy entries out");
+            return Some("Archives are read-only; use F5 to copy entries out");
         }
         if self.active_panel().is_archive()
             && matches!(
@@ -31,7 +31,7 @@ impl AppState {
             )
             || (command == AppCommand::PutOtherTagged && self.passive_panel().is_archive())
         {
-            return Some("This command requires a local directory; leave the ZIP archive first");
+            return Some("This command requires a local directory; leave the archive first");
         }
         if let AppCommand::Panel(panel, PanelCommand::OpenTree) = command
             && self.panels[panel.index()].is_archive()

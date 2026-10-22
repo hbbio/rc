@@ -414,21 +414,21 @@ impl AppState {
         if self
             .panels
             .iter()
-            .filter_map(PanelState::zip_location)
+            .filter_map(PanelState::archive_location)
             .any(|location| destination_dir.starts_with(&location.archive))
         {
-            self.set_status("ZIP archives are read-only; choose a local destination directory");
+            self.set_status("Archives are read-only; choose a local destination directory");
             return;
         }
         if let OperationOrigin::Panel(panel) = origin
-            && let Some(location) = self.panels[panel.index()].zip_location().cloned()
+            && let Some(location) = self.panels[panel.index()].archive_location().cloned()
         {
             if kind != TransferKind::Copy {
-                self.set_status("ZIP archives are read-only; use F5 to copy entries out");
+                self.set_status("Archives are read-only; use F5 to copy entries out");
                 return;
             }
             self.queue_filesystem_job(
-                JobRequest::ExtractZip {
+                JobRequest::ExtractArchive {
                     location,
                     sources,
                     destination_dir,
@@ -470,11 +470,11 @@ impl AppState {
         if self
             .panels
             .iter()
-            .filter_map(PanelState::zip_location)
+            .filter_map(PanelState::archive_location)
             .any(|location| destination_dir.starts_with(&location.archive))
             || matches!(origin, OperationOrigin::Panel(panel) if self.panels[panel.index()].is_archive())
         {
-            self.set_status("ZIP archives are read-only; choose a local destination directory");
+            self.set_status("Archives are read-only; choose a local destination directory");
             return;
         }
         let request = match kind {
@@ -798,7 +798,7 @@ fn tree_mutation_impacts(request: &JobRequest) -> Vec<PathBuf> {
         JobRequest::Copy {
             destination_dir, ..
         }
-        | JobRequest::ExtractZip {
+        | JobRequest::ExtractArchive {
             destination_dir, ..
         } => impacts.push(destination_dir.clone()),
         JobRequest::Move {

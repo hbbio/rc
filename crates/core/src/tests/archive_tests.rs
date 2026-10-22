@@ -51,8 +51,8 @@ impl Fixture {
 
     fn copy(&self, sources: &[&str], policy: OverwritePolicy) -> Result<(), JobError> {
         let mut manager = JobManager::new();
-        let job = manager.enqueue(JobRequest::ExtractZip {
-            location: ZipLocation::root(self.zip.clone()),
+        let job = manager.enqueue(JobRequest::ExtractArchive {
+            location: ArchiveLocation::root(self.zip.clone()),
             sources: sources.iter().map(|path| self.zip.join(path)).collect(),
             destination_dir: self.output.clone(),
             overwrite: policy,
@@ -432,8 +432,8 @@ fn zip_enter_and_f3_view_files_and_quick_view_reads_selected_member() {
 fn zip_large_member_preview_is_bounded_and_cancelable() {
     let data = vec![b'x'; VIEWER_TEXT_PREVIEW_LIMIT_BYTES + 1024];
     let fixture = Fixture::new(&[("large", &data)]);
-    let location = ZipLocation::root(fixture.zip.clone());
-    let viewer = ViewerState::open_zip_cancellable(
+    let location = ArchiveLocation::root(fixture.zip.clone());
+    let viewer = ViewerState::open_archive_cancellable(
         &location,
         fixture.zip.join("large"),
         &AtomicBool::new(false),
@@ -446,7 +446,7 @@ fn zip_large_member_preview_is_bounded_and_cancelable() {
             .min(VIEWER_TEXT_PREVIEW_LIMIT_BYTES)
     );
     assert!(viewer.text_is_preview());
-    let error = ViewerState::open_zip_cancellable(
+    let error = ViewerState::open_archive_cancellable(
         &location,
         fixture.zip.join("large"),
         &AtomicBool::new(true),
@@ -482,8 +482,8 @@ fn zip_encrypted_members_can_be_listed_but_require_supported_decryption_to_read(
             .message
             .contains("password-protected")
     );
-    let error = ViewerState::open_zip_cancellable(
-        &ZipLocation::root(fixture.zip.clone()),
+    let error = ViewerState::open_archive_cancellable(
+        &ArchiveLocation::root(fixture.zip.clone()),
         fixture.zip.join("secret"),
         &AtomicBool::new(false),
     )
@@ -755,8 +755,8 @@ fn zip_invalid_archive_and_failed_refresh_restore_previous_pane() {
 fn zip_canceled_extraction_does_not_create_output() {
     let fixture = Fixture::new(&[("folder/file", b"payload")]);
     let mut manager = JobManager::new();
-    let job = manager.enqueue(JobRequest::ExtractZip {
-        location: ZipLocation::root(fixture.zip.clone()),
+    let job = manager.enqueue(JobRequest::ExtractArchive {
+        location: ArchiveLocation::root(fixture.zip.clone()),
         sources: vec![fixture.zip.join("folder")],
         destination_dir: fixture.output.clone(),
         overwrite: OverwritePolicy::Overwrite,

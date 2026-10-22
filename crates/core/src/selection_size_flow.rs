@@ -113,8 +113,8 @@ impl AppState {
         let selected_items = paths.len();
         let (request_id, previous_job_id) = self.selection_size.begin_request(panel, paths.clone());
         self.selection_sizes[panel.index()] = SelectionSizeState::Calculating { selected_items };
-        let request = match self.panels[panel.index()].zip_location() {
-            Some(location) => JobRequest::MeasureZipSelection {
+        let request = match self.panels[panel.index()].archive_location() {
+            Some(location) => JobRequest::MeasureArchiveSelection {
                 location: location.clone(),
                 panel,
                 paths,

@@ -350,19 +350,13 @@ impl AppState {
         opened
     }
 
-    pub(crate) fn open_selected_zip(&mut self) -> bool {
+    pub(crate) fn open_selected_archive(&mut self) -> bool {
         if self.active_panel().is_archive() {
             return false;
         }
         let Some(path) = self
             .selected_non_parent_entry()
-            .filter(|entry| {
-                !entry.is_dir()
-                    && entry
-                        .path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-            })
+            .filter(|entry| !entry.is_dir() && ArchiveFormat::for_path(&entry.path).is_some())
             .map(|entry| entry.path.clone())
         else {
             return false;
@@ -371,10 +365,10 @@ impl AppState {
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let previous = self.active_panel().cwd.clone();
-        let location = ZipLocation::root(path);
+        let location = ArchiveLocation::root(path);
         let state = self.active_panel_mut();
         state.cwd = location.path();
-        state.source = PanelListingSource::Zip(location);
+        state.source = PanelListingSource::Archive(location);
         state.clear_canonical_paths();
         state.entries.clear();
         state.tagged.clear();

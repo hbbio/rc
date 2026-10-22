@@ -12,8 +12,8 @@ and fast directory navigation.
 ### Panels and navigation
 
 - Two independent directory panels with Full, Brief, and Long layouts.
-- Browse ZIP archives as read-only folders, with normal navigation, sorting,
-  filtering, and tagging.
+- Browse ZIP, TAR, gzip TAR, and bzip2 TAR archives as read-only folders, with
+  normal navigation, sorting, filtering, and tagging.
 - Native filesystem notifications automatically refresh both panels and the open
   directory tree, including changes made by other programs. Updates are coalesced
   and scanned in the background while preserving selection and tags.
@@ -37,27 +37,56 @@ and fast directory navigation.
   destinations, and rollback when an overwrite fails.
 - Incremental, cancelable directory refreshes that preserve selection and tags.
 
-### ZIP archives
+### Archives
 
-Press `Enter` on a `.zip` file to browse it in the current pane. `Enter` opens
-folders and previews files; `F3` and Quick view also preview individual files.
-`Backspace` or `..` goes up, leaving the archive at its root. Browsing reads the
-ZIP directory metadata without decompressing its file contents.
-Unsorted mode follows the order stored in the archive. Folders without their own
-ZIP entry use their newest descendant's modification time for date sorting.
+Press `Enter` on a `.zip`, `.tar`, `.tar.gz` (`.tgz`), or `.tar.bz2` (`.tbz2`,
+`.tbz`) file to browse it in the current pane. Extensions are case-insensitive.
+`Enter` opens folders and previews files; `F3` and Quick view also preview files.
+`Backspace` or `..` goes up, leaving the archive at its root. Normal sorting,
+filtering, hidden-file control, and tagging work inside archives. Unsorted mode
+follows archive order. Inferred folders use their newest descendant's modification
+time for date sorting.
 
-Use `F5` to copy the selected file or directory, or tagged entries, to a local
-directory. Only those entries and the descendants of selected directories are
-decompressed. Copy jobs support progress, cancellation, and the existing Skip,
-Rename, and Overwrite policies. Move, delete, rename, edit, mkdir, and copying into
-archives are blocked; ZIP panes are labeled read-only. The command line, Find,
-directory tree, external panelize, and adding the current directory to the hotlist
-require a local directory.
+Use `F5` to copy selected or tagged files and directories to a local directory.
+Only selected files and the descendants of selected directories are written.
+Copy jobs support progress, cancellation, and Skip, Rename, and Overwrite policies.
+Move, delete, rename, edit, mkdir, and copying into archives are blocked; archive
+panes are labeled read-only. The command line, Find, directory tree, external
+panelize, and adding the current directory to the hotlist require a local directory.
 
-Stored and Deflate-compressed entries are supported. Encrypted file contents,
-archive symlinks and special files, and browsing ZIPs inside other ZIPs are not
-supported. Unsafe member paths are omitted. Use manual refresh if another program
-changes an open archive.
+ZIP browsing reads directory metadata without decompressing payloads. Plain TAR
+browsing reads headers and seeks past payloads. Opening a compressed TAR for the
+first time requires a cancellable decompression scan to build its directory and
+seek index. No temporary directory tree or full decompressed TAR is written.
+Indexes are shared between panes and reused for navigation, sorting, size totals,
+and previews/copies during the session. Gzip reads resume from decoder checkpoints;
+bzip2 reads decode the required blocks and reuse one block per reader. Reading a
+selected file may therefore also decompress preceding bytes in its checkpoint
+interval or compression block. ZIP copies decompress only selected entries.
+
+The archive cache retains up to eight recent indexes with a soft 64 MiB budget;
+gzip checkpoint memory is separately bounded by adapting checkpoint spacing as
+archives grow. A large metadata index can exceed the soft budget to keep navigation
+usable. Indexes are invalidated when the source file's identity, size, or timestamps
+change. Use manual refresh to update an open pane after external changes.
+
+ZIP Stored/Deflate entries and TAR regular files/directories are supported,
+including GNU long names and PAX paths, sizes, and modification times. Repeated TAR
+names use the last record. Encrypted ZIP contents, archive symlinks, hard links,
+sparse files, special files, and nested archive browsing are not supported for
+viewing/extraction. Unsafe member paths are omitted.
+
+On Unix, member paths retain their original bytes, including non-UTF-8 names;
+display labels may contain replacement characters. Unsupported names produce an
+explicit error during indexing or extraction. Directory copies restore an
+overwritten destination if its filesystem cannot represent a member name.
+
+Archive panes and jobs use a common read-only backend interface in
+[`crates/core/src/archive`](crates/core/src/archive.rs). Container backends supply
+immutable metadata and member readers; TAR compression readers supply indexed
+seeking independently. Adding another format does not require format-specific
+navigation, viewer, or copy flows. This archive layer does not yet provide the
+unified local/remote VFS or nested mounts described in the roadmap.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
@@ -164,7 +193,7 @@ interface.
 | Keys | Action |
 | --- | --- |
 | `Tab` | Switch active panel |
-| `Enter` | Enter a directory or ZIP archive, run an executable, or open a document |
+| `Enter` | Enter a directory or archive, run an executable, or open a document |
 | `Backspace` | Go to the parent directory |
 | `Space` / `Insert` / `Ctrl-T` | Toggle the selected entry |
 | `/` / `Alt-C` | Open Quick CD |

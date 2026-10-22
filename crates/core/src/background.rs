@@ -171,7 +171,7 @@ pub fn refresh_panel_entries(
     cancel_flag: &AtomicBool,
 ) -> io::Result<Vec<FileEntry>> {
     match source {
-        PanelListingSource::Zip(location) => {
+        PanelListingSource::Archive(location) => {
             location.read_entries(sort_mode, show_hidden_files, Some(cancel_flag))
         }
         PanelListingSource::Directory => read_entries_with_visibility_cancel(
@@ -212,7 +212,7 @@ where
     F: FnMut(BackgroundEvent) -> bool,
 {
     let mut result = match &request.source {
-        PanelListingSource::Zip(location) => {
+        PanelListingSource::Archive(location) => {
             let entries = location.read_entries(
                 request.sort_mode,
                 request.show_hidden_files,
@@ -310,7 +310,7 @@ where
         } => {
             stream_panelized_paths_with_cancel(base_dir, paths, Some(cancel_flag), &mut emit_entry)
         }
-        PanelListingSource::Directory | PanelListingSource::Zip(_) => {
+        PanelListingSource::Directory | PanelListingSource::Archive(_) => {
             unreachable!("directory sources use directory streaming")
         }
     }?;

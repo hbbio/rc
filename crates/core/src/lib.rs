@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
-pub use archive::{ZipLocation, measure_zip_selection};
+pub use archive::{ArchiveFormat, ArchiveLocation, measure_archive_selection};
 pub use background::{
     BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
     build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,
@@ -1132,7 +1132,7 @@ impl FileEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PanelListingSource {
     Directory,
-    Zip(ZipLocation),
+    Archive(ArchiveLocation),
     Panelize {
         command: String,
     },
@@ -1223,7 +1223,7 @@ impl PanelState {
     pub fn refresh(&mut self) -> io::Result<()> {
         self.clear_canonical_paths();
         let (entries, panelized_entries) = match &self.source {
-            PanelListingSource::Zip(location) => (
+            PanelListingSource::Archive(location) => (
                 location.read_entries(self.sort_mode, self.show_hidden_files, None)?,
                 None,
             ),
@@ -1488,14 +1488,14 @@ impl PanelState {
             return false;
         }
 
-        let source = if let Some(location) = self.zip_location() {
+        let source = if let Some(location) = self.archive_location() {
             if path == location.parent_path() && location.directory.as_os_str().is_empty() {
                 PanelListingSource::Directory
             } else {
                 let Ok(directory) = location.member_path(&path) else {
                     return false;
                 };
-                PanelListingSource::Zip(ZipLocation {
+                PanelListingSource::Archive(ArchiveLocation {
                     archive: location.archive.clone(),
                     directory,
                 })
@@ -1515,14 +1515,14 @@ impl PanelState {
     }
 
     pub fn go_parent(&mut self) -> bool {
-        let parent_path = self.zip_location().map(ZipLocation::parent_path);
+        let parent_path = self.archive_location().map(ArchiveLocation::parent_path);
         let Some(parent) = parent_path.as_deref().or_else(|| self.cwd.parent()) else {
             return false;
         };
 
-        let source = if let Some(location) = self.zip_location() {
+        let source = if let Some(location) = self.archive_location() {
             match location.directory.parent() {
-                Some(directory) => PanelListingSource::Zip(ZipLocation {
+                Some(directory) => PanelListingSource::Archive(ArchiveLocation {
                     archive: location.archive.clone(),
                     directory: directory.to_path_buf(),
                 }),
@@ -1584,15 +1584,15 @@ impl PanelState {
         self.source.is_panelized()
     }
 
-    pub fn zip_location(&self) -> Option<&ZipLocation> {
+    pub fn archive_location(&self) -> Option<&ArchiveLocation> {
         match &self.source {
-            PanelListingSource::Zip(location) => Some(location),
+            PanelListingSource::Archive(location) => Some(location),
             _ => None,
         }
     }
 
     pub fn is_archive(&self) -> bool {
-        self.zip_location().is_some()
+        self.archive_location().is_some()
     }
 }
 

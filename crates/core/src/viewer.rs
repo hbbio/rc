@@ -77,15 +77,15 @@ impl ViewerState {
         Ok(Self::from_prefix(path, total_size, bytes, hit_read_limit))
     }
 
-    pub fn open_zip_cancellable(
-        location: &crate::ZipLocation,
+    pub fn open_archive_cancellable(
+        location: &crate::ArchiveLocation,
         path: PathBuf,
         cancel: &AtomicBool,
     ) -> io::Result<Self> {
-        let mut reader = crate::archive::ZipReader::open(location, Some(cancel))?;
+        let mut reader = crate::archive::ArchiveReader::open(location, Some(cancel))?;
         let member_path = location.member_path(&path)?;
-        let member = reader.members.get(&member_path).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "ZIP member no longer exists")
+        let member = reader.members.get(&member_path).cloned().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "archive member no longer exists")
         })?;
         if member.is_dir {
             return Err(io::Error::new(
@@ -95,20 +95,17 @@ impl ViewerState {
         }
         member.ensure_extractable()?;
         let size = member.size;
-        let mut input = crate::archive::normalize_zip_io_result(
-            reader
-                .archive
-                .by_index(member.index.expect("file has an archive index"))
-                .map_err(crate::archive::zip_error),
-            Some(cancel),
-        )?;
+        let mut input =
+            crate::archive::normalize_archive_io_result(reader.open_member(&member), Some(cancel))?;
         let limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let (bytes, hit_limit) = crate::archive::normalize_zip_io_result(
+        let (bytes, hit_limit) = crate::archive::normalize_archive_io_result(
             read_prefix(&mut input, limit, Some(cancel)),
             Some(cancel),
         )?;
+        drop(input);
+        reader.verify_source()?;
         Ok(Self::from_prefix(path, size, bytes, hit_limit))
     }
 

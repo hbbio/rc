@@ -137,8 +137,8 @@ impl AppState {
 
         let (request_id, previous_job_id) = self.quick_view.begin_request(target_panel);
         self.quick_views[target_panel.index()] = QuickViewState::Loading { path: path.clone() };
-        let request = match self.panels[source_panel.index()].zip_location() {
-            Some(location) => JobRequest::LoadZipViewer {
+        let request = match self.panels[source_panel.index()].archive_location() {
+            Some(location) => JobRequest::LoadArchiveViewer {
                 location: location.clone(),
                 path,
                 quick_view: Some((target_panel, request_id)),

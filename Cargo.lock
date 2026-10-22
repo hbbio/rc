@@ -187,6 +187,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
+
+[[package]]
 name = "cassowary"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -790,6 +799,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1158,8 +1173,10 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64",
+ "bzip2",
  "clap",
  "crossterm",
+ "flate2",
  "futures-util",
  "getrandom",
  "nix 0.29.0",
@@ -1170,6 +1187,7 @@ dependencies = [
  "rust-commander-platform",
  "rust-commander-ui",
  "shlex 1.3.0",
+ "tar",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1182,15 +1200,21 @@ dependencies = [
 name = "rust-commander-core"
 version = "0.2.2"
 dependencies = [
+ "bzip2",
  "chrono",
+ "crc32fast",
  "filetime",
+ "flate2",
  "getrandom",
  "globset",
  "memchr",
+ "miniz_oxide",
  "nix 0.29.0",
  "regex",
  "rust-commander-shell",
  "shlex 1.3.0",
+ "tar",
+ "tempfile",
  "tracing",
  "tui-input",
  "unicode-segmentation",
@@ -1488,6 +1512,16 @@ dependencies = [
  "thiserror",
  "walkdir",
  "yaml-rust",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]

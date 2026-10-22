@@ -26,9 +26,17 @@ tui-input.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 zip.workspace = true
+tar.workspace = true
+bzip2.workspace = true
+miniz_oxide.workspace = true
+crc32fast.workspace = true
 
 [target.'cfg(any(unix, windows))'.dependencies]
 getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }
+
+[dev-dependencies]
+flate2.workspace = true
+tempfile.workspace = true
