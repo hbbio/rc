@@ -1595,6 +1595,14 @@ impl PanelState {
         }
     }
 
+    /// Local directory represented by this panel for previous-directory history.
+    pub(crate) fn local_directory(&self) -> &Path {
+        match self.archive_location() {
+            Some(location) => location.archive.parent().unwrap_or(Path::new(".")),
+            None => &self.cwd,
+        }
+    }
+
     pub fn is_archive(&self) -> bool {
         self.archive_location().is_some()
     }

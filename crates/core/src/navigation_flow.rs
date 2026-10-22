@@ -1065,7 +1065,7 @@ impl AppState {
         }
 
         let panel_index = panel_id.index();
-        let previous_directory = self.panels[panel_index].cwd.clone();
+        let previous_directory = self.panels[panel_index].local_directory().to_path_buf();
         let revert = self.panel_refresh_revert_snapshot(panel_id);
         if let Some(snapshot) = self.completed_panelized_result_snapshot(panel_id) {
             self.panelized_result_history[panel_index] = Some(snapshot);

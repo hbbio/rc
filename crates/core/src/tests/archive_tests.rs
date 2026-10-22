@@ -100,6 +100,15 @@ fn enter(app: &mut AppState, path: &Path) {
 }
 
 #[test]
+fn zip_navigation_preserves_quick_cd_local_history() {
+    let fixture = Fixture::new(&[("nested/deep/file", b"contents")]);
+    super::quick_cd_tests::assert_archive_navigation_preserves_local_history(
+        &fixture.root,
+        &fixture.zip,
+    );
+}
+
+#[test]
 fn zip_sort_dialog_orders_members_at_the_root_and_in_subdirectories() {
     let fixture = Fixture::new(&[]);
     let mut writer = ZipWriter::new(fs::File::create(&fixture.zip).unwrap());

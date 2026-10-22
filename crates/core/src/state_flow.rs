@@ -327,6 +327,7 @@ impl AppState {
     pub fn open_selected_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
+        let previous_local_directory = self.active_panel().local_directory().to_path_buf();
         let archive_parent = self.active_panel().is_archive()
             && self
                 .active_panel()
@@ -343,7 +344,7 @@ impl AppState {
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
-            self.remember_previous_directory(panel, previous_directory);
+            self.remember_previous_directory(panel, previous_local_directory);
             self.sync_quick_view_from(panel, false);
             self.sync_selection_size(panel, false);
         }
@@ -364,7 +365,7 @@ impl AppState {
         let panel = self.active_panel;
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
-        let previous = self.active_panel().cwd.clone();
+        let previous = self.active_panel().local_directory().to_path_buf();
         let location = ArchiveLocation::root(path);
         let state = self.active_panel_mut();
         state.cwd = location.path();
@@ -388,6 +389,7 @@ impl AppState {
     pub fn go_parent_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
+        let previous_local_directory = self.active_panel().local_directory().to_path_buf();
         let was_archive = self.active_panel().is_archive();
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
@@ -400,7 +402,7 @@ impl AppState {
             if let Some(snapshot) = snapshot {
                 self.panelized_result_history[panel.index()] = Some(snapshot);
             }
-            self.remember_previous_directory(panel, previous_directory);
+            self.remember_previous_directory(panel, previous_local_directory);
             self.sync_quick_view_from(panel, false);
             self.sync_selection_size(panel, false);
         }

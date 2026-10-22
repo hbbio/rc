@@ -125,6 +125,17 @@ fn enter(app: &mut AppState, path: &Path) {
 }
 
 #[test]
+fn tar_formats_navigation_preserves_quick_cd_local_history() {
+    for format in FORMATS {
+        let fixture = Fixture::new(format, &[("nested/deep/file", b"contents")]);
+        super::quick_cd_tests::assert_archive_navigation_preserves_local_history(
+            fixture.root.path(),
+            &fixture.archive,
+        );
+    }
+}
+
+#[test]
 fn tar_formats_browse_aliases_nested_and_empty_directories_and_exit_with_focus() {
     for format in ["tar", "TAR.GZ", "tgz", "TAR.BZ2", "tbz2", "tbz"] {
         let fixture = Fixture::new(
