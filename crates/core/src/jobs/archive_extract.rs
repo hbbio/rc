@@ -129,15 +129,24 @@ fn extract_selection(
     }
     let stage = destination_staging_path(destination)?;
     let root = &reader.members[source];
+    // Staging paths live beside the destination, where other users may be able
+    // to search the parent. Restrict access at creation, before writing payloads.
+    let mut directories = fs::DirBuilder::new();
+    let mut files = fs::OpenOptions::new();
+    files.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        directories.mode(0o700);
+        files.mode(0o600);
+    }
     if root.is_dir {
-        fs::create_dir(&stage)?;
+        directories.create(&stage)?;
     } else {
         // Reserve this path before cleanup can ever own it.
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&stage)?;
+        files.create_new(true).open(&stage)?;
     }
+    directories.recursive(true);
     let result = (|| {
         let mut ordered = members.iter().collect::<Vec<_>>();
         // Create parents first, then read payloads in physical archive order.
@@ -159,18 +168,13 @@ fn extract_selection(
             progress.set_current_path(&display_path);
             if member.is_dir {
                 if member_path != source {
-                    fs::create_dir_all(&path)?;
+                    directories.create(&path)?;
                 }
             } else {
                 if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
+                    directories.create(parent)?;
                 }
-                let mut options = fs::OpenOptions::new();
-                options.write(true);
-                if member_path != source {
-                    options.create_new(true);
-                }
-                let mut output = options.open(&path)?;
+                let mut output = files.create_new(member_path != source).open(&path)?;
                 let mut input = normalize_archive_io_result(
                     reader.open_member(member),
                     Some(progress.cancel_flag.as_ref()),
@@ -208,7 +212,9 @@ fn extract_selection(
             }
             progress.complete_item(&display_path);
         }
-        // Apply directory permissions after their children have been written.
+        // Apply directory permissions after their children have been written,
+        // keeping the staging root private until all descendants have their
+        // final permissions. Entries without archived modes stay private.
         for (member_path, member) in members.iter().rev() {
             progress.ensure_not_canceled()?;
             let path = if member_path == source {
@@ -263,5 +269,174 @@ fn cleanup_stage(path: &Path) {
             let _ = fs::set_permissions(path, permissions);
         }
         let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::jobs::JobId;
+    use std::cell::Cell;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+
+    fn fixture(entries: &[(&str, u32, &[u8])]) -> (tempfile::TempDir, ArchiveLocation) {
+        let root = tempfile::tempdir().expect("fixture directory should be created");
+        let archive = root.path().join("example.tar");
+        let mut builder = tar::Builder::new(fs::File::create(&archive).unwrap());
+        for (name, mode, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(*mode);
+            header.set_size(contents.len() as u64);
+            if name.ends_with('/') {
+                header.set_entry_type(tar::EntryType::Directory);
+            }
+            header.set_cksum();
+            builder.append_data(&mut header, name, *contents).unwrap();
+        }
+        builder.finish().unwrap();
+        (root, ArchiveLocation::root(archive))
+    }
+
+    fn extract_observing(
+        location: &ArchiveLocation,
+        source: &Path,
+        destination: &Path,
+        cancel: &Arc<AtomicBool>,
+        inspect: impl FnMut(&ArchiveMember),
+    ) -> io::Result<()> {
+        let mut reader = ArchiveReader::open(location, Some(cancel))?.inspect_member_opens(inspect);
+        let members = reader
+            .subtree(source)
+            .map(|(path, member)| (path.clone(), member.clone()))
+            .collect::<Vec<_>>();
+        let (tx, _rx) = mpsc::channel();
+        let mut progress =
+            ProgressTracker::new(JobId(1), JobTotals::default(), &tx, Arc::clone(cancel));
+        extract_selection(
+            &mut reader,
+            location,
+            source,
+            &members,
+            destination,
+            &mut progress,
+        )
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path)
+            .expect("staged entry should exist")
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    #[test]
+    fn archive_directory_staging_is_private_until_all_payloads_are_written() {
+        for (directory_mode, file_mode) in [(0o700, 0o600), (0o755, 0o644), (0o2700, 0o4600)] {
+            let secret = b"private credential material";
+            let (root, location) = fixture(&[
+                ("tree/", directory_mode, b""),
+                ("tree/nested/", directory_mode, b""),
+                ("tree/nested/credentials", file_mode, secret),
+                ("tree/later", file_mode, b"later payload"),
+            ]);
+            let destination = root.path().join("tree");
+            let stage = destination_staging_path(&destination).unwrap();
+            let opened = Cell::new(0);
+            extract_observing(
+                &location,
+                Path::new("tree"),
+                &destination,
+                &Arc::default(),
+                |_| {
+                    assert!(
+                        !destination.exists(),
+                        "the selection must not be published yet"
+                    );
+                    assert_eq!(mode(&stage), 0o700);
+                    assert_eq!(mode(&stage.join("nested")), 0o700);
+                    assert_eq!(mode(&stage.join("nested/credentials")), 0o600);
+                    if opened.get() == 1 {
+                        assert_eq!(fs::read(stage.join("nested/credentials")).unwrap(), secret);
+                        assert_eq!(mode(&stage.join("later")), 0o600);
+                    }
+                    opened.set(opened.get() + 1);
+                },
+            )
+            .expect("directory extraction should succeed");
+            assert_eq!(opened.get(), 2);
+            assert!(!stage.exists());
+            assert_eq!(mode(&destination), directory_mode & 0o777);
+            assert_eq!(mode(&destination.join("nested")), directory_mode & 0o777);
+            assert_eq!(
+                mode(&destination.join("nested/credentials")),
+                file_mode & 0o777
+            );
+            assert_eq!(
+                fs::read(destination.join("nested/credentials")).unwrap(),
+                secret
+            );
+        }
+    }
+
+    #[test]
+    fn archive_file_staging_is_private_and_cancellation_removes_it() {
+        for canceled in [false, true] {
+            for file_mode in [0o600, 0o644] {
+                let (root, location) =
+                    fixture(&[("credentials", file_mode, b"private credential material")]);
+                let destination = root.path().join("credentials");
+                let stage = destination_staging_path(&destination).unwrap();
+                let cancel = Arc::new(AtomicBool::new(false));
+                let inspected = Cell::new(false);
+                let result = extract_observing(
+                    &location,
+                    Path::new("credentials"),
+                    &destination,
+                    &cancel,
+                    |_| {
+                        assert!(!destination.exists());
+                        assert_eq!(mode(&stage), 0o600);
+                        inspected.set(true);
+                        cancel.store(canceled, Ordering::Relaxed);
+                    },
+                );
+                assert!(inspected.get());
+                assert!(!stage.exists(), "staging must be moved or removed");
+                if canceled {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+                    assert!(!destination.exists());
+                } else {
+                    result.expect("file extraction should succeed");
+                    assert_eq!(mode(&destination), file_mode);
+                    assert_eq!(
+                        fs::read(&destination).unwrap(),
+                        b"private credential material"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn archive_implicit_directories_keep_private_permissions() {
+        let (root, location) = fixture(&[(
+            "tree/nested/credentials",
+            0o600,
+            b"private credential material",
+        )]);
+        let destination = root.path().join("tree");
+        extract_observing(
+            &location,
+            Path::new("tree"),
+            &destination,
+            &Arc::default(),
+            |_| {},
+        )
+        .expect("implicit directories should be extracted");
+        assert_eq!(mode(&destination), 0o700);
+        assert_eq!(mode(&destination.join("nested")), 0o700);
     }
 }

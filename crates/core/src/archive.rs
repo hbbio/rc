@@ -418,6 +418,32 @@ impl<'a> ArchiveReader<'a> {
         check_canceled(self.cancel)?;
         self.index.identity.verify(&fs::metadata(&self.path)?)
     }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn inspect_member_opens<F>(self, inspect: F) -> Self
+    where
+        F: FnMut(&ArchiveMember) + 'a,
+    {
+        // Let extraction tests inspect on-disk staging before reading payloads,
+        // without racing a worker or allocating an artificially large archive.
+        struct InspectingBackend<'a, F> {
+            backend: Box<dyn ArchiveBackend + 'a>,
+            inspect: F,
+        }
+        impl<F: FnMut(&ArchiveMember)> ArchiveBackend for InspectingBackend<'_, F> {
+            fn open_member(&mut self, member: &ArchiveMember) -> io::Result<Box<dyn Read + '_>> {
+                (self.inspect)(member);
+                self.backend.open_member(member)
+            }
+        }
+        Self {
+            backend: Box::new(InspectingBackend {
+                backend: self.backend,
+                inspect,
+            }),
+            ..self
+        }
+    }
 }
 
 /// Measures apparent bytes for selected archive members, including directory descendants.
