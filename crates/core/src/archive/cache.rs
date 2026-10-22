@@ -1,10 +1,16 @@
 //! Process-local, single-flight LRU cache. No archive payloads or sidecar files
 //! are written. In-flight users retain their immutable snapshot across eviction.
-use super::*;
+use super::{
+    ArchiveFormat, ArchiveIndex, ArchiveLocation, check_canceled, invalid_data,
+    normalize_archive_io_result, open_source, safe_component, tar, zip,
+};
 use std::collections::VecDeque;
-use std::fs::Metadata;
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::fs::{self, Metadata};
+use std::io::{self, Seek};
+use std::path::{Component, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 const CACHE_ARCHIVES: usize = 8;
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -69,13 +75,14 @@ struct Entry {
 
 static CACHE: OnceLock<Mutex<VecDeque<Entry>>> = OnceLock::new();
 
-// Always wake waiters on error or panic. A canceled first reader must never
-// poison the archive for the other pane or hold a worker lane indefinitely.
+// Always wake waiters on error or panic. Canceled builds can be retried, while
+// poisoned state must be reported without accessing its contents.
 struct Building(Arc<Slot>);
 impl Drop for Building {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.building = false;
+        if let Ok(mut state) = self.0.state.lock() {
+            state.building = false;
+        }
         self.0.changed.notify_all();
     }
 }
@@ -83,6 +90,14 @@ impl Drop for Building {
 pub(super) fn get_index(
     location: &ArchiveLocation,
     cancel: Option<&AtomicBool>,
+) -> io::Result<Arc<ArchiveIndex>> {
+    get_index_with_cache(location, cancel, CACHE.get_or_init(Mutex::default))
+}
+
+fn get_index_with_cache(
+    location: &ArchiveLocation,
+    cancel: Option<&AtomicBool>,
+    cache: &Mutex<VecDeque<Entry>>,
 ) -> io::Result<Arc<ArchiveIndex>> {
     check_canceled(cancel)?;
     if location
@@ -103,10 +118,9 @@ pub(super) fn get_index(
     // Opening before inspecting metadata also rejects FIFOs without blocking.
     let mut file = open_source(&path)?;
     let identity = SourceIdentity::new(&file.metadata()?);
-    let cache = CACHE.get_or_init(Mutex::default);
     let _trim = TrimOnDrop(cache);
     let slot = {
-        let mut entries = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = cache.lock().map_err(|_| poisoned_cache())?;
         let existing = entries
             .iter()
             .position(|entry| {
@@ -127,13 +141,16 @@ pub(super) fn get_index(
     };
     loop {
         check_canceled(cancel)?;
-        let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = slot.state.lock().map_err(|_| poisoned_cache())?;
         if let Some(index) = &state.index {
             return Ok(Arc::clone(index));
         }
         if state.building {
             // Cancellation remains responsive even when another worker owns the scan.
-            let _ = slot.changed.wait_timeout(state, Duration::from_millis(25));
+            let _ = slot
+                .changed
+                .wait_timeout(state, Duration::from_millis(25))
+                .map_err(|_| poisoned_cache())?;
             continue;
         }
         state.building = true;
@@ -156,21 +173,29 @@ pub(super) fn get_index(
             cancel,
         )?);
         check_canceled(cancel)?;
-        slot.state.lock().unwrap_or_else(|e| e.into_inner()).index = Some(Arc::clone(&index));
+        slot.state.lock().map_err(|_| poisoned_cache())?.index = Some(Arc::clone(&index));
         drop(building);
         return Ok(index);
     }
 }
 
-struct TrimOnDrop(&'static Mutex<VecDeque<Entry>>);
-impl Drop for TrimOnDrop {
+fn poisoned_cache() -> io::Error {
+    io::Error::other("archive index cache lock is poisoned; restart the application")
+}
+
+struct TrimOnDrop<'cache>(&'cache Mutex<VecDeque<Entry>>);
+impl Drop for TrimOnDrop<'_> {
     fn drop(&mut self) {
         trim_cache(self.0);
     }
 }
 
 fn trim_cache(cache: &Mutex<VecDeque<Entry>>) {
-    let mut entries = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut entries) = cache.lock() else {
+        // This is best-effort cleanup, including during unwinding. Never access
+        // poisoned contents or panic again while another panic is in flight.
+        return;
+    };
     let mut bytes = entries
         .iter()
         .filter_map(|entry| entry.slot.state.try_lock().ok())
@@ -189,7 +214,9 @@ fn trim_cache(cache: &Mutex<VecDeque<Entry>>) {
         let Some(position) = removable else {
             break;
         };
-        let entry = entries.remove(position).unwrap();
+        let entry = entries
+            .remove(position)
+            .expect("removable entry came from the same locked cache deque");
         if let Ok(state) = entry.slot.state.lock()
             && let Some(index) = &state.index
         {
@@ -201,7 +228,13 @@ fn trim_cache(cache: &Mutex<VecDeque<Entry>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::{ArchiveReader, measure_archive_selection};
+    use std::fs::File;
     use std::io::Write;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::thread;
 
     fn fixture(name: &str) -> (tempfile::TempDir, ArchiveLocation) {
         let root = tempfile::tempdir().unwrap();
@@ -289,6 +322,110 @@ mod tests {
                 .members
                 .contains_key(Path::new("first"))
         );
+    }
+
+    #[test]
+    fn poisoned_cache_fails_lookup_and_cleanup_does_not_panic_during_unwinding() {
+        let (_root, location) = fixture("example.tar");
+        let cache = Arc::new(Mutex::new(VecDeque::new()));
+        get_index_with_cache(&location, None, &cache).expect("cache should contain a valid index");
+        let poison_cache = Arc::clone(&cache);
+        let poisoner = thread::spawn(move || {
+            let _trim = TrimOnDrop(&poison_cache);
+            let _entries = poison_cache
+                .lock()
+                .expect("cache should not yet be poisoned");
+            panic!("deliberately poison the cache while its cleanup guard is alive");
+        });
+        assert!(
+            poisoner.join().is_err(),
+            "the poisoning panic should unwind normally"
+        );
+        assert!(cache.is_poisoned());
+        let error = get_index_with_cache(&location, None, &cache)
+            .err()
+            .expect("a poisoned cache must not serve its existing index");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("poisoned"));
+    }
+
+    #[test]
+    fn poisoned_slot_does_not_serve_an_already_built_index() {
+        let (_root, location) = fixture("example.tar");
+        let cache = Mutex::new(VecDeque::new());
+        get_index_with_cache(&location, None, &cache).expect("cache should contain a valid index");
+        let slot = Arc::clone(
+            &cache
+                .lock()
+                .expect("cache should be healthy")
+                .front()
+                .expect("lookup should have inserted a slot")
+                .slot,
+        );
+        let poisoner = thread::spawn(move || {
+            let _state = slot.state.lock().expect("slot should not yet be poisoned");
+            panic!("deliberately poison a completed index slot");
+        });
+        assert!(poisoner.join().is_err());
+        let error = get_index_with_cache(&location, None, &cache)
+            .err()
+            .expect("a poisoned slot must not serve its existing index");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("poisoned"));
+    }
+
+    #[test]
+    fn building_drop_wakes_waiters_when_the_slot_is_poisoned_during_unwinding() {
+        let slot = Arc::new(Slot::default());
+        slot.state
+            .lock()
+            .expect("new slot should be healthy")
+            .building = true;
+        let waiting_slot = Arc::clone(&slot);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let state = waiting_slot
+                .state
+                .lock()
+                .expect("slot should be healthy before waiting");
+            ready_tx
+                .send(())
+                .expect("test should receive the waiter's readiness");
+            let poisoned = waiting_slot
+                .changed
+                .wait_while(state, |state| state.building)
+                .is_err();
+            finished_tx
+                .send(poisoned)
+                .expect("test should receive the wait result");
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter should acquire the slot");
+        let poisoner = thread::spawn(move || {
+            let _building = Building(Arc::clone(&slot));
+            // The waiter holds this lock until it enters the condition-variable wait.
+            // On unwind, this guard poisons the lock before Building is dropped.
+            let _state = slot
+                .state
+                .lock()
+                .expect("waiter should release a healthy lock");
+            panic!("deliberately poison a building slot");
+        });
+        assert!(
+            poisoner.join().is_err(),
+            "Building::drop must not panic during unwinding"
+        );
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("Building::drop must notify the blocked waiter"),
+            "the waiter must observe poisoning rather than a completed build"
+        );
+        waiter
+            .join()
+            .expect("waiter should report poisoning without panicking");
     }
 
     #[test]

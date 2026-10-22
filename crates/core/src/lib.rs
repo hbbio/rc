@@ -1132,6 +1132,7 @@ impl FileEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PanelListingSource {
     Directory,
+    /// Read-only archive listing whose pane paths are synthetic member identities.
     Archive(ArchiveLocation),
     Panelize {
         command: String,
@@ -1584,6 +1585,9 @@ impl PanelState {
         self.source.is_panelized()
     }
 
+    /// Returns the archive and member directory when this panel lists an archive.
+    ///
+    /// Member paths in the panel are identities inside that archive, not local files.
     pub fn archive_location(&self) -> Option<&ArchiveLocation> {
         match &self.source {
             PanelListingSource::Archive(location) => Some(location),

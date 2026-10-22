@@ -1,6 +1,15 @@
-use super::*;
+use super::{
+    ArchiveBackend, ArchiveMember, CancelReader, IndexedArchive, check_canceled, invalid_data,
+    normalize_archive_io_result, safe_member_path,
+};
 use ::zip::ZipArchive;
 use chrono::TimeZone;
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{self, Read, Seek};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::time::SystemTime;
 
 struct ZipIndex;
 struct ZipBackend<'a> {
@@ -96,7 +105,8 @@ mod tests {
     use super::*;
     use ::zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
     use std::cell::Cell;
-    use std::io::{Cursor, Write};
+    use std::io::{Cursor, SeekFrom, Write};
+    use std::sync::atomic::Ordering;
 
     struct Fixture {
         bytes: Vec<u8>,

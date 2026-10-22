@@ -94,17 +94,31 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    /// Copies selected regular members and directory subtrees to the local filesystem.
+    ///
+    /// Sources are synthetic `location.archive.join(member)` paths. Each selection
+    /// is staged before replacing its destination; earlier completed selections
+    /// remain committed if a later selection fails or the job is canceled.
     ExtractArchive {
         location: ArchiveLocation,
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
         overwrite: OverwritePolicy,
     },
+    /// Loads a bounded archive preview on a runtime worker.
+    ///
+    /// `path` is a synthetic archive member identity. `quick_view` identifies the
+    /// target panel and request when loading a quick-view preview.
+    /// See [`crate::ViewerState::open_archive_cancellable`] for I/O and error behavior.
     LoadArchiveViewer {
         location: ArchiveLocation,
         path: PathBuf,
         quick_view: Option<(ActivePanel, u64)>,
     },
+    /// Measures selected synthetic archive paths on a runtime worker.
+    ///
+    /// The panel and request ID associate the result with the originating selection.
+    /// See [`crate::measure_archive_selection`] for indexing costs and error behavior.
     MeasureArchiveSelection {
         location: ArchiveLocation,
         panel: ActivePanel,

@@ -1,10 +1,12 @@
 //! Seekable gzip using bounded snapshots of the existing miniz decoder. Unlike
 //! block-only indexes this also bounds seeks for highly compressible inputs.
 //! Snapshots include checksum state; the first pass validates every gzip member.
-use super::*;
+use super::{check_archive_io_canceled, invalid_data};
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const INITIAL_SPAN: u64 = 4 * 1024 * 1024;
 const MAX_POINTS: usize = 256;
@@ -148,8 +150,8 @@ impl<'a, R: Read + Seek> GzipReader<'a, R> {
     fn finish_member(&mut self) -> io::Result<()> {
         let mut trailer = [0_u8; 8];
         self.input.read_exact(&mut trailer)?;
-        let crc = u32::from_le_bytes(trailer[..4].try_into().unwrap());
-        let size = u32::from_le_bytes(trailer[4..].try_into().unwrap());
+        let crc = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+        let size = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
         if crc != self.crc.clone().finalize() || size != self.member_size {
             return Err(invalid_data("gzip checksum or size mismatch"));
         }
@@ -338,8 +340,9 @@ fn read_header<R: BufRead>(reader: &mut R) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::{CancelReader, normalize_archive_io_result};
     use std::io::{Cursor, Write};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn encode(bytes: &[u8]) -> Vec<u8> {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());

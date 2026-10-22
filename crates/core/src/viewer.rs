@@ -77,6 +77,21 @@ impl ViewerState {
         Ok(Self::from_prefix(path, total_size, bytes, hit_read_limit))
     }
 
+    /// Loads a bounded preview of a regular archive member synchronously.
+    ///
+    /// `path` must be `location.archive.join(member)`, with `member` relative to
+    /// the archive root. The returned viewer retains that synthetic identity.
+    /// Preview bytes are limited by the viewer memory budget, but building the
+    /// shared index for a compressed TAR can first decompress its entire stream.
+    /// No extracted files are written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::Interrupted`] when canceled,
+    /// [`io::ErrorKind::NotFound`] for an absent member, and
+    /// [`io::ErrorKind::Unsupported`] for directories or unsupported member types.
+    /// Invalid paths, unreadable or malformed archives, and source changes also
+    /// return errors rather than a partially loaded viewer.
     pub fn open_archive_cancellable(
         location: &crate::ArchiveLocation,
         path: PathBuf,

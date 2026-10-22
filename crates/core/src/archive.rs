@@ -22,6 +22,7 @@ use crate::{
     FileEntry, FileEntryKind, FileEntryMetadata, SelectionSizeReport, SortField, SortMode,
 };
 
+/// Archive containers supported by read-only browsing, previews, and extraction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArchiveFormat {
     Zip,
@@ -31,6 +32,12 @@ pub enum ArchiveFormat {
 }
 
 impl ArchiveFormat {
+    /// Infers a format from a case-insensitive filename suffix without opening the file.
+    ///
+    /// Recognizes `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz2`, and `.tbz`.
+    /// Returns `None` for other suffixes or paths without a filename. This does not
+    /// validate the archive contents; readers validate the selected format when opened.
+    #[must_use]
     pub fn for_path(path: &Path) -> Option<Self> {
         let name = path.file_name()?.as_encoded_bytes().to_ascii_lowercase();
         if name.ends_with(b".zip") {
@@ -47,6 +54,8 @@ impl ArchiveFormat {
         }
     }
 
+    /// Returns the display label, using the canonical format name for aliases.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Zip => "ZIP",
@@ -61,11 +70,17 @@ impl ArchiveFormat {
 /// never a local filesystem path. Only backends open the containing local file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArchiveLocation {
+    /// Local path to the containing archive file.
     pub archive: PathBuf,
+    /// Safe member directory relative to the archive root; empty for the root itself.
+    ///
+    /// Readers reject absolute paths, parent traversal, and unsafe components.
     pub directory: PathBuf,
 }
 
 impl ArchiveLocation {
+    /// Creates a root location without opening or validating the containing file.
+    #[must_use]
     pub fn root(archive: PathBuf) -> Self {
         Self {
             archive,
@@ -73,11 +88,18 @@ impl ArchiveLocation {
         }
     }
 
+    /// Infers the containing file's format using [`ArchiveFormat::for_path`].
+    ///
+    /// Returns [`io::ErrorKind::Unsupported`] if its filename has no supported suffix.
     pub fn format(&self) -> io::Result<ArchiveFormat> {
         ArchiveFormat::for_path(&self.archive)
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unsupported archive format"))
     }
 
+    /// Joins the archive path and member directory into a synthetic pane identity.
+    ///
+    /// Pass this identity to archive APIs; it does not name a local directory.
+    #[must_use]
     pub fn path(&self) -> PathBuf {
         self.archive.join(&self.directory)
     }
@@ -131,7 +153,11 @@ impl ArchiveLocation {
         for path in index.children.get(&self.directory).into_iter().flatten() {
             check_canceled(cancel)?;
             let member = &index.members[path];
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let name = path
+                .file_name()
+                .expect("indexed members have validated, nonempty relative paths")
+                .to_string_lossy()
+                .into_owned();
             if !show_hidden && name.starts_with('.') {
                 continue;
             }
@@ -290,7 +316,11 @@ impl ArchiveIndex {
         for path in members.keys() {
             check_canceled(cancel)?;
             children
-                .entry(path.parent().unwrap().to_path_buf())
+                .entry(
+                    path.parent()
+                        .expect("nonempty relative member paths have a parent, possibly the root")
+                        .to_path_buf(),
+                )
                 .or_default()
                 .push(path.clone());
         }
@@ -390,6 +420,23 @@ impl<'a> ArchiveReader<'a> {
     }
 }
 
+/// Measures apparent bytes for selected archive members, including directory descendants.
+///
+/// Each path must be a synthetic identity formed as `location.archive.join(member)`,
+/// where `member` is relative to the archive root, not to `location.directory`.
+/// Duplicate selections and descendants of selected directories are counted once.
+/// Sizes come from metadata and do not imply that a member can be extracted.
+///
+/// This function blocks while acquiring or building the shared metadata index. The
+/// first scan of a compressed TAR decompresses and validates the entire stream;
+/// subsequent calls can reuse the index. No extracted files are written.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::Interrupted`] when `cancel` is set, and an error for
+/// invalid or missing member paths, unreadable or malformed archives, unsupported
+/// formats, or changes to the archive during indexing. Failures return no partial
+/// report; successful reports have `unreadable_entries` equal to zero.
 pub fn measure_archive_selection(
     location: &ArchiveLocation,
     paths: &[PathBuf],

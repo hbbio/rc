@@ -2,10 +2,18 @@
 //! the logical TAR stream, so neither pane code nor extraction depends on codecs.
 use super::bzip::{BzipIndex, BzipReader};
 use super::gzip::{GzipIndex, GzipReader};
-use super::*;
+use super::{
+    ArchiveBackend, ArchiveFormat, ArchiveMember, CancelReader, IndexedArchive,
+    check_archive_io_canceled, invalid_data, safe_member_path,
+};
 use ::tar::Header;
-use std::io::BufReader;
-use std::time::{Duration, UNIX_EPOCH};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
@@ -316,8 +324,11 @@ fn parse_time(value: &[u8]) -> io::Result<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::normalize_archive_io_result;
     use std::cell::Cell;
     use std::io::Cursor;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     struct Counted<'a> {
         file: Cursor<Vec<u8>>,

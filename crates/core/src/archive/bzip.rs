@@ -2,9 +2,11 @@
 //! and sizes are retained; each reader decodes one block at a time. Block markers
 //! may be at any bit alignment, including those produced by pbzip2 streams.
 use super::gzip::seek_target;
-use super::*;
+use super::{check_archive_io_canceled, invalid_data};
 use ::bzip2::read::BzDecoder;
-use std::io::{BufReader, Cursor};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 const END_MAGIC: u64 = 0x1772_4538_5090;
@@ -177,13 +179,14 @@ impl<R: Read + Seek> Read for BzipReader<'_, R> {
             return Ok(0);
         }
         loop {
-            if self.decoder.is_none() {
+            let Some(decoder) = self.decoder.as_mut() else {
                 self.next_block()?;
                 if self.done {
                     return Ok(0);
                 }
-            }
-            let count = self.decoder.as_mut().unwrap().read(output)?;
+                continue;
+            };
+            let count = decoder.read(output)?;
             if count != 0 {
                 self.position = self
                     .position
@@ -191,7 +194,10 @@ impl<R: Read + Seek> Read for BzipReader<'_, R> {
                     .ok_or_else(|| invalid_data("bzip2 size overflow"))?;
                 return Ok(count);
             }
-            let mut block = self.block.take().unwrap();
+            let mut block = self
+                .block
+                .take()
+                .expect("an active bzip2 decoder has block metadata");
             let decoded_size = self.position - block.decoded;
             if self.building {
                 block.size = decoded_size;
@@ -213,9 +219,9 @@ impl<R: Read + Seek> Seek for BzipReader<'_, R> {
         if target == self.position {
             return Ok(target);
         }
-        if !self.building {
-            if target >= self.length.unwrap() {
-                if target > self.length.unwrap() {
+        if let Some(length) = self.length {
+            if target >= length {
+                if target > length {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         "TAR member extends beyond the bzip2 stream",
@@ -414,7 +420,9 @@ fn frame(data: &[u8], offset: usize, bits: usize, level: u8, crc: u32) -> Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::normalize_archive_io_result;
     use std::io::Write;
+    use std::sync::atomic::Ordering;
 
     fn data() -> Vec<u8> {
         let mut seed = 0x1234_5678_u32;
