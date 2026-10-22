@@ -19,6 +19,7 @@ allow = [
   "Apache-2.0",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "bzip2-1.0.6", # libbz2-rs-sys, the pure Rust bzip2 backend
   "CC0-1.0",
   "GPL-3.0",
   "GPL-3.0-or-later",

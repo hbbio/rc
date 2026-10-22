@@ -40,9 +40,9 @@ in the project [README](README.md).
 
 ## Virtual filesystems and archives
 
-- Introduce a path and backend model that can represent local, archive, helper, and
-  remote locations without weakening local-filesystem behavior.
-- Browse TAR and ZIP archives as directories and support nested archive paths.
+- Extend the shared read-only archive backend into a unified path/backend model
+  for local, helper, and remote locations without weakening local-filesystem behavior.
+- Support nested archive paths and persistent indexes across application sessions.
 - Support MC-style extfs helpers for additional archive and package formats.
 - Add optional SFTP, FTP, and shell links with secure credential handling, host
   verification, cancellation, and reconnect behavior.

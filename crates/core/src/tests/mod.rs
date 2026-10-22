@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
+mod archive_tests;
 mod find_tests;
 mod mouse_tests;
 mod panelize_tests;
@@ -16,6 +17,7 @@ mod quick_view_tests;
 mod refresh_tests;
 mod route_command_tests;
 mod selection_size_tests;
+mod tar_tests;
 mod viewer_tests;
 
 fn file_entry(name: &str) -> FileEntry {
@@ -72,6 +74,60 @@ fn drain_background(app: &mut AppState) {
                     let job_id = job.id;
                     let (event_tx, event_rx) = std::sync::mpsc::channel();
                     match &job.request {
+                        JobRequest::LoadArchiveViewer {
+                            location,
+                            path,
+                            quick_view,
+                        } => {
+                            let _ = event_tx.send(JobEvent::Started { id: job_id });
+                            let viewer_result = ViewerState::open_archive_cancellable(
+                                location,
+                                path.clone(),
+                                job.cancel_flag().as_ref(),
+                            )
+                            .map_err(|error| error.to_string());
+                            let event = match quick_view {
+                                Some((panel, request_id)) => BackgroundEvent::QuickViewLoaded {
+                                    panel: *panel,
+                                    path: path.clone(),
+                                    request_id: *request_id,
+                                    result: viewer_result.clone(),
+                                },
+                                None => BackgroundEvent::ViewerLoaded {
+                                    path: path.clone(),
+                                    result: viewer_result.clone(),
+                                },
+                            };
+                            app.handle_background_event(event);
+                            let _ = event_tx.send(JobEvent::Finished {
+                                id: job_id,
+                                result: viewer_result.map(|_| ()).map_err(JobError::from_message),
+                            });
+                        }
+                        JobRequest::MeasureArchiveSelection {
+                            location,
+                            panel,
+                            paths,
+                            request_id,
+                        } => {
+                            let _ = event_tx.send(JobEvent::Started { id: job_id });
+                            let result = measure_archive_selection(
+                                location,
+                                paths,
+                                job.cancel_flag().as_ref(),
+                            )
+                            .map(|report| {
+                                app.handle_background_event(
+                                    BackgroundEvent::SelectionSizeMeasured {
+                                        panel: *panel,
+                                        request_id: *request_id,
+                                        report,
+                                    },
+                                );
+                            })
+                            .map_err(JobError::from_io);
+                            let _ = event_tx.send(JobEvent::Finished { id: job_id, result });
+                        }
                         JobRequest::RefreshPanel {
                             panel,
                             cwd,

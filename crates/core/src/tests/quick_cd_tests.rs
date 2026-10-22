@@ -157,6 +157,95 @@ fn normal_panel_navigation_updates_quick_cd_history_per_panel() {
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 
+pub(super) fn assert_archive_navigation_preserves_local_history(root: &Path, archive: &Path) {
+    let previous = root.join("previous");
+    fs::create_dir(&previous).expect("previous directory should be created");
+    let enter = |app: &mut AppState, path: &Path| {
+        app.active_panel_mut().cursor = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.path == path)
+            .expect("navigation target should be listed");
+        app.apply(AppCommand::OpenEntry).expect("entry should open");
+        drain_background(app);
+    };
+    let dash = |app: &mut AppState| {
+        app.apply(AppCommand::OpenQuickCd)
+            .expect("Quick CD should open");
+        app.finish_dialog(DialogResult::QuickCdSubmitted {
+            input: String::from("-"),
+            selected_path: None,
+        });
+        drain_background(app);
+        assert!(
+            !app.status_line.contains("Quick cd failed"),
+            "{}",
+            app.status_line
+        );
+    };
+
+    for exit in ["backspace", "parent entry", "quick cd"] {
+        let mut app = app_with_loaded_panels(previous.clone());
+        assert!(app.set_active_panel_directory(root.to_path_buf()).unwrap());
+        drain_background(&mut app);
+        for path in [
+            archive.to_path_buf(),
+            archive.join("nested"),
+            archive.join("nested/deep"),
+        ] {
+            enter(&mut app, &path);
+            assert!(app.active_panel().is_archive());
+            assert_eq!(
+                app.previous_panel_directories[0],
+                Some(previous.clone()),
+                "{exit}: {}",
+                path.display()
+            );
+        }
+
+        if exit != "quick cd" {
+            for _ in 0..3 {
+                if exit == "backspace" {
+                    app.apply(AppCommand::CdUp).expect("parent should open");
+                    drain_background(&mut app);
+                } else {
+                    let parent = app.active_panel().entries[0].path.clone();
+                    enter(&mut app, &parent);
+                }
+                assert_eq!(
+                    app.previous_panel_directories[0],
+                    Some(previous.clone()),
+                    "{exit}"
+                );
+            }
+            assert_eq!(app.active_panel().cwd, root);
+            assert!(!app.active_panel().is_archive());
+        }
+
+        dash(&mut app);
+        assert_eq!(app.active_panel().cwd, previous, "{exit}");
+        assert_eq!(app.previous_panel_directories[0].as_deref(), Some(root));
+        assert!(!app.active_panel().is_archive());
+        dash(&mut app);
+        assert_eq!(app.active_panel().cwd, root, "{exit}");
+        assert_eq!(app.previous_panel_directories[0], Some(previous.clone()));
+        assert_eq!(
+            app.previous_panel_directories[1], None,
+            "passive-panel history must stay independent"
+        );
+    }
+
+    let mut app = app_with_loaded_panels(root.to_path_buf());
+    enter(&mut app, archive);
+    app.apply(AppCommand::CdUp).expect("archive should close");
+    drain_background(&mut app);
+    assert_eq!(
+        app.previous_panel_directories[0], None,
+        "archive browsing must not invent local history"
+    );
+}
+
 #[test]
 fn quick_cd_coalesces_queued_searches_as_the_query_changes() {
     let stamp = SystemTime::now()

@@ -114,9 +114,16 @@ impl AppState {
 
     fn open_panel_sort_order_dialog(&mut self, panel: ActivePanel) {
         let sort_mode = self.panels[panel.index()].sort_mode;
+        let is_archive = self.panels[panel.index()].is_archive();
         let items = SortField::ALL
             .into_iter()
-            .map(|field| field.dialog_label().to_string())
+            .map(|field| {
+                if is_archive && field == SortField::Unsorted {
+                    String::from("Unsorted (archive order)")
+                } else {
+                    field.dialog_label().to_string()
+                }
+            })
             .collect();
         self.push_dialog(
             DialogState::listbox_with_hint(
@@ -223,7 +230,12 @@ impl AppState {
         }
 
         let destination_dir = self.passive_panel().cwd.clone();
-        let source_base_dir = self.active_panel().cwd.clone();
+        let source_base_dir = self
+            .active_panel()
+            .archive_location()
+            .and_then(|location| location.archive.parent())
+            .unwrap_or(&self.active_panel().cwd)
+            .to_path_buf();
         self.start_transfer_dialog_for_paths(
             kind,
             sources,

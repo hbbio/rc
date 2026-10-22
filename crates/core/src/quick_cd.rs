@@ -180,7 +180,9 @@ impl AppState {
         panel: ActivePanel,
         previous_directory: PathBuf,
     ) {
-        if self.panels[panel.index()].cwd != previous_directory {
+        // Archive browsing stays anchored to its containing local directory;
+        // synthetic member paths must never enter filesystem-only cd history.
+        if self.panels[panel.index()].local_directory() != previous_directory {
             self.previous_panel_directories[panel.index()] = Some(previous_directory);
         }
     }

@@ -171,6 +171,9 @@ pub fn refresh_panel_entries(
     cancel_flag: &AtomicBool,
 ) -> io::Result<Vec<FileEntry>> {
     match source {
+        PanelListingSource::Archive(location) => {
+            location.read_entries(sort_mode, show_hidden_files, Some(cancel_flag))
+        }
         PanelListingSource::Directory => read_entries_with_visibility_cancel(
             cwd,
             sort_mode,
@@ -209,6 +212,23 @@ where
     F: FnMut(BackgroundEvent) -> bool,
 {
     let mut result = match &request.source {
+        PanelListingSource::Archive(location) => {
+            let entries = location.read_entries(
+                request.sort_mode,
+                request.show_hidden_files,
+                Some(cancel_flag),
+            );
+            // Use the refresh cancellation label so navigation rollback stays consistent.
+            ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
+            let entries = crate::panel_filter::apply_panel_filter(entries?, &request.filter)
+                .map_err(io::Error::other)?;
+            Ok(PanelRefreshResult {
+                entries,
+                panelized_entries: None,
+                canonical_cwd: None,
+                canonical_home_directory: None,
+            })
+        }
         PanelListingSource::Directory => {
             stream_directory_entries(request, cancel_flag, &mut emit_chunk)
         }
@@ -290,7 +310,9 @@ where
         } => {
             stream_panelized_paths_with_cancel(base_dir, paths, Some(cancel_flag), &mut emit_entry)
         }
-        PanelListingSource::Directory => unreachable!("directory sources use directory streaming"),
+        PanelListingSource::Directory | PanelListingSource::Archive(_) => {
+            unreachable!("directory sources use directory streaming")
+        }
     }?;
     emit_panel_entries_chunk(request, &mut pending, emit_chunk)?;
     let panelized_entries = Arc::<[FileEntry]>::from(discovered_entries);
