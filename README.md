@@ -21,6 +21,9 @@ and fast directory navigation.
   control, and persisted configuration.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
   columns, and mouse selection or activation.
+- Select or unselect groups with glob or regular-expression patterns, optional
+  case-insensitive matching, and control over including directories. These
+  commands affect visible entries and preserve tags hidden by a listing filter.
 - Quick view and file information in the passive panel.
 - Quick CD for exact paths, `~`, Unix `~user`, `cd -`, and ranked
   case-insensitive directory search.

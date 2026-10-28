@@ -19,7 +19,7 @@ in the project [README](README.md).
 
 - Add chmod, chown, advanced chown, hard-link, symlink, relative-symlink, and
   edit-symlink operations with tagged-file support.
-- Add select-group and unselect-group dialogs and filtered-view command handling.
+- Add filtered-view command handling.
 - Add explicit directory and file comparison commands.
 - Add panel swapping, directory-size calculation on demand, viewed/edited-file
   history, and a screen selector.
@@ -36,7 +36,6 @@ in the project [README](README.md).
 - Add a persistent PTY-backed shell with a prompt protocol and bidirectional
   working-directory synchronization.
 - Implement `Ctrl-O` panel hiding around the persistent shell.
-- Bring the modal command line, completion, and shell configuration to Windows.
 
 ## Virtual filesystems and archives
 
@@ -53,6 +52,10 @@ in the project [README](README.md).
 - Preserve non-UTF-8 filenames losslessly throughout panels, jobs, search,
   command insertion, and external-tool invocation.
 - Add optional per-panel legacy filename encodings.
+- Turn Learn Keys capture into editable, persistent keymap overrides.
+
+## Deferred: Windows (out of current scope)
+
+- Bring the modal command line, completion, and shell configuration to Windows.
 - Complete platform-specific path, permissions, ownership, and terminal behavior
   on Windows.
-- Turn Learn Keys capture into editable, persistent keymap overrides.

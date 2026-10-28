@@ -2355,7 +2355,11 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 ])
             };
             let pattern = if filter.pattern.is_empty() {
-                String::from("<disabled>")
+                String::from(if filter.require_pattern {
+                    "<required>"
+                } else {
+                    "<disabled>"
+                })
             } else {
                 filter.pattern.clone()
             };
@@ -2383,9 +2387,11 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
             ];
             frame.render_widget(Paragraph::new(rows).style(normal), layout[0]);
             frame.render_widget(
-                Paragraph::new(
-                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Empty pattern disables",
-                )
+                Paragraph::new(if filter.require_pattern {
+                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Pattern required"
+                } else {
+                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Empty pattern disables"
+                })
                 .style(skin.style("core", "disabled")),
                 layout[1],
             );
@@ -3808,6 +3814,26 @@ mod tests {
         assert!(measured.contains("3kb in 1 item"));
 
         fs::remove_dir_all(root).expect("temporary root should be removable");
+    }
+
+    #[test]
+    fn render_group_selection_explains_its_required_pattern() {
+        let root = temp_root("group-selection-dialog");
+        let mut app = app_with_loaded_panels(root.clone());
+        for command in [AppCommand::SelectGroup, AppCommand::UnselectGroup] {
+            app.apply(command).unwrap();
+            app.apply(AppCommand::DialogBackspace).unwrap();
+            let dialog_frame = render_to_text(&app, 100, 30);
+            assert!(dialog_frame.contains("<required>"));
+            assert!(dialog_frame.contains("Pattern required"));
+            assert!(!dialog_frame.contains("Empty pattern disables"));
+            app.apply(AppCommand::DialogCancel).unwrap();
+        }
+        app.apply(AppCommand::OpenPanelFilter).unwrap();
+        let filter_frame = render_to_text(&app, 100, 30);
+        assert!(filter_frame.contains("<disabled>"));
+        assert!(filter_frame.contains("Empty pattern disables"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

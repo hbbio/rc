@@ -10,6 +10,7 @@ use std::{env, fs};
 
 mod archive_tests;
 mod find_tests;
+mod group_selection_tests;
 mod mouse_tests;
 mod panelize_tests;
 mod quick_cd_tests;

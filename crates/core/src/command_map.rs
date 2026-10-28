@@ -51,6 +51,8 @@ impl AppCommand {
             }
             (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
+            (KeyContext::FileManager, KeyCommand::SelectGroup) => Some(Self::SelectGroup),
+            (KeyContext::FileManager, KeyCommand::UnselectGroup) => Some(Self::UnselectGroup),
             (KeyContext::FileManager, KeyCommand::CycleListingFormat) => {
                 Some(Self::CycleListingFormat)
             }

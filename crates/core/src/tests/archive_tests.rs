@@ -109,6 +109,28 @@ fn zip_navigation_preserves_quick_cd_local_history() {
 }
 
 #[test]
+fn zip_group_selection_tags_synthetic_member_paths() {
+    let fixture = Fixture::new(&[("first.txt", b"one"), ("second.md", b"two")]);
+    let mut app = fixture.app();
+    app.apply(AppCommand::SelectGroup).unwrap();
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter {
+        pattern: String::from("*.txt"),
+        ..PanelFilter::default()
+    }));
+    assert_eq!(
+        app.active_panel().tagged_paths(),
+        vec![fixture.zip.join("first.txt")]
+    );
+    assert!(app.active_panel().is_archive());
+    app.apply(AppCommand::UnselectGroup).unwrap();
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter {
+        pattern: String::from("*"),
+        ..PanelFilter::default()
+    }));
+    assert!(app.active_panel().tagged_paths().is_empty());
+}
+
+#[test]
 fn zip_sort_dialog_orders_members_at_the_root_and_in_subdirectories() {
     let fixture = Fixture::new(&[]);
     let mut writer = ZipWriter::new(fs::File::create(&fixture.zip).unwrap());

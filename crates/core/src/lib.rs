@@ -25,6 +25,7 @@ mod quick_cd_search;
 mod quick_view_flow;
 mod refresh_flow;
 mod route_flow;
+mod selection_flow;
 mod selection_size;
 mod selection_size_flow;
 pub mod settings;
@@ -168,6 +169,8 @@ pub enum AppCommand {
     Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
     InvertTags,
+    SelectGroup,
+    UnselectGroup,
     CycleListingFormat,
     OpenListingFormat,
     OpenSortOrder,
@@ -488,6 +491,8 @@ impl AppCommand {
             | Self::OpenListingFormat
             | Self::OpenSortOrder
             | Self::OpenPanelFilter
+            | Self::SelectGroup
+            | Self::UnselectGroup
             | Self::Panel(
                 _,
                 PanelCommand::OpenListingFormat
@@ -672,8 +677,8 @@ const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("Delete", "F8", AppCommand::Delete),
     MenuEntry::action_with_shortcut("Quick cd", "M-c", AppCommand::OpenQuickCd),
     MenuEntry::separator(),
-    MenuEntry::stub("Select group", "+"),
-    MenuEntry::stub("Unselect group", "-"),
+    MenuEntry::action_with_shortcut("Select group", "+", AppCommand::SelectGroup),
+    MenuEntry::action_with_shortcut("Unselect group", "-", AppCommand::UnselectGroup),
     MenuEntry::action_with_shortcut("Invert selection", "*", AppCommand::InvertTags),
     MenuEntry::separator(),
     MenuEntry::action_with_shortcut("Exit", "F10", AppCommand::Quit),
@@ -2027,6 +2032,10 @@ enum PendingDialogAction {
     },
     SetPanelFilter {
         panel: ActivePanel,
+    },
+    SetGroupSelection {
+        panel: ActivePanel,
+        select: bool,
     },
     ViewerSearch {
         direction: ViewerSearchDirection,

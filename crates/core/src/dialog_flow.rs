@@ -21,6 +21,16 @@ impl AppState {
             }
             AppCommand::OpenSortOrder => self.open_panel_sort_order_dialog(self.active_panel),
             AppCommand::OpenPanelFilter => self.open_panel_filter_dialog(self.active_panel),
+            AppCommand::SelectGroup | AppCommand::UnselectGroup => {
+                self.open_group_selection_dialog(
+                    self.active_panel,
+                    command == AppCommand::SelectGroup,
+                    &PanelFilter {
+                        pattern: String::from("*"),
+                        ..PanelFilter::default()
+                    },
+                );
+            }
             AppCommand::Panel(panel, PanelCommand::OpenListingFormat) => {
                 self.open_panel_listing_format_dialog(panel)
             }
@@ -749,6 +759,13 @@ impl AppState {
             }
             (Some(PendingDialogAction::SetPanelFilter { .. }), DialogResult::Canceled) => {
                 self.set_status("Filter unchanged");
+            }
+            (
+                Some(PendingDialogAction::SetGroupSelection { panel, select }),
+                DialogResult::FilterSubmitted(filter),
+            ) => self.apply_group_selection(panel, select, filter),
+            (Some(PendingDialogAction::SetGroupSelection { .. }), DialogResult::Canceled) => {
+                self.set_status("Selection unchanged");
             }
             (Some(PendingDialogAction::FindSearch), DialogResult::FindSubmitted(spec)) => {
                 self.start_find_search(*spec);

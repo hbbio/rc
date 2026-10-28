@@ -353,6 +353,8 @@ pub struct FilterDialogState {
     pub name_mode: FindNameMode,
     pub case_sensitive: bool,
     pub focus: FilterDialogField,
+    /// Whether empty input must be replaced with a pattern before applying.
+    pub require_pattern: bool,
 }
 
 impl FilterDialogState {
@@ -363,6 +365,7 @@ impl FilterDialogState {
             name_mode: filter.name_mode,
             case_sensitive: filter.case_sensitive,
             focus: FilterDialogField::Pattern,
+            require_pattern: false,
         }
     }
 
