@@ -14,6 +14,7 @@ impl AppState {
             AppCommand::OpenUserMenu => {
                 self.set_status("User menu is not available");
             }
+            AppCommand::EditConfigurationFile(file) => self.edit_configuration_file(file),
             AppCommand::OpenCommandLine => self.open_command_line(),
             AppCommand::ViewFile => self.open_view_file_dialog(),
             AppCommand::OpenFileHistory => self.open_file_history(),

@@ -7,6 +7,7 @@ mod command_line;
 mod command_map;
 mod command_output;
 mod comparison;
+pub mod configuration_files;
 pub mod dialog;
 mod dialog_flow;
 mod directory_sizes;
@@ -69,6 +70,7 @@ pub use command_line::{
     ShellResolutionResponse, resolve_shell_request_blocking, sanitize_paste,
 };
 pub use command_output::{CapturedCommand, CommandCaptureSpec, execute_command_capture};
+pub use configuration_files::{ConfigurationFile, ConfigurationFiles};
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
     FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
@@ -159,6 +161,7 @@ pub enum AppCommand {
     CopySelectedPath,
     CloseHelp,
     OpenUserMenu,
+    EditConfigurationFile(ConfigurationFile),
     OpenMenuBar,
     OpenMenuBarAt(usize),
     CloseMenu,
@@ -441,6 +444,7 @@ impl AppCommand {
             | Self::CopySelectedPath
             | Self::CloseHelp
             | Self::OpenUserMenu
+            | Self::EditConfigurationFile(_)
             | Self::ViewFile
             | Self::OpenFileHistory
             | Self::OpenCommandHistory
@@ -803,9 +807,18 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
     MenuEntry::action_with_shortcut("Screen list", "M-`", AppCommand::OpenScreenList),
     MenuEntry::separator(),
-    MenuEntry::stub("Edit extension file", ""),
-    MenuEntry::stub("Edit menu file", ""),
-    MenuEntry::stub("Edit highlighting group file", ""),
+    MenuEntry::action(
+        "Edit extension file",
+        AppCommand::EditConfigurationFile(ConfigurationFile::Extensions),
+    ),
+    MenuEntry::action(
+        "Edit menu file",
+        AppCommand::EditConfigurationFile(ConfigurationFile::Menu),
+    ),
+    MenuEntry::action(
+        "Edit highlighting group file",
+        AppCommand::EditConfigurationFile(ConfigurationFile::Highlighting),
+    ),
 ];
 
 const OPTIONS_MENU_ENTRIES: [MenuEntry; 9] = [
@@ -2421,6 +2434,7 @@ impl KeybindingHints {
 #[derive(Debug)]
 pub struct AppState {
     settings: Settings,
+    configuration_files: ConfigurationFiles,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     panel_views: [PanelViewMode; 2],

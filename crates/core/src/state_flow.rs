@@ -72,6 +72,7 @@ impl AppState {
 
         Ok(Self {
             settings: settings.clone(),
+            configuration_files: ConfigurationFiles::default(),
             panels: [left, right],
             active_panel: ActivePanel::Left,
             panel_views: [PanelViewMode::Listing; 2],

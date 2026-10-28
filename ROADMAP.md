@@ -12,8 +12,6 @@ in the project [README](README.md).
 - Parse `mc.menu`, evaluate its conditions, and implement the F2 user menu.
 - Support menu macros for current and passive panels, tagged files, quoting modes,
   interactive prompts, and `%view{...}` output.
-- Provide commands for opening the effective extension, menu, and highlighting
-  configuration files in the external editor.
 
 ## Command output, diff, and subshell
 

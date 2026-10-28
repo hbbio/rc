@@ -152,6 +152,14 @@ renaming still update the panels.
 
 ### Viewer and external programs
 
+- **Command → Edit extension file / Edit menu file / Edit highlighting group file**
+  opens `mc.ext.ini`, `mc.menu`, or `filehighlight.ini` in the configured external
+  editor. Files in `~/.config/mc` take precedence over MC files installed under
+  `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an installed or bundled default
+  first creates a private user copy without replacing an existing file.
+  On Unix, a regular `.mc.menu` in the active directory takes precedence when it is
+  owned by the current user or root and is not writable by group or others;
+  local symlinks are ignored. The same discovery is shared by configuration readers.
 - Internal text and hex viewer with syntax highlighting, search in both directions,
   goto, wrapping, and bounded previews for large files.
 - File → View file opens an entered local path, including relative paths and `~/`.

@@ -11,6 +11,7 @@ use std::{env, fs};
 mod archive_tests;
 mod command_output_tests;
 mod comparison_tests;
+mod configuration_file_tests;
 mod directory_size_tests;
 mod encoding_tests;
 mod file_history_tests;
