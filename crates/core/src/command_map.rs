@@ -86,6 +86,8 @@ impl AppCommand {
             (KeyContext::Help, KeyCommand::HelpNodePrev) => Some(Self::HelpNodePrev),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::ViewEntry) => Some(Self::ViewEntry),
+            (KeyContext::FileManager, KeyCommand::ViewFile) => Some(Self::ViewFile),
+            (KeyContext::FileManager, KeyCommand::OpenFileHistory) => Some(Self::OpenFileHistory),
             (KeyContext::FileManager, KeyCommand::EditEntry) => Some(Self::EditEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::QuickCd) => Some(Self::OpenQuickCd),

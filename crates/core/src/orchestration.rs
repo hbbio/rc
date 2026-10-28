@@ -320,6 +320,7 @@ impl AppState {
             } => self.handle_panel_identity_resolved(panel, cwd, request_id, result),
             BackgroundEvent::ViewerLoaded { path, result } => match result {
                 Ok(viewer) => {
+                    self.record_viewed_file(path.clone(), viewer.archive_location.clone());
                     let is_preview = viewer.text_is_preview();
                     self.routes.push(Route::Viewer(viewer));
                     if is_preview {

@@ -25,6 +25,7 @@ enum ViewerGotoTarget {
 #[derive(Clone, Debug)]
 pub struct ViewerState {
     path: PathBuf,
+    pub(crate) archive_location: Option<crate::ArchiveLocation>,
     pub bytes: Vec<u8>,
     content: String,
     text_is_preview: bool,
@@ -121,7 +122,9 @@ impl ViewerState {
         )?;
         drop(input);
         reader.verify_source()?;
-        Ok(Self::from_prefix(path, size, bytes, hit_limit))
+        let mut viewer = Self::from_prefix(path, size, bytes, hit_limit);
+        viewer.archive_location = Some(location.clone());
+        Ok(viewer)
     }
 
     fn from_prefix(path: PathBuf, total_size: u64, bytes: Vec<u8>, hit_read_limit: bool) -> Self {
@@ -144,6 +147,7 @@ impl ViewerState {
 
         Self {
             path,
+            archive_location: None,
             bytes,
             content,
             text_is_preview,
@@ -516,6 +520,7 @@ mod tests {
         let content = String::from_utf8_lossy(bytes).into_owned();
         ViewerState {
             path: PathBuf::from("fixture"),
+            archive_location: None,
             bytes: bytes.to_vec(),
             line_offsets: compute_line_offsets(&content),
             content,

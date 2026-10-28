@@ -4745,7 +4745,7 @@ OpenConfirmDialog = f2
         let buffer = render_to_buffer(&app, 120, 40);
         let skin = current_skin();
         let inactive_style = skin.style("menu", "menuinactive");
-        let disabled_cell = first_cell_for_text(&buffer, "View file...")
+        let disabled_cell = first_cell_for_text(&buffer, "Filtered view")
             .expect("unimplemented menu entry should render");
         assert_eq!(
             disabled_cell.fg,
@@ -4758,8 +4758,8 @@ OpenConfirmDialog = f2
             "unimplemented menu label should use inactive background"
         );
 
-        let enabled_cell =
-            first_cell_for_text(&buffer, "Copy").expect("implemented menu entry should render");
+        let enabled_cell = first_cell_for_text(&buffer, "View file...")
+            .expect("implemented menu entry should render");
         assert_ne!(
             disabled_cell.fg, enabled_cell.fg,
             "implemented and unimplemented menu entries should be visually distinct"

@@ -113,6 +113,9 @@ renaming still update the panels.
 
 - Internal text and hex viewer with syntax highlighting, search in both directions,
   goto, wrapping, and bounded previews for large files.
+- File → View file opens an entered local path, including relative paths and `~/`.
+- `Alt-Shift-E` opens the session's viewed/edited-file history. Its 100 most recent
+  entries reopen with the original action, including files inside archives.
 - External editing through a configured command, `$EDITOR`, `$VISUAL`, or
   detected editors (`hx`, `nvim`, `vim`, `vi`, `emacs`).
 - Executables run in the terminal; documents open with the operating system's

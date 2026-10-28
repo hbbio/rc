@@ -21,8 +21,7 @@ in the project [README](README.md).
   edit-symlink operations with tagged-file support.
 - Add filtered-view command handling.
 - Add explicit directory and file comparison commands.
-- Add panel swapping, directory-size calculation on demand, viewed/edited-file
-  history, and a screen selector.
+- Add panel swapping, directory-size calculation on demand, and a screen selector.
 - Support user-defined panel listing formats in addition to Full, Brief, and Long.
 
 ## Command output, diff, and subshell

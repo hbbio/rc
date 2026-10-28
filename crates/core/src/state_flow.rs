@@ -36,6 +36,7 @@ impl AppState {
             pending_skin_preview: None,
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
+            file_history: Vec::new(),
             command_line: CommandLineModel::new(settings.shell.history),
             next_command_line_activation_id: 1,
             #[cfg(unix)]

@@ -93,6 +93,24 @@ fn select(app: &mut AppState, path: &Path) {
         .unwrap_or_else(|| panic!("{} is not listed", path.display()));
 }
 
+#[test]
+fn file_history_reopens_archive_member_after_leaving_archive() {
+    let fixture = Fixture::new(&[("member.txt", b"archive history")]);
+    let mut app = fixture.app();
+    select(&mut app, &fixture.zip.join("member.txt"));
+    app.apply(AppCommand::ViewEntry).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_viewer().unwrap().bytes, b"archive history");
+    app.apply(AppCommand::CloseViewer).unwrap();
+    app.apply(AppCommand::CdUp).unwrap();
+    drain_background(&mut app);
+    assert!(!app.active_panel().is_archive());
+    app.apply(AppCommand::OpenFileHistory).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_viewer().unwrap().bytes, b"archive history");
+}
+
 fn enter(app: &mut AppState, path: &Path) {
     select(app, path);
     app.apply(AppCommand::OpenEntry).unwrap();

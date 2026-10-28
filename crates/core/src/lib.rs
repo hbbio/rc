@@ -7,6 +7,7 @@ mod command_line;
 mod command_map;
 pub mod dialog;
 mod dialog_flow;
+mod file_history;
 mod find_engine;
 mod find_flow;
 pub mod help;
@@ -188,6 +189,8 @@ pub enum AppCommand {
     OpenEntry,
     /// Open the selected file in rc's internal viewer.
     ViewEntry,
+    ViewFile,
+    OpenFileHistory,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -389,6 +392,8 @@ impl AppCommand {
             | Self::CopySelectedPath
             | Self::CloseHelp
             | Self::OpenUserMenu
+            | Self::ViewFile
+            | Self::OpenFileHistory
             | Self::OpenMenuBar
             | Self::OpenMenuBarAt(_)
             | Self::CloseMenu
@@ -661,7 +666,7 @@ const RIGHT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::
 
 const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("View", "F3", AppCommand::ViewEntry),
-    MenuEntry::stub("View file...", ""),
+    MenuEntry::action("View file...", AppCommand::ViewFile),
     MenuEntry::stub("Filtered view", "M-!"),
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
     MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
@@ -700,7 +705,11 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     MenuEntry::stub("Show directory sizes", "C-Space"),
     MenuEntry::separator(),
     MenuEntry::stub("Command history", "M-h"),
-    MenuEntry::stub("Viewed/edited files history", "M-E"),
+    MenuEntry::action_with_shortcut(
+        "Viewed/edited files history",
+        "M-E",
+        AppCommand::OpenFileHistory,
+    ),
     MenuEntry::action_with_literal_shortcut("Directory hotlist", "C-\\", AppCommand::OpenHotlist),
     MenuEntry::stub("Active VFS list", "C-x a"),
     MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
@@ -1986,6 +1995,12 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    ViewFile {
+        base_dir: PathBuf,
+    },
+    FileHistory {
+        entries: Vec<file_history::FileHistoryEntry>,
+    },
     ConfirmDelete {
         targets: Vec<PathBuf>,
         origin: OperationOrigin,
@@ -2286,6 +2301,7 @@ pub struct AppState {
     pending_skin_preview: Option<String>,
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
+    file_history: Vec<file_history::FileHistoryEntry>,
     command_line: CommandLineModel,
     next_command_line_activation_id: u64,
     #[cfg(unix)]

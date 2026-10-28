@@ -404,6 +404,20 @@ impl AppState {
             self.stop_quick_cd_search();
         }
         match (pending, result) {
+            (
+                Some(PendingDialogAction::ViewFile { base_dir }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                self.view_file_input(&base_dir, &value);
+            }
+            (
+                Some(PendingDialogAction::FileHistory { entries }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(entry) = index.and_then(|index| entries.get(index)) {
+                    self.reopen_history_entry(entry);
+                }
+            }
             (None, result) => self.set_status(result.status_line()),
             (
                 Some(PendingDialogAction::ConfirmDelete { targets, origin }),

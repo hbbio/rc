@@ -922,6 +922,8 @@ fn dispatch_pending_external_edit_requests(
     for request in state.take_pending_external_edit_requests() {
         if let Err(error) = run_external_editor_request(terminal, &request) {
             state.set_status(format!("Editor launch failed: {error}"));
+        } else {
+            state.record_edited_file(&request);
         }
     }
 }

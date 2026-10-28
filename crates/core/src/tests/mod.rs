@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 mod archive_tests;
+mod file_history_tests;
 mod find_tests;
 mod group_selection_tests;
 mod mouse_tests;
