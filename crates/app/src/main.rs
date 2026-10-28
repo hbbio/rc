@@ -1017,7 +1017,9 @@ fn run_foreground_shell_request(
 ) -> Result<ExitStatus> {
     let invocation = request.shell.invocation(&request.command);
     let mut command = Command::new(&invocation.program);
-    command.args(&invocation.arguments);
+    command
+        .args(&invocation.arguments)
+        .envs(invocation.environment);
     run_terminal_shell_command(
         terminal,
         &mut command,

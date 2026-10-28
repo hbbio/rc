@@ -278,6 +278,7 @@ impl ResolvedShell {
         ShellInvocation {
             program: self.program.clone(),
             arguments,
+            environment: crate::native_argument_environment(command),
         }
     }
 }
@@ -286,6 +287,7 @@ impl ResolvedShell {
 pub struct ShellInvocation {
     pub program: PathBuf,
     pub arguments: Vec<OsString>,
+    pub environment: Vec<(String, OsString)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -39,6 +39,12 @@ and fast directory navigation.
   search can match raw bytes with patterns such as `(?-u:\xFF)`; editor `{path}`
   placeholders also retain native bytes. Saved path settings use separate encoded
   keys when needed, while existing plain-path entries retain their meaning.
+- Panel-to-command insertion and filesystem completion retain native bytes through
+  quoted `RC_NATIVE_HEX_…` references when a filename contains invalid UTF-8 or
+  control characters. Keep these references intact when editing a command; rc
+  supplies their values to the selected POSIX or Fish shell. They survive session
+  history and work with literal `cd`, Quick cd, and completion inside such
+  directories. Clipboard paths use the same reversible spelling as path fields.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
   columns, and mouse selection or activation.
 - `Ctrl-Space` calculates recursive apparent sizes for tagged directories, or all

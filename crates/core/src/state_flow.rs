@@ -779,10 +779,7 @@ impl AppState {
                 return;
             }
         };
-        let Some(text) = absolute_path.to_str().map(ToString::to_string) else {
-            self.set_command_feedback("Selected path is not valid UTF-8 and cannot be copied");
-            return;
-        };
+        let text = rc_shell::encode_path_text(absolute_path.as_os_str());
 
         self.pending_clipboard_copy_requests
             .push(ClipboardCopyRequest { text });

@@ -98,3 +98,35 @@ fn view_file_and_find_dialog_decode_native_paths() {
     let form = crate::dialog::FindDialogState::from_spec(&spec);
     assert_eq!(form.to_spec().start_dir, path);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn filesystem_copy_and_move_jobs_preserve_invalid_utf8_names() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join(OsString::from_vec(b"file\xff".to_vec()));
+    let destination = root.path().join(OsString::from_vec(b"dir\xfe".to_vec()));
+    fs::write(&source, b"native contents").unwrap();
+    fs::create_dir(&destination).unwrap();
+    let mut app = app_with_loaded_panels(root.path().to_owned());
+    app.queue_worker_job_request(JobRequest::Copy {
+        sources: vec![source.clone()],
+        destination_dir: destination.clone(),
+        overwrite: OverwritePolicy::Overwrite,
+    });
+    drain_background(&mut app);
+    let copied = destination.join(source.file_name().unwrap());
+    assert_eq!(fs::read(&copied).unwrap(), b"native contents");
+    let renamed = OsString::from_vec(b"renamed\xfd".to_vec());
+    app.queue_worker_job_request(JobRequest::Move {
+        sources: vec![copied.clone()],
+        destination_dir: destination.clone(),
+        destination_names: Some(vec![renamed.clone()]),
+        overwrite: OverwritePolicy::Overwrite,
+    });
+    drain_background(&mut app);
+    assert!(!copied.exists());
+    assert_eq!(
+        fs::read(destination.join(renamed)).unwrap(),
+        b"native contents"
+    );
+}

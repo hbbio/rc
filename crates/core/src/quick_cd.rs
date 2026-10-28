@@ -341,6 +341,24 @@ fn resolve_quick_cd_input_with_home(
     previous_directory: Option<&Path>,
     mut home_directory: impl FnMut(Option<&str>) -> Result<Option<PathBuf>, String>,
 ) -> Result<PathBuf, QuickCdError> {
+    if input.contains("\"$RC_NATIVE_HEX_")
+        && let Some(rc_shell::LiteralCd::Path { path, expand_home }) =
+            rc_shell::parse_literal_cd(&format!("cd {input}"), rc_shell::ShellDialect::Posix)
+    {
+        let path = if expand_home {
+            let home = home_directory(None)
+                .map_err(QuickCdError::HomeLookup)?
+                .ok_or(QuickCdError::HomeDirectoryUnavailable)?;
+            home.join(path.strip_prefix("~").unwrap_or_else(|_| Path::new("")))
+        } else {
+            path
+        };
+        return Ok(lexically_normalize(&if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }));
+    }
     let arguments = shlex::split(input).ok_or(QuickCdError::InvalidQuoting)?;
     let argument = match arguments.as_slice() {
         [] => return Err(QuickCdError::Empty),
@@ -504,6 +522,28 @@ mod tests {
         )
         .expect("quoted path should resolve");
         assert_eq!(resolved, root.join("projects/rc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_argument_directory_is_resolved_without_loss() {
+        use std::os::unix::ffi::OsStringExt;
+        let name = std::ffi::OsString::from_vec(b"dir\xff\n".to_vec());
+        let token = rc_shell::quote_native_argument(&name, rc_shell::ShellDialect::Posix);
+        assert_eq!(
+            resolve_quick_cd_input(&token, Path::new("/work"), None).unwrap(),
+            Path::new("/work").join(&name)
+        );
+        assert_eq!(
+            resolve_quick_cd_input_with_home(
+                &format!("~/{token}"),
+                Path::new("/work"),
+                None,
+                |_| Ok(Some(PathBuf::from("/native-home")))
+            )
+            .unwrap(),
+            Path::new("/native-home").join(name)
+        );
     }
 
     #[test]

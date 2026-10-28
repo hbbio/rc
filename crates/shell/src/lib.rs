@@ -5,6 +5,7 @@ mod capture;
 mod cd;
 mod completion;
 mod display;
+mod native_arguments;
 mod path_text;
 
 pub use backend::{
@@ -24,6 +25,7 @@ pub use display::{
     DISPLAY_FIELD_LIMIT_BYTES, DISPLAY_LINE_LIMIT_BYTES, sanitize_display_field,
     sanitize_display_line, sanitize_display_lossy,
 };
+pub use native_arguments::{native_argument_environment, quote_native_argument};
 pub use path_text::{decode_path_text, encode_path_text};
 
 use std::io::{self, Read};
@@ -288,6 +290,7 @@ fn spawn_shell_command(cwd: &Path, command: &str) -> io::Result<std::process::Ch
     Command::new("sh")
         .arg("-c")
         .arg(command)
+        .envs(native_argument_environment(command))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

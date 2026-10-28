@@ -100,7 +100,7 @@ impl AppState {
                     .current_path
                     .as_deref()
                     .and_then(Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned())
+                    .map(rc_shell::encode_path_text)
                     .unwrap_or_else(|| String::from("-"));
                 self.set_status(format!(
                     "Job #{id} {percent}% | items {}/{} | bytes {}/{} | {path_label}",

@@ -85,7 +85,9 @@ pub fn execute_command_capture(
                     .shell
                     .invocation(script);
                 let mut command = Command::new(invocation.program);
-                command.args(invocation.arguments);
+                command
+                    .args(invocation.arguments)
+                    .envs(invocation.environment);
                 command
             }
             CapturedCommand::Compare {

@@ -19,11 +19,6 @@ in the project [README](README.md).
   verification, cancellation, and reconnect behavior.
 - Add an active-VFS screen for inspecting and closing mounted connections.
 
-## Portability and configuration fidelity
-
-- Preserve non-UTF-8 filenames losslessly throughout panels, jobs, search,
-  command insertion, and external-tool invocation.
-
 ## Deferred: Windows (out of current scope)
 
 - Bring the modal command line, completion, and shell configuration to Windows.

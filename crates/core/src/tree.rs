@@ -711,11 +711,7 @@ fn offset_index(index: usize, delta: isize, len: usize) -> Option<usize> {
 }
 
 fn tree_entry_search_key(entry: &TreeEntry) -> String {
-    entry
-        .path
-        .file_name()
-        .unwrap_or(entry.path.as_os_str())
-        .to_string_lossy()
+    rc_shell::encode_path_text(entry.path.file_name().unwrap_or(entry.path.as_os_str()))
         .to_lowercase()
 }
 
