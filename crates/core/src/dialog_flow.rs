@@ -84,7 +84,9 @@ impl AppState {
                 }
             }
             AppCommand::DialogInputChar(ch) => {
-                if ch != ' ' || !self.toggle_panel_sort_dialog_reverse() {
+                if !self.accept_user_menu_hotkey(ch)
+                    && (ch != ' ' || !self.toggle_panel_sort_dialog_reverse())
+                {
                     let quick_cd_changed = self.quick_cd_dialog_is_active();
                     self.handle_dialog_event(DialogEvent::InsertChar(ch));
                     if quick_cd_changed {
@@ -433,6 +435,26 @@ impl AppState {
             self.stop_quick_cd_search();
         }
         match (pending, result) {
+            (
+                Some(PendingDialogAction::UserMenu(menu)),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(entry) = index.and_then(|i| menu.entries.get(i)) {
+                    self.begin_action(&entry.command, entry.label.clone(), None);
+                }
+            }
+            (
+                Some(PendingDialogAction::UserMenuDebug(menu)),
+                DialogResult::ListboxSubmitted { .. },
+            ) => {
+                self.show_user_menu(menu);
+            }
+            (
+                Some(PendingDialogAction::UserMenu(_) | PendingDialogAction::UserMenuDebug(_)),
+                DialogResult::Canceled,
+            ) => {
+                self.set_status("User menu canceled");
+            }
             (
                 Some(PendingDialogAction::SetFilenameEncoding { panel }),
                 DialogResult::ListboxSubmitted { index, .. },

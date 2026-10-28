@@ -72,7 +72,7 @@ impl ProcessBackend for PermissionDeniedProcessBackend {
     }
 }
 
-fn drain_background(app: &mut AppState) {
+pub(super) fn drain_background(app: &mut AppState) {
     loop {
         let mut progressed = false;
 
@@ -1400,7 +1400,7 @@ fn menu_stub_action_reports_not_implemented_status() {
 }
 
 #[test]
-fn user_menu_command_reports_that_it_is_unavailable() {
+fn user_menu_command_opens_bundled_entries() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -1409,11 +1409,21 @@ fn user_menu_command_reports_that_it_is_unavailable() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.set_configuration_files(ConfigurationFiles {
+        user_directory: None,
+        system_directories: vec![],
+    });
     app.apply(AppCommand::OpenUserMenu)
-        .expect("user menu placeholder should be handled");
+        .expect("user menu should open");
 
-    assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert_eq!(app.status_line, "User menu is not available");
+    assert_eq!(app.key_context(), KeyContext::Listbox);
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("expected dialog");
+    };
+    let DialogKind::Listbox(listbox) = &dialog.kind else {
+        panic!("expected menu");
+    };
+    assert_eq!(listbox.items, ["v  File information", "d  Directory sizes"]);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }

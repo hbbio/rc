@@ -3,12 +3,6 @@
 This file contains only unfinished product work. Supported behavior is documented
 in the project [README](README.md).
 
-## Extension rules and user menus
-
-- Parse `mc.menu`, evaluate its conditions, and implement the F2 user menu.
-- Support menu macros for current and passive panels, tagged files, quoting modes,
-  interactive prompts, and `%view{...}` output.
-
 ## Command output, diff, and subshell
 
 - Add a persistent PTY-backed shell with a prompt protocol and bidirectional

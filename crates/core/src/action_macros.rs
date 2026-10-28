@@ -364,7 +364,10 @@ fn panel_values(
         'f' => local_file
             .map(|path| path.as_os_str().to_owned())
             .unwrap_or_else(|| relative(path)),
-        'p' => path.file_name().unwrap_or(path.as_os_str()).to_owned(),
+        'p' => path
+            .file_name()
+            .map(OsStr::to_owned)
+            .unwrap_or_else(|| relative(path)),
         's' => relative(path),
         'n' | 'x' => {
             let name = relative(path);

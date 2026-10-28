@@ -11,9 +11,7 @@ impl AppState {
             AppCommand::MenuNotImplemented(label) => {
                 self.set_status(format!("{label} is not implemented yet"));
             }
-            AppCommand::OpenUserMenu => {
-                self.set_status("User menu is not available");
-            }
+            AppCommand::OpenUserMenu => self.open_user_menu(),
             AppCommand::EditConfigurationFile(file) => self.edit_configuration_file(file),
             AppCommand::OpenCommandLine => self.open_command_line(),
             AppCommand::ViewFile => self.open_view_file_dialog(),

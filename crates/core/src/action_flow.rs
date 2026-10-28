@@ -329,9 +329,24 @@ impl AppState {
                 return;
             }
         };
+        let mut context = self.macro_context();
+        if action.is_none() {
+            for (snapshot, panel) in context
+                .panels
+                .iter_mut()
+                .zip([self.active_panel(), self.passive_panel()])
+            {
+                if panel
+                    .selected_entry()
+                    .is_some_and(|entry| entry.is_parent())
+                {
+                    snapshot.selected = Some(panel.cwd.join(".."));
+                }
+            }
+        }
         self.continue_action(PendingAction {
             template,
-            context: self.macro_context(),
+            context,
             answers: Vec::new(),
             label,
             active: self.active_panel,

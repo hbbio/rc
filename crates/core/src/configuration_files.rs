@@ -14,6 +14,12 @@ pub enum ConfigurationFile {
 }
 
 impl ConfigurationFile {
+    pub const fn user_filename(self) -> &'static str {
+        match self {
+            Self::Menu => "menu",
+            _ => self.filename(),
+        }
+    }
     pub const fn filename(self) -> &'static str {
         match self {
             Self::Extensions => "mc.ext.ini",
@@ -73,10 +79,31 @@ impl ConfigurationFiles {
         {
             return Ok(Some(path));
         }
-        for directory in self.user_directory.iter().chain(&self.system_directories) {
+        if let Some(path) = self.user_path(file)? {
+            return Ok(Some(path));
+        }
+        for directory in &self.system_directories {
             let path = directory.join(file.filename());
             if regular_configuration(&path)? {
                 return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    fn user_path(&self, file: ConfigurationFile) -> io::Result<Option<PathBuf>> {
+        let Some(directory) = &self.user_directory else {
+            return Ok(None);
+        };
+        let path = directory.join(file.user_filename());
+        if regular_configuration(&path)? {
+            return Ok(Some(path));
+        }
+        // Retain the early rc spelling as an alias, after MC's standard user file.
+        if file == ConfigurationFile::Menu {
+            let legacy = directory.join(file.filename());
+            if regular_configuration(&legacy)? {
+                return Ok(Some(legacy));
             }
         }
         Ok(None)
@@ -110,13 +137,16 @@ impl ConfigurationFiles {
         {
             return Ok(path);
         }
+        if let Some(path) = self.user_path(file)? {
+            return Ok(path);
+        }
         let directory = self.user_directory.as_deref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "user configuration directory is unavailable",
             )
         })?;
-        let path = directory.join(file.filename());
+        let path = directory.join(file.user_filename());
         if regular_configuration(&path)? {
             return Ok(path);
         }

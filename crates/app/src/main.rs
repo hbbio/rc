@@ -728,9 +728,17 @@ fn handle_key(
         return Ok(false);
     }
 
-    if matches!(context, KeyContext::Input | KeyContext::FindDialog)
+    if (matches!(context, KeyContext::Input | KeyContext::FindDialog)
+        || state.user_menu_is_active())
         && let Some(command) = input_char_command(&key_event)
     {
+        let command = if state.user_menu_is_active()
+            && let AppCommand::DialogInputChar(ch) = command
+        {
+            AppCommand::DialogInputChar(shifted_text_character(ch, key_event.modifiers))
+        } else {
+            command
+        };
         return Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit);
     }
 
@@ -3856,6 +3864,74 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn user_menu_shortcut_precedes_listbox_navigation_binding() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-user-menu-keys-{stamp}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".mc.menu"),
+            "h Action\n echo %{lower}\nH Uppercase\n echo %{upper}\n@ Symbol\n echo %{symbol}\n",
+        )
+        .unwrap();
+        let mut state = AppState::new(root.clone()).unwrap();
+        state.set_configuration_files(rc_core::ConfigurationFiles {
+            user_directory: None,
+            system_directories: vec![],
+        });
+        let keymap = Keymap::bundled_mc_default().unwrap();
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        for (ch, modifiers, prompt) in [
+            ('h', KeyModifiers::NONE, "lower"),
+            ('h', KeyModifiers::SHIFT, "upper"),
+            ('2', KeyModifiers::SHIFT, "symbol"),
+        ] {
+            handle_key(
+                &mut state,
+                &keymap,
+                KeyEvent::new(CrosstermKeyCode::F(2), KeyModifiers::NONE),
+                TEST_VIEWPORT_WIDTH,
+                &mut runtime,
+                &skin_runtime,
+                compat_enabled(),
+            )
+            .unwrap();
+            assert!(
+                !handle_key(
+                    &mut state,
+                    &keymap,
+                    KeyEvent::new(CrosstermKeyCode::Char(ch), modifiers),
+                    TEST_VIEWPORT_WIDTH,
+                    &mut runtime,
+                    &skin_runtime,
+                    compat_enabled()
+                )
+                .unwrap()
+            );
+            assert_eq!(state.key_context(), KeyContext::Input);
+            let rc_core::Route::Dialog(dialog) = state.top_route() else {
+                panic!("expected prompt");
+            };
+            let rc_core::DialogKind::Input(input) = &dialog.kind else {
+                panic!("expected input");
+            };
+            assert_eq!(input.prompt, prompt);
+            state.apply(AppCommand::DialogCancel).unwrap();
+        }
+        assert!(state.take_pending_external_action_requests().is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

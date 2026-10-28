@@ -50,6 +50,7 @@ pub mod settings_io;
 pub mod slo;
 mod state_flow;
 mod tree;
+mod user_menu;
 mod viewer;
 mod viewer_flow;
 
@@ -780,7 +781,7 @@ const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
 ];
 
 const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
-    MenuEntry::stub("User menu", "F2"),
+    MenuEntry::action_with_shortcut("User menu", "F2", AppCommand::OpenUserMenu),
     MenuEntry::action("Directory tree", AppCommand::OpenTree),
     MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
     MenuEntry::action_with_shortcut("Swap panels", "C-u", AppCommand::SwapPanels),
@@ -2124,6 +2125,8 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    UserMenu(user_menu::UserMenu),
+    UserMenuDebug(user_menu::UserMenu),
     ActionPrompt(Box<action_flow::PendingAction>),
     SetFilenameEncoding {
         panel: ActivePanel,

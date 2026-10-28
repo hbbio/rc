@@ -178,13 +178,22 @@ renaming still update the panels.
   script instead. Regex patterns use the same Rust regex syntax as panel filters,
   with doubled backslashes for INI escaping.
 - **Command → Edit extension file / Edit menu file / Edit highlighting group file**
-  opens `mc.ext.ini`, `mc.menu`, or `filehighlight.ini` in the configured external
+  opens `mc.ext.ini`, `menu`, or `filehighlight.ini` in the configured external
   editor. Files in `~/.config/mc` take precedence over MC files installed under
   `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an installed or bundled default
   first creates a private user copy without replacing an existing file.
   On Unix, a regular `.mc.menu` in the active directory takes precedence when it is
   owned by the current user or root and is not writable by group or others;
   local symlinks are ignored. The same discovery is shared by configuration readers.
+- F2 / **Command → User menu** reads the effective menu on each open: trusted
+  `.mc.menu`, `~/.config/mc/menu` (with `mc.menu` as a compatibility fallback),
+  installed `mc.menu`, then bundled entries. Shortcut letters or Enter launch the
+  selected entry through the shared macro engine, including prompts and `%view`.
+  Addition (`+`) and default (`=`) conditions support active/passive filename,
+  directory, file type and tag tests, executable checks, negation, and left-to-right
+  `&`/`|` logic. `shell_patterns=0/1` selects regex/glob matching; `?` after a
+  condition prefix shows its result before the menu. User menus require a local
+  active directory; syntax conditions (`y`) are false outside an editor.
 - `filehighlight.ini` controls panel colors through groups in the active skin.
   Rules match in file order and support `type`, `regexp`, and semicolon-separated
   `extensions`, with optional `extensions_case=true`. Type takes precedence over

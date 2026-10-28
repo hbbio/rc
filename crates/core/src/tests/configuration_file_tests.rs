@@ -61,7 +61,10 @@ fn all_configuration_commands_enqueue_editor_with_existing_file_and_valid_cwd() 
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.editor_command, "my-editor --wait");
-        assert_eq!(request.path, root.path().join("user").join(file.filename()));
+        assert_eq!(
+            request.path,
+            root.path().join("user").join(file.user_filename())
+        );
         assert_eq!(request.cwd, root.path().join("user"));
         assert_eq!(fs::read_to_string(&request.path).unwrap(), file.bundled());
         assert!(
@@ -150,5 +153,28 @@ fn missing_user_directory_reports_edit_error_without_launching_editor() {
     assert!(
         app.status_line
             .contains("configuration directory is unavailable")
+    );
+}
+
+#[test]
+fn standard_user_menu_precedes_legacy_alias_and_system_menu() {
+    let root = tempfile::tempdir().unwrap();
+    let files = files(root.path());
+    fs::create_dir(root.path().join("user")).unwrap();
+    fs::create_dir(root.path().join("system")).unwrap();
+    fs::write(root.path().join("system/mc.menu"), "system").unwrap();
+    assert_eq!(files.read(ConfigurationFile::Menu, None).unwrap(), "system");
+    fs::write(root.path().join("user/mc.menu"), "legacy").unwrap();
+    assert_eq!(files.read(ConfigurationFile::Menu, None).unwrap(), "legacy");
+    fs::write(root.path().join("user/menu"), "standard").unwrap();
+    assert_eq!(
+        files.read(ConfigurationFile::Menu, None).unwrap(),
+        "standard"
+    );
+    assert_eq!(
+        files
+            .prepare_for_edit(ConfigurationFile::Menu, None)
+            .unwrap(),
+        root.path().join("user/menu")
     );
 }
