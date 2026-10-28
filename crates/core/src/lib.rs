@@ -21,6 +21,7 @@ pub mod keymap;
 pub mod layout;
 mod learn_keys;
 mod listing_format;
+mod metadata_change;
 mod navigation_flow;
 mod orchestration;
 mod panel;
@@ -83,6 +84,7 @@ pub use jobs::{
     WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
 pub use listing_format::{DEFAULT_USER_LISTING_FORMAT, ListingField, UserListingFormat};
+pub use metadata_change::{MetadataChange, PermissionChange};
 #[cfg(test)]
 use panel::read_entries;
 #[cfg(test)]
@@ -190,6 +192,9 @@ pub enum AppCommand {
     SortNext,
     SortReverse,
     Copy,
+    Chmod,
+    Chown,
+    AdvancedChown,
     Move,
     Delete,
     CancelJob,
@@ -533,6 +538,9 @@ impl AppCommand {
             | Self::ViewerToggleWrap
             | Self::ViewerToggleHex => CommandDomain::Viewer,
             Self::OpenConfirmDialog
+            | Self::Chmod
+            | Self::Chown
+            | Self::AdvancedChown
             | Self::OpenInputDialog
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
@@ -714,13 +722,13 @@ const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("Filtered view", "M-!", AppCommand::FilteredView),
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
     MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
-    MenuEntry::stub("Chmod", "C-x c"),
+    MenuEntry::action_with_literal_shortcut("Chmod", "C-x c", AppCommand::Chmod),
     MenuEntry::stub("Link", "C-x l"),
     MenuEntry::stub("Symlink", "C-x s"),
     MenuEntry::stub("Relative symlink", "C-x v"),
     MenuEntry::stub("Edit symlink", "C-x C-s"),
-    MenuEntry::stub("Chown", "C-x o"),
-    MenuEntry::stub("Advanced chown", ""),
+    MenuEntry::action_with_literal_shortcut("Chown", "C-x o", AppCommand::Chown),
+    MenuEntry::action("Advanced chown", AppCommand::AdvancedChown),
     MenuEntry::action_with_shortcut("Rename/Move", "F6", AppCommand::Move),
     MenuEntry::action_with_shortcut("Mkdir", "F7", AppCommand::OpenInputDialog),
     MenuEntry::action_with_shortcut("Delete", "F8", AppCommand::Delete),
@@ -2048,6 +2056,11 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    MetadataChange {
+        action: metadata_change::MetadataAction,
+        paths: Vec<PathBuf>,
+        panel: ActivePanel,
+    },
     SelectScreen {
         targets: Vec<screens::ScreenTarget>,
     },

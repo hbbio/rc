@@ -1102,6 +1102,7 @@ async fn run_runtime_loop(
                                 (Arc::clone(&settings_limit), "settings")
                             }
                             JobRequest::Copy { .. }
+                            | JobRequest::ChangeMetadata { .. }
                             | JobRequest::ExtractArchive { .. }
                             | JobRequest::Move { .. }
                             | JobRequest::Delete { .. }

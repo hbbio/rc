@@ -24,6 +24,7 @@ use crate::{
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 mod archive_extract;
+mod metadata;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -37,6 +38,7 @@ impl fmt::Display for JobId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
+    ChangeMetadata,
     MeasureDirectories,
     Command,
     Copy,
@@ -58,6 +60,7 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::ChangeMetadata => "permissions/ownership",
             Self::MeasureDirectories => "directory-sizes",
             Self::Command => "command",
             Self::Copy => "copy",
@@ -98,6 +101,10 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    ChangeMetadata {
+        paths: Vec<PathBuf>,
+        change: crate::MetadataChange,
+    },
     MeasureDirectories {
         paths: Vec<PathBuf>,
         archive: Option<ArchiveLocation>,
@@ -212,6 +219,7 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::ChangeMetadata { .. } => JobKind::ChangeMetadata,
             Self::MeasureDirectories { .. } => JobKind::MeasureDirectories,
             Self::CaptureCommand { .. } => JobKind::Command,
             Self::ExtractArchive { .. } => JobKind::Copy,
@@ -242,6 +250,7 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::ChangeMetadata { paths, .. } => paths.len(),
             Self::MeasureDirectories { paths, .. } => paths.len(),
             Self::CaptureCommand { .. } => 1,
             Self::ExtractArchive { sources, .. } => sources.len(),
@@ -266,6 +275,9 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::ChangeMetadata { paths, .. } => {
+                format!("change permissions/ownership of {} entries", paths.len())
+            }
             Self::MeasureDirectories { paths, .. } => {
                 format!("measure {} directories", paths.len())
             }
@@ -1032,6 +1044,9 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
+        JobRequest::ChangeMetadata { paths, change } => {
+            metadata::change_metadata(&paths, &change, progress)
+        }
         JobRequest::ExtractArchive {
             location,
             sources,
@@ -2005,6 +2020,10 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
+        JobRequest::ChangeMetadata { paths, .. } => Ok(JobTotals {
+            items: paths.len() as u64,
+            bytes: 0,
+        }),
         JobRequest::ExtractArchive {
             location, sources, ..
         } => archive_extract::measure_archive_totals(location, sources, cancel_flag),

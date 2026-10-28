@@ -143,6 +143,7 @@ impl AppState {
                         kind,
                         Some(
                             JobKind::Copy
+                                | JobKind::ChangeMetadata
                                 | JobKind::Move
                                 | JobKind::Delete
                                 | JobKind::Mkdir
@@ -182,6 +183,9 @@ impl AppState {
                     self.panel_mkdirs.finish(id, false);
                     let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
+                    if kind == Some(JobKind::ChangeMetadata) {
+                        self.refresh_panels();
+                    }
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
                     let is_persist_settings = kind == Some(JobKind::PersistSettings);
                     let is_find = kind == Some(JobKind::Find);

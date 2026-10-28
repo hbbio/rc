@@ -269,11 +269,31 @@ where
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     if let Some(cached_entries) = request.cached_panelized_entries.clone() {
         let mut entries = Vec::new();
+        let mut refreshed = Vec::with_capacity(cached_entries.len());
         for entry in cached_entries.iter() {
             ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
-            if matcher.matches(entry) {
+            // Cache the result paths, not their filesystem metadata: mutations
+            // must be visible without executing a panelize command again.
+            let metadata = fs::metadata(&entry.path)
+                .ok()
+                .or_else(|| fs::symlink_metadata(&entry.path).ok());
+            let entry = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
+                FileEntry::directory_from_metadata(
+                    entry.name.clone(),
+                    entry.path.clone(),
+                    metadata.as_ref(),
+                )
+            } else {
+                FileEntry::file_from_metadata(
+                    entry.name.clone(),
+                    entry.path.clone(),
+                    metadata.as_ref(),
+                )
+            };
+            if matcher.matches(&entry) {
                 entries.push(entry.clone());
             }
+            refreshed.push(entry);
         }
         sort_file_entries(&mut entries, request.sort_mode);
         for chunk in entries.chunks(PANEL_EVENT_CHUNK_SIZE) {
@@ -282,7 +302,7 @@ where
         }
         return Ok(PanelRefreshResult {
             entries,
-            panelized_entries: Some(cached_entries),
+            panelized_entries: Some(Arc::from(refreshed)),
             canonical_cwd: None,
             canonical_home_directory: None,
         });
@@ -672,11 +692,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["main.rs"]
         );
-        assert!(
-            result
-                .panelized_entries
-                .as_ref()
-                .is_some_and(|entries| Arc::ptr_eq(entries, &cached))
-        );
+        assert!(result.panelized_entries.as_ref().is_some_and(|entries| {
+            entries
+                .iter()
+                .map(|e| &e.path)
+                .eq(cached.iter().map(|e| &e.path))
+        }));
     }
 }

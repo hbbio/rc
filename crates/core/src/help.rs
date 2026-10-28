@@ -77,6 +77,11 @@ File operations:\n\
   {{fm_move}} move cursor\n\
   {{fm_toggle_tag}} toggle selection\n\
   {{fm_file_ops}} copy/move/delete\n\
+  File menu: Chmod, Chown, and Advanced chown apply to selected/tagged entries.\n\
+  Chmod: octal modes or u/g/o/a clauses, e.g. u+rw,g-w,o=r. No recursion.\n\
+  Chown: account names or numeric IDs; blank fields keep existing values.\n\
+  Advanced chown: owner:group plus an optional mode. Jobs can be canceled.\n\
+  Chmod rejects symlinks; chown changes the link itself.\n\
 \n\
 Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
 and - for the previous directory. Quote paths containing spaces.\n\

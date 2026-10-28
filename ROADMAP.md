@@ -17,8 +17,8 @@ in the project [README](README.md).
 
 ## File-manager workflows
 
-- Add chmod, chown, advanced chown, hard-link, symlink, relative-symlink, and
-  edit-symlink operations with tagged-file support.
+- Add hard-link, symlink, relative-symlink, and edit-symlink operations with
+  tagged-file support.
 
 ## Command output, diff, and subshell
 

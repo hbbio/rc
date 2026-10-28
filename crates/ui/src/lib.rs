@@ -4812,14 +4812,14 @@ OpenConfirmDialog = f2
     fn render_styles_unimplemented_menu_entries_as_inactive() {
         let root = temp_root("menu-inactive");
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.apply(AppCommand::OpenMenuBarAt(1))
+        app.apply(AppCommand::OpenMenuBarAt(0))
             .expect("menu route should open");
 
         let buffer = render_to_buffer(&app, 120, 40);
         let skin = current_skin();
         let inactive_style = skin.style("menu", "menuinactive");
-        let disabled_cell =
-            first_cell_for_text(&buffer, "Chmod").expect("unimplemented menu entry should render");
+        let disabled_cell = first_cell_for_text(&buffer, "Encoding...")
+            .expect("unimplemented menu entry should render");
         assert_eq!(
             disabled_cell.fg,
             inactive_style.fg.unwrap_or(Color::Reset),
@@ -4831,7 +4831,7 @@ OpenConfirmDialog = f2
             "unimplemented menu label should use inactive background"
         );
 
-        let enabled_cell = first_cell_for_text(&buffer, "View file...")
+        let enabled_cell = first_cell_for_text(&buffer, "Listing format...")
             .expect("implemented menu entry should render");
         assert_ne!(
             disabled_cell.fg, enabled_cell.fg,

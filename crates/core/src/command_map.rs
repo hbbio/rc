@@ -55,6 +55,15 @@ impl AppCommand {
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::SwapPanels) => Some(Self::SwapPanels),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Chmod) => {
+                Some(Self::Chmod)
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Chown) => {
+                Some(Self::Chown)
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::AdvancedChown) => {
+                Some(Self::AdvancedChown)
+            }
             (KeyContext::FileManager, KeyCommand::ShowDirectorySizes) => {
                 Some(Self::ShowDirectorySizes)
             }

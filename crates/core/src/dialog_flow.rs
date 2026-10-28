@@ -11,6 +11,15 @@ impl AppState {
 
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
+            AppCommand::Chmod => {
+                self.open_metadata_dialog(crate::metadata_change::MetadataAction::Chmod)
+            }
+            AppCommand::Chown => {
+                self.open_metadata_dialog(crate::metadata_change::MetadataAction::Chown)
+            }
+            AppCommand::AdvancedChown => {
+                self.open_metadata_dialog(crate::metadata_change::MetadataAction::Advanced)
+            }
             AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenQuickCd => self.start_quick_cd_dialog(),
@@ -418,6 +427,25 @@ impl AppState {
             self.stop_quick_cd_search();
         }
         match (pending, result) {
+            (
+                Some(PendingDialogAction::MetadataChange {
+                    action,
+                    paths,
+                    panel,
+                }),
+                DialogResult::InputSubmitted(value),
+            ) => self.submit_metadata_dialog(action, paths, panel, value, String::new()),
+            (
+                Some(PendingDialogAction::MetadataChange {
+                    action,
+                    paths,
+                    panel,
+                }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_metadata_dialog(action, paths, panel, first, second),
+            (Some(PendingDialogAction::MetadataChange { .. }), DialogResult::Canceled) => {
+                self.set_status("Permissions/ownership unchanged")
+            }
             (
                 Some(PendingDialogAction::SelectScreen { targets }),
                 DialogResult::ListboxSubmitted { index, .. },
