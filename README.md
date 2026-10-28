@@ -25,6 +25,13 @@ and fast directory navigation.
   and scanned in the background while preserving selection and tags.
 - Per-panel sorting, reverse order, glob or regular-expression filters, hidden-file
   control, and persisted configuration.
+- **Left/Right → Encoding** (`Alt-E`) selects the filename encoding on Unix:
+  UTF-8, Windows-1252/1251, ISO-8859-2, KOI8-R, Shift_JIS, EUC-JP, GBK, Big5,
+  EUC-KR, or CP437. Listings, sorting, and panel filters use decoded names; filesystem
+  operations retain original path bytes. The setting also applies to archive and
+  panelized names, follows panel swaps, and persists with Save setup. It does not
+  change file contents or the terminal encoding.
+  ZIP names that are not UTF-8 default to CP437 unless another codec is selected.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
   columns, and mouse selection or activation.
 - `Ctrl-Space` calculates recursive apparent sizes for tagged directories, or all

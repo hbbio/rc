@@ -147,6 +147,8 @@ Listing:\n\
   User format accepts name, size, mtime, perm, nlink, uid, gid, inode.\n\
   Separate columns with spaces; use :width (1-256) for fixed widths.\n\
   Example: perm size:9 name. An unsized name fills remaining space.\n\
+  Encoding selects a per-panel filename codec, also used for sorting and filters.\n\
+  Filesystem operations retain original bytes; file contents are unchanged.\n\
   In Brief format, Left/Right moves across columns and Up/Down within them.\n\
   Sort order supports name, version, extension, times, size, inode,\n\
   and unsorted discovery order, with an independent reverse toggle.\n\

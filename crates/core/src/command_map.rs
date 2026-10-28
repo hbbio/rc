@@ -55,6 +55,7 @@ impl AppCommand {
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::SwapPanels) => Some(Self::SwapPanels),
+            (KeyContext::FileManager, KeyCommand::SelectEncoding) => Some(Self::OpenEncoding),
             (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Link) => {
                 Some(Self::CreateLink(crate::LinkKind::Hard))
             }

@@ -185,6 +185,7 @@ pub enum JobRequest {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        filename_encoding: crate::FilenameEncoding,
         filter: PanelFilter,
         show_hidden_files: bool,
         cached_panelized_entries: Option<Arc<[FileEntry]>>,

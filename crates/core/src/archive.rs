@@ -569,7 +569,7 @@ fn safe_member_path(name: &[u8]) -> io::Result<Option<PathBuf>> {
         return Ok(None);
     }
 
-    // TAR paths are byte strings. Preserve their native identity; only display
+    // Archive paths are byte strings. Preserve their native identity; only display
     // labels may be lossy. Platforms without byte paths must report the limit.
     #[cfg(unix)]
     let name = {

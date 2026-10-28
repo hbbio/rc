@@ -280,6 +280,7 @@ impl AppState {
             cwd,
             source,
             sort_mode,
+            filename_encoding: self.panels[panel.index()].filename_encoding,
             filter,
             show_hidden_files,
             cached_panelized_entries,

@@ -1403,6 +1403,7 @@ fn finish_canceled_worker_before_start(
             cwd,
             source,
             sort_mode,
+            filename_encoding,
             filter,
             show_hidden_files,
             cached_panelized_entries,
@@ -1414,6 +1415,7 @@ fn finish_canceled_worker_before_start(
                 cwd: cwd.clone(),
                 source: source.clone(),
                 sort_mode: *sort_mode,
+                filename_encoding: *filename_encoding,
                 filter: filter.clone(),
                 show_hidden_files: *show_hidden_files,
                 cached_panelized_entries: cached_panelized_entries.clone(),
@@ -1478,6 +1480,7 @@ fn execute_runtime_worker_job(
             cwd,
             source,
             sort_mode,
+            filename_encoding,
             filter,
             show_hidden_files,
             cached_panelized_entries,
@@ -1490,6 +1493,7 @@ fn execute_runtime_worker_job(
                 cwd,
                 source,
                 sort_mode,
+                filename_encoding,
                 filter,
                 show_hidden_files,
                 cached_panelized_entries,
@@ -2865,6 +2869,7 @@ mod tests {
         request_id: u64,
     ) -> PanelRefreshStreamRequest {
         PanelRefreshStreamRequest {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel,
             cwd,
             source,
@@ -3268,6 +3273,7 @@ mod tests {
             path: PathBuf::from("/tmp/medium"),
         });
         let low_job = manager.enqueue(JobRequest::RefreshPanel {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel: ActivePanel::Left,
             cwd: PathBuf::from("/tmp"),
             source: PanelListingSource::Directory,
@@ -3326,6 +3332,7 @@ mod tests {
             path: root.join("first"),
         });
         let low_id = state.enqueue_worker_job_request(JobRequest::RefreshPanel {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel: ActivePanel::Left,
             cwd: root.clone(),
             source: PanelListingSource::Directory,
@@ -3575,6 +3582,7 @@ mod tests {
             }
             let location = rc_core::ArchiveLocation::root(archive);
             let job = manager.enqueue(JobRequest::RefreshPanel {
+                filename_encoding: rc_core::FilenameEncoding::Utf8,
                 panel: ActivePanel::Left,
                 cwd: location.path(),
                 source: PanelListingSource::Archive(location),
@@ -4555,6 +4563,7 @@ mod tests {
         let root = make_temp_dir("refresh-canceled-before-start");
         let mut manager = JobManager::new();
         let job = manager.enqueue(JobRequest::RefreshPanel {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel: ActivePanel::Right,
             cwd: root.clone(),
             source: PanelListingSource::Directory,

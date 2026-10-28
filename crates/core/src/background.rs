@@ -25,6 +25,7 @@ pub struct PanelRefreshStreamRequest {
     pub cwd: PathBuf,
     pub source: PanelListingSource,
     pub sort_mode: SortMode,
+    pub filename_encoding: crate::FilenameEncoding,
     pub filter: PanelFilter,
     pub show_hidden_files: bool,
     pub cached_panelized_entries: Option<Arc<[FileEntry]>>,
@@ -232,7 +233,17 @@ where
             );
             // Use the refresh cancellation label so navigation rollback stays consistent.
             ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
-            let entries = crate::panel_filter::apply_panel_filter(entries?, &request.filter)
+            let mut entries = entries?;
+            for entry in &mut entries {
+                request
+                    .filename_encoding
+                    .update_entry(entry, &request.cwd, &request.source);
+            }
+            let skip = usize::from(entries.first().is_some_and(FileEntry::is_parent));
+            if request.sort_mode.field != crate::SortField::Unsorted {
+                sort_file_entries(&mut entries[skip..], request.sort_mode);
+            }
+            let entries = crate::panel_filter::apply_panel_filter(entries, &request.filter)
                 .map_err(io::Error::other)?;
             Ok(PanelRefreshResult {
                 entries,
@@ -277,7 +288,7 @@ where
             let metadata = fs::metadata(&entry.path)
                 .ok()
                 .or_else(|| fs::symlink_metadata(&entry.path).ok());
-            let entry = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
+            let mut entry = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
                 FileEntry::directory_from_metadata(
                     entry.name.clone(),
                     entry.path.clone(),
@@ -290,6 +301,9 @@ where
                     metadata.as_ref(),
                 )
             };
+            request
+                .filename_encoding
+                .update_entry(&mut entry, &request.cwd, &request.source);
             if matcher.matches(&entry) {
                 entries.push(entry.clone());
             }
@@ -312,10 +326,14 @@ where
     let mut next_chunk_size = 1_usize;
     let mut last_emit = None::<Instant>;
     let mut emit_entry = |entry: &FileEntry| {
-        if !matcher.matches(entry) {
+        let mut entry = entry.clone();
+        request
+            .filename_encoding
+            .update_entry(&mut entry, &request.cwd, &request.source);
+        if !matcher.matches(&entry) {
             return Ok(());
         }
-        pending.push(entry.clone());
+        pending.push(entry);
         let flush_interval_elapsed =
             last_emit.is_some_and(|emitted_at| emitted_at.elapsed() >= PANEL_EVENT_FLUSH_INTERVAL);
         if pending.len() < next_chunk_size && !flush_interval_elapsed {
@@ -330,7 +348,7 @@ where
         Ok(())
     };
 
-    let discovered_entries = match &request.source {
+    let mut discovered_entries = match &request.source {
         PanelListingSource::Panelize { command } => stream_panelized_entries_with_cancel(
             &request.cwd,
             command,
@@ -347,6 +365,11 @@ where
         }
     }?;
     emit_panel_entries_chunk(request, &mut pending, emit_chunk)?;
+    for entry in &mut discovered_entries {
+        request
+            .filename_encoding
+            .update_entry(entry, &request.cwd, &request.source);
+    }
     let panelized_entries = Arc::<[FileEntry]>::from(discovered_entries);
     let mut visible_entries = panelized_entries
         .iter()
@@ -412,7 +435,7 @@ where
         ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
         let entry = entry_result?;
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = request.filename_encoding.decode(&entry.file_name());
         if !request.show_hidden_files && name.starts_with('.') {
             continue;
         }
@@ -539,6 +562,7 @@ mod tests {
         let alias = root.join("home-alias");
         std::os::unix::fs::symlink(&home, &alias).expect("home alias should be creatable");
         let request = PanelRefreshStreamRequest {
+            filename_encoding: crate::FilenameEncoding::Utf8,
             panel: ActivePanel::Left,
             cwd: alias,
             source: PanelListingSource::Directory,
@@ -572,6 +596,7 @@ mod tests {
             .map(|index| PathBuf::from(format!("entry-{index:03}.txt")))
             .collect();
         let request = PanelRefreshStreamRequest {
+            filename_encoding: crate::FilenameEncoding::Utf8,
             panel: ActivePanel::Right,
             cwd: PathBuf::from("."),
             source: PanelListingSource::FindResults {
@@ -626,6 +651,7 @@ mod tests {
         fs::write(root.join("main.rs"), "fn main() {}").expect("Rust fixture should be written");
         fs::write(root.join("notes.txt"), "notes").expect("text fixture should be written");
         let request = PanelRefreshStreamRequest {
+            filename_encoding: crate::FilenameEncoding::Utf8,
             panel: ActivePanel::Left,
             cwd: root.clone(),
             source: PanelListingSource::Directory,
@@ -663,6 +689,7 @@ mod tests {
             cached_entry("src", FileEntryKind::Directory),
         ]);
         let request = PanelRefreshStreamRequest {
+            filename_encoding: crate::FilenameEncoding::Utf8,
             panel: ActivePanel::Right,
             cwd: PathBuf::from("."),
             source: PanelListingSource::Panelize {

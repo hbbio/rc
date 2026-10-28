@@ -50,8 +50,7 @@ pub(super) fn build_index(
         check_canceled(cancel)?;
         // Central-directory metadata only. No member payload is decompressed.
         let entry = archive.by_index_data(index).map_err(zip_error)?;
-        let name = entry.name().map_err(zip_error)?;
-        let Some(path) = safe_member_path(name.as_bytes())? else {
+        let Some(path) = safe_member_path(entry.name_raw())? else {
             continue;
         };
         let member = ArchiveMember {

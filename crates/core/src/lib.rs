@@ -11,6 +11,7 @@ pub mod dialog;
 mod dialog_flow;
 mod directory_sizes;
 mod file_history;
+mod filename_encoding;
 mod find_engine;
 mod find_flow;
 pub mod help;
@@ -74,6 +75,7 @@ pub use dialog::{
     QuickCdSearchStatus,
 };
 pub use directory_sizes::execute_directory_sizes;
+pub use filename_encoding::FilenameEncoding;
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
     FindSpec, run_find_entries, stream_find_entries,
@@ -189,6 +191,7 @@ pub enum AppCommand {
     UnselectGroup,
     CycleListingFormat,
     OpenListingFormat,
+    OpenEncoding,
     OpenSortOrder,
     OpenPanelFilter,
     SortNext,
@@ -284,6 +287,7 @@ pub enum AppCommand {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
+    OpenEncoding,
     SetView(PanelViewMode),
     /// Focus this listing panel and select an entry by index.
     SelectAt(usize),
@@ -552,6 +556,7 @@ impl AppCommand {
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
             | Self::OpenListingFormat
+            | Self::OpenEncoding
             | Self::OpenSortOrder
             | Self::OpenPanelFilter
             | Self::SelectGroup
@@ -559,6 +564,7 @@ impl AppCommand {
             | Self::Panel(
                 _,
                 PanelCommand::OpenListingFormat
+                | PanelCommand::OpenEncoding
                 | PanelCommand::OpenSortOrder
                 | PanelCommand::OpenFilter,
             )
@@ -701,7 +707,11 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
             "Filter...",
             AppCommand::Panel(panel, PanelCommand::OpenFilter),
         ),
-        MenuEntry::stub("Encoding...", "M-e"),
+        MenuEntry::action_with_literal_shortcut(
+            "Encoding...",
+            "M-e",
+            AppCommand::Panel(panel, PanelCommand::OpenEncoding),
+        ),
         MenuEntry::separator(),
         MenuEntry::stub("FTP link...", ""),
         MenuEntry::stub("Shell link...", ""),
@@ -1279,6 +1289,7 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    pub filename_encoding: FilenameEncoding,
     mouse_viewport: Option<PanelViewport>,
     home_directory: Option<PathBuf>,
     canonical_cwd: Option<PathBuf>,
@@ -1299,6 +1310,7 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            filename_encoding: FilenameEncoding::Utf8,
             mouse_viewport: None,
             home_directory: None,
             canonical_cwd: None,
@@ -1315,7 +1327,7 @@ impl PanelState {
 
     pub fn refresh(&mut self) -> io::Result<()> {
         self.clear_canonical_paths();
-        let (entries, panelized_entries) = match &self.source {
+        let (mut entries, mut panelized_entries) = match &self.source {
             PanelListingSource::Archive(location) => (
                 location.read_entries(self.sort_mode, self.show_hidden_files, None)?,
                 None,
@@ -1349,6 +1361,20 @@ impl PanelState {
                 (entries, Some(Arc::<[FileEntry]>::from(discovered_entries)))
             }
         };
+        for entry in &mut entries {
+            self.filename_encoding
+                .update_entry(entry, &self.cwd, &self.source);
+        }
+        if let Some(cached) = &mut panelized_entries {
+            for entry in Arc::make_mut(cached) {
+                self.filename_encoding
+                    .update_entry(entry, &self.cwd, &self.source);
+            }
+        }
+        let skip = usize::from(entries.first().is_some_and(FileEntry::is_parent));
+        if self.sort_mode.field != SortField::Unsorted {
+            sort_file_entries(&mut entries[skip..], self.sort_mode);
+        }
         let entries = apply_panel_filter(entries, &self.filter)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let (canonical_cwd, canonical_home_directory) =
@@ -2074,6 +2100,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    SetFilenameEncoding {
+        panel: ActivePanel,
+    },
     CreateLinks {
         kind: LinkKind,
         sources: Vec<PathBuf>,

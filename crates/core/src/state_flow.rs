@@ -42,6 +42,7 @@ impl AppState {
         }
         self.active_panel = self.active_panel.other();
         self.settings.panel_options.listing_formats.swap(0, 1);
+        self.settings.panel_options.filename_encodings.swap(0, 1);
         self.settings.panel_options.user_listing_formats.swap(0, 1);
         self.settings.panel_options.sort_modes.swap(0, 1);
         self.settings.panel_options.filters.swap(0, 1);
@@ -211,6 +212,7 @@ impl AppState {
         for (index, panel) in self.panels.iter_mut().enumerate() {
             panel.mouse_viewport = None;
             panel.sort_mode = self.settings.panel_options.sort_modes[index];
+            panel.filename_encoding = self.settings.panel_options.filename_encodings[index];
             panel.filter = self.settings.panel_options.filters[index].clone();
             panel.set_show_hidden_files(show_hidden_files);
         }

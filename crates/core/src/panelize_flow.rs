@@ -61,10 +61,14 @@ impl AppState {
             }
         };
         let selected_path = entries.get(cursor).map(|entry| entry.path.clone());
-        let raw_entries = unfiltered_entries
+        let mut raw_entries = unfiltered_entries
             .as_deref()
             .map(<[FileEntry]>::to_vec)
             .unwrap_or(entries);
+        let encoding = self.panels[panel_index].filename_encoding;
+        for entry in &mut raw_entries {
+            encoding.update_entry(entry, &cwd, &source);
+        }
         let filter = self.panels[panel_index].filter.clone();
         let panelized_entries = Arc::<[FileEntry]>::from(raw_entries);
         let Ok(mut entries) = apply_panel_filter(panelized_entries.to_vec(), &filter) else {

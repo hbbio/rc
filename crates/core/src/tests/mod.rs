@@ -12,6 +12,7 @@ mod archive_tests;
 mod command_output_tests;
 mod comparison_tests;
 mod directory_size_tests;
+mod encoding_tests;
 mod file_history_tests;
 mod find_tests;
 mod group_selection_tests;
@@ -159,6 +160,7 @@ fn drain_background(app: &mut AppState) {
                             cwd,
                             source,
                             sort_mode,
+                            filename_encoding,
                             filter,
                             show_hidden_files,
                             cached_panelized_entries,
@@ -173,6 +175,7 @@ fn drain_background(app: &mut AppState) {
                                     cwd: cwd.clone(),
                                     source: source.clone(),
                                     sort_mode: *sort_mode,
+                                    filename_encoding: *filename_encoding,
                                     filter: filter.clone(),
                                     show_hidden_files: *show_hidden_files,
                                     cached_panelized_entries: cached_panelized_entries.clone(),
@@ -429,6 +432,7 @@ fn toggle_panel_flips_between_left_and_right() {
 #[test]
 fn move_cursor_stays_in_bounds() {
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
         cwd: PathBuf::from("/tmp"),
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
@@ -585,6 +589,7 @@ fn size_sort_listing_populates_metadata_fields() {
 #[test]
 fn toggle_and_invert_tags_work_for_non_parent_entries() {
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
         cwd: PathBuf::from("/tmp"),
         entries: vec![
             FileEntry::parent(PathBuf::from("/")),
@@ -632,6 +637,7 @@ fn page_home_end_navigation_stays_bounded() {
         file_entry("c"),
     ];
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
         cwd: PathBuf::from("/tmp"),
         entries,
         cursor: 1,
@@ -665,6 +671,7 @@ fn page_home_end_navigation_stays_bounded() {
 #[test]
 fn sort_mode_cycles_and_toggles_direction() {
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
         cwd: PathBuf::from("/tmp"),
         entries: Vec::new(),
         cursor: 0,
@@ -1363,7 +1370,7 @@ fn menu_stub_action_reports_not_implemented_status() {
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left menu should open");
-    move_menu_selection_to_label(&mut app, "Encoding...");
+    move_menu_selection_to_label(&mut app, "FTP link...");
     app.apply(AppCommand::MenuAccept)
         .expect("accepting stub menu action should succeed");
     assert_eq!(app.key_context(), KeyContext::FileManager);

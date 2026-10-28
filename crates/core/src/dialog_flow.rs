@@ -11,6 +11,10 @@ impl AppState {
 
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
+            AppCommand::OpenEncoding => self.open_encoding_dialog(self.active_panel),
+            AppCommand::Panel(panel, PanelCommand::OpenEncoding) => {
+                self.open_encoding_dialog(panel)
+            }
             AppCommand::CreateLink(kind) => self.open_link_dialog(kind),
             AppCommand::EditSymlink => self.open_edit_symlink_dialog(),
             AppCommand::Chmod => {
@@ -429,6 +433,17 @@ impl AppState {
             self.stop_quick_cd_search();
         }
         match (pending, result) {
+            (
+                Some(PendingDialogAction::SetFilenameEncoding { panel }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(encoding) = index.and_then(|i| FilenameEncoding::ALL.get(i)).copied() {
+                    self.set_filename_encoding(panel, encoding);
+                }
+            }
+            (Some(PendingDialogAction::SetFilenameEncoding { .. }), DialogResult::Canceled) => {
+                self.set_status("Filename encoding unchanged")
+            }
             (
                 Some(PendingDialogAction::CreateLinks {
                     kind,

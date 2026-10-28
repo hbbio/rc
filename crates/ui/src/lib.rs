@@ -753,6 +753,9 @@ fn panel_topline_titles_with_home(
     if panel.filter().is_active() {
         summary.push(format!("filter:{}", panel.filter().display_pattern()));
     }
+    if panel.filename_encoding != rc_core::FilenameEncoding::Utf8 {
+        summary.push(panel.filename_encoding.label().into());
+    }
     if panel.is_panelized() {
         summary.push(String::from("panelize"));
     }
@@ -769,11 +772,12 @@ fn panel_topline_titles_with_home(
     }
 
     PanelToplineTitles {
-        path: format_panel_path(
+        path: format_panel_path_with_encoding(
             &panel.cwd,
             home,
             panel.canonical_cwd(),
             panel.canonical_home_directory(),
+            panel.filename_encoding,
         ),
         summary: summary.join(" | "),
     }
@@ -784,6 +788,22 @@ fn format_panel_path(
     home: Option<&Path>,
     canonical_path: Option<&Path>,
     canonical_home: Option<&Path>,
+) -> String {
+    format_panel_path_with_encoding(
+        path,
+        home,
+        canonical_path,
+        canonical_home,
+        rc_core::FilenameEncoding::Utf8,
+    )
+}
+
+fn format_panel_path_with_encoding(
+    path: &Path,
+    home: Option<&Path>,
+    canonical_path: Option<&Path>,
+    canonical_home: Option<&Path>,
+    encoding: rc_core::FilenameEncoding,
 ) -> String {
     let relative = home
         .filter(|home| !home.as_os_str().is_empty())
@@ -800,8 +820,8 @@ fn format_panel_path(
 
     match relative {
         Some(relative) if relative.as_os_str().is_empty() => String::from("~"),
-        Some(relative) => format!("~/{}", relative.to_string_lossy()),
-        None => path.to_string_lossy().into_owned(),
+        Some(relative) => format!("~/{}", encoding.decode(relative.as_os_str())),
+        None => encoding.decode(path.as_os_str()),
     }
 }
 
@@ -3442,6 +3462,7 @@ mod tests {
                                 cwd,
                                 source,
                                 sort_mode,
+                                filename_encoding,
                                 filter,
                                 show_hidden_files,
                                 cached_panelized_entries,
@@ -3456,6 +3477,7 @@ mod tests {
                                         cwd: cwd.clone(),
                                         source: source.clone(),
                                         sort_mode: *sort_mode,
+                                        filename_encoding: *filename_encoding,
                                         filter: filter.clone(),
                                         show_hidden_files: *show_hidden_files,
                                         cached_panelized_entries: cached_panelized_entries.clone(),
@@ -4818,7 +4840,7 @@ OpenConfirmDialog = f2
         let buffer = render_to_buffer(&app, 120, 40);
         let skin = current_skin();
         let inactive_style = skin.style("menu", "menuinactive");
-        let disabled_cell = first_cell_for_text(&buffer, "Encoding...")
+        let disabled_cell = first_cell_for_text(&buffer, "FTP link...")
             .expect("unimplemented menu entry should render");
         assert_eq!(
             disabled_cell.fg,

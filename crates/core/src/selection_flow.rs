@@ -57,10 +57,16 @@ impl AppState {
         for entry in &state.entries {
             if entry.is_parent()
                 || (filter.files_only && entry.is_dir())
-                || !entry
-                    .path
-                    .file_name()
-                    .is_some_and(|name| matcher.matches_path(Path::new(name)))
+                || !entry.path.file_name().is_some_and(|name| {
+                    let encoding = state
+                        .filename_encoding
+                        .effective_for_name(name, &state.source);
+                    if encoding == crate::FilenameEncoding::Utf8 {
+                        matcher.matches_path(Path::new(name))
+                    } else {
+                        matcher.matches_path(Path::new(&encoding.decode(name)))
+                    }
+                })
             {
                 continue;
             }

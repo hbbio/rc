@@ -612,6 +612,12 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                         [usize::from(key == "right_user_format")] = parsed;
                 }
             }
+            ("panel_options", key @ ("left_filename_encoding" | "right_filename_encoding")) => {
+                if let Some(encoding) = crate::FilenameEncoding::parse(value) {
+                    settings.panel_options.filename_encodings
+                        [usize::from(key == "right_filename_encoding")] = encoding;
+                }
+            }
             ("panel_options", "left_filter_pattern") => {
                 if let Some(parsed) = unescape_settings_field(value) {
                     settings.panel_options.filters[0].pattern = parsed;
@@ -917,6 +923,10 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         .into_iter()
         .zip(&settings.panel_options.filters)
     {
+        lines.push(format!(
+            "{prefix}_filename_encoding={}",
+            settings.panel_options.filename_encodings[usize::from(prefix == "right")].label()
+        ));
         lines.push(format!(
             "{prefix}_filter_pattern={}",
             escape_settings_field(&filter.pattern)
@@ -1243,6 +1253,10 @@ skin=default
     fn user_listing_formats_round_trip_and_invalid_input_keeps_default() {
         let mut settings = Settings::default();
         settings.panel_options.listing_formats[0] = PanelListingFormat::User;
+        settings.panel_options.filename_encodings = [
+            crate::FilenameEncoding::ShiftJis,
+            crate::FilenameEncoding::Windows1252,
+        ];
         settings.panel_options.user_listing_formats =
             ["perm size:9 name".into(), "inode, name:40".into()];
         let mut parsed = Settings::default();

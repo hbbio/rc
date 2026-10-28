@@ -505,6 +505,7 @@ SelectCodepage = alt-e
 # rc overrides for implemented commands
 
 [filemanager]
+SelectEncoding = alt-e
 ScreenList = alt-backquote
 Quit = q; esc; f10
 PanelOther = tab

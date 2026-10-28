@@ -169,14 +169,25 @@ fn panelized_stdout_entry(
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<Option<FileEntry>> {
     ensure_panel_refresh_not_canceled(cancel_flag)?;
-    let line = String::from_utf8_lossy(raw_line);
-    let line = line.strip_suffix('\n').unwrap_or(line.as_ref());
-    let line = line.strip_suffix('\r').unwrap_or(line);
+    let line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.is_empty() {
         return Ok(None);
     }
 
-    panelized_path_entry(base_dir, PathBuf::from(line), seen, cancel_flag)
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(line))
+    };
+    #[cfg(not(unix))]
+    let path = PathBuf::from(std::str::from_utf8(line).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Panelize returned a non-UTF-8 path on this platform",
+        )
+    })?);
+    panelized_path_entry(base_dir, path, seen, cancel_flag)
 }
 
 pub(crate) fn read_panelized_paths(

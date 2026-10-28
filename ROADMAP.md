@@ -35,7 +35,6 @@ in the project [README](README.md).
 
 - Preserve non-UTF-8 filenames losslessly throughout panels, jobs, search,
   command insertion, and external-tool invocation.
-- Add optional per-panel legacy filename encodings.
 
 ## Deferred: Windows (out of current scope)
 
