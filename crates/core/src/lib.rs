@@ -6,6 +6,7 @@ mod command_dispatch;
 mod command_line;
 mod command_map;
 mod command_output;
+mod comparison;
 pub mod dialog;
 mod dialog_flow;
 mod file_history;
@@ -60,7 +61,7 @@ pub use command_line::{
     OpenCompletion, PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest,
     ShellResolutionResponse, resolve_shell_request_blocking, sanitize_paste,
 };
-pub use command_output::{CommandCaptureSpec, execute_command_capture};
+pub use command_output::{CapturedCommand, CommandCaptureSpec, execute_command_capture};
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
     FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
@@ -196,6 +197,8 @@ pub enum AppCommand {
     OpenCommandHistory,
     FilteredView,
     OpenJobOutput,
+    CompareFiles,
+    CompareDirectories,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -402,6 +405,8 @@ impl AppCommand {
             | Self::OpenCommandHistory
             | Self::FilteredView
             | Self::OpenJobOutput
+            | Self::CompareFiles
+            | Self::CompareDirectories
             | Self::OpenMenuBar
             | Self::OpenMenuBarAt(_)
             | Self::CloseMenu
@@ -703,8 +708,12 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
     MenuEntry::stub("Swap panels", "C-u"),
     MenuEntry::stub("Switch panels on/off", "C-o"),
-    MenuEntry::stub("Compare directories", "C-x d"),
-    MenuEntry::stub("Compare files", "C-x C-d"),
+    MenuEntry::action_with_literal_shortcut(
+        "Compare directories",
+        "C-x d",
+        AppCommand::CompareDirectories,
+    ),
+    MenuEntry::action_with_literal_shortcut("Compare files", "C-x C-d", AppCommand::CompareFiles),
     MenuEntry::action_with_literal_shortcut(
         "External panelize",
         "C-x !",

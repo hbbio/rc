@@ -121,6 +121,11 @@ renaming still update the panels.
   The title records completion or failure. Capture stops at 8 MiB per command;
   up to eight outputs are retained, evicting the oldest completed, closed output.
   Captured commands use the configured shell and have no interactive standard input.
+- Command → Compare files (`Ctrl-X Ctrl-D`) compares the selected local file in
+  each panel, preferring `difft` (difftastic) and falling back to unified `diff`.
+  Compare directories (`Ctrl-X D`) reports recursive differences between the two
+  local panel directories with `diff`. Both use the output viewer; differences are
+  a successful comparison, while read/tool errors are reported as failed jobs.
 - `Alt-Shift-E` opens the session's viewed/edited-file history. Its 100 most recent
   entries reopen with the original action, including files inside archives.
 - External editing through a configured command, `$EDITOR`, `$VISUAL`, or

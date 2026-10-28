@@ -20,6 +20,8 @@ impl AppState {
             AppCommand::OpenCommandHistory => self.open_command_history(),
             AppCommand::FilteredView => self.open_filtered_view(),
             AppCommand::OpenJobOutput => self.open_selected_job_output(),
+            AppCommand::CompareFiles => self.compare_files(),
+            AppCommand::CompareDirectories => self.compare_directories(),
             AppCommand::PutCurrentSelected
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged

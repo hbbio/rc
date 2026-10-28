@@ -9,8 +9,38 @@ const OUTPUT_HISTORY_LIMIT: usize = 8;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandCaptureSpec {
     pub cwd: PathBuf,
-    pub command: String,
-    pub shell: ShellSettings,
+    pub command: CapturedCommand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CapturedCommand {
+    Shell {
+        script: String,
+        shell: ShellSettings,
+    },
+    Compare {
+        left: PathBuf,
+        right: PathBuf,
+        directories: bool,
+    },
+}
+
+impl CommandCaptureSpec {
+    pub fn shell(cwd: PathBuf, script: String, shell: ShellSettings) -> Self {
+        Self {
+            cwd,
+            command: CapturedCommand::Shell { script, shell },
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        sanitize_display_line(&match &self.command {
+            CapturedCommand::Shell { script, .. } => script.clone(),
+            CapturedCommand::Compare { left, right, .. } => {
+                format!("Compare {} ↔ {}", left.display(), right.display())
+            }
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -31,10 +61,22 @@ pub fn execute_command_capture(
     let id = job.id;
     let _ = jobs.send(JobEvent::Started { id });
     let result = (|| {
-        let resolution = rc_shell::resolve_shell(&spec.shell, &spec.cwd)?;
-        let invocation = resolution.shell.invocation(&spec.command);
-        let mut command = Command::new(invocation.program);
-        command.args(invocation.arguments).current_dir(&spec.cwd);
+        let mut command = match &spec.command {
+            CapturedCommand::Shell { script, shell } => {
+                let invocation = rc_shell::resolve_shell(shell, &spec.cwd)?
+                    .shell
+                    .invocation(script);
+                let mut command = Command::new(invocation.program);
+                command.args(invocation.arguments);
+                command
+            }
+            CapturedCommand::Compare {
+                left,
+                right,
+                directories,
+            } => crate::comparison::comparison_process(left, right, *directories, &spec.cwd)?,
+        };
+        command.current_dir(&spec.cwd);
         rc_shell::run_captured_command(
             command,
             job.cancel_flag().as_ref(),
@@ -51,13 +93,16 @@ pub fn execute_command_capture(
             },
         )
     })();
+    let comparison = matches!(spec.command, CapturedCommand::Compare { .. });
     let status = match &result {
+        Ok(status) if comparison && status.code() == Some(0) => "No differences".into(),
+        Ok(status) if comparison && status.code() == Some(1) => "Differences found".into(),
         Ok(status) => status.to_string(),
         Err(error) => error.to_string(),
     };
     let _ = events.send(BackgroundEvent::CommandCompleted { job_id: id, status });
     let result = result.map_err(JobError::from_io).and_then(|status| {
-        if status.success() {
+        if status.success() || (comparison && status.code() == Some(1)) {
             Ok(())
         } else {
             Err(JobError::from_message(format!("command {status}")))
@@ -81,7 +126,9 @@ impl AppState {
     }
 
     pub(crate) fn start_command_capture(&mut self, spec: CommandCaptureSpec) {
-        if spec.command.len() > COMMAND_BUFFER_LIMIT_BYTES || spec.command.contains('\0') {
+        if let CapturedCommand::Shell { script, .. } = &spec.command
+            && (script.len() > COMMAND_BUFFER_LIMIT_BYTES || script.contains('\0'))
+        {
             self.set_status("Command is too long or contains NUL");
             return;
         }
@@ -104,7 +151,7 @@ impl AppState {
                 return;
             }
         }
-        let title = sanitize_display_line(&spec.command);
+        let title = spec.summary();
         let job_id = self.queue_worker_job_request(JobRequest::CaptureCommand { spec });
         self.command_outputs.insert(
             job_id,

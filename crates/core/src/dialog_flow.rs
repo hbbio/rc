@@ -409,11 +409,11 @@ impl AppState {
                 DialogResult::InputSubmitted(command),
             ) => {
                 if !command.trim().is_empty() {
-                    self.start_command_capture(CommandCaptureSpec {
+                    self.start_command_capture(CommandCaptureSpec::shell(
                         cwd,
                         command,
-                        shell: self.settings.shell.clone(),
-                    });
+                        self.settings.shell.clone(),
+                    ));
                 }
             }
             (

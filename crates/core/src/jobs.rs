@@ -258,7 +258,7 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
-            Self::CaptureCommand { spec } => crate::sanitize_display_line(&spec.command),
+            Self::CaptureCommand { spec } => spec.summary(),
             Self::ExtractArchive {
                 sources,
                 destination_dir,

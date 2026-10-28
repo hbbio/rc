@@ -88,6 +88,13 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::ViewEntry) => Some(Self::ViewEntry),
             (KeyContext::FileManager, KeyCommand::ViewFile) => Some(Self::ViewFile),
             (KeyContext::FileManager, KeyCommand::FilteredView) => Some(Self::FilteredView),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::CompareFiles) => {
+                Some(Self::CompareFiles)
+            }
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap,
+                KeyCommand::CompareDirectories,
+            ) => Some(Self::CompareDirectories),
             (KeyContext::Jobs, KeyCommand::OpenEntry) => Some(Self::OpenJobOutput),
             (KeyContext::Viewer | KeyContext::ViewerHex, KeyCommand::CancelJob) => {
                 Some(Self::CancelJob)

@@ -3007,11 +3007,11 @@ mod tests {
         .unwrap();
         for _ in 0..CAPTURE_CONCURRENCY_LIMIT {
             let job = manager.enqueue(JobRequest::CaptureCommand {
-                spec: rc_core::CommandCaptureSpec {
-                    cwd: root.clone(),
-                    command: "printf ready; sleep 30".into(),
-                    shell: shell.clone(),
-                },
+                spec: rc_core::CommandCaptureSpec::shell(
+                    root.clone(),
+                    "printf ready; sleep 30".into(),
+                    shell.clone(),
+                ),
             });
             send_run(&command_tx, job);
         }

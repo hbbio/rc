@@ -10,6 +10,7 @@ use std::{env, fs};
 
 mod archive_tests;
 mod command_output_tests;
+mod comparison_tests;
 mod file_history_tests;
 mod find_tests;
 mod group_selection_tests;
