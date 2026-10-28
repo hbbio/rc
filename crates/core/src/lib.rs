@@ -20,6 +20,7 @@ mod keybinding_help;
 pub mod keymap;
 pub mod layout;
 mod learn_keys;
+mod link_flow;
 mod listing_format;
 mod metadata_change;
 mod navigation_flow;
@@ -83,6 +84,7 @@ pub use jobs::{
     JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
     WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
+pub use link_flow::LinkKind;
 pub use listing_format::{DEFAULT_USER_LISTING_FORMAT, ListingField, UserListingFormat};
 pub use metadata_change::{MetadataChange, PermissionChange};
 #[cfg(test)]
@@ -195,6 +197,8 @@ pub enum AppCommand {
     Chmod,
     Chown,
     AdvancedChown,
+    CreateLink(LinkKind),
+    EditSymlink,
     Move,
     Delete,
     CancelJob,
@@ -541,6 +545,8 @@ impl AppCommand {
             | Self::Chmod
             | Self::Chown
             | Self::AdvancedChown
+            | Self::CreateLink(_)
+            | Self::EditSymlink
             | Self::OpenInputDialog
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
@@ -723,10 +729,22 @@ const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
     MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
     MenuEntry::action_with_literal_shortcut("Chmod", "C-x c", AppCommand::Chmod),
-    MenuEntry::stub("Link", "C-x l"),
-    MenuEntry::stub("Symlink", "C-x s"),
-    MenuEntry::stub("Relative symlink", "C-x v"),
-    MenuEntry::stub("Edit symlink", "C-x C-s"),
+    MenuEntry::action_with_literal_shortcut(
+        "Link",
+        "C-x l",
+        AppCommand::CreateLink(LinkKind::Hard),
+    ),
+    MenuEntry::action_with_literal_shortcut(
+        "Symlink",
+        "C-x s",
+        AppCommand::CreateLink(LinkKind::Symbolic),
+    ),
+    MenuEntry::action_with_literal_shortcut(
+        "Relative symlink",
+        "C-x v",
+        AppCommand::CreateLink(LinkKind::RelativeSymbolic),
+    ),
+    MenuEntry::action_with_literal_shortcut("Edit symlink", "C-x C-s", AppCommand::EditSymlink),
     MenuEntry::action_with_literal_shortcut("Chown", "C-x o", AppCommand::Chown),
     MenuEntry::action("Advanced chown", AppCommand::AdvancedChown),
     MenuEntry::action_with_shortcut("Rename/Move", "F6", AppCommand::Move),
@@ -2056,6 +2074,16 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    CreateLinks {
+        kind: LinkKind,
+        sources: Vec<PathBuf>,
+        base: PathBuf,
+        panel: ActivePanel,
+    },
+    EditSymlinks {
+        paths: Vec<PathBuf>,
+        panel: ActivePanel,
+    },
     MetadataChange {
         action: metadata_change::MetadataAction,
         paths: Vec<PathBuf>,

@@ -24,6 +24,7 @@ use crate::{
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 mod archive_extract;
+mod links;
 mod metadata;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
@@ -38,6 +39,7 @@ impl fmt::Display for JobId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
+    Links,
     ChangeMetadata,
     MeasureDirectories,
     Command,
@@ -60,6 +62,7 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Links => "links",
             Self::ChangeMetadata => "permissions/ownership",
             Self::MeasureDirectories => "directory-sizes",
             Self::Command => "command",
@@ -101,6 +104,15 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    CreateLinks {
+        kind: crate::LinkKind,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+    },
+    EditSymlinks {
+        paths: Vec<PathBuf>,
+        target: PathBuf,
+    },
     ChangeMetadata {
         paths: Vec<PathBuf>,
         change: crate::MetadataChange,
@@ -219,6 +231,7 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::CreateLinks { .. } | Self::EditSymlinks { .. } => JobKind::Links,
             Self::ChangeMetadata { .. } => JobKind::ChangeMetadata,
             Self::MeasureDirectories { .. } => JobKind::MeasureDirectories,
             Self::CaptureCommand { .. } => JobKind::Command,
@@ -250,6 +263,8 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::CreateLinks { sources, .. } => sources.len(),
+            Self::EditSymlinks { paths, .. } => paths.len(),
             Self::ChangeMetadata { paths, .. } => paths.len(),
             Self::MeasureDirectories { paths, .. } => paths.len(),
             Self::CaptureCommand { .. } => 1,
@@ -275,6 +290,19 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::CreateLinks {
+                kind,
+                sources,
+                destination,
+            } => format!(
+                "{} {} entries -> {}",
+                kind.label(),
+                sources.len(),
+                destination.display()
+            ),
+            Self::EditSymlinks { paths, target } => {
+                format!("edit {} symlinks -> {}", paths.len(), target.display())
+            }
             Self::ChangeMetadata { paths, .. } => {
                 format!("change permissions/ownership of {} entries", paths.len())
             }
@@ -1044,6 +1072,14 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
+        JobRequest::CreateLinks {
+            kind,
+            sources,
+            destination,
+        } => links::create_links(kind, &sources, &destination, progress),
+        JobRequest::EditSymlinks { paths, target } => {
+            links::edit_symlinks(&paths, &target, progress)
+        }
         JobRequest::ChangeMetadata { paths, change } => {
             metadata::change_metadata(&paths, &change, progress)
         }
@@ -2020,6 +2056,14 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
+        JobRequest::CreateLinks { sources, .. } => Ok(JobTotals {
+            items: sources.len() as u64,
+            bytes: 0,
+        }),
+        JobRequest::EditSymlinks { paths, .. } => Ok(JobTotals {
+            items: paths.len() as u64,
+            bytes: 0,
+        }),
         JobRequest::ChangeMetadata { paths, .. } => Ok(JobTotals {
             items: paths.len() as u64,
             bytes: 0,

@@ -15,11 +15,6 @@ in the project [README](README.md).
 - Provide commands for opening the effective extension, menu, and highlighting
   configuration files in the external editor.
 
-## File-manager workflows
-
-- Add hard-link, symlink, relative-symlink, and edit-symlink operations with
-  tagged-file support.
-
 ## Command output, diff, and subshell
 
 - Add a persistent PTY-backed shell with a prompt protocol and bidirectional

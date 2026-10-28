@@ -16,6 +16,7 @@ mod file_history_tests;
 mod find_tests;
 mod group_selection_tests;
 mod learned_key_tests;
+mod link_tests;
 mod metadata_tests;
 mod mouse_tests;
 mod panelize_tests;

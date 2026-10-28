@@ -52,6 +52,17 @@ and fast directory navigation.
   optional mode. Operations affect only the selected entries, without recursion.
   Chmod rejects symlinks; chown changes the link itself. Completed changes remain
   if a later entry fails or the job is canceled.
+- **File → Link / Symlink / Relative symlink** (`Ctrl-X l/s/v`) creates links
+  for selected or tagged entries on Unix. Destinations are literal paths relative
+  to the passive panel; `.` uses that directory and the original names. Tagged
+  batches require an existing directory. Existing destinations are never replaced.
+  Hard links require regular files on the same filesystem; relative symlinks are
+  calculated from each destination directory, including directory aliases.
+  **Edit symlink** (`Ctrl-X Ctrl-S`) changes each selected link to the entered
+  literal target, including dangling links, without following it. Editing uses
+  atomic exchange on Linux/macOS; filesystems lacking it report an error. If an
+  entry changes concurrently, rc rolls back and reports a preserved recovery path.
+  Completed batch entries remain if a later entry fails or the job is canceled.
 - Background execution with progress, cancellation, overwrite policies, and a jobs
   screen.
 - Alt + backtick opens the screen list from panels, viewers, searches, trees, help, and

@@ -1103,6 +1103,8 @@ async fn run_runtime_loop(
                             }
                             JobRequest::Copy { .. }
                             | JobRequest::ChangeMetadata { .. }
+                            | JobRequest::CreateLinks { .. }
+                            | JobRequest::EditSymlinks { .. }
                             | JobRequest::ExtractArchive { .. }
                             | JobRequest::Move { .. }
                             | JobRequest::Delete { .. }

@@ -11,6 +11,8 @@ impl AppState {
 
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
+            AppCommand::CreateLink(kind) => self.open_link_dialog(kind),
+            AppCommand::EditSymlink => self.open_edit_symlink_dialog(),
             AppCommand::Chmod => {
                 self.open_metadata_dialog(crate::metadata_change::MetadataAction::Chmod)
             }
@@ -427,6 +429,26 @@ impl AppState {
             self.stop_quick_cd_search();
         }
         match (pending, result) {
+            (
+                Some(PendingDialogAction::CreateLinks {
+                    kind,
+                    sources,
+                    base,
+                    panel,
+                }),
+                DialogResult::InputSubmitted(value),
+            ) => self.submit_link_dialog(kind, sources, base, panel, value),
+            (
+                Some(PendingDialogAction::EditSymlinks { paths, panel }),
+                DialogResult::InputSubmitted(value),
+            ) => self.submit_edit_symlink_dialog(paths, panel, value),
+            (
+                Some(
+                    PendingDialogAction::CreateLinks { .. }
+                    | PendingDialogAction::EditSymlinks { .. },
+                ),
+                DialogResult::Canceled,
+            ) => self.set_status("Links unchanged"),
             (
                 Some(PendingDialogAction::MetadataChange {
                     action,

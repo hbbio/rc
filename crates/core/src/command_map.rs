@@ -55,6 +55,19 @@ impl AppCommand {
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::SwapPanels) => Some(Self::SwapPanels),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Link) => {
+                Some(Self::CreateLink(crate::LinkKind::Hard))
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Symlink) => {
+                Some(Self::CreateLink(crate::LinkKind::Symbolic))
+            }
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap,
+                KeyCommand::RelativeSymlink,
+            ) => Some(Self::CreateLink(crate::LinkKind::RelativeSymbolic)),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::EditSymlink) => {
+                Some(Self::EditSymlink)
+            }
             (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Chmod) => {
                 Some(Self::Chmod)
             }

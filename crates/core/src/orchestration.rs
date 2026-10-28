@@ -144,6 +144,7 @@ impl AppState {
                         Some(
                             JobKind::Copy
                                 | JobKind::ChangeMetadata
+                                | JobKind::Links
                                 | JobKind::Move
                                 | JobKind::Delete
                                 | JobKind::Mkdir
@@ -183,7 +184,7 @@ impl AppState {
                     self.panel_mkdirs.finish(id, false);
                     let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
-                    if kind == Some(JobKind::ChangeMetadata) {
+                    if matches!(kind, Some(JobKind::ChangeMetadata | JobKind::Links)) {
                         self.refresh_panels();
                     }
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");

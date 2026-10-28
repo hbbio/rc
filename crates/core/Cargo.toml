@@ -20,6 +20,7 @@ globset = "0.4"
 memchr = "2"
 rc-shell.workspace = true
 regex = "1.11"
+tempfile.workspace = true
 shlex.workspace = true
 tracing.workspace = true
 tui-input.workspace = true
@@ -36,7 +37,7 @@ getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }
+rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
 flate2.workspace = true
-tempfile.workspace = true

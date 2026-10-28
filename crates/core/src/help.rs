@@ -82,6 +82,9 @@ File operations:\n\
   Chown: account names or numeric IDs; blank fields keep existing values.\n\
   Advanced chown: owner:group plus an optional mode. Jobs can be canceled.\n\
   Chmod rejects symlinks; chown changes the link itself.\n\
+  File menu: Link, Symlink, and Relative symlink create links without overwrite.\n\
+  Destinations are relative to the passive panel; tagged batches need a directory.\n\
+  Edit symlink assigns a literal target to every selected link, including dangling links.\n\
 \n\
 Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
 and - for the previous directory. Quote paths containing spaces.\n\
