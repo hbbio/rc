@@ -93,7 +93,7 @@ impl AppState {
             self.set_status("Enter a destination path");
             return;
         }
-        let path = PathBuf::from(value);
+        let path = PathBuf::from(rc_shell::decode_path_text(&value));
         let destination = if path.is_absolute() {
             path
         } else {
@@ -114,11 +114,10 @@ impl AppState {
         let Some(paths) = self.link_operation_paths() else {
             return;
         };
-        // Read one short link target for the default, preserving non-UTF-8
-        // targets by leaving the input blank instead of inserting lossy text.
+        // Escape bytes that cannot be represented directly in the input field.
         let value = if paths.len() == 1 {
             match fs::read_link(&paths[0]) {
-                Ok(target) => target.to_str().unwrap_or_default().to_string(),
+                Ok(target) => rc_shell::encode_path_text(target.as_os_str()),
                 Err(error) => {
                     self.set_status(format!("Cannot edit symlink: {error}"));
                     return;
@@ -160,7 +159,7 @@ impl AppState {
         let id = self.queue_filesystem_job(
             JobRequest::EditSymlinks {
                 paths,
-                target: PathBuf::from(value),
+                target: PathBuf::from(rc_shell::decode_path_text(&value)),
             },
             OperationOrigin::Panel(panel),
         );

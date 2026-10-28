@@ -32,6 +32,13 @@ and fast directory navigation.
   panelized names, follows panel swaps, and persists with Save setup. It does not
   change file contents or the terminal encoding.
   ZIP names that are not UTF-8 default to CP437 unless another codec is selected.
+- UTF-8 listings and editable path fields preserve Unix filenames with reversible
+  `\xHH` byte escapes; a literal backslash appears as `\\`. Copy/move, rename,
+  mkdir, link targets, hotlist paths, View file, and Find's start directory accept
+  this spelling. Batch rename masks operate on original bytes. Regex filename
+  search can match raw bytes with patterns such as `(?-u:\xFF)`; editor `{path}`
+  placeholders also retain native bytes. Saved path settings use separate encoded
+  keys when needed, while existing plain-path entries retain their meaning.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
   columns, and mouse selection or activation.
 - `Ctrl-Space` calculates recursive apparent sizes for tagged directories, or all

@@ -172,7 +172,7 @@ pub enum JobRequest {
     Move {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
-        destination_names: Option<Vec<String>>,
+        destination_names: Option<Vec<std::ffi::OsString>>,
         overwrite: OverwritePolicy,
     },
     Delete {
@@ -362,7 +362,14 @@ impl JobRequest {
             } => {
                 let destination_suffix = match destination_names {
                     Some(destination_names) if !destination_names.is_empty() => {
-                        format!(" with custom names [{}]", destination_names.join(", "))
+                        format!(
+                            " with custom names [{}]",
+                            destination_names
+                                .iter()
+                                .map(|name| rc_shell::encode_path_text(name))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                     Some(_) => String::from(""),
                     None => String::from(""),
@@ -1239,7 +1246,7 @@ fn copy_paths(
 fn move_paths(
     sources: &[PathBuf],
     destination_dir: &Path,
-    destination_names: Option<&[String]>,
+    destination_names: Option<&[std::ffi::OsString]>,
     overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
@@ -1289,7 +1296,7 @@ struct PlannedMove<'a> {
 fn build_move_plan<'a>(
     sources: &'a [PathBuf],
     destination_dir: &Path,
-    destination_names: Option<&[String]>,
+    destination_names: Option<&[std::ffi::OsString]>,
 ) -> io::Result<Vec<PlannedMove<'a>>> {
     sources
         .iter()
@@ -1318,7 +1325,7 @@ fn build_move_plan<'a>(
         .collect()
 }
 
-fn validate_custom_destination_name(destination_name: &str) -> io::Result<()> {
+fn validate_custom_destination_name(destination_name: &std::ffi::OsStr) -> io::Result<()> {
     let path = Path::new(destination_name);
     let mut components = path.components();
     let is_single_normal_component = matches!(
@@ -3520,7 +3527,7 @@ mod tests {
             JobRequest::Move {
                 sources: vec![first_source.clone(), second_source.clone()],
                 destination_dir: root.clone(),
-                destination_names: Some(vec![String::from("a.bak"), String::from("a.bak.bak")]),
+                destination_names: Some(vec!["a.bak".into(), "a.bak.bak".into()]),
                 overwrite: OverwritePolicy::Overwrite,
             },
             &LocalFsBackend,
@@ -3569,10 +3576,7 @@ mod tests {
             JobRequest::Move {
                 sources: vec![first_source.clone(), second_source.clone()],
                 destination_dir: root.clone(),
-                destination_names: Some(vec![
-                    String::from("renamed.txt"),
-                    String::from("renamed.txt"),
-                ]),
+                destination_names: Some(vec!["renamed.txt".into(), "renamed.txt".into()]),
                 overwrite: OverwritePolicy::Overwrite,
             },
             &LocalFsBackend,
@@ -3630,7 +3634,7 @@ mod tests {
                 JobRequest::Move {
                     sources: vec![source.clone()],
                     destination_dir: destination_dir.clone(),
-                    destination_names: Some(vec![invalid_name]),
+                    destination_names: Some(vec![invalid_name.into()]),
                     overwrite: OverwritePolicy::Overwrite,
                 },
                 &LocalFsBackend,
@@ -3717,7 +3721,7 @@ mod tests {
                 JobRequest::Move {
                     sources: vec![source],
                     destination_dir: policy_root.clone(),
-                    destination_names: Some(vec![String::from("FOO.txt")]),
+                    destination_names: Some(vec!["FOO.txt".into()]),
                     overwrite,
                 },
                 &LocalFsBackend,

@@ -260,7 +260,7 @@ fn renmov_single_file_with_wildcards_uses_its_default_as_a_literal_name() {
     assert_eq!(sources, vec![source_file]);
     assert_eq!(
         destination_names,
-        Some(vec![String::from("renamed.txt")]),
+        Some(vec!["renamed.txt".into()]),
         "literal wildcard characters in the source name must not enable pattern matching"
     );
 
@@ -306,7 +306,7 @@ fn renmov_single_file_preserves_literal_whitespace_in_its_default_name() {
     };
     assert_eq!(
         destination_names,
-        Some(vec![String::from("renamed.txt")]),
+        Some(vec!["renamed.txt".into()]),
         "literal whitespace in the source name must be preserved while matching the default"
     );
 
@@ -378,10 +378,7 @@ fn renmov_multiple_selection_can_rename_by_wildcard_pattern() {
     assert_eq!(destination_dir, destination);
     assert_eq!(
         destination_names.expect("pattern rename should provide names"),
-        vec![
-            String::from("first.txt.bak"),
-            String::from("second.txt.bak")
-        ]
+        vec!["first.txt.bak", "second.txt.bak"]
     );
 
     fs::remove_dir_all(&source_root).expect("must remove temp root");

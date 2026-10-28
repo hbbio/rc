@@ -1864,7 +1864,7 @@ mod tests {
             .active_panel()
             .entries
             .iter()
-            .position(|entry| entry.name == "line\nbreak")
+            .position(|entry| entry.path.file_name() == Some(std::ffi::OsStr::new("line\nbreak")))
             .expect("control-character fixture");
         app.active_panel_mut().cursor = invalid;
         app.apply(AppCommand::PutCurrentSelected)

@@ -38,9 +38,9 @@ impl AppState {
                 self.set_status("Home directory is unavailable");
                 return;
             };
-            home.join(suffix)
+            home.join(rc_shell::decode_path_text(suffix))
         } else {
-            base_dir.join(value)
+            base_dir.join(rc_shell::decode_path_text(value))
         };
         self.queue_worker_job_request(JobRequest::LoadViewer { path });
         self.set_status("Opening viewer...");

@@ -1,3 +1,4 @@
+use rc_shell::{decode_path_text, encode_path_text};
 use std::path::{Path, PathBuf};
 
 use crate::dialog::DialogEvent;
@@ -238,13 +239,13 @@ impl AppState {
             sources
                 .first()
                 .and_then(|source| source.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
+                .map(encode_path_text)
                 .unwrap_or_else(|| String::from("*"))
         };
         let dialog = DialogState::pair_input_with_default(
             "Move",
             "Destination directory:",
-            destination_dir.to_string_lossy(),
+            encode_path_text(destination_dir.as_os_str()),
             "New name:",
             &default_name,
             &default_name,
@@ -302,7 +303,7 @@ impl AppState {
             DialogState::input(
                 title,
                 "Destination directory:",
-                destination_dir.to_string_lossy(),
+                encode_path_text(destination_dir.as_os_str()),
             ),
             PendingDialogAction::TransferDestination {
                 kind,
@@ -372,7 +373,7 @@ impl AppState {
         let source = entry.path.clone();
         let current_name = source
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+            .map(encode_path_text)
             .unwrap_or_else(|| entry.name.clone());
         self.push_dialog(
             DialogState::input("Rename/Move", "New name:", current_name),
@@ -590,7 +591,7 @@ impl AppState {
                     self.set_status("Mkdir canceled: empty name");
                     return;
                 }
-                let input_path = PathBuf::from(value);
+                let input_path = PathBuf::from(decode_path_text(value));
                 let destination = if input_path.is_absolute() {
                     input_path
                 } else {
@@ -614,7 +615,7 @@ impl AppState {
                     self.set_status("Rename failed: source has no parent directory");
                     return;
                 };
-                let destination = parent.join(value);
+                let destination = parent.join(decode_path_text(value));
                 if destination == source {
                     self.set_status("Rename skipped: name unchanged");
                     return;
@@ -1170,7 +1171,7 @@ fn overwrite_policy_items() -> Vec<String> {
 }
 
 fn parse_destination_path(base_dir: &Path, value: &str) -> PathBuf {
-    let input_path = PathBuf::from(value);
+    let input_path = PathBuf::from(decode_path_text(value));
     if input_path.is_absolute() {
         input_path
     } else {
@@ -1184,20 +1185,19 @@ fn most_common_file_extension_pattern(sources: &[PathBuf]) -> String {
         let Some(name) = source.file_name() else {
             return String::from("*");
         };
-        let name = name.to_string_lossy();
-        let extension = Path::new(name.as_ref())
+        let extension = Path::new(name)
             .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("");
+            .map(encode_path_text)
+            .unwrap_or_default();
         if extension.is_empty() || extension.contains('*') {
             return String::from("*");
         }
         if let Some(current) = common_extension.as_ref() {
-            if current != extension {
+            if current != &extension {
                 return String::from("*");
             }
         } else {
-            common_extension = Some(String::from(extension));
+            common_extension = Some(extension);
         }
     }
 
@@ -1214,49 +1214,63 @@ fn rename_sources(
     old_pattern: &str,
     new_pattern: &str,
     use_shell_patterns: bool,
-) -> Vec<String> {
+) -> Vec<std::ffi::OsString> {
+    let old_pattern = decode_path_text(old_pattern);
+    let new_pattern = decode_path_text(new_pattern);
     sources
         .iter()
         .map(|source| {
-            let source_name = source
-                .file_name()
-                .map_or_else(|| source.to_string_lossy(), |name| name.to_string_lossy())
-                .into_owned();
-            rename_source_name(&source_name, old_pattern, new_pattern, use_shell_patterns)
+            let source_name = source.file_name().unwrap_or(source.as_os_str());
+            rename_source_name(source_name, &old_pattern, &new_pattern, use_shell_patterns)
         })
         .collect()
 }
 
 fn rename_source_name(
-    source_name: &str,
-    old_pattern: &str,
-    new_pattern: &str,
+    source_name: &std::ffi::OsStr,
+    old_pattern: &std::ffi::OsStr,
+    new_pattern: &std::ffi::OsStr,
     use_shell_patterns: bool,
-) -> String {
+) -> std::ffi::OsString {
     if use_shell_patterns {
-        if let Some(capture) = wildcard_capture(source_name, old_pattern) {
-            if new_pattern.contains('*') {
-                return new_pattern.replace('*', &capture);
+        if let Some(capture) = wildcard_capture(
+            source_name.as_encoded_bytes(),
+            old_pattern.as_encoded_bytes(),
+        ) {
+            if new_pattern.as_encoded_bytes().contains(&b'*') {
+                let mut result = Vec::new();
+                for (index, part) in new_pattern
+                    .as_encoded_bytes()
+                    .split(|byte| *byte == b'*')
+                    .enumerate()
+                {
+                    if index != 0 {
+                        result.extend_from_slice(capture);
+                    }
+                    result.extend_from_slice(part);
+                }
+                return crate::action_macros::os_from_bytes(&result)
+                    .unwrap_or_else(|_| source_name.to_owned());
             }
-            return new_pattern.to_string();
+            return new_pattern.to_owned();
         }
-        return source_name.to_string();
+        return source_name.to_owned();
     }
     if source_name == old_pattern {
-        new_pattern.to_string()
+        new_pattern.to_owned()
     } else {
-        source_name.to_string()
+        source_name.to_owned()
     }
 }
 
-fn wildcard_capture(haystack: &str, pattern: &str) -> Option<String> {
-    let parts: Vec<_> = pattern.split('*').collect();
+fn wildcard_capture<'a>(haystack: &'a [u8], pattern: &[u8]) -> Option<&'a [u8]> {
+    let parts: Vec<_> = pattern.split(|byte| *byte == b'*').collect();
     if parts.len() > 2 {
         return None;
     }
     if parts.len() == 1 {
         if haystack == pattern {
-            return Some(String::new());
+            return Some(&[]);
         }
         return None;
     }
@@ -1270,7 +1284,7 @@ fn wildcard_capture(haystack: &str, pattern: &str) -> Option<String> {
     if middle_end < middle_start {
         return None;
     }
-    Some(haystack[middle_start..middle_end].to_string())
+    Some(&haystack[middle_start..middle_end])
 }
 
 fn overwrite_policy_index(policy: OverwritePolicy) -> usize {
@@ -1294,6 +1308,31 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
 mod rename_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn rename_masks_preserve_native_bytes_and_literal_backslashes() {
+        use std::os::unix::ffi::OsStringExt;
+        let source = PathBuf::from(std::ffi::OsString::from_vec(b"raw\xff\\xFF.rs".to_vec()));
+        let names = rename_sources(std::slice::from_ref(&source), "*.rs", "*.txt", true);
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from_vec(b"raw\xff\\xFF.txt".to_vec())]
+        );
+        let old = encode_path_text(source.as_os_str());
+        let renamed = rename_sources(&[source], &old, r"new\xFE.txt", false);
+        assert_eq!(
+            renamed,
+            vec![std::ffi::OsString::from_vec(b"new\xfe.txt".to_vec())]
+        );
+        let sources = [PathBuf::from(r"a.\x41"), PathBuf::from(r"b.\x41")];
+        let mask = most_common_file_extension_pattern(&sources);
+        assert_eq!(mask, r"*.\\x41");
+        assert_eq!(
+            rename_sources(&sources, &mask, "*.bak", true),
+            vec!["a.bak", "b.bak"]
+        );
+    }
+
     #[test]
     fn wildcard_extensions_use_a_valid_catch_all_pattern() {
         let sources = [PathBuf::from("first.*"), PathBuf::from("second.*")];
@@ -1302,7 +1341,7 @@ mod rename_tests {
         assert_eq!(pattern, "*");
         assert_eq!(
             rename_sources(&sources, &pattern, "*.bak", true),
-            vec![String::from("first.*.bak"), String::from("second.*.bak")]
+            vec!["first.*.bak", "second.*.bak"]
         );
     }
 }

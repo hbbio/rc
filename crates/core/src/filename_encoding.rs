@@ -52,6 +52,9 @@ impl FilenameEncoding {
             .find(|e| e.label().eq_ignore_ascii_case(value.trim()))
     }
     pub fn decode(self, name: &OsStr) -> String {
+        if self == Self::Utf8 {
+            return rc_shell::encode_path_text(name);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;

@@ -5,6 +5,7 @@ mod capture;
 mod cd;
 mod completion;
 mod display;
+mod path_text;
 
 pub use backend::{
     COMMAND_PLACEHOLDER, CustomShell, ResolvedShell, ShellDialect, ShellHistoryMode,
@@ -23,6 +24,7 @@ pub use display::{
     DISPLAY_FIELD_LIMIT_BYTES, DISPLAY_LINE_LIMIT_BYTES, sanitize_display_field,
     sanitize_display_line, sanitize_display_lossy,
 };
+pub use path_text::{decode_path_text, encode_path_text};
 
 use std::io::{self, Read};
 use std::path::Path;

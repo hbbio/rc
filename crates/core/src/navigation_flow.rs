@@ -517,7 +517,7 @@ impl AppState {
             return false;
         };
         if let Some(selected) = selected {
-            form.start_directory = selected.to_string_lossy().into_owned();
+            form.start_directory = rc_shell::encode_path_text(selected.as_os_str());
         }
         self.push_dialog(
             DialogState {

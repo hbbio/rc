@@ -2189,7 +2189,7 @@ enum PendingDialogAction {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
-        destination_names: Vec<String>,
+        destination_names: Vec<std::ffi::OsString>,
         origin: OperationOrigin,
     },
     TransferOverwrite {

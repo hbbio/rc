@@ -2107,13 +2107,14 @@ fn resolve_external_editor_process_command(
     let mut inserted_path = false;
     for part in parts {
         if part.contains("{path}") {
-            let Some(path) = request.path.to_str() else {
-                return Err(anyhow!(
-                    "external editor command '{}' uses {{path}} placeholder but selected path is not valid UTF-8",
-                    request.editor_command
-                ));
-            };
-            args.push(OsString::from(part.replace("{path}", path)));
+            let mut argument = OsString::new();
+            for (index, fragment) in part.split("{path}").enumerate() {
+                if index != 0 {
+                    argument.push(&request.path);
+                }
+                argument.push(fragment);
+            }
+            args.push(argument);
             inserted_path = true;
         } else {
             args.push(OsString::from(part));
@@ -3275,19 +3276,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn external_editor_command_parser_rejects_non_utf8_path_with_placeholder() {
+    fn external_editor_command_parser_preserves_non_utf8_path_with_placeholders() {
         let request = ExternalEditRequest {
-            editor_command: String::from("code --goto {path}:1"),
+            editor_command: String::from("code --goto {path}:1 --label=before{path}after{path}"),
             path: PathBuf::from(OsString::from_vec(vec![b'n', b'o', b't', b'e', 0x80])),
             cwd: PathBuf::from("/tmp"),
         };
-        let error = resolve_external_editor_process_command(&request)
-            .expect_err("non-utf8 placeholder expansion should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("selected path is not valid UTF-8"),
-            "placeholder expansion should fail loudly for non-utf8 paths"
+        let command = resolve_external_editor_process_command(&request).unwrap();
+        assert_eq!(command.args[1].as_bytes(), b"note\x80:1");
+        assert_eq!(
+            command.args[2].as_bytes(),
+            b"--label=beforenote\x80afternote\x80"
         );
     }
 

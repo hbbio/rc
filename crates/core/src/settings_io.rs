@@ -307,6 +307,18 @@ fn parse_ini_section_name(line: &str) -> Option<&str> {
     None
 }
 
+fn encoded_path_setting(path: &Path) -> Option<String> {
+    let encoded = rc_shell::encode_path_text(path.as_os_str());
+    (path.to_str() != Some(encoded.as_str()) || encoded.trim() != encoded).then_some(encoded)
+}
+
+fn render_path_setting(key: &str, path: &Path) -> String {
+    match encoded_path_setting(path) {
+        Some(encoded) => format!("{key}_encoded={encoded}"),
+        None => format!("{key}={}", path.to_str().expect("plain Unicode path")),
+    }
+}
+
 fn render_hotlist_entry(entry: &HotlistEntry) -> String {
     format!(
         "{}\t{}",
@@ -473,19 +485,31 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             ("configuration", "use_internal_editor") => {
                 // Legacy rc setting. Internal editing is no longer implemented.
             }
-            ("configuration", "keymap_override") => {
+            ("configuration", "keymap_override" | "keymap_override_encoded") => {
                 if value.is_empty() {
                     settings.configuration.keymap_override = None;
                 } else {
-                    settings.configuration.keymap_override = Some(PathBuf::from(value));
+                    settings.configuration.keymap_override = Some(if key.ends_with("_encoded") {
+                        rc_shell::decode_path_text(value).into()
+                    } else {
+                        PathBuf::from(value)
+                    });
                 }
             }
-            ("configuration", "hotlist") | ("configuration", "hotlist_entry") => {
+            ("configuration", "hotlist" | "hotlist_entry" | "hotlist_entry_encoded") => {
                 if !saw_hotlist {
                     settings.configuration.hotlist.clear();
                     saw_hotlist = true;
                 }
-                let entry = if key == "hotlist_entry" {
+                let entry = if key == "hotlist_entry_encoded" {
+                    parse_hotlist_entry(value).map(|mut entry| {
+                        entry.path = rc_shell::decode_path_text(
+                            entry.path.to_str().expect("decoded text field"),
+                        )
+                        .into();
+                        entry
+                    })
+                } else if key == "hotlist_entry" {
                     parse_hotlist_entry(value)
                 } else {
                     (!value.is_empty())
@@ -681,12 +705,19 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             ("appearance", "skin") if !value.is_empty() => {
                 settings.appearance.skin = value.to_string();
             }
-            ("appearance", "skin_dir") => {
+            ("appearance", "skin_dir" | "skin_dir_encoded") => {
                 if !saw_skin_dirs {
                     settings.appearance.skin_dirs.clear();
                     saw_skin_dirs = true;
                 }
-                settings.appearance.skin_dirs.push(PathBuf::from(value));
+                settings
+                    .appearance
+                    .skin_dirs
+                    .push(if key.ends_with("_encoded") {
+                        rc_shell::decode_path_text(value).into()
+                    } else {
+                        PathBuf::from(value)
+                    });
             }
             ("display_bits", "utf8_output") => {
                 if let Some(parsed) = parse_bool(value) {
@@ -812,12 +843,20 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
             .unwrap_or_default()
     ));
     if let Some(path) = settings.configuration.keymap_override.as_ref() {
-        lines.push(format!("keymap_override={}", path.to_string_lossy()));
+        lines.push(render_path_setting("keymap_override", path));
     } else {
         lines.push(String::from("keymap_override="));
     }
     for entry in &settings.configuration.hotlist {
-        lines.push(format!("hotlist_entry={}", render_hotlist_entry(entry)));
+        if let Some(encoded) = encoded_path_setting(&entry.path) {
+            lines.push(format!(
+                "hotlist_entry_encoded={}\t{}",
+                escape_settings_field(&entry.label),
+                escape_settings_field(&encoded)
+            ));
+        } else {
+            lines.push(format!("hotlist_entry={}", render_hotlist_entry(entry)));
+        }
     }
     for preset in &settings.configuration.panelize_presets {
         lines.push(format!(
@@ -962,7 +1001,7 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     lines.push(String::from("[appearance]"));
     lines.push(format!("skin={}", settings.appearance.skin));
     for skin_dir in &settings.appearance.skin_dirs {
-        lines.push(format!("skin_dir={}", skin_dir.to_string_lossy()));
+        lines.push(render_path_setting("skin_dir", skin_dir));
     }
 
     lines.push(String::new());
@@ -1267,6 +1306,33 @@ skin=default
             "[panel_options]\nleft_user_format=unknown\nright_user_format=name:0\n",
         );
         assert_eq!(parsed.panel_options, settings.panel_options);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_paths_round_trip_without_reinterpreting_legacy_fields() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut settings = Settings::default();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b" /raw\xff\\x41\n ".to_vec()));
+        settings.configuration.keymap_override = Some(path.clone());
+        let whitespace = PathBuf::from("/unicode\u{a0}");
+        settings.appearance.skin_dirs = vec![path.clone(), whitespace.clone()];
+        settings.configuration.hotlist = vec![HotlistEntry::new("Native", path.clone())];
+        let rendered = render_rc_settings_ini(&settings);
+        assert!(rendered.contains("hotlist_entry_encoded="));
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &rendered);
+        assert_eq!(parsed.configuration.keymap_override, Some(path.clone()));
+        assert_eq!(parsed.appearance.skin_dirs, vec![path.clone(), whitespace]);
+        assert_eq!(parsed.configuration.hotlist[0].path, path);
+        apply_rc_settings_ini(
+            &mut parsed,
+            "[configuration]\nkeymap_override=/literal\\xFF\n",
+        );
+        assert_eq!(
+            parsed.configuration.keymap_override,
+            Some(PathBuf::from(r"/literal\xFF"))
+        );
     }
 
     #[test]

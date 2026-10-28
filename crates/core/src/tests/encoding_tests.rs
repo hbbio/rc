@@ -108,7 +108,7 @@ fn panelized_encoding_uses_original_bytes_and_filters_without_rerunning_command(
     app.set_panel_filter(ActivePanel::Left, PanelFilter::default());
     app.set_filename_encoding(ActivePanel::Left, FilenameEncoding::Utf8);
     drain_background(&mut app);
-    assert_eq!(app.active_panel().entries[0].name, "caf�.txt");
+    assert_eq!(app.active_panel().entries[0].name, r"caf\xE9.txt");
     assert_eq!(fs::read(root.path().join("count")).unwrap(), b"x");
 }
 

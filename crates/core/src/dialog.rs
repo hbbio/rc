@@ -234,7 +234,7 @@ pub struct FindDialogState {
 impl FindDialogState {
     pub fn from_spec(spec: &FindSpec) -> Self {
         Self {
-            start_directory: spec.start_dir.to_string_lossy().into_owned(),
+            start_directory: rc_shell::encode_path_text(spec.start_dir.as_os_str()),
             filename_pattern: spec.filename_pattern.clone(),
             name_mode: spec.name_mode,
             case_sensitive: spec.case_sensitive,
@@ -247,7 +247,7 @@ impl FindDialogState {
 
     pub fn to_spec(&self) -> FindSpec {
         FindSpec {
-            start_dir: self.start_directory.trim().into(),
+            start_dir: rc_shell::decode_path_text(self.start_directory.trim()).into(),
             filename_pattern: self.filename_pattern.clone(),
             name_mode: self.name_mode,
             case_sensitive: self.case_sensitive,
