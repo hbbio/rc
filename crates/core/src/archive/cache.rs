@@ -17,7 +17,7 @@ const CACHE_ARCHIVES: usize = 8;
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SourceIdentity {
+pub(crate) struct SourceIdentity {
     pub size: u64,
     modified: Option<SystemTime>,
     created: Option<SystemTime>,
@@ -26,7 +26,7 @@ pub(super) struct SourceIdentity {
 }
 
 impl SourceIdentity {
-    pub(super) fn new(metadata: &Metadata) -> Self {
+    pub(crate) fn new(metadata: &Metadata) -> Self {
         Self {
             size: metadata.len(),
             modified: metadata.modified().ok(),

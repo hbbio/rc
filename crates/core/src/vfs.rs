@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{ArchiveLocation, FileEntry, FileEntryKind, FileEntryMetadata, SortMode};
 
+#[cfg(unix)]
+pub mod extfs;
+#[cfg(unix)]
+mod process;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {
     Local,
@@ -85,6 +90,10 @@ pub trait Backend: Send + Sync {
     /// Release resources without waiting for readers; their cancellation context
     /// is already marked closed when this hook runs.
     fn close(&self) {}
+    /// Native containers that must never be overwritten by extraction.
+    fn protected_local_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 static NEXT_MOUNT: AtomicU64 = AtomicU64::new(1);
@@ -237,6 +246,13 @@ impl From<ArchiveLocation> for VfsPath {
 }
 
 impl VfsPath {
+    pub fn protected_local_paths(&self) -> Vec<PathBuf> {
+        match self {
+            Self::Local(_) => Vec::new(),
+            Self::Archive { location, .. } => vec![location.local_archive().to_path_buf()],
+            Self::Mounted(path) => path.mount.backend.protected_local_paths(),
+        }
+    }
     pub fn identity(&self) -> PathBuf {
         match self {
             Self::Local(path) | Self::Archive { path, .. } => path.clone(),

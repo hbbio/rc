@@ -20,6 +20,7 @@ encoding_rs = "0.8"
 globset = "0.4"
 memchr = "2"
 rc-shell.workspace = true
+rc-platform.workspace = true
 regex = "1.11"
 tempfile.workspace = true
 shlex.workspace = true

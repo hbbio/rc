@@ -24,6 +24,7 @@ use crate::{
     FileEntry, FileEntryKind, FileEntryMetadata, SelectionSizeReport, SortField, SortMode,
 };
 
+pub(crate) use cache::SourceIdentity;
 pub use persistent::configure_archive_index_cache;
 
 /// Archive containers supported by read-only browsing, previews, and extraction.
