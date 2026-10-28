@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod action_macros;
 mod archive;
 mod background;
 mod command_dispatch;
