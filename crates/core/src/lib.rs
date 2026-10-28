@@ -31,6 +31,7 @@ mod quick_cd_search;
 mod quick_view_flow;
 mod refresh_flow;
 mod route_flow;
+mod screens;
 mod selection_flow;
 mod selection_size;
 mod selection_size_flow;
@@ -193,6 +194,7 @@ pub enum AppCommand {
     Delete,
     CancelJob,
     OpenJobsScreen,
+    OpenScreenList,
     CloseJobsScreen,
     /// Activate the selected entry: descend into directories, execute runnable files,
     /// or delegate documents to the operating system's configured application.
@@ -454,6 +456,7 @@ impl AppCommand {
             | Self::ShowDirectorySizes
             | Self::Panel(_, PanelCommand::OpenTree)
             | Self::OpenJobsScreen
+            | Self::OpenScreenList
             | Self::CloseJobsScreen
             | Self::MenuAccept
             | Self::MenuSelectAt(_)
@@ -762,7 +765,7 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     MenuEntry::action_with_literal_shortcut("Directory hotlist", "C-\\", AppCommand::OpenHotlist),
     MenuEntry::stub("Active VFS list", "C-x a"),
     MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
-    MenuEntry::stub("Screen list", "M-`"),
+    MenuEntry::action_with_shortcut("Screen list", "M-`", AppCommand::OpenScreenList),
     MenuEntry::separator(),
     MenuEntry::stub("Edit extension file", ""),
     MenuEntry::stub("Edit menu file", ""),
@@ -2045,6 +2048,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    SelectScreen {
+        targets: Vec<screens::ScreenTarget>,
+    },
     LearnKey {
         chord: KeyChord,
         original: Option<keymap::LearnedBinding>,
@@ -2365,6 +2371,7 @@ pub struct AppState {
     pending_skin_preview: Option<String>,
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
+    suspended_screens: Vec<Vec<Route>>,
     file_history: Vec<file_history::FileHistoryEntry>,
     command_outputs: HashMap<JobId, command_output::CommandOutput>,
     command_line: CommandLineModel,

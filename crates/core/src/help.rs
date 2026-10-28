@@ -67,6 +67,8 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_panel_quick_view}} quick-view the selection in the passive panel\n\
   {{fm_cycle_listing}} cycle Full/Brief/Long/User listing formats\n\
   {{fm_open_jobs}} open jobs screen\n\
+  {{fm_screens}} opens the screen list; choose File manager to keep a screen open.\n\
+  Restore suspended screens from that list; close them normally to release them.\n\
   {{fm_cancel_job}} cancel latest job\n\
   {{fm_skin}} open skin picker\n\
   {{fm_quit}} quit\n\
@@ -685,6 +687,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ),
         ("fm_external_panelize_menu", String::from("F9")),
         ("fm_open_jobs", String::from("Ctrl-J")),
+        ("fm_screens", String::from("Alt-backtick")),
         ("fm_cancel_job", String::from("Alt-J")),
         ("fm_skin", String::from("Alt-S/Ctrl-K")),
         ("fm_quit", String::from("q/F10")),
@@ -820,6 +823,7 @@ mod tests {
         assert!(content.contains("Ctrl-X i show info in the passive panel"));
         assert!(content.contains("Alt-Shift-T cycle Full/Brief/Long/User listing formats"));
         assert!(content.contains("q/F10 quit"));
+        assert!(content.contains("Alt-backtick opens the screen list"));
     }
 
     #[test]

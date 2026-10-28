@@ -90,6 +90,7 @@ impl AppState {
             pending_skin_preview: None,
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
+            suspended_screens: Vec::new(),
             file_history: Vec::new(),
             command_outputs: HashMap::new(),
             command_line: CommandLineModel::new(settings.shell.history),

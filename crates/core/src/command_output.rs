@@ -133,17 +133,12 @@ impl AppState {
             return;
         }
         if self.command_outputs.len() >= OUTPUT_HISTORY_LIMIT {
-            let oldest =
-                self.command_outputs
-                    .iter()
-                    .filter(|(id, output)| {
-                        output.finished
-                            && !self.routes.iter().any(
-                                |route| matches!(route, Route::CommandOutput(open) if open == *id),
-                            )
-                    })
-                    .map(|(id, _)| *id)
-                    .min_by_key(|id| id.0);
+            let oldest = self
+                .command_outputs
+                .iter()
+                .filter(|(id, output)| output.finished && !self.output_screen_is_open(**id))
+                .map(|(id, _)| *id)
+                .min_by_key(|id| id.0);
             if let Some(id) = oldest {
                 self.command_outputs.remove(&id);
             } else {
@@ -199,7 +194,21 @@ impl AppState {
         };
         let id = job.id;
         if self.command_outputs.contains_key(&id) {
-            self.routes.push(Route::CommandOutput(id));
+            if let Some(index) = self.suspended_screens.iter().position(|routes| {
+                routes
+                    .iter()
+                    .any(|r| matches!(r, Route::CommandOutput(open) if *open == id))
+            }) {
+                self.select_screen(crate::screens::ScreenTarget::Suspended(index));
+            } else if let Some(index) = self
+                .routes
+                .iter()
+                .position(|r| matches!(r, Route::CommandOutput(open) if *open == id))
+            {
+                self.routes.truncate(index + 1);
+            } else {
+                self.routes.push(Route::CommandOutput(id));
+            }
             self.set_status(format!("Output for job #{id}"));
         } else {
             self.set_status("This job has no retained command output");

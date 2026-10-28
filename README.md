@@ -46,6 +46,11 @@ and fast directory navigation.
 - Copy, move, rename, mkdir, and delete for individual or tagged entries.
 - Background execution with progress, cancellation, overwrite policies, and a jobs
   screen.
+- Alt + backtick opens the screen list from panels, viewers, searches, trees, help, and
+  jobs. Switch to File manager to keep the current screen open, then restore it
+  later with its cursor and search state intact. Background searches and captured
+  output continue while their screens are suspended. Up to 16 screens can be
+  suspended; restore a screen and close it normally to release it.
 - Metadata preservation, symlink-aware operations, validation against recursive
   destinations, and rollback when an overwrite fails.
 - Incremental, cancelable directory refreshes that preserve selection and tags.

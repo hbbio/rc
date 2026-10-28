@@ -419,6 +419,17 @@ impl AppState {
         }
         match (pending, result) {
             (
+                Some(PendingDialogAction::SelectScreen { targets }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(target) = index.and_then(|i| targets.get(i)).cloned() {
+                    self.select_screen(target);
+                }
+            }
+            (Some(PendingDialogAction::SelectScreen { .. }), DialogResult::Canceled) => {
+                self.set_status("Screen unchanged");
+            }
+            (
                 Some(PendingDialogAction::LearnKey { chord, original }),
                 DialogResult::PairInputSubmitted { first, second },
             ) => self.save_learned_binding(chord, original, first, second),

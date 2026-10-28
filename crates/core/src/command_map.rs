@@ -9,6 +9,17 @@ impl AppCommand {
 
         match (context, key_command) {
             (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
+            (
+                KeyContext::FileManager
+                | KeyContext::Viewer
+                | KeyContext::ViewerHex
+                | KeyContext::Jobs
+                | KeyContext::FindResults
+                | KeyContext::Tree
+                | KeyContext::Hotlist
+                | KeyContext::Help,
+                KeyCommand::ScreenList,
+            ) => Some(Self::OpenScreenList),
             (KeyContext::FileManager, KeyCommand::OpenCommandLine) => Some(Self::OpenCommandLine),
             (
                 KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,

@@ -310,6 +310,7 @@ impl AppState {
     pub(crate) fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
         self.routes
             .iter()
+            .chain(self.suspended_screens.iter().flatten())
             .rev()
             .find_map(|route| match route {
                 Route::FindResults(results) if results.job_id == job_id => Some(results),
@@ -326,10 +327,16 @@ impl AppState {
         &mut self,
         job_id: JobId,
     ) -> Option<&mut FindResultsState> {
-        if let Some(results) = self.routes.iter_mut().rev().find_map(|route| match route {
-            Route::FindResults(results) if results.job_id == job_id => Some(results),
-            _ => None,
-        }) {
+        if let Some(results) = self
+            .routes
+            .iter_mut()
+            .chain(self.suspended_screens.iter_mut().flatten())
+            .rev()
+            .find_map(|route| match route {
+                Route::FindResults(results) if results.job_id == job_id => Some(results),
+                _ => None,
+            })
+        {
             return Some(results);
         }
 
@@ -735,10 +742,14 @@ impl AppState {
     }
 
     pub(crate) fn tree_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut TreeState> {
-        self.routes.iter_mut().rev().find_map(|route| match route {
-            Route::Tree(tree) if tree.scan_job_id() == Some(job_id) => Some(tree.as_mut()),
-            _ => None,
-        })
+        self.routes
+            .iter_mut()
+            .chain(self.suspended_screens.iter_mut().flatten())
+            .rev()
+            .find_map(|route| match route {
+                Route::Tree(tree) if tree.scan_job_id() == Some(job_id) => Some(tree.as_mut()),
+                _ => None,
+            })
     }
 
     pub(crate) fn move_tree_cursor(&mut self, delta: isize) {

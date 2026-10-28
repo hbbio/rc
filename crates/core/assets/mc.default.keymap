@@ -1,4 +1,5 @@
 [filemanager]
+ScreenList = alt-backquote
 ChangePanel = tab; ctrl-i
 Help = f1
 UserMenu = f2
@@ -208,6 +209,7 @@ Bottom = end; alt-gt; c1
 Select = space
 
 [tree]
+ScreenList = alt-backquote
 Help = f1
 Reread = f2; ctrl-r
 Forget = f3
@@ -227,6 +229,7 @@ Search = ctrl-s; alt-s
 Delete = f8; delete
 
 [help]
+ScreenList = alt-backquote
 Help = f1
 Index = f2; c
 Back = f3; left; l
@@ -390,6 +393,7 @@ SpellCheckCurrentWord = ctrl-p
 # ExtendedKeyMap =
 
 [viewer]
+ScreenList = alt-backquote
 Help = f1
 WrapMode = f2
 Quit = f3; f10; q; esc
@@ -428,6 +432,7 @@ Ruler = alt-r
 History = alt-shift-e
 
 [viewer:hex]
+ScreenList = alt-backquote
 Help = f1
 HexEditMode = f2
 Quit = f3; f10; q; esc
@@ -500,6 +505,7 @@ SelectCodepage = alt-e
 # rc overrides for implemented commands
 
 [filemanager]
+ScreenList = alt-backquote
 Quit = q; esc; f10
 PanelOther = tab
 Up = up
@@ -575,6 +581,7 @@ Cancel = esc
 Quit = f10
 
 [jobs]
+ScreenList = alt-backquote
 Enter = enter
 Up = up
 Down = down
@@ -582,6 +589,7 @@ CancelJob = alt-j
 CloseJobs = esc; q
 
 [findresults]
+ScreenList = alt-backquote
 Quit = esc; q
 Up = up
 Down = down
@@ -596,6 +604,7 @@ FindTogglePause = f6; ctrl-s
 CancelJob = alt-j
 
 [tree]
+ScreenList = alt-backquote
 Quit = esc; f10; q
 Up = up
 Down = down
@@ -611,6 +620,7 @@ Delete = f8
 Backspace = backspace; ctrl-h
 
 [hotlist]
+ScreenList = alt-backquote
 Quit = esc; q
 Up = up
 Down = down
@@ -633,6 +643,7 @@ Home = home
 End = end
 
 [viewer]
+ScreenList = alt-backquote
 Quit = f10; esc; q
 CancelJob = alt-j
 Up = up
@@ -650,6 +661,7 @@ ToggleWrap = w
 ToggleHex = h
 
 [viewer:hex]
+ScreenList = alt-backquote
 Quit = f10; esc; q
 CancelJob = alt-j
 Up = up
