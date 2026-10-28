@@ -11,6 +11,7 @@ pub mod configuration_files;
 pub mod dialog;
 mod dialog_flow;
 mod directory_sizes;
+pub mod extension_rules;
 mod file_highlight;
 mod file_history;
 mod filename_encoding;
