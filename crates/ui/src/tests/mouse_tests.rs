@@ -10,6 +10,9 @@ fn set_format(app: &mut AppState, panel: ActivePanel, format: PanelListingFormat
         .unwrap();
     app.apply(AppCommand::DialogListboxSelectAt(index)).unwrap();
     app.apply(AppCommand::DialogAccept).unwrap();
+    if format == PanelListingFormat::User {
+        app.apply(AppCommand::DialogAccept).unwrap();
+    }
 }
 
 fn assert_rendered_entries_are_clickable(app: &AppState, width: u16, height: u16) {

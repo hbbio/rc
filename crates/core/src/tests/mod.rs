@@ -1615,6 +1615,7 @@ fn listing_format_shortcut_cycles_the_active_panel_only() {
     for expected in [
         PanelListingFormat::Brief,
         PanelListingFormat::Long,
+        PanelListingFormat::User,
         PanelListingFormat::Full,
     ] {
         app.apply(AppCommand::CycleListingFormat)
@@ -1628,6 +1629,58 @@ fn listing_format_shortcut_cycles_the_active_panel_only() {
 
     assert!(app.settings().save_setup.dirty);
     fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn user_listing_format_validates_before_applying_and_follows_panel_swap() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = app_with_loaded_panels(root.path().to_path_buf());
+    app.apply(AppCommand::OpenListingFormat).unwrap();
+    app.apply(AppCommand::DialogListboxSelectAt(3)).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    let set_value = |app: &mut AppState, value: &str| {
+        let Some(Route::Dialog(dialog)) = app.routes.last_mut() else {
+            panic!("expected format input")
+        };
+        let DialogKind::Input(input) = &mut dialog.kind else {
+            panic!("expected input")
+        };
+        input.value = value.into();
+    };
+    set_value(&mut app, "name:0");
+    app.apply(AppCommand::DialogAccept).unwrap();
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Left),
+        PanelListingFormat::Full
+    );
+    assert!(matches!(app.routes.last(), Some(Route::Dialog(_))));
+    set_value(&mut app, "perm name size:9");
+    app.apply(AppCommand::DialogAccept).unwrap();
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Left),
+        PanelListingFormat::User
+    );
+    assert_eq!(
+        app.settings.panel_options.user_listing_formats[1],
+        DEFAULT_USER_LISTING_FORMAT
+    );
+    app.apply(AppCommand::SwapPanels).unwrap();
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Right),
+        PanelListingFormat::User
+    );
+    assert_eq!(
+        app.settings.panel_options.user_listing_formats[1],
+        "perm name size:9"
+    );
+    app.apply(AppCommand::OpenListingFormat).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    set_value(&mut app, "name");
+    app.apply(AppCommand::DialogCancel).unwrap();
+    assert_eq!(
+        app.settings.panel_options.user_listing_formats[1],
+        "perm name size:9"
+    );
 }
 
 #[test]

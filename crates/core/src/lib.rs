@@ -20,6 +20,7 @@ mod keybinding_help;
 pub mod keymap;
 pub mod layout;
 mod learn_keys;
+mod listing_format;
 mod navigation_flow;
 mod orchestration;
 mod panel;
@@ -80,6 +81,7 @@ pub use jobs::{
     JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
     WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
+pub use listing_format::{DEFAULT_USER_LISTING_FORMAT, ListingField, UserListingFormat};
 #[cfg(test)]
 use panel::read_entries;
 #[cfg(test)]
@@ -309,16 +311,18 @@ pub enum PanelListingFormat {
     Full,
     Brief,
     Long,
+    User,
 }
 
 impl PanelListingFormat {
-    pub const ALL: [Self; 3] = [Self::Full, Self::Brief, Self::Long];
+    pub const ALL: [Self; 4] = [Self::Full, Self::Brief, Self::Long, Self::User];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Full => "Full",
             Self::Brief => "Brief",
             Self::Long => "Long",
+            Self::User => "User defined...",
         }
     }
 
@@ -327,6 +331,7 @@ impl PanelListingFormat {
             Self::Full => "full",
             Self::Brief => "brief",
             Self::Long => "long",
+            Self::User => "user",
         }
     }
 
@@ -334,7 +339,8 @@ impl PanelListingFormat {
         match self {
             Self::Full => Self::Brief,
             Self::Brief => Self::Long,
-            Self::Long => Self::Full,
+            Self::Long => Self::User,
+            Self::User => Self::Full,
         }
     }
 
@@ -343,6 +349,7 @@ impl PanelListingFormat {
             Self::Full => 0,
             Self::Brief => 1,
             Self::Long => 2,
+            Self::User => 3,
         }
     }
 
@@ -2092,6 +2099,9 @@ enum PendingDialogAction {
         original_skin: String,
     },
     SetPanelListingFormat {
+        panel: ActivePanel,
+    },
+    SetUserListingFormat {
         panel: ActivePanel,
     },
     SetPanelSortOrder {

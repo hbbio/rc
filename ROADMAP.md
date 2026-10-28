@@ -20,7 +20,6 @@ in the project [README](README.md).
 - Add chmod, chown, advanced chown, hard-link, symlink, relative-symlink, and
   edit-symlink operations with tagged-file support.
 - Add a screen selector.
-- Support user-defined panel listing formats in addition to Full, Brief, and Long.
 
 ## Command output, diff, and subshell
 

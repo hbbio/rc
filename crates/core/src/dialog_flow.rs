@@ -122,6 +122,20 @@ impl AppState {
         self.set_status(format!("{} panel: choose listing format", panel.label()));
     }
 
+    fn push_user_listing_format_dialog(&mut self, panel: ActivePanel, value: Option<String>) {
+        let value = value.unwrap_or_else(|| {
+            self.settings.panel_options.user_listing_formats[panel.index()].clone()
+        });
+        self.push_dialog(
+            DialogState::input(
+                "User listing format",
+                "Columns: name size mtime perm nlink uid gid inode; optional :width",
+                value,
+            ),
+            PendingDialogAction::SetUserListingFormat { panel },
+        );
+    }
+
     fn open_panel_sort_order_dialog(&mut self, panel: ActivePanel) {
         let sort_mode = self.panels[panel.index()].sort_mode;
         let is_archive = self.panels[panel.index()].is_archive();
@@ -741,12 +755,32 @@ impl AppState {
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {
                 if let Some(format) = index.and_then(PanelListingFormat::from_index) {
-                    self.set_panel_listing_format(panel, format);
+                    if format == PanelListingFormat::User {
+                        self.push_user_listing_format_dialog(panel, None);
+                    } else {
+                        self.set_panel_listing_format(panel, format);
+                    }
                 } else {
                     self.set_status("Listing format unchanged");
                 }
             }
             (Some(PendingDialogAction::SetPanelListingFormat { .. }), DialogResult::Canceled) => {
+                self.set_status("Listing format unchanged");
+            }
+            (
+                Some(PendingDialogAction::SetUserListingFormat { panel }),
+                DialogResult::InputSubmitted(value),
+            ) => match UserListingFormat::parse(&value) {
+                Ok(_) => {
+                    self.settings.panel_options.user_listing_formats[panel.index()] = value;
+                    self.set_panel_listing_format(panel, PanelListingFormat::User);
+                }
+                Err(error) => {
+                    self.push_user_listing_format_dialog(panel, Some(value));
+                    self.set_status(error);
+                }
+            },
+            (Some(PendingDialogAction::SetUserListingFormat { .. }), DialogResult::Canceled) => {
                 self.set_status("Listing format unchanged");
             }
             (

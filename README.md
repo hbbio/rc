@@ -11,7 +11,11 @@ and fast directory navigation.
 
 ### Panels and navigation
 
-- Two independent directory panels with Full, Brief, and Long layouts.
+- Two independent directory panels with Full, Brief, Long, and user-defined layouts.
+  Choose **Listing format → User defined** to arrange `name`, `size`, `mtime`,
+  `perm`, `nlink`, `uid`, `gid`, and `inode` columns, separated by spaces or commas.
+  Add `:width` (1–256) for a fixed width; an unsized `name` fills available space.
+  For example, `perm size:9 name`. Formats are saved per panel with Save setup.
 - `Ctrl-U` swaps the panels with their selection, tags, listing settings, and
   navigation history. Focus follows the active listing.
 - Browse ZIP, TAR, gzip TAR, and bzip2 TAR archives as read-only folders, with
@@ -238,7 +242,7 @@ interface.
 | `Alt-P` / `Ctrl-P` / `Ctrl-X !` | Open external panelize |
 | `Ctrl-X i` / `Ctrl-X q` | Show Info / Quick view in the passive panel |
 | `Ctrl-X y` | Copy the active selected entry's full path to the clipboard |
-| `Alt-Shift-T` | Cycle Full, Brief, and Long panel layouts |
+| `Alt-Shift-T` | Cycle Full, Brief, Long, and user-defined panel layouts |
 | `Shift-F6` / `Shift-F8` | Cycle sort field / reverse sort order |
 | `F9` | Open the menu bar |
 | `q` / `Esc` / `F10` | Quit |

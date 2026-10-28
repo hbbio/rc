@@ -604,6 +604,14 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.panel_options.listing_formats[1] = parsed;
                 }
             }
+            ("panel_options", key @ ("left_user_format" | "right_user_format")) => {
+                if let Some(parsed) = unescape_settings_field(value)
+                    && crate::UserListingFormat::parse(&parsed).is_ok()
+                {
+                    settings.panel_options.user_listing_formats
+                        [usize::from(key == "right_user_format")] = parsed;
+                }
+            }
             ("panel_options", "left_filter_pattern") => {
                 if let Some(parsed) = unescape_settings_field(value) {
                     settings.panel_options.filters[0].pattern = parsed;
@@ -896,6 +904,15 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         "right_listing_format={}",
         settings.panel_options.listing_formats[1].title_label()
     ));
+    for (prefix, format) in ["left", "right"]
+        .into_iter()
+        .zip(&settings.panel_options.user_listing_formats)
+    {
+        lines.push(format!(
+            "{prefix}_user_format={}",
+            escape_settings_field(format)
+        ));
+    }
     for (prefix, filter) in ["left", "right"]
         .into_iter()
         .zip(&settings.panel_options.filters)
@@ -1095,6 +1112,7 @@ fn parse_listing_format(value: &str) -> Option<PanelListingFormat> {
         "full" => Some(PanelListingFormat::Full),
         "brief" => Some(PanelListingFormat::Brief),
         "long" => Some(PanelListingFormat::Long),
+        "user" => Some(PanelListingFormat::User),
         _ => None,
     }
 }
@@ -1219,6 +1237,22 @@ skin=default
         assert_eq!(parsed.panel_options.filters, settings.panel_options.filters);
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
         assert!(!parsed.confirmation.confirm_hotlist_delete);
+    }
+
+    #[test]
+    fn user_listing_formats_round_trip_and_invalid_input_keeps_default() {
+        let mut settings = Settings::default();
+        settings.panel_options.listing_formats[0] = PanelListingFormat::User;
+        settings.panel_options.user_listing_formats =
+            ["perm size:9 name".into(), "inode, name:40".into()];
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &render_rc_settings_ini(&settings));
+        assert_eq!(parsed.panel_options, settings.panel_options);
+        apply_rc_settings_ini(
+            &mut parsed,
+            "[panel_options]\nleft_user_format=unknown\nright_user_format=name:0\n",
+        );
+        assert_eq!(parsed.panel_options, settings.panel_options);
     }
 
     #[test]

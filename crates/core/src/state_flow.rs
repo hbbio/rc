@@ -42,6 +42,7 @@ impl AppState {
         }
         self.active_panel = self.active_panel.other();
         self.settings.panel_options.listing_formats.swap(0, 1);
+        self.settings.panel_options.user_listing_formats.swap(0, 1);
         self.settings.panel_options.sort_modes.swap(0, 1);
         self.settings.panel_options.filters.swap(0, 1);
         self.settings.mark_dirty();
@@ -249,6 +250,11 @@ impl AppState {
 
     pub fn panel_listing_format(&self, panel: ActivePanel) -> PanelListingFormat {
         self.panel_listing_formats[panel.index()]
+    }
+
+    pub fn user_listing_format(&self, panel: ActivePanel) -> UserListingFormat {
+        UserListingFormat::parse(&self.settings.panel_options.user_listing_formats[panel.index()])
+            .unwrap_or_default()
     }
 
     pub fn quick_view_state(&self, panel: ActivePanel) -> &QuickViewState {

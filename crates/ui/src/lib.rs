@@ -961,6 +961,14 @@ fn render_panel(
             PanelListingFormat::Long => {
                 render_long_panel_entries(frame, panel_layout[0], panel, active, skin)
             }
+            PanelListingFormat::User => render_user_panel_entries(
+                frame,
+                panel_layout[0],
+                panel,
+                active,
+                skin,
+                &app.user_listing_format(panel_id),
+            ),
         }
     }
 
@@ -1242,6 +1250,53 @@ fn render_long_panel_entries(
     let mut table_state = TableState::default();
     table_state.select(Some(selected_row));
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn render_user_panel_entries(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+    format: &rc_core::UserListingFormat,
+) {
+    use rc_core::ListingField;
+    let (start, end) = panel.visible_window(usize::from(area.height.saturating_sub(1).max(1)), 1);
+    let rows = panel.entries[start..end].iter().map(|entry| {
+        Row::new(format.columns.iter().map(|column| {
+            Cell::from(match column.field {
+                ListingField::Name => panel_entry_display_label(panel, entry),
+                ListingField::Size => panel_entry_size_label(entry),
+                ListingField::Modified => format_modified(entry.modified),
+                ListingField::Permissions => format_file_mode(entry),
+                ListingField::Links => optional_number(entry.metadata.hard_links),
+                ListingField::User => optional_number(entry.metadata.user_id),
+                ListingField::Group => optional_number(entry.metadata.group_id),
+                ListingField::Inode => optional_number(entry.metadata.inode),
+            })
+        }))
+        .style(panel_entry_style(panel, entry, false, skin))
+    });
+    let widths = format
+        .columns
+        .iter()
+        .map(|column| column.width.map_or(Constraint::Fill(1), Constraint::Length));
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(format.columns.iter().map(|c| c.field.label()))
+                .style(skin.style("core", "header")),
+        )
+        .style(skin.style("core", "_default_"))
+        .highlight_style(panel_selection_style(panel, active, skin))
+        .column_spacing(1);
+    let mut state = TableState::default();
+    state.select(Some(
+        panel
+            .cursor
+            .saturating_sub(start)
+            .min(end.saturating_sub(start).saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn panel_entry_display_label(panel: &PanelState, entry: &FileEntry) -> String {
@@ -3785,6 +3840,26 @@ mod tests {
             "frame should include panel entry names"
         );
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn render_user_listing_respects_column_order_and_handles_narrow_panels() {
+        let root = temp_root("user-listing");
+        fs::write(root.join("payload.txt"), "hello").unwrap();
+        let mut app = app_with_loaded_panels(root.clone());
+        let mut settings = app.settings().clone();
+        settings.panel_options.listing_formats[0] = PanelListingFormat::User;
+        settings.panel_options.user_listing_formats[0] = "inode:10 name size:8".into();
+        app.replace_settings(settings);
+        let rendered = render_to_text(&app, 160, 24);
+        let header = rendered.lines().find(|l| l.contains("Inode")).unwrap();
+        assert!(header.find("Inode") < header.find("Name"));
+        assert!(header.find("Name") < header.find("Size"));
+        assert!(rendered.contains("payload.txt"));
+        for width in [1, 2, 10, 30] {
+            let _ = render_to_text(&app, width, 6);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

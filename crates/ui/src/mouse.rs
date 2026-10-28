@@ -76,7 +76,7 @@ pub fn commands_for_left_click(
                 },
             )
         }
-        PanelListingFormat::Full | PanelListingFormat::Long => {
+        PanelListingFormat::Full | PanelListingFormat::Long | PanelListingFormat::User => {
             // Full and Long tables reserve their first row for column headers.
             let row = row.checked_sub(listing.y + 1)?;
             let viewport_rows = usize::from(listing.height.saturating_sub(1));
