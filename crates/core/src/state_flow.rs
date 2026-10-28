@@ -431,26 +431,27 @@ impl AppState {
         opened
     }
 
-    pub(crate) fn open_selected_archive(&mut self) -> bool {
-        if self.active_panel().is_archive() {
-            return false;
-        }
+    pub(crate) fn open_selected_archive(&mut self) -> io::Result<bool> {
         let Some(path) = self
             .selected_non_parent_entry()
             .filter(|entry| !entry.is_dir() && ArchiveFormat::for_path(&entry.path).is_some())
             .map(|entry| entry.path.clone())
         else {
-            return false;
+            return Ok(false);
         };
-        self.open_archive_path(path)
+        self.open_archive_path(path).map(|()| true)
     }
 
-    pub(crate) fn open_archive_path(&mut self, path: PathBuf) -> bool {
+    pub(crate) fn open_archive_path(&mut self, path: PathBuf) -> io::Result<()> {
+        let location = if let Some(parent) = self.active_panel().archive_location() {
+            ArchiveLocation::nested(parent.clone(), path)?
+        } else {
+            ArchiveLocation::root(path)
+        };
         let panel = self.active_panel;
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let previous = self.active_panel().local_directory().to_path_buf();
-        let location = ArchiveLocation::root(path);
         let state = self.active_panel_mut();
         state.cwd = location.path();
         state.source = PanelListingSource::Archive(location);
@@ -467,7 +468,7 @@ impl AppState {
         self.remember_previous_directory(panel, previous);
         self.sync_quick_view_from(panel, false);
         self.sync_selection_size(panel, false);
-        true
+        Ok(())
     }
 
     pub fn go_parent_directory(&mut self) -> bool {

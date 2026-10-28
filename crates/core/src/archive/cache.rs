@@ -1,5 +1,5 @@
-//! Process-local, single-flight LRU cache. No archive payloads or sidecar files
-//! are written. In-flight users retain their immutable snapshot across eviction.
+//! Process-local, single-flight LRU cache. Nested containers own bounded private
+//! temporary payloads. In-flight users retain their snapshot across eviction.
 use super::{
     ArchiveFormat, ArchiveIndex, ArchiveLocation, check_canceled, invalid_data,
     normalize_archive_io_result, open_source, safe_component, tar, zip,
@@ -114,7 +114,8 @@ fn get_index_with_cache(
         ));
     }
     let format = location.format()?;
-    let path = fs::canonicalize(&location.archive)?;
+    let source = super::nested::resolve(location, cancel)?;
+    let path = source.path.clone();
     // Opening before inspecting metadata also rejects FIFOs without blocking.
     let mut file = open_source(&path)?;
     let identity = SourceIdentity::new(&file.metadata()?);
@@ -166,10 +167,12 @@ fn get_index_with_cache(
         let (members, backend) = normalize_archive_io_result(result, cancel)?;
         identity.verify(&file.metadata()?)?;
         identity.verify(&fs::metadata(&path)?)?;
+        source.verify_parent()?;
         let index = Arc::new(ArchiveIndex::build(
             members,
             identity.clone(),
             backend,
+            Arc::clone(&source),
             cancel,
         )?);
         check_canceled(cancel)?;
@@ -177,6 +180,26 @@ fn get_index_with_cache(
         drop(building);
         return Ok(index);
     }
+}
+
+pub(super) fn release_unused_indexes() -> bool {
+    let Some(cache) = CACHE.get() else {
+        return false;
+    };
+    let Ok(mut entries) = cache.lock() else {
+        return false;
+    };
+    let before = entries.len();
+    entries.retain(|entry| {
+        entry.slot.state.try_lock().map_or(true, |state| {
+            state.building
+                || state
+                    .index
+                    .as_ref()
+                    .is_some_and(|index| Arc::strong_count(index) > 1)
+        })
+    });
+    entries.len() != before
 }
 
 fn poisoned_cache() -> io::Error {

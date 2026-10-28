@@ -5,6 +5,7 @@
 mod bzip;
 mod cache;
 mod gzip;
+mod nested;
 mod tar;
 mod zip;
 
@@ -70,12 +71,14 @@ impl ArchiveFormat {
 /// never a local filesystem path. Only backends open the containing local file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArchiveLocation {
-    /// Local path to the containing archive file.
+    /// Logical path to the containing archive file (local for an outer archive).
     pub archive: PathBuf,
     /// Safe member directory relative to the archive root; empty for the root itself.
     ///
     /// Readers reject absolute paths, parent traversal, and unsafe components.
     pub directory: PathBuf,
+    /// Enclosing archive directory, when this archive is itself a member.
+    pub parent: Option<Box<ArchiveLocation>>,
 }
 
 impl ArchiveLocation {
@@ -85,7 +88,58 @@ impl ArchiveLocation {
         Self {
             archive,
             directory: PathBuf::new(),
+            parent: None,
         }
+    }
+
+    /// Opens a member as an archive, preserving the enclosing location for `..`.
+    pub fn nested(parent: Self, archive: PathBuf) -> io::Result<Self> {
+        let member = parent.member_path(&archive)?;
+        if member.as_os_str().is_empty() || ArchiveFormat::for_path(&archive).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported nested archive",
+            ));
+        }
+        let mut depth = 1;
+        let mut ancestor = Some(&parent);
+        while let Some(location) = ancestor {
+            depth += 1;
+            ancestor = location.parent.as_deref();
+        }
+        if depth > nested::MAX_DEPTH {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "archive nesting exceeds eight levels",
+            ));
+        }
+        let parent = parent.in_directory(member.parent().unwrap_or(Path::new("")).to_path_buf());
+        Ok(Self {
+            archive,
+            directory: PathBuf::new(),
+            parent: Some(Box::new(parent)),
+        })
+    }
+
+    pub(crate) fn in_directory(&self, directory: PathBuf) -> Self {
+        Self {
+            directory,
+            ..self.clone()
+        }
+    }
+
+    /// The outermost local container, used for shell cwd and overwrite protection.
+    pub fn local_archive(&self) -> &Path {
+        self.parent
+            .as_deref()
+            .map_or(&self.archive, Self::local_archive)
+    }
+
+    pub(crate) fn parent_location(&self) -> Option<Self> {
+        self.directory
+            .parent()
+            .map(|directory| self.in_directory(directory.to_path_buf()))
+            .or_else(|| self.parent.as_deref().cloned())
     }
 
     /// Infers the containing file's format using [`ArchiveFormat::for_path`].
@@ -121,10 +175,15 @@ impl ArchiveLocation {
     pub(crate) fn parent_path(&self) -> PathBuf {
         self.directory.parent().map_or_else(
             || {
-                self.archive
-                    .parent()
-                    .unwrap_or(Path::new("/"))
-                    .to_path_buf()
+                self.parent.as_deref().map_or_else(
+                    || {
+                        self.archive
+                            .parent()
+                            .unwrap_or(Path::new("/"))
+                            .to_path_buf()
+                    },
+                    Self::path,
+                )
             },
             |parent| self.archive.join(parent),
         )
@@ -267,6 +326,8 @@ pub(crate) struct ArchiveIndex {
     identity: cache::SourceIdentity,
     backend: Box<dyn IndexedArchive>,
     estimated_bytes: usize,
+    source: Arc<nested::ArchiveSource>,
+    nested: std::sync::Mutex<BTreeMap<PathBuf, std::sync::Weak<nested::ArchiveSource>>>,
 }
 
 impl ArchiveIndex {
@@ -281,6 +342,7 @@ impl ArchiveIndex {
         mut members: BTreeMap<PathBuf, ArchiveMember>,
         identity: cache::SourceIdentity,
         backend: Box<dyn IndexedArchive>,
+        source: Arc<nested::ArchiveSource>,
         cancel: Option<&AtomicBool>,
     ) -> io::Result<Self> {
         let leaves = members
@@ -335,7 +397,14 @@ impl ArchiveIndex {
             identity,
             backend,
             estimated_bytes,
+            source,
+            nested: std::sync::Mutex::default(),
         })
+    }
+
+    fn verify_source(&self) -> io::Result<()> {
+        self.source.verify_parent()?;
+        self.identity.verify(&fs::metadata(&self.source.path)?)
     }
 
     pub(crate) fn subtree<'r>(
@@ -383,7 +452,6 @@ impl ArchiveIndex {
 pub(crate) struct ArchiveReader<'a> {
     index: Arc<ArchiveIndex>,
     backend: Box<dyn ArchiveBackend + 'a>,
-    path: PathBuf,
     cancel: Option<&'a AtomicBool>,
 }
 
@@ -397,13 +465,17 @@ impl Deref for ArchiveReader<'_> {
 impl<'a> ArchiveReader<'a> {
     pub fn open(location: &ArchiveLocation, cancel: Option<&'a AtomicBool>) -> io::Result<Self> {
         let index = cache::get_index(location, cancel)?;
-        let file = open_source(&location.archive)?;
+        Self::from_index(index, cancel)
+    }
+
+    fn from_index(index: Arc<ArchiveIndex>, cancel: Option<&'a AtomicBool>) -> io::Result<Self> {
+        index.verify_source()?;
+        let file = open_source(&index.source.path)?;
         index.identity.verify(&file.metadata()?)?;
         let backend = normalize_archive_io_result(index.backend.open(file, cancel), cancel)?;
         Ok(Self {
             index,
             backend,
-            path: location.archive.clone(),
             cancel,
         })
     }
@@ -416,7 +488,7 @@ impl<'a> ArchiveReader<'a> {
 
     pub fn verify_source(&self) -> io::Result<()> {
         check_canceled(self.cancel)?;
-        self.index.identity.verify(&fs::metadata(&self.path)?)
+        self.index.verify_source()
     }
 
     #[cfg(all(test, unix))]
@@ -455,7 +527,8 @@ impl<'a> ArchiveReader<'a> {
 ///
 /// This function blocks while acquiring or building the shared metadata index. The
 /// first scan of a compressed TAR decompresses and validates the entire stream;
-/// subsequent calls can reuse the index. No extracted files are written.
+/// subsequent calls can reuse the index. Nested containers may be materialized
+/// in private, bounded temporary files; selected members are not extracted.
 ///
 /// # Errors
 ///

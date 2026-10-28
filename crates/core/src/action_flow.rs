@@ -474,9 +474,11 @@ impl AppState {
                 {
                     use std::os::unix::ffi::OsStrExt;
                     let archive = PathBuf::from(OsStr::from_bytes(archive));
-                    if ArchiveFormat::for_path(&archive).is_some()
-                        && self.open_archive_path(archive)
-                    {
+                    if ArchiveFormat::for_path(&archive).is_some() {
+                        if let Err(error) = self.open_archive_path(archive) {
+                            self.set_status(format!("Cannot open archive: {error}"));
+                            return false;
+                        }
                         self.queue_panel_refresh(self.active_panel);
                         self.set_status("Opening archive...");
                         return true;
@@ -507,7 +509,14 @@ impl AppState {
     pub(crate) fn apply_builtin_file_action(&mut self, action: ExtensionAction) {
         match action {
             ExtensionAction::Open => {
-                if self.open_selected_archive() || self.open_selected_directory() {
+                let opened_archive = match self.open_selected_archive() {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        self.set_status(format!("Cannot open archive: {error}"));
+                        return;
+                    }
+                };
+                if opened_archive || self.open_selected_directory() {
                     self.queue_panel_refresh(self.active_panel);
                     self.set_status("Loading selected directory...");
                 } else if self.active_panel().is_archive() {

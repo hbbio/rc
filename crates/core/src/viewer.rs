@@ -152,7 +152,8 @@ impl ViewerState {
     /// the archive root. The returned viewer retains that synthetic identity.
     /// Preview bytes are limited by the viewer memory budget, but building the
     /// shared index for a compressed TAR can first decompress its entire stream.
-    /// No extracted files are written.
+    /// Nested containers may use private temporary files; the viewed member
+    /// itself is read directly into the bounded preview buffer.
     ///
     /// # Errors
     ///

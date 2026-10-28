@@ -23,6 +23,7 @@ mod link_tests;
 mod metadata_tests;
 mod mouse_tests;
 mod native_path_tests;
+mod nested_archive_tests;
 mod panelize_tests;
 mod quick_cd_tests;
 mod quick_view_tests;

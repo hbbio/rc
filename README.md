@@ -130,8 +130,17 @@ change. Use manual refresh to update an open pane after external changes.
 ZIP Stored/Deflate entries and TAR regular files/directories are supported,
 including GNU long names and PAX paths, sizes, and modification times. Repeated TAR
 names use the last record. Encrypted ZIP contents, archive symlinks, hard links,
-sparse files, special files, and nested archive browsing are not supported for
+sparse files, and special files are not supported for
 viewing/extraction. Unsafe member paths are omitted.
+
+Enter opens supported archives inside other archives, up to eight container levels.
+`..` returns to the enclosing archive and selects the container just left. Viewing,
+file history, size totals, and copying work at every level. Inner containers are
+materialized into private temporary files, reused while cached, and removed on
+eviction or exit. Each inner container is limited to 512 MiB, with a shared 1 GiB
+temporary-storage limit. Cancellation and errors remove incomplete files; changes
+to any enclosing container invalidate its descendants. Copies cannot replace the
+outer source archive.
 
 On Unix, member paths retain their original bytes, including non-UTF-8 names;
 display labels may contain replacement characters. Unsupported names produce an
@@ -143,7 +152,7 @@ Archive panes and jobs use a common read-only backend interface in
 immutable metadata and member readers; TAR compression readers supply indexed
 seeking independently. Adding another format does not require format-specific
 navigation, viewer, or copy flows. This archive layer does not yet provide the
-unified local/remote VFS or nested mounts described in the roadmap.
+unified local/remote VFS described in the roadmap.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;

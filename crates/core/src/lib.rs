@@ -1637,15 +1637,14 @@ impl PanelState {
 
         let source = if let Some(location) = self.archive_location() {
             if path == location.parent_path() && location.directory.as_os_str().is_empty() {
-                PanelListingSource::Directory
+                location
+                    .parent_location()
+                    .map_or(PanelListingSource::Directory, PanelListingSource::Archive)
             } else {
                 let Ok(directory) = location.member_path(&path) else {
                     return false;
                 };
-                PanelListingSource::Archive(ArchiveLocation {
-                    archive: location.archive.clone(),
-                    directory,
-                })
+                PanelListingSource::Archive(location.in_directory(directory))
             }
         } else {
             PanelListingSource::Directory
@@ -1668,13 +1667,9 @@ impl PanelState {
         };
 
         let source = if let Some(location) = self.archive_location() {
-            match location.directory.parent() {
-                Some(directory) => PanelListingSource::Archive(ArchiveLocation {
-                    archive: location.archive.clone(),
-                    directory: directory.to_path_buf(),
-                }),
-                None => PanelListingSource::Directory,
-            }
+            location
+                .parent_location()
+                .map_or(PanelListingSource::Directory, PanelListingSource::Archive)
         } else {
             PanelListingSource::Directory
         };
@@ -1744,7 +1739,7 @@ impl PanelState {
     /// Local directory represented by this panel for previous-directory history.
     pub fn local_directory(&self) -> &Path {
         match self.archive_location() {
-            Some(location) => location.archive.parent().unwrap_or(Path::new(".")),
+            Some(location) => location.local_archive().parent().unwrap_or(Path::new(".")),
             None => &self.cwd,
         }
     }

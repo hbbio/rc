@@ -275,7 +275,7 @@ impl AppState {
         let source_base_dir = self
             .active_panel()
             .archive_location()
-            .and_then(|location| location.archive.parent())
+            .and_then(|location| location.local_archive().parent())
             .unwrap_or(&self.active_panel().cwd)
             .to_path_buf();
         self.start_transfer_dialog_for_paths(
