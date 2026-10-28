@@ -23,6 +23,10 @@ and fast directory navigation.
   control, and persisted configuration.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
   columns, and mouse selection or activation.
+- `Ctrl-Space` calculates recursive apparent sizes for tagged directories, or all
+  visible directories when none are tagged. Results update the size column and
+  size sorting without moving the selection. The cancelable scan supports archives,
+  does not follow local symlinks, and reports unreadable entries as partial results.
 - Select or unselect groups with glob or regular-expression patterns, optional
   case-insensitive matching, and control over including directories. These
   commands affect visible entries and preserve tags hidden by a listing filter.

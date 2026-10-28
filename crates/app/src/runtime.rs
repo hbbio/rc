@@ -1113,6 +1113,7 @@ async fn run_runtime_loop(
                             | JobRequest::QuickCdSearch { .. }
                             | JobRequest::ResolvePanelIdentity { .. }
                             | JobRequest::MeasureSelection { .. }
+                            | JobRequest::MeasureDirectories { .. }
                             | JobRequest::MeasureArchiveSelection { .. }
                             | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan")
@@ -1463,6 +1464,9 @@ fn execute_runtime_worker_job(
 ) {
     let cancel_flag = worker_job.cancel_flag();
     match worker_job.request.clone() {
+        JobRequest::MeasureDirectories { .. } => {
+            rc_core::execute_directory_sizes(worker_job, worker_event_tx, background_event_tx)
+        }
         JobRequest::CaptureCommand { .. } => {
             rc_core::execute_command_capture(worker_job, worker_event_tx, background_event_tx)
         }

@@ -130,6 +130,22 @@ fn swapping_archive_panel_preserves_browsing_and_tagged_members() {
     assert_eq!(app.active_viewer().unwrap().bytes, b"archive swap");
 }
 
+#[test]
+fn archive_directory_sizes_use_member_sizes_without_extracting() {
+    let fixture = Fixture::new(&[("folder/one", b"one"), ("folder/sub/two", b"second")]);
+    let mut app = fixture.app();
+    app.apply(AppCommand::ShowDirectorySizes).unwrap();
+    drain_background(&mut app);
+    let folder = app
+        .active_panel()
+        .entries
+        .iter()
+        .find(|entry| entry.name == "folder")
+        .unwrap();
+    assert_eq!(folder.size, 9);
+    assert!(fs::read_dir(&fixture.output).unwrap().next().is_none());
+}
+
 fn enter(app: &mut AppState, path: &Path) {
     select(app, path);
     app.apply(AppCommand::OpenEntry).unwrap();

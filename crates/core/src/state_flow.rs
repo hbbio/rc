@@ -34,6 +34,7 @@ impl AppState {
         self.panel_listing_formats.swap(0, 1);
         self.selection_sizes.swap(0, 1);
         self.panelized_result_history.swap(0, 1);
+        self.directory_size_jobs.swap(0, 1);
         self.previous_panel_directories.swap(0, 1);
         self.panel_mkdirs.latest_job_ids.swap(0, 1);
         for pending in self.panel_mkdirs.pending.values_mut() {
@@ -113,6 +114,7 @@ impl AppState {
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             quick_view: QuickViewWorkflow::default(),
             selection_size: SelectionSizeWorkflow::default(),
+            directory_size_jobs: [None, None],
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
             panel_mkdirs: PanelMkdirTracker::default(),

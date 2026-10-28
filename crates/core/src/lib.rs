@@ -9,6 +9,7 @@ mod command_output;
 mod comparison;
 pub mod dialog;
 mod dialog_flow;
+mod directory_sizes;
 mod file_history;
 mod find_engine;
 mod find_flow;
@@ -67,6 +68,7 @@ pub use dialog::{
     FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
     QuickCdSearchStatus,
 };
+pub use directory_sizes::execute_directory_sizes;
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
     FindSpec, run_find_entries, stream_find_entries,
@@ -169,6 +171,7 @@ pub enum AppCommand {
     EnterXMap,
     SwitchPanel,
     SwapPanels,
+    ShowDirectorySizes,
     SetOtherPanelView(PanelViewMode),
     Panel(ActivePanel, PanelCommand),
     Navigate(NavigationTarget, NavigationMotion),
@@ -426,6 +429,7 @@ impl AppCommand {
             | Self::EnterXMap
             | Self::SwitchPanel
             | Self::SwapPanels
+            | Self::ShowDirectorySizes
             | Self::Panel(_, PanelCommand::OpenTree)
             | Self::OpenJobsScreen
             | Self::CloseJobsScreen
@@ -721,7 +725,11 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
         "C-x !",
         AppCommand::OpenPanelizeDialog,
     ),
-    MenuEntry::stub("Show directory sizes", "C-Space"),
+    MenuEntry::action_with_shortcut(
+        "Show directory sizes",
+        "C-Space",
+        AppCommand::ShowDirectorySizes,
+    ),
     MenuEntry::separator(),
     MenuEntry::action_with_shortcut("Command history", "M-H", AppCommand::OpenCommandHistory),
     MenuEntry::action_with_shortcut(
@@ -2352,6 +2360,7 @@ pub struct AppState {
     panel_refresh_post: PanelRefreshPostWorkflow,
     quick_view: QuickViewWorkflow,
     selection_size: SelectionSizeWorkflow,
+    directory_size_jobs: [Option<directory_sizes::DirectorySizePending>; 2],
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
     panel_mkdirs: PanelMkdirTracker,

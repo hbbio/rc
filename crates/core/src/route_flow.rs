@@ -64,6 +64,7 @@ impl AppState {
                 }
             }
             AppCommand::SwapPanels => self.swap_panels(),
+            AppCommand::ShowDirectorySizes => self.show_directory_sizes(),
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
             AppCommand::Navigate(NavigationTarget::Jobs, motion) => {

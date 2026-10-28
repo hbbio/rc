@@ -11,6 +11,7 @@ use std::{env, fs};
 mod archive_tests;
 mod command_output_tests;
 mod comparison_tests;
+mod directory_size_tests;
 mod file_history_tests;
 mod find_tests;
 mod group_selection_tests;
@@ -79,6 +80,14 @@ fn drain_background(app: &mut AppState) {
                     let job_id = job.id;
                     let (event_tx, event_rx) = std::sync::mpsc::channel();
                     match &job.request {
+                        JobRequest::MeasureDirectories { .. } => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            execute_directory_sizes(job, &event_tx, &background_tx);
+                            drop(background_tx);
+                            for event in background_rx {
+                                app.handle_background_event(event);
+                            }
+                        }
                         JobRequest::CaptureCommand { .. } => {
                             let (background_tx, background_rx) = std::sync::mpsc::channel();
                             execute_command_capture(job, &event_tx, &background_tx);

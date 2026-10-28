@@ -44,6 +44,9 @@ impl AppCommand {
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
             (KeyContext::FileManager, KeyCommand::SwapPanels) => Some(Self::SwapPanels),
+            (KeyContext::FileManager, KeyCommand::ShowDirectorySizes) => {
+                Some(Self::ShowDirectorySizes)
+            }
             (KeyContext::FileManagerXMap, KeyCommand::PanelInfo) => {
                 Some(Self::SetOtherPanelView(crate::PanelViewMode::Info))
             }

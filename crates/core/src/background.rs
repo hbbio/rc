@@ -63,6 +63,10 @@ impl PanelRefreshStreamRequest {
 
 #[derive(Clone, Debug)]
 pub enum BackgroundEvent {
+    DirectorySizesMeasured {
+        job_id: JobId,
+        sizes: Vec<(PathBuf, crate::SelectionSizeReport)>,
+    },
     CommandOutput {
         job_id: JobId,
         bytes: Vec<u8>,

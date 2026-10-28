@@ -233,6 +233,7 @@ impl AppState {
     }
 
     pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
+        self.cancel_directory_sizes(panel);
         let panel_index = panel.index();
         if self.panels[panel_index].source.is_panelized() {
             let snapshot = self.panel_refresh_revert_snapshot(panel);

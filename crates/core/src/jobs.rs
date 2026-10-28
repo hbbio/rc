@@ -37,6 +37,7 @@ impl fmt::Display for JobId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
+    MeasureDirectories,
     Command,
     Copy,
     Move,
@@ -57,6 +58,7 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::MeasureDirectories => "directory-sizes",
             Self::Command => "command",
             Self::Copy => "copy",
             Self::Move => "move",
@@ -96,6 +98,10 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    MeasureDirectories {
+        paths: Vec<PathBuf>,
+        archive: Option<ArchiveLocation>,
+    },
     CaptureCommand {
         spec: crate::CommandCaptureSpec,
     },
@@ -206,6 +212,7 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::MeasureDirectories { .. } => JobKind::MeasureDirectories,
             Self::CaptureCommand { .. } => JobKind::Command,
             Self::ExtractArchive { .. } => JobKind::Copy,
             Self::LoadArchiveViewer { quick_view, .. } => {
@@ -235,6 +242,7 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::MeasureDirectories { paths, .. } => paths.len(),
             Self::CaptureCommand { .. } => 1,
             Self::ExtractArchive { sources, .. } => sources.len(),
             Self::LoadArchiveViewer { .. } => 1,
@@ -258,6 +266,9 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::MeasureDirectories { paths, .. } => {
+                format!("measure {} directories", paths.len())
+            }
             Self::CaptureCommand { spec } => spec.summary(),
             Self::ExtractArchive {
                 sources,
@@ -1121,10 +1132,12 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "quick-view jobs are executed by the runtime adapter",
         )),
-        JobRequest::MeasureSelection { .. } => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "selection-size jobs are executed by the runtime adapter",
-        )),
+        JobRequest::MeasureSelection { .. } | JobRequest::MeasureDirectories { .. } => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "selection-size jobs are executed by the runtime adapter",
+            ))
+        }
         JobRequest::BuildTree { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "tree jobs are executed by the runtime adapter",
@@ -2011,6 +2024,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::MeasureArchiveSelection { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }
+        | JobRequest::MeasureDirectories { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
