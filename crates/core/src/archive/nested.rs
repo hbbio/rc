@@ -224,6 +224,11 @@ mod tests {
             location = ArchiveLocation::nested(location, path).unwrap();
         }
         let index = cache::get_index(&location, None).unwrap();
+        // This isolated process has no unrelated readers churning the LRU.
+        assert!(Arc::ptr_eq(
+            &index,
+            &cache::get_index(&location, None).unwrap()
+        ));
         let source = Arc::downgrade(&index.source);
         drop(index);
         let used = STORAGE_BYTES.load(Ordering::Relaxed);

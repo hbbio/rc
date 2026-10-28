@@ -162,8 +162,11 @@ Archive panes and jobs use a common read-only backend interface in
 [`crates/core/src/archive`](crates/core/src/archive.rs). Container backends supply
 immutable metadata and member readers; TAR compression readers supply indexed
 seeking independently. Adding another format does not require format-specific
-navigation, viewer, or copy flows. This archive layer does not yet provide the
-unified local/remote VFS described in the roadmap.
+navigation, viewer, or copy flows. Typed locations and the shared read interface
+in [`crates/core/src/vfs.rs`](crates/core/src/vfs.rs) distinguish native paths,
+archive members, and mounted backends. Mounted readers inherit job cancellation
+and mount closure; their display identities cannot be obtained as native paths.
+Helper and remote connections are still listed in the roadmap.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;

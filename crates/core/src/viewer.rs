@@ -167,32 +167,34 @@ impl ViewerState {
         path: PathBuf,
         cancel: &AtomicBool,
     ) -> io::Result<Self> {
-        let mut reader = crate::archive::ArchiveReader::open(location, Some(cancel))?;
-        let member_path = location.member_path(&path)?;
-        let member = reader.members.get(&member_path).cloned().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "archive member no longer exists")
-        })?;
-        if member.is_dir {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "viewer supports files only",
-            ));
-        }
-        member.ensure_extractable()?;
-        let size = member.size;
-        let mut input =
-            crate::archive::normalize_archive_io_result(reader.open_member(&member), Some(cancel))?;
+        Self::open_vfs_cancellable(
+            crate::vfs::VfsPath::Archive {
+                location: location.clone(),
+                path,
+            },
+            cancel,
+        )
+    }
+
+    pub fn open_vfs_cancellable(
+        path: crate::vfs::VfsPath,
+        cancel: &AtomicBool,
+    ) -> io::Result<Self> {
         let limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let (bytes, hit_limit) = crate::archive::normalize_archive_io_result(
-            read_prefix(&mut input, limit, Some(cancel)),
-            Some(cancel),
-        )?;
-        drop(input);
-        reader.verify_source()?;
-        let mut viewer = Self::from_prefix(path, size, bytes, hit_limit);
-        viewer.archive_location = Some(location.clone());
+        let mut result = None;
+        path.with_file(Some(cancel), &mut |entry, input| {
+            let (bytes, hit_limit) = read_prefix(input, limit, Some(cancel))?;
+            result = Some((entry.size, bytes, hit_limit));
+            Ok(())
+        })?;
+        let (size, bytes, hit_limit) =
+            result.ok_or_else(|| io::Error::other("VFS backend did not provide file data"))?;
+        let mut viewer = Self::from_prefix(path.identity(), size, bytes, hit_limit);
+        if let crate::vfs::VfsPath::Archive { location, .. } = path {
+            viewer.archive_location = Some(location);
+        }
         Ok(viewer)
     }
 
@@ -553,12 +555,16 @@ fn read_file_prefix(
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<(Vec<u8>, bool)> {
     ensure_viewer_not_canceled(cancel_flag)?;
-    let mut file = fs::File::open(path)?;
-    read_prefix(&mut file, byte_limit, cancel_flag)
+    let mut result = None;
+    crate::vfs::VfsPath::Local(path.to_path_buf()).with_file(cancel_flag, &mut |_, file| {
+        result = Some(read_prefix(file, byte_limit, cancel_flag)?);
+        Ok(())
+    })?;
+    result.ok_or_else(|| io::Error::other("file reader did not provide data"))
 }
 
 fn read_prefix(
-    file: &mut impl Read,
+    file: &mut (impl Read + ?Sized),
     byte_limit: usize,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<(Vec<u8>, bool)> {

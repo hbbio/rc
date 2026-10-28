@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use crate::{
     ActivePanel, DiskUsageSummary, FileEntry, FindResultEntry, JobId, PanelFilter,
     PanelListingSource, SortMode, TreeBuildResult, ViewerState, build_tree_entries,
-    canonical_panel_paths, ensure_panel_refresh_not_canceled, read_entries_with_visibility_cancel,
-    read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
-    stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
+    canonical_panel_paths, ensure_panel_refresh_not_canceled, read_panelized_entries_with_cancel,
+    read_panelized_paths, sort_file_entries, stream_panelized_entries_with_cancel,
+    stream_panelized_paths_with_cancel,
 };
 
 #[cfg(unix)]
@@ -188,15 +188,10 @@ pub fn refresh_panel_entries(
     cancel_flag: &AtomicBool,
 ) -> io::Result<Vec<FileEntry>> {
     match source {
-        PanelListingSource::Archive(location) => {
-            location.read_entries(sort_mode, show_hidden_files, Some(cancel_flag))
-        }
-        PanelListingSource::Directory => read_entries_with_visibility_cancel(
-            cwd,
-            sort_mode,
-            show_hidden_files,
-            Some(cancel_flag),
-        ),
+        PanelListingSource::Archive(location) => crate::vfs::VfsPath::from(location.clone())
+            .read_directory(sort_mode, show_hidden_files, Some(cancel_flag)),
+        PanelListingSource::Directory => crate::vfs::VfsPath::Local(cwd.to_path_buf())
+            .read_directory(sort_mode, show_hidden_files, Some(cancel_flag)),
         PanelListingSource::Panelize { command } => {
             read_panelized_entries_with_cancel(cwd, command, sort_mode, Some(cancel_flag))
         }
@@ -230,7 +225,7 @@ where
 {
     let mut result = match &request.source {
         PanelListingSource::Archive(location) => {
-            let entries = location.read_entries(
+            let entries = crate::vfs::VfsPath::from(location.clone()).read_directory(
                 request.sort_mode,
                 request.show_hidden_files,
                 Some(cancel_flag),

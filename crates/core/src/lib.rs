@@ -51,6 +51,7 @@ pub mod slo;
 mod state_flow;
 mod tree;
 mod user_menu;
+pub mod vfs;
 mod viewer;
 mod viewer_flow;
 
@@ -106,8 +107,8 @@ use panel::read_entries;
 pub(crate) use panel::read_panelized_entries_with_process_backend;
 pub(crate) use panel::{
     PANEL_REFRESH_CANCELED_MESSAGE, ensure_panel_refresh_not_canceled,
-    read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
-    sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
+    read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
+    stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
 pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
 pub use quick_cd::current_user_home_directory;
@@ -147,6 +148,7 @@ pub(crate) use tree::{
 pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
+#[cfg(test)]
 use crate::panel::read_entries_with_visibility;
 use crate::panel_filter::apply_panel_filter;
 use crate::quick_cd::QuickCdSearchWorkflow;
@@ -1359,14 +1361,18 @@ impl PanelState {
         self.clear_canonical_paths();
         let (mut entries, mut panelized_entries) = match &self.source {
             PanelListingSource::Archive(location) => (
-                location.read_entries(self.sort_mode, self.show_hidden_files, None)?,
+                vfs::VfsPath::from(location.clone()).read_directory(
+                    self.sort_mode,
+                    self.show_hidden_files,
+                    None,
+                )?,
                 None,
             ),
             PanelListingSource::Directory => {
-                let entries = read_entries_with_visibility(
-                    &self.cwd,
+                let entries = vfs::VfsPath::Local(self.cwd.clone()).read_directory(
                     self.sort_mode,
                     self.show_hidden_files,
+                    None,
                 )?;
                 (entries, None)
             }
@@ -1735,6 +1741,13 @@ impl PanelState {
         match &self.source {
             PanelListingSource::Archive(location) => Some(location),
             _ => None,
+        }
+    }
+
+    pub fn location(&self) -> vfs::VfsPath {
+        match self.archive_location() {
+            Some(location) => location.clone().into(),
+            None => vfs::VfsPath::Local(self.cwd.clone()),
         }
     }
 

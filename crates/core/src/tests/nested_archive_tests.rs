@@ -112,7 +112,7 @@ fn nested_zip_tar_navigation_view_copy_and_history_preserve_enclosing_location()
 }
 
 #[test]
-fn nested_sources_reuse_indexes_detect_outer_changes_and_protect_outer_file() {
+fn nested_sources_detect_outer_changes_and_protect_outer_file() {
     use crate::archive::{ArchiveIndex, ArchiveReader};
     let files = tempfile::tempdir().unwrap();
     let archive = files.path().join("outer.zip");
@@ -127,10 +127,6 @@ fn nested_sources_reuse_indexes_detect_outer_changes_and_protect_outer_file() {
     )
     .unwrap();
     let first = ArchiveIndex::open(&location, None).unwrap();
-    assert!(Arc::ptr_eq(
-        &first,
-        &ArchiveIndex::open(&location, None).unwrap()
-    ));
     let reader = ArchiveReader::open(&location, None).unwrap();
     let before = fs::read(&archive).unwrap();
     assert!(
