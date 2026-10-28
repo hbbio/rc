@@ -19,13 +19,85 @@ pub(crate) struct VfsWorkflow {
     mounts: BTreeMap<u64, Arc<Mount>>,
     pending: HashMap<JobId, PendingMount>,
     jobs: HashMap<JobId, u64>,
+    reconnects: HashMap<JobId, u64>,
 }
 
 impl AppState {
+    pub(crate) fn open_sftp_dialog(&mut self, panel: ActivePanel) {
+        if !self.settings.virtual_fs.vfs_enabled || !self.settings.virtual_fs.sftp_enabled {
+            self.set_status("Enable VFS and SFTP links in Options → Virtual FS first");
+            return;
+        }
+        self.push_dialog(
+            DialogState::pair_input(
+                "SFTP link (SSH keys / agent)",
+                "Address [user@]host[:port]:",
+                "",
+                "Directory:",
+                ".",
+            ),
+            PendingDialogAction::SftpConnection { panel },
+        );
+    }
+    pub(crate) fn submit_sftp_connection(
+        &mut self,
+        panel: ActivePanel,
+        address: &str,
+        directory: &str,
+    ) {
+        #[cfg(unix)]
+        {
+            if !self.settings.virtual_fs.vfs_enabled || !self.settings.virtual_fs.sftp_enabled {
+                self.set_status("SFTP links are disabled in Options → Virtual FS");
+                return;
+            }
+            let endpoint = match vfs::ssh::Endpoint::parse(address) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    self.push_dialog(
+                        DialogState::pair_input(
+                            "SFTP link",
+                            "Address [user@]host[:port]:",
+                            address,
+                            "Directory:",
+                            directory,
+                        ),
+                        PendingDialogAction::SftpConnection { panel },
+                    );
+                    self.set_status(error.to_string());
+                    return;
+                }
+            };
+            let directory = PathBuf::from(rc_shell::decode_path_text(directory));
+            let return_to = self.panels[panel.index()].location();
+            self.queue_mount_task(
+                panel,
+                Task::OpenSftp {
+                    connection: vfs::sftp::Connection {
+                        endpoint,
+                        directory,
+                    },
+                    return_to,
+                },
+                PathBuf::new(),
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (panel, address, directory);
+            self.set_status("SFTP links require Unix OpenSSH");
+        }
+    }
     pub(crate) fn cancel_vfs_open(&mut self, job: JobId) {
         self.vfs_workflow.pending.remove(&job);
+        self.vfs_workflow.reconnects.remove(&job);
     }
     pub(crate) fn track_vfs_job(&mut self, id: JobId, request: &JobRequest) {
+        if let JobRequest::Vfs(Task::Reconnect { location }) = request {
+            self.vfs_workflow
+                .reconnects
+                .insert(id, location.mount().id());
+        }
         let mount = match request {
             JobRequest::Vfs(task) => task.mount_id(),
             JobRequest::RefreshPanel {
@@ -41,6 +113,28 @@ impl AppState {
     }
     pub(crate) fn finish_vfs_job(&mut self, id: JobId, result: &Result<(), JobError>) {
         self.vfs_workflow.jobs.remove(&id);
+        if let Some(mount_id) = self.vfs_workflow.reconnects.remove(&id)
+            && let Some(mount) = self
+                .vfs_workflow
+                .mounts
+                .get(&mount_id)
+                .filter(|mount| !mount.is_closed())
+        {
+            match result {
+                Ok(()) => {
+                    self.set_status(format!("Reconnected {}", mount.label()));
+                    for panel in [ActivePanel::Left, ActivePanel::Right] {
+                        if self.panels[panel.index()]
+                            .mounted_location()
+                            .is_some_and(|path| path.mount().id() == mount_id)
+                        {
+                            self.queue_panel_refresh(panel);
+                        }
+                    }
+                }
+                Err(error) => self.set_status(format!("Cannot reconnect VFS: {}", error.message)),
+            }
+        }
         if let Err(error) = result
             && self.vfs_workflow.pending.remove(&id).is_some()
         {
@@ -68,6 +162,28 @@ impl AppState {
         source: Option<VfsPath>,
         directory: PathBuf,
     ) {
+        let from = self.panels[panel.index()].location();
+        let return_to = source
+            .as_ref()
+            .and_then(|source| source.parent().ok().flatten())
+            .unwrap_or(from);
+        self.queue_mount_task(
+            panel,
+            Task::OpenHelper {
+                helper,
+                source,
+                return_to,
+            },
+            directory,
+        );
+    }
+
+    #[cfg(unix)]
+    fn queue_mount_task(&mut self, panel: ActivePanel, task: Task, directory: PathBuf) {
+        if !self.settings.virtual_fs.vfs_enabled {
+            self.set_status("Enable VFS in Options → Virtual FS first");
+            return;
+        }
         if self.vfs_workflow.mounts.len() >= MOUNT_LIMIT {
             self.set_status("Close a mount in Active VFS list before opening another (limit 16)");
             return;
@@ -77,17 +193,9 @@ impl AppState {
             return;
         }
         let from = self.panels[panel.index()].location();
-        let return_to = source
-            .as_ref()
-            .and_then(|source| source.parent().ok().flatten())
-            .unwrap_or_else(|| from.clone());
         self.cancel_pending_mount(panel);
         let refresh_id = self.panel_refresh_generation(panel);
-        let id = self.queue_worker_job_request(JobRequest::Vfs(Task::OpenHelper {
-            helper,
-            source,
-            return_to,
-        }));
+        let id = self.queue_worker_job_request(JobRequest::Vfs(task));
         self.vfs_workflow.pending.insert(
             id,
             PendingMount {
@@ -97,7 +205,7 @@ impl AppState {
                 directory,
             },
         );
-        self.set_status("Opening VFS helper...");
+        self.set_status("Opening VFS connection...");
     }
 
     /// Returns true once a helper URI has been handled, including an error.
@@ -293,11 +401,17 @@ impl AppState {
             mount.label(),
             mount.root().identity().display()
         ));
-        let labels = vec![
+        let mut labels = vec![
             "Open in left panel".into(),
             "Open in right panel".into(),
             "Close mount".into(),
         ];
+        if matches!(
+            mount.kind(),
+            vfs::BackendKind::Sftp | vfs::BackendKind::Shell | vfs::BackendKind::Ftp
+        ) {
+            labels.push("Reconnect".into());
+        }
         self.push_dialog(
             DialogState::listbox(title, labels, 0),
             PendingDialogAction::VfsMount { mount },
@@ -320,6 +434,28 @@ impl AppState {
                 true,
             ),
             2 => self.close_vfs_mount(mount.id()),
+            3 if matches!(
+                mount.kind(),
+                vfs::BackendKind::Sftp | vfs::BackendKind::Shell | vfs::BackendKind::Ftp
+            ) =>
+            {
+                let jobs: Vec<_> = self
+                    .vfs_workflow
+                    .jobs
+                    .iter()
+                    .filter(|(_, id)| **id == mount.id())
+                    .map(|(job, _)| *job)
+                    .collect();
+                for job in jobs {
+                    self.request_cancel_for_job(job);
+                }
+                mount.invalidate();
+                let VfsPath::Mounted(location) = mount.root() else {
+                    unreachable!()
+                };
+                self.queue_worker_job_request(JobRequest::Vfs(Task::Reconnect { location }));
+                self.set_status(format!("Reconnecting {}...", mount.label()));
+            }
             _ => {}
         }
     }

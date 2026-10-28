@@ -304,6 +304,7 @@ pub enum AppCommand {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
+    OpenSftp,
     OpenEncoding,
     SetView(PanelViewMode),
     /// Focus this listing panel and select an entry by index.
@@ -585,6 +586,7 @@ impl AppCommand {
             | Self::Panel(
                 _,
                 PanelCommand::OpenListingFormat
+                | PanelCommand::OpenSftp
                 | PanelCommand::OpenEncoding
                 | PanelCommand::OpenSortOrder
                 | PanelCommand::OpenFilter,
@@ -736,7 +738,10 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
         MenuEntry::separator(),
         MenuEntry::stub("FTP link...", ""),
         MenuEntry::stub("Shell link...", ""),
-        MenuEntry::stub("SFTP link...", ""),
+        MenuEntry::action(
+            "SFTP link...",
+            AppCommand::Panel(panel, PanelCommand::OpenSftp),
+        ),
         MenuEntry::action(
             "Panelize",
             AppCommand::Panel(panel, PanelCommand::RestorePanelizedResults),
@@ -2155,6 +2160,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    SftpConnection {
+        panel: ActivePanel,
+    },
     ViewVfsFile {
         base: vfs::VfsPath,
     },

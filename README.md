@@ -191,7 +191,7 @@ Action macros also reject references to virtual files in the passive panel;
 actions using only the active local panel continue to work.
 
 **Command → Active VFS list** (`Ctrl-X a`) lists up to 16 mounted connections.
-Select one to open it in either panel or close it. Closing cancels its jobs and
+Select one to open it in either panel, reconnect a remote connection, or close it. Closing cancels its jobs and
 dependent mounts and returns affected panels to their containing location.
 Leaving a mount with `..` keeps it available in this list. Manual reread refreshes
 helper metadata. Helpers have a five-minute deadline, 16 MiB listing limit,
@@ -201,7 +201,31 @@ per output to detect truncation. Native filename bytes are preserved when the
 helper's listing format preserves them; leading whitespace needs the MC `./`
 prefix convention, and names containing newlines cannot use this line format.
 
-Remote connection providers remain in the roadmap.
+On Unix, **Left / Right → SFTP link** opens a read-only remote panel using the
+installed OpenSSH client and SFTP v3 server. Enter `[user@]host[:port]` (bracket
+IPv6 addresses) and the remote directory separately. SSH aliases, keys, agent,
+and configuration are supported. Authentication runs in batch mode; RC never
+collects or stores SSH passwords or private keys. Host-key verification is
+mandatory, including for connections whose SSH configuration relaxes it. Add or
+verify the host through ordinary SSH first. Agent forwarding and local commands
+are disabled for these connections.
+
+SFTP listings preserve native filename bytes, including newlines. Directory and
+View file inputs use the same reversible `\xHH` notation as local paths. Reads
+stream directly from an owned SSH process and support cancellation. Each RPC has
+a 30-second deadline, directory listings have a five-minute deadline, and cached
+metadata expires after 30 seconds. Listings are bounded to 100,000 entries and
+16 MiB of metadata. SFTP links and special files cannot be read or copied.
+Interrupted or failed operations discard their connection; the next operation
+reconnects. **Rescan** clears metadata and the idle connection. **Active VFS list
+→ Reconnect** cancels that mount's pending jobs, establishes a fresh connection, and
+refreshes its visible panels. Source-change checks use the attributes supplied
+by SFTP v3, including size and second-resolution modification time.
+
+**Options → Virtual FS** controls new mounts. Disabling VFS blocks new archive,
+helper, and remote mounts; existing mounts remain usable until closed. The SFTP
+toggle separately controls new SFTP links. FTP and shell providers remain in the
+roadmap.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;

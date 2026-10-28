@@ -17,6 +17,12 @@ pub(crate) mod walk;
 pub mod extfs;
 #[cfg(unix)]
 mod process;
+#[cfg(unix)]
+mod remote_cache;
+#[cfg(unix)]
+pub mod sftp;
+#[cfg(unix)]
+pub mod ssh;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {

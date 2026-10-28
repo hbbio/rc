@@ -12,6 +12,14 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Task {
+    Reconnect {
+        location: MountedPath,
+    },
+    #[cfg(unix)]
+    OpenSftp {
+        connection: super::sftp::Connection,
+        return_to: VfsPath,
+    },
     #[cfg(unix)]
     OpenHelper {
         helper: super::extfs::Helper,
@@ -43,8 +51,9 @@ pub enum Task {
 impl Task {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::Reconnect { .. } => JobKind::RefreshPanel,
             #[cfg(unix)]
-            Self::OpenHelper { .. } => JobKind::RefreshPanel,
+            Self::OpenHelper { .. } | Self::OpenSftp { .. } => JobKind::RefreshPanel,
             Self::View { quick_view, .. } => {
                 if quick_view.is_some() {
                     JobKind::LoadQuickView
@@ -66,8 +75,13 @@ impl Task {
     }
     pub fn summary(&self) -> String {
         match self {
+            Self::Reconnect { location } => format!("reconnect {}", location.mount().label()),
             #[cfg(unix)]
             Self::OpenHelper { helper, .. } => format!("open extfs {}", helper.name()),
+            #[cfg(unix)]
+            Self::OpenSftp { connection, .. } => {
+                format!("connect SFTP {}", connection.endpoint.authority())
+            }
             Self::View { path, .. } => format!("view {}", path.identity().display()),
             Self::Measure { paths, .. } => format!("measure {} VFS entries", paths.len()),
             Self::DirectorySizes { paths, .. } => {
@@ -88,6 +102,7 @@ impl Task {
         match self {
             Self::View { path, .. } => Some(path.mount().id()),
             Self::Measure { location, .. }
+            | Self::Reconnect { location }
             | Self::DirectorySizes { location, .. }
             | Self::Copy { location, .. } => Some(location.mount().id()),
             #[cfg(unix)]
@@ -96,7 +111,7 @@ impl Task {
                 ..
             } => Some(path.mount().id()),
             #[cfg(unix)]
-            Self::OpenHelper { .. } => None,
+            Self::OpenHelper { .. } | Self::OpenSftp { .. } => None,
         }
     }
 }
@@ -114,6 +129,22 @@ pub fn execute(job: WorkerJob, jobs: &Sender<JobEvent>, events: &Sender<Backgrou
     let _ = jobs.send(JobEvent::Started { id });
     let result = (|| -> io::Result<()> {
         let event = match task {
+            Task::Reconnect { location } => {
+                VfsPath::Mounted(location.clone()).read_directory(
+                    crate::SortMode::default(),
+                    true,
+                    Some(&cancel),
+                )?;
+                return Ok(());
+            }
+            #[cfg(unix)]
+            Task::OpenSftp {
+                connection,
+                return_to,
+            } => BackgroundEvent::VfsMounted {
+                job_id: id,
+                mount: super::sftp::open(connection, return_to.clone(), Some(&cancel))?,
+            },
             #[cfg(unix)]
             Task::OpenHelper {
                 helper,

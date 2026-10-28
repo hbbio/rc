@@ -16,6 +16,134 @@ fn fixture() -> (tempfile::TempDir, AppState, vfs::extfs::Helper, PathBuf) {
     (dir, app, helper, source)
 }
 
+#[test]
+fn sftp_menu_targets_its_panel_validates_addresses_and_queues_native_paths() {
+    let (dir, mut app, _, _) = fixture();
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::OpenSftp,
+    ))
+    .unwrap();
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "bad;command".into(),
+        second: "/data".into(),
+    });
+    assert!(
+        matches!(app.top_route(), Route::Dialog(_)),
+        "invalid addresses retain the dialog"
+    );
+    assert!(app.take_pending_worker_commands().is_empty());
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "user@[::1]:2222".into(),
+        second: r"/native/\xFF".into(),
+    });
+    let pending = app.take_pending_worker_commands();
+    let job = pending
+        .into_iter()
+        .find_map(|command| {
+            if let WorkerCommand::Run(job) = command {
+                Some(job)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let JobRequest::Vfs(Task::OpenSftp {
+        connection,
+        return_to,
+    }) = &job.request
+    else {
+        panic!("SFTP task")
+    };
+    assert_eq!(connection.endpoint.authority(), "user@[::1]:2222");
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(connection.directory.as_os_str().as_bytes(), b"/native/\xff");
+    assert_eq!(*return_to, VfsPath::Local(dir.path().into()));
+    assert_eq!(app.vfs_workflow.pending[&job.id].panel, ActivePanel::Right);
+    assert!(app.panels.iter().all(|panel| !panel.is_virtual()));
+    assert!(app.request_cancel_for_job(job.id));
+    assert!(app.vfs_workflow.pending.is_empty());
+    app.settings.virtual_fs.sftp_enabled = false;
+    app.apply(AppCommand::Panel(ActivePanel::Left, PanelCommand::OpenSftp))
+        .unwrap();
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(app.status_line.contains("Enable"));
+}
+
+#[test]
+fn global_vfs_setting_blocks_new_archives_and_helpers() {
+    let (dir, mut app, helper, source) = fixture();
+    app.settings.virtual_fs.vfs_enabled = false;
+    assert!(
+        app.open_archive_path(dir.path().join("archive.zip"))
+            .is_err()
+    );
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    assert!(app.take_pending_worker_commands().is_empty());
+    assert!(app.vfs_workflow.pending.is_empty());
+}
+
+#[test]
+fn reconnect_runs_in_a_worker_and_refreshes_only_panels_still_on_the_mount() {
+    struct Remote;
+    impl vfs::Backend for Remote {
+        fn kind(&self) -> vfs::BackendKind {
+            vfs::BackendKind::Sftp
+        }
+        fn read_directory(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+        ) -> io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+        fn metadata(&self, _: &Path, _: &vfs::Cancellation<'_>) -> io::Result<FileEntry> {
+            Err(io::Error::other("unused"))
+        }
+        fn with_file(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+            _: &mut dyn FnMut(&FileEntry, &mut dyn io::Read) -> io::Result<()>,
+        ) -> io::Result<()> {
+            Err(io::Error::other("unused"))
+        }
+    }
+    let (dir, mut app, _, _) = fixture();
+    let mount = Mount::new(
+        "remote".into(),
+        "sftp://host/".into(),
+        VfsPath::Local(dir.path().into()),
+        Arc::new(Remote),
+    )
+    .unwrap();
+    app.vfs_workflow
+        .mounts
+        .insert(mount.id(), Arc::clone(&mount));
+    app.enter_vfs_location(ActivePanel::Left, mount.root(), true);
+    drain_background(&mut app);
+    app.act_on_vfs_mount(Arc::clone(&mount), 3);
+    assert_eq!(app.vfs_workflow.reconnects.len(), 1);
+    drain_background(&mut app);
+    assert!(app.vfs_workflow.reconnects.is_empty());
+    assert_eq!(
+        app.panels[0].mounted_location().unwrap().mount().id(),
+        mount.id()
+    );
+    assert!(!app.panels[1].is_virtual());
+    app.act_on_vfs_mount(Arc::clone(&mount), 3);
+    app.close_vfs_mount(mount.id());
+    drain_background(&mut app);
+    assert!(app.vfs_workflow.reconnects.is_empty());
+    assert!(app.panels.iter().all(|panel| !panel.is_virtual()));
+}
+
 fn mounted(app: &mut AppState, helper: vfs::extfs::Helper, source: PathBuf) -> Arc<Mount> {
     app.queue_helper_mount(
         ActivePanel::Left,

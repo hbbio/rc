@@ -24,7 +24,7 @@ impl AppState {
             return None;
         }
         if self.active_panel().is_virtual() {
-            self.set_status("Archives are read-only");
+            self.set_status("Virtual locations are read-only");
             return None;
         }
         if self.active_panel().loading {

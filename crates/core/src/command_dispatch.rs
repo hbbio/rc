@@ -14,7 +14,7 @@ impl AppState {
                     | AppCommand::OpenInputDialog
             )
         {
-            return Some("Archives are read-only; use F5 to copy entries out");
+            return Some("Virtual locations are read-only; use F5 to copy entries out");
         }
         if self.active_panel().is_virtual()
             && matches!(
@@ -33,7 +33,9 @@ impl AppState {
             )
             || (command == AppCommand::PutOtherTagged && self.passive_panel().is_virtual())
         {
-            return Some("This command requires a local directory; leave the archive first");
+            return Some(
+                "This command requires a local directory; leave the virtual location first",
+            );
         }
         if let AppCommand::Panel(panel, PanelCommand::OpenTree) = command
             && self.panels[panel.index()].is_virtual()

@@ -452,6 +452,9 @@ impl AppState {
     }
 
     pub(crate) fn open_archive_path(&mut self, path: PathBuf) -> io::Result<()> {
+        if !self.settings.virtual_fs.vfs_enabled {
+            return Err(io::Error::other("Enable VFS in Options → Virtual FS first"));
+        }
         let location = if let Some(parent) = self.active_panel().archive_location() {
             ArchiveLocation::nested(parent.clone(), path)?
         } else {

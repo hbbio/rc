@@ -1,6 +1,7 @@
 //! Worker-only subprocess capture with nonblocking pipes. No reader thread can
 //! be stranded by a descendant that keeps an inherited pipe open.
 use super::Cancellation;
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -177,4 +178,154 @@ pub(super) fn ensure_success(output: Output) -> io::Result<Vec<u8>> {
     } else {
         format!("VFS helper failed: {detail}")
     }))
+}
+
+/// A bounded duplex transport for request/response protocols over an owned
+/// subprocess. Every wait polls cancellation and drains both output pipes.
+pub(super) struct Duplex {
+    child: OwnedChild,
+    input: std::process::ChildStdin,
+    output: std::process::ChildStdout,
+    errors: std::process::ChildStderr,
+    pending: VecDeque<u8>,
+    diagnostics: Vec<u8>,
+    output_closed: bool,
+    limit: usize,
+}
+
+impl Duplex {
+    pub fn spawn(
+        mut command: Command,
+        limit: usize,
+        cancel: &Cancellation<'_>,
+    ) -> io::Result<Self> {
+        cancel.check()?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut child = OwnedChild {
+            child: command.spawn()?,
+            reaped: false,
+        };
+        let input = child.child.stdin.take().expect("requested stdin");
+        let output = child.child.stdout.take().expect("requested stdout");
+        let errors = child.child.stderr.take().expect("requested stderr");
+        nonblocking(&input)?;
+        nonblocking(&output)?;
+        nonblocking(&errors)?;
+        Ok(Self {
+            child,
+            input,
+            output,
+            errors,
+            pending: VecDeque::new(),
+            diagnostics: Vec::new(),
+            output_closed: false,
+            limit,
+        })
+    }
+    fn error(&self, message: &str) -> io::Error {
+        let detail = rc_shell::sanitize_display_lossy(&self.diagnostics);
+        let detail = detail.trim();
+        io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            if detail.is_empty() {
+                message.into()
+            } else {
+                format!("{message}: {detail}")
+            },
+        )
+    }
+    fn poll(&mut self, deadline: Instant, cancel: &Cancellation<'_>) -> io::Result<()> {
+        cancel.check()?;
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote operation timed out",
+            ));
+        }
+        drain(&mut self.errors, &mut self.diagnostics, STDERR_LIMIT)?;
+        let mut buffer = [0_u8; 8192];
+        for _ in 0..8 {
+            match self.output.read(&mut buffer) {
+                Ok(0) => {
+                    self.output_closed = true;
+                    break;
+                }
+                Ok(count) => {
+                    if self.pending.len().saturating_add(count) > self.limit {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "remote response exceeds its buffer limit",
+                        ));
+                    }
+                    self.pending.extend(&buffer[..count]);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if self.child.status()?.is_some_and(|status| !status.success()) {
+            return Err(self.error("remote transport failed"));
+        }
+        Ok(())
+    }
+    pub fn write_all(
+        &mut self,
+        mut bytes: &[u8],
+        deadline: Instant,
+        cancel: &Cancellation<'_>,
+    ) -> io::Result<()> {
+        if bytes.len() > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "remote request exceeds its buffer limit",
+            ));
+        }
+        while !bytes.is_empty() {
+            self.poll(deadline, cancel)?;
+            match self.input.write(bytes) {
+                Ok(0) => return Err(self.error("remote transport input closed")),
+                Ok(count) => bytes = &bytes[count..],
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    std::thread::sleep(TICK)
+                }
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                    return Err(self.error("remote transport input closed"));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        cancel.check()
+    }
+    pub fn read_exact(
+        &mut self,
+        mut bytes: &mut [u8],
+        deadline: Instant,
+        cancel: &Cancellation<'_>,
+    ) -> io::Result<()> {
+        while !bytes.is_empty() {
+            self.poll(deadline, cancel)?;
+            let count = bytes.len().min(self.pending.len());
+            for target in &mut bytes[..count] {
+                *target = self.pending.pop_front().expect("count checked");
+            }
+            bytes = &mut bytes[count..];
+            if !bytes.is_empty() && self.output_closed {
+                return Err(self.error("remote transport closed before completing its response"));
+            }
+            if count == 0 {
+                std::thread::sleep(TICK);
+            }
+        }
+        cancel.check()
+    }
 }
