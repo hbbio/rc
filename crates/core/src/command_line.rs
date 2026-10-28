@@ -53,6 +53,7 @@ pub enum CommandLineInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForegroundShellRequest {
     pub activation_id: u64,
+    pub buffer_revision: u64,
     pub command: String,
     pub cwd: PathBuf,
     pub shell: ResolvedShell,
@@ -1080,6 +1081,7 @@ impl AppState {
         self.pending_foreground_shell_requests
             .push(ForegroundShellRequest {
                 activation_id,
+                buffer_revision,
                 command,
                 cwd,
                 shell,
@@ -1157,6 +1159,64 @@ impl AppState {
         std::mem::take(&mut self.pending_foreground_shell_requests)
     }
 
+    pub fn take_panel_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_panel_toggle)
+    }
+
+    pub fn set_shell_available(&mut self, available: bool) {
+        self.shell_available = available;
+    }
+
+    /// Follow a shell directory change only while its original panel is still
+    /// active and has not been navigated elsewhere by the user.
+    pub fn follow_shell_directory(
+        &mut self,
+        panel: crate::ActivePanel,
+        expected: &Path,
+        directory: &Path,
+    ) -> io::Result<bool> {
+        if self.active_panel != panel
+            || self.active_panel().cwd != expected
+            || !directory.is_absolute()
+            || self.active_panel().local_directory() == directory
+        {
+            return Ok(false);
+        }
+        self.set_active_panel_directory(directory.to_path_buf())
+    }
+
+    pub fn finish_persistent_shell_request(
+        &mut self,
+        request: &ForegroundShellRequest,
+        result: Result<i32, String>,
+    ) {
+        match result {
+            Ok(status) => {
+                self.command_line.set_last_exit_status(status);
+                // The user may have closed the modal prompt while this command
+                // ran. Retire its unchanged draft without touching newer text.
+                if self.command_line.revision() == request.buffer_revision {
+                    self.command_line.clear_after_success();
+                }
+                if let Some(session) =
+                    self.command_line_session_by_activation_mut(request.activation_id)
+                {
+                    session.notice = None;
+                }
+            }
+            Err(error) => {
+                let message = format!("Command failed: {error}");
+                if let Some(session) =
+                    self.command_line_session_by_activation_mut(request.activation_id)
+                {
+                    session.notice = Some(message);
+                } else {
+                    self.set_status(message);
+                }
+            }
+        }
+    }
+
     pub fn handle_completion_response(&mut self, response: CompletionResponse) {
         let model_matches = self.command_line.revision() == response.buffer_revision
             && self.command_line.value() == response.original_buffer;
@@ -1214,8 +1274,8 @@ impl AppState {
         result: Result<i32, String>,
     ) {
         let active = self
-            .command_line_session()
-            .is_some_and(|session| session.activation_id == activation_id);
+            .command_line_session_by_activation_mut(activation_id)
+            .is_some();
         if !active {
             return;
         }
@@ -1223,9 +1283,15 @@ impl AppState {
             Ok(status) => {
                 self.command_line.set_last_exit_status(status);
                 self.command_line.clear_after_success();
-                self.clear_command_line_notice();
+                if let Some(session) = self.command_line_session_by_activation_mut(activation_id) {
+                    session.notice = None;
+                }
             }
-            Err(error) => self.set_command_line_notice(format!("Command failed: {error}")),
+            Err(error) => {
+                if let Some(session) = self.command_line_session_by_activation_mut(activation_id) {
+                    session.notice = Some(format!("Command failed: {error}"));
+                }
+            }
         }
     }
 

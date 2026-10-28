@@ -111,6 +111,8 @@ impl AppState {
             pending_completion_requests: Vec::new(),
             pending_completion_cancellations: Vec::new(),
             pending_foreground_shell_requests: Vec::new(),
+            pending_panel_toggle: false,
+            shell_available: false,
             paused_find_results: None,
             pending_find_tree_picker: None,
             pending_worker_commands: Vec::new(),

@@ -63,6 +63,9 @@ fn answer_queries(shell: &mut PersistentShell, query_tail: &mut Vec<u8>, bytes: 
     if query_tail.windows(4).any(|bytes| bytes == b"\x1b[6n") {
         shell.write_response(b"\x1b[1;1R").unwrap();
     }
+    if query_tail.windows(4).any(|bytes| bytes == b"\x1b[?u") {
+        shell.write_response(b"\x1b[?0u").unwrap();
+    }
     query_tail.drain(..query_tail.len().saturating_sub(3));
 }
 
@@ -78,6 +81,7 @@ fn wait_prompt(shell: &mut PersistentShell, query_tail: &mut Vec<u8>) -> (ShellP
                     output.extend(bytes);
                 }
                 SubshellEvent::Prompt(event) => prompt = Some(event),
+                SubshellEvent::CommandStarted(_) => {}
                 event => panic!(
                     "unexpected shell event {event:?}; output {}",
                     String::from_utf8_lossy(&output)
@@ -250,6 +254,31 @@ fn persistent_shells_keep_state_report_cwd_and_accept_native_arguments() {
             );
             thread::sleep(IO_TICK);
         }
+        shell.interrupt().unwrap();
+        wait_prompt(&mut shell, &mut query_tail);
+        shell.run_command("sh -c 'stty -icanon -echo; printf ONE_CHAR; dd bs=1 count=1 2>/dev/null; stty icanon echo'").unwrap();
+        wait_output(&mut shell, &mut query_tail, b"ONE_CHAR");
+        shell.write(b"q").unwrap();
+        wait_prompt(&mut shell, &mut query_tail);
+        assert!(
+            !shell.at_prompt(),
+            "{name}: unacknowledged raw input must prevent command injection"
+        );
+        shell.interrupt().unwrap();
+        wait_prompt(&mut shell, &mut query_tail);
+        assert!(
+            shell.at_prompt(),
+            "{name}: Ctrl+C recovers after program input"
+        );
+        shell.run_command("printf TYPEAHEAD; sleep 0.1").unwrap();
+        wait_output(&mut shell, &mut query_tail, b"TYPEAHEAD");
+        shell.write(b"printf DRAFT").unwrap();
+        wait_prompt(&mut shell, &mut query_tail);
+        assert_eq!(
+            shell.run_command("true").unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "{name}: typeahead must block private command injection"
+        );
         shell.interrupt().unwrap();
         wait_prompt(&mut shell, &mut query_tail);
         shell.run_command("printf 'RUNNING'; sleep 30").unwrap();

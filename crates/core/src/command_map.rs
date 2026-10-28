@@ -11,6 +11,13 @@ impl AppCommand {
             (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
             (
                 KeyContext::FileManager
+                | KeyContext::CommandLine
+                | KeyContext::Viewer
+                | KeyContext::ViewerHex,
+                KeyCommand::TogglePanels,
+            ) => Some(Self::TogglePanels),
+            (
+                KeyContext::FileManager
                 | KeyContext::Viewer
                 | KeyContext::ViewerHex
                 | KeyContext::Jobs

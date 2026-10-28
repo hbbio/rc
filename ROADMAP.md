@@ -3,12 +3,6 @@
 This file contains only unfinished product work. Supported behavior is documented
 in the project [README](README.md).
 
-## Command output, diff, and subshell
-
-- Add a persistent PTY-backed shell with a prompt protocol and bidirectional
-  working-directory synchronization.
-- Implement `Ctrl-O` panel hiding around the persistent shell.
-
 ## Virtual filesystems and archives
 
 - Extend the shared read-only archive backend into a unified path/backend model

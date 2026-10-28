@@ -191,6 +191,7 @@ pub enum AppCommand {
     EnterXMap,
     SwitchPanel,
     SwapPanels,
+    TogglePanels,
     ShowDirectorySizes,
     SetOtherPanelView(PanelViewMode),
     Panel(ActivePanel, PanelCommand),
@@ -431,6 +432,7 @@ impl AppCommand {
             self,
             Self::OpenHelp
                 | Self::OpenCommandHistory
+                | Self::TogglePanels
                 | Self::EnterXMap
                 | Self::PutCurrentSelected
                 | Self::PutCurrentFullSelected
@@ -477,6 +479,7 @@ impl AppCommand {
             | Self::EnterXMap
             | Self::SwitchPanel
             | Self::SwapPanels
+            | Self::TogglePanels
             | Self::ShowDirectorySizes
             | Self::Panel(_, PanelCommand::OpenTree)
             | Self::OpenJobsScreen
@@ -785,7 +788,7 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     MenuEntry::action("Directory tree", AppCommand::OpenTree),
     MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
     MenuEntry::action_with_shortcut("Swap panels", "C-u", AppCommand::SwapPanels),
-    MenuEntry::stub("Switch panels on/off", "C-o"),
+    MenuEntry::action_with_shortcut("Switch panels on/off", "C-o", AppCommand::TogglePanels),
     MenuEntry::action_with_literal_shortcut(
         "Compare directories",
         "C-x d",
@@ -1739,7 +1742,7 @@ impl PanelState {
     }
 
     /// Local directory represented by this panel for previous-directory history.
-    pub(crate) fn local_directory(&self) -> &Path {
+    pub fn local_directory(&self) -> &Path {
         match self.archive_location() {
             Some(location) => location.archive.parent().unwrap_or(Path::new(".")),
             None => &self.cwd,
@@ -2486,6 +2489,8 @@ pub struct AppState {
     pending_completion_requests: Vec<CompletionRequest>,
     pending_completion_cancellations: Vec<CompletionCancellation>,
     pending_foreground_shell_requests: Vec<ForegroundShellRequest>,
+    pending_panel_toggle: bool,
+    shell_available: bool,
     paused_find_results: Option<FindResultsState>,
     pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,

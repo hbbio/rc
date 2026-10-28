@@ -30,6 +30,8 @@ mod refresh_tests;
 mod route_command_tests;
 mod screen_tests;
 mod selection_size_tests;
+#[cfg(unix)]
+mod subshell_tests;
 mod swap_tests;
 mod tar_tests;
 mod viewer_tests;

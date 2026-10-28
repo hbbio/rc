@@ -37,6 +37,9 @@ pub struct ShellPrompt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SubshellEvent {
     Output(Vec<u8>),
+    /// The private command input has been consumed. Frontends may stop hiding
+    /// its terminal echo before rendering the user's command output.
+    CommandStarted(u64),
     Prompt(ShellPrompt),
     Exited(i32),
     Error(String),
@@ -176,11 +179,16 @@ impl PersistentShell {
 
     pub fn at_prompt(&self) -> bool {
         self.at_prompt
+            && !self.incomplete_input
             && !self.exited
             && self.exit_observed.is_none()
-            && self.master.as_ref().is_some_and(|pty| {
-                pty.process_group_leader().map(|pid| pid as u32) == self.child.process_id()
-            })
+            && self.owns_terminal()
+    }
+
+    fn owns_terminal(&self) -> bool {
+        self.master.as_ref().is_some_and(|pty| {
+            pty.process_group_leader().map(|pid| pid as u32) == self.child.process_id()
+        })
     }
 
     pub fn last_prompt(&self) -> Option<&ShellPrompt> {
@@ -201,6 +209,7 @@ impl PersistentShell {
                     self.prepared_prompt = None;
                     if self.awaiting_command == Some(id) && self.started_command != Some(id) {
                         self.pending_gate = Some(id);
+                        events.push(SubshellEvent::CommandStarted(id));
                     }
                     continue;
                 }
@@ -240,7 +249,7 @@ impl PersistentShell {
                 self.awaiting_command = None;
                 self.pending_gate = None;
                 self.prompt = Some(prompt.clone());
-                self.at_prompt = !self.incomplete_input;
+                self.at_prompt = true;
                 // A canceled line may still be queued behind a prompt redraw.
                 // Only retire files once their ID (or a later one) executed.
                 self.command_files.retain(|id, _| *id > prompt.command_id);
@@ -299,8 +308,8 @@ impl PersistentShell {
             .map_err(pty_error)
     }
 
-    /// Send terminal input. Any partial input makes directory/command injection
-    /// unavailable until the next prompt, so it cannot overwrite an edited line.
+    /// Send terminal input. Conservatively block injection after partial input:
+    /// a running program may leave typeahead for the shell's line editor.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         // Cancel queued commands through their private launch gate. A terminal
         // interrupt before the line editor finishes can lose the protocol ID.
@@ -313,15 +322,25 @@ impl PersistentShell {
             self.at_prompt = false;
             return Ok(());
         }
-        self.write_response(bytes)?;
+        if bytes == [3]
+            && self.dialect == ShellDialect::Fish
+            && self.at_prompt
+            && self.owns_terminal()
+        {
+            // Sending VINTR would let the terminal flush the following escape
+            // sequence. The binding itself implements explicit cancellation.
+            self.write_response(b"\x1b[24;8~")?;
+        } else {
+            self.write_response(bytes)?;
+        }
         if !bytes.is_empty() {
             self.at_prompt = false;
             for byte in bytes {
                 self.incomplete_input = !matches!(byte, b'\r' | b'\n' | 3 | 4);
-                if *byte == 3 {
-                    self.cancel_requested = true;
-                    self.interrupt_sent = true;
-                }
+            }
+            if bytes == [3] {
+                self.cancel_requested = true;
+                self.interrupt_sent = true;
             }
         }
         Ok(())

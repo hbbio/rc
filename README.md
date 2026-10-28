@@ -241,6 +241,21 @@ renaming still update the panels.
 ### Unix command line
 
 - `>` opens a modal prompt in the active panel directory.
+- Commands run in a persistent PTY shell: variables, functions, and directory
+  changes survive between commands. Bash, Zsh, Fish, sh, and dash are supported;
+  other shells and custom command templates retain one-shot execution.
+- `Ctrl-O` or Command → Switch panels on/off shows the shell and returns to the
+  panels. The shell also appears in the Screens selector. Programs keep running
+  while the panels are visible; terminal colors, full-screen applications,
+  resizing, mouse input, and bracketed paste are supported.
+- Panel and shell directories synchronize when the shell is ready. A running
+  command cannot overwrite a directory subsequently chosen in the panels.
+  Unfinished terminal input blocks injected commands and directory changes;
+  use `Ctrl-C` to clear it. This can also be needed after leaving a program with
+  a single key because unread typeahead cannot be distinguished reliably.
+  Fish sessions reserve `Ctrl-Alt-Shift-F12` for this input recovery.
+- `Shift-PgUp` / `Shift-PgDn` scroll shell output. `exit` or `Ctrl-D` at an empty
+  shell prompt closes the shell; `Ctrl-O` starts another when needed.
 - Fish-aware or generic completion, live prefix filtering, bounded history, and
   draft preservation.
 - Command → Command history (`Alt-Shift-H`) lists recent commands and recalls a

@@ -9,6 +9,7 @@ pub(crate) enum ScreenTarget {
     Suspended(usize),
     Output(JobId),
     Jobs,
+    Shell,
 }
 
 impl AppState {
@@ -84,6 +85,10 @@ impl AppState {
             labels.push(String::from("Background jobs"));
             targets.push(ScreenTarget::Jobs);
         }
+        if self.shell_available {
+            labels.push(String::from("Shell"));
+            targets.push(ScreenTarget::Shell);
+        }
         let labels = labels
             .into_iter()
             .map(|s| sanitize_display_line(&s))
@@ -96,6 +101,10 @@ impl AppState {
     }
 
     pub(crate) fn select_screen(&mut self, target: ScreenTarget) {
+        if matches!(target, ScreenTarget::Shell) {
+            self.pending_panel_toggle = true;
+            return;
+        }
         if matches!(target, ScreenTarget::Current)
             || (matches!(target, ScreenTarget::Panels) && self.routes.len() == 1)
         {
@@ -110,7 +119,7 @@ impl AppState {
             return;
         }
         let next = match target {
-            ScreenTarget::Current => return,
+            ScreenTarget::Current | ScreenTarget::Shell => return,
             ScreenTarget::Panels => vec![Route::FileManager],
             ScreenTarget::Suspended(index) => {
                 if index >= self.suspended_screens.len() {

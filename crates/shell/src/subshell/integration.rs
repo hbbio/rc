@@ -145,6 +145,19 @@ end
 function __rc_repaint --on-event fish_cancel --on-signal INT
     commandline -f repaint 2>/dev/null
 end
+# An empty-line cancellation need not repaint. The owner uses this private
+# binding for explicit Ctrl+C after observing a prompt. Clear synchronously
+# before acknowledging; never execute the editor's input.
+function __rc_cancel_input
+    commandline --replace ''
+    or return
+    commandline -f repaint
+    printf '\033]777;rc;{nonce};r%s;130;%s\007' $__rc_command_id "$__rc_prompt_hex"
+end
+for __rc_mode in default insert (bind --list-modes)
+    # Fish ignores unknown CSI key numbers; use Ctrl-Alt-Shift-F12.
+    bind --mode $__rc_mode \e\[24\;8\~ __rc_cancel_input
+end
 set -g fish_history ''
 "#
             );

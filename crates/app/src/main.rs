@@ -36,6 +36,8 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 mod clipboard;
 mod filesystem_watch;
 mod runtime;
+#[cfg(unix)]
+mod subshell;
 
 use runtime::RuntimeBridge;
 
@@ -618,6 +620,8 @@ fn run_event_loop(
     let mut last_tick = Instant::now();
     let mut mouse_click_tracker = MouseClickTracker::default();
     let mut filesystem_watch = filesystem_watch::FilesystemWatch::spawn(tracing_log)?;
+    #[cfg(unix)]
+    let mut shell = subshell::ShellController::default();
 
     loop {
         runtime.drain_events(state);
@@ -629,6 +633,18 @@ fn run_event_loop(
         dispatch_pending_external_edit_requests(terminal, state);
         dispatch_pending_external_execute_requests(terminal, state);
         dispatch_pending_external_action_requests(terminal, state);
+        #[cfg(unix)]
+        {
+            let size = terminal.size().context("failed to read terminal size")?;
+            for request in shell.update(state, size.width, size.height) {
+                let result = run_foreground_shell_request(terminal, &request)
+                    .map(exit_status_number)
+                    .map_err(|error| sanitize_display_field(&error.to_string()));
+                state.finish_persistent_shell_request(&request, result);
+                state.refresh_panels_in_directory(&request.cwd);
+            }
+        }
+        #[cfg(not(unix))]
         dispatch_pending_foreground_shell_requests(terminal, state);
         if TERMINAL_RECOVERY_FAILED.load(AtomicOrdering::Relaxed) {
             return Err(anyhow!(
@@ -637,18 +653,65 @@ fn run_event_loop(
         }
 
         terminal
-            .draw(|frame| rc_ui::render(frame, state))
+            .draw(|frame| {
+                #[cfg(unix)]
+                if shell.visible() {
+                    shell.render(frame);
+                    return;
+                }
+                rc_ui::render(frame, state);
+            })
             .context("failed to draw frame")?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         let timeout = state
             .deferred_work_delay()
             .map_or(timeout, |delay| timeout.min(delay));
+        #[cfg(unix)]
+        let timeout = if shell.active() {
+            timeout.min(Duration::from_millis(20))
+        } else {
+            timeout
+        };
         if event::poll(timeout).context("failed to poll input")? {
             let viewport = terminal.size().context("failed to read terminal size")?;
             let input_event = event::read().context("failed to read input event")?;
             if matches!(&input_event, Event::Key(_)) {
                 mouse_click_tracker.clear();
+            }
+            #[cfg(unix)]
+            if shell.visible() {
+                let toggle = match &input_event {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        (matches!(key.code, CrosstermKeyCode::Char('o' | 'O'))
+                            && key.modifiers == crossterm::event::KeyModifiers::CONTROL)
+                            || map_key_event_to_chord(
+                                *key,
+                                InputCompatibility {
+                                    macos_option_symbols: state
+                                        .settings()
+                                        .configuration
+                                        .macos_option_symbols,
+                                },
+                            )
+                            .and_then(|chord| {
+                                state.resolve_key_command(keymap, KeyContext::FileManager, chord)
+                            })
+                            .is_some_and(|command| {
+                                *command == rc_core::keymap::KeyCommand::TogglePanels
+                            })
+                    }
+                    _ => false,
+                };
+                if toggle {
+                    shell.hide();
+                } else {
+                    shell.input(input_event, state);
+                }
+                if last_tick.elapsed() >= tick_rate {
+                    last_tick = Instant::now();
+                }
+                continue;
             }
             match input_event {
                 Event::Key(key_event)
@@ -955,6 +1018,7 @@ fn dispatch_pending_external_execute_requests(
     }
 }
 
+#[cfg(not(unix))]
 fn dispatch_pending_foreground_shell_requests(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
