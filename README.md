@@ -113,7 +113,7 @@ panelize, and adding the current directory to the hotlist require a local direct
 
 ZIP browsing reads directory metadata without decompressing payloads. Plain TAR
 browsing reads headers and seeks past payloads. Opening a compressed TAR for the
-first time requires a cancellable decompression scan to build its directory and
+first time without a saved index requires a cancellable decompression scan to build its directory and
 seek index. No temporary directory tree or full decompressed TAR is written.
 Indexes are shared between panes and reused for navigation, sorting, size totals,
 and previews/copies during the session. Gzip reads resume from decoder checkpoints;
@@ -126,6 +126,17 @@ gzip checkpoint memory is separately bounded by adapting checkpoint spacing as
 archives grow. A large metadata index can exceed the soft budget to keep navigation
 usable. Indexes are invalidated when the source file's identity, size, or timestamps
 change. Use manual refresh to update an open pane after external changes.
+
+On Unix, metadata indexes also survive application restarts in
+`$XDG_CACHE_HOME/rust-commander/archive-indexes`, or
+`~/.cache/rust-commander/archive-indexes` when that variable is unset. The directory
+and files are private to the current user. Atomic, versioned cache files include
+source identities and checksums; missing, corrupt, or outdated entries are rebuilt.
+The disk cache uses a soft budget of 64 indexes and 256 MiB, with a 64 MiB limit per index.
+Larger indexes remain available through the in-memory cache. Nested metadata keys
+include the outer source and every container boundary. Compressed seek checkpoints
+are rebuilt on the first member read after restarting; metadata-only browsing
+does not require that scan. An unwritable cache does not prevent archive access.
 
 ZIP Stored/Deflate entries and TAR regular files/directories are supported,
 including GNU long names and PAX paths, sizes, and modification times. Repeated TAR

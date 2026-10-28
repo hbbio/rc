@@ -63,7 +63,9 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
 pub use action_flow::{ExternalActionRequest, execute_action_viewer, execute_file_type_probe};
-pub use archive::{ArchiveFormat, ArchiveLocation, measure_archive_selection};
+pub use archive::{
+    ArchiveFormat, ArchiveLocation, configure_archive_index_cache, measure_archive_selection,
+};
 pub use background::{
     BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
     build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,

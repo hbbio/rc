@@ -67,6 +67,13 @@ pub(super) struct ArchiveSource {
 }
 
 impl ArchiveSource {
+    pub fn persistent_root(&self, identity: &cache::SourceIdentity) -> (&std::path::Path, Vec<u8>) {
+        match &self.parent {
+            Some(parent) => parent.source.persistent_root(&parent.identity),
+            None => (&self.path, identity.fingerprint()),
+        }
+    }
+
     pub fn verify_parent(&self) -> io::Result<()> {
         self.parent
             .as_ref()

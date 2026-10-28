@@ -12,6 +12,10 @@ use std::sync::atomic::AtomicBool;
 use std::time::SystemTime;
 
 struct ZipIndex;
+
+pub(super) fn restored_index() -> Box<dyn IndexedArchive> {
+    Box::new(ZipIndex)
+}
 struct ZipBackend<'a> {
     archive: ZipArchive<CancelReader<'a>>,
 }

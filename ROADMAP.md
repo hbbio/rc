@@ -7,7 +7,6 @@ in the project [README](README.md).
 
 - Extend the shared read-only archive backend into a unified path/backend model
   for local, helper, and remote locations without weakening local-filesystem behavior.
-- Persist archive indexes across application sessions.
 - Support MC-style extfs helpers for additional archive and package formats.
 - Add optional SFTP, FTP, and shell links with secure credential handling, host
   verification, cancellation, and reconnect behavior.

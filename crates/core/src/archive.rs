@@ -6,6 +6,7 @@ mod bzip;
 mod cache;
 mod gzip;
 mod nested;
+mod persistent;
 mod tar;
 mod zip;
 
@@ -22,6 +23,8 @@ use std::time::SystemTime;
 use crate::{
     FileEntry, FileEntryKind, FileEntryMetadata, SelectionSizeReport, SortField, SortMode,
 };
+
+pub use persistent::configure_archive_index_cache;
 
 /// Archive containers supported by read-only browsing, previews, and extraction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -386,11 +389,9 @@ impl ArchiveIndex {
                 .or_default()
                 .push(path.clone());
         }
-        let estimated_bytes = members
-            .keys()
-            .fold(backend.estimated_bytes(), |total, path| {
-                total.saturating_add(path.as_os_str().len().saturating_mul(3).saturating_add(256))
-            });
+        let estimated_bytes = members.keys().fold(0_usize, |total, path| {
+            total.saturating_add(path.as_os_str().len().saturating_mul(3).saturating_add(256))
+        });
         Ok(Self {
             members,
             children,
@@ -446,6 +447,7 @@ impl ArchiveIndex {
 
     fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
+            .saturating_add(self.backend.estimated_bytes())
     }
 }
 

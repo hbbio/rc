@@ -1,5 +1,6 @@
-//! Process-local, single-flight LRU cache. Nested containers own bounded private
-//! temporary payloads. In-flight users retain their snapshot across eviction.
+//! Single-flight LRU cache backed by optional persistent metadata indexes.
+//! Nested containers own bounded private temporary payloads. In-flight users
+//! retain their snapshot across eviction.
 use super::{
     ArchiveFormat, ArchiveIndex, ArchiveLocation, check_canceled, invalid_data,
     normalize_archive_io_result, open_source, safe_component, tar, zip,
@@ -25,7 +26,7 @@ pub(super) struct SourceIdentity {
 }
 
 impl SourceIdentity {
-    fn new(metadata: &Metadata) -> Self {
+    pub(super) fn new(metadata: &Metadata) -> Self {
         Self {
             size: metadata.len(),
             modified: metadata.modified().ok(),
@@ -41,6 +42,31 @@ impl SourceIdentity {
                 )
             },
         }
+    }
+
+    pub(super) fn fingerprint(&self) -> Vec<u8> {
+        let mut bytes = self.size.to_le_bytes().to_vec();
+        for time in [self.modified, self.created] {
+            match time {
+                None => bytes.push(0),
+                Some(time) => {
+                    let (sign, duration) = match time.duration_since(std::time::UNIX_EPOCH) {
+                        Ok(duration) => (1, duration),
+                        Err(error) => (2, error.duration()),
+                    };
+                    bytes.push(sign);
+                    bytes.extend_from_slice(&duration.as_nanos().to_le_bytes());
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            bytes.extend_from_slice(&self.unix.0.to_le_bytes());
+            bytes.extend_from_slice(&self.unix.1.to_le_bytes());
+            bytes.extend_from_slice(&self.unix.2.to_le_bytes());
+            bytes.extend_from_slice(&self.unix.3.to_le_bytes());
+        }
+        bytes
     }
 
     pub fn verify(&self, metadata: &Metadata) -> io::Result<()> {
@@ -157,6 +183,33 @@ fn get_index_with_cache(
         state.building = true;
         drop(state);
         let building = Building(Arc::clone(&slot));
+        let persistent = super::persistent::entry(location, &source, &identity);
+        if let Some(members) = persistent
+            .as_ref()
+            .and_then(|entry| entry.load(cancel).ok().flatten())
+        {
+            let backend = match format {
+                ArchiveFormat::Zip => zip::restored_index(),
+                format => tar::restored_index(format),
+            };
+            // Cached metadata is untrusted even after its checksum and source
+            // key match. A structural failure falls back to scanning the source.
+            if let Ok(index) = ArchiveIndex::build(
+                members,
+                identity.clone(),
+                backend,
+                Arc::clone(&source),
+                cancel,
+            ) {
+                check_canceled(cancel)?;
+                index.verify_source()?;
+                let index = Arc::new(index);
+                slot.state.lock().map_err(|_| poisoned_cache())?.index = Some(Arc::clone(&index));
+                drop(building);
+                return Ok(index);
+            }
+        }
+        check_canceled(cancel)?;
         file.rewind()?;
         let result = match format {
             ArchiveFormat::Zip => zip::build_index(&mut file, cancel),
@@ -168,6 +221,9 @@ fn get_index_with_cache(
         identity.verify(&file.metadata()?)?;
         identity.verify(&fs::metadata(&path)?)?;
         source.verify_parent()?;
+        let encoded = persistent
+            .as_ref()
+            .and_then(|entry| entry.encode(&members, cancel).ok());
         let index = Arc::new(ArchiveIndex::build(
             members,
             identity.clone(),
@@ -175,6 +231,11 @@ fn get_index_with_cache(
             Arc::clone(&source),
             cancel,
         )?);
+        if let (Some(entry), Some(bytes)) = (&persistent, encoded)
+            && let Err(error) = entry.save(&bytes, cancel)
+        {
+            tracing::debug!("archive index cache write skipped: {error}");
+        }
         check_canceled(cancel)?;
         slot.state.lock().map_err(|_| poisoned_cache())?.index = Some(Arc::clone(&index));
         drop(building);

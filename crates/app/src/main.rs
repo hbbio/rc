@@ -148,6 +148,17 @@ fn main() -> Result<()> {
     apply_env_overrides(&mut settings);
     apply_cli_overrides(&mut settings, &cli);
 
+    #[cfg(unix)]
+    if let Some(root) = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        && let Err(error) =
+            rc_core::configure_archive_index_cache(root.join("rust-commander/archive-indexes"))
+    {
+        tracing::debug!("persistent archive indexes disabled: {error}");
+    }
+
     let start_path = cli
         .path
         .unwrap_or(std::env::current_dir().context("failed to resolve current directory")?);
