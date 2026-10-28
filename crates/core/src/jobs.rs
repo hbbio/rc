@@ -26,6 +26,7 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 mod archive_extract;
 mod links;
 mod metadata;
+mod vfs_extract;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -106,6 +107,7 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    Vfs(crate::vfs::tasks::Task),
     LoadActionViewer {
         path: PathBuf,
         options: crate::action_macros::ViewOptions,
@@ -241,6 +243,7 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::Vfs(task) => task.kind(),
             Self::LoadActionViewer { .. } => JobKind::LoadViewer,
             Self::ProbeFileType { .. } => JobKind::FileType,
             Self::CreateLinks { .. } | Self::EditSymlinks { .. } => JobKind::Links,
@@ -275,6 +278,7 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::Vfs(task) => task.item_count(),
             Self::LoadActionViewer { .. } => 1,
             Self::ProbeFileType { .. } => 1,
             Self::CreateLinks { sources, .. } => sources.len(),
@@ -304,6 +308,7 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::Vfs(task) => task.summary(),
             Self::LoadActionViewer { path, .. } => format!("view {}", path.display()),
             Self::ProbeFileType { path } => format!("identify {}", path.display()),
             Self::CreateLinks {
@@ -410,6 +415,7 @@ impl JobRequest {
             } => {
                 let source_label = match source {
                     PanelListingSource::Archive(_) => "archive",
+                    PanelListingSource::Mounted(_) => "VFS",
                     PanelListingSource::Directory => "directory",
                     PanelListingSource::Panelize { .. } => "panelize",
                     PanelListingSource::FindResults { .. } => "find-results",
@@ -1095,6 +1101,22 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
+        JobRequest::Vfs(crate::vfs::tasks::Task::Copy {
+            location,
+            sources,
+            destination_dir,
+            overwrite,
+        }) => vfs_extract::extract(
+            &crate::vfs::VfsPath::Mounted(location),
+            &sources,
+            &destination_dir,
+            overwrite,
+            progress,
+        ),
+        JobRequest::Vfs(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "VFS task requires the runtime adapter",
+        )),
         JobRequest::CreateLinks {
             kind,
             sources,
@@ -2082,6 +2104,18 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
+        JobRequest::Vfs(crate::vfs::tasks::Task::Copy {
+            location, sources, ..
+        }) => {
+            let scan = crate::vfs::walk::scan(
+                &crate::vfs::VfsPath::Mounted(location.clone()),
+                sources,
+                cancel_flag,
+                true,
+            )?;
+            Ok(vfs_extract::totals(scan.entries.values()))
+        }
+        JobRequest::Vfs(_) => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::CreateLinks { sources, .. } => Ok(JobTotals {
             items: sources.len() as u64,
             bytes: 0,

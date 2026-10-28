@@ -763,6 +763,9 @@ fn panel_topline_titles_with_home(
         let label = location.format().map_or("Archive", |format| format.label());
         summary.push(format!("{label} read-only"));
     }
+    if let Some(path) = panel.mounted_location() {
+        summary.push(format!("{} read-only", path.mount().label()));
+    }
     let tagged_count = panel.tagged_count();
     if tagged_count > 0 {
         summary.push(format!("tagged:{tagged_count}"));

@@ -139,13 +139,6 @@ impl ArchiveLocation {
             .map_or(&self.archive, Self::local_archive)
     }
 
-    pub(crate) fn parent_location(&self) -> Option<Self> {
-        self.directory
-            .parent()
-            .map(|directory| self.in_directory(directory.to_path_buf()))
-            .or_else(|| self.parent.as_deref().cloned())
-    }
-
     /// Infers the containing file's format using [`ArchiveFormat::for_path`].
     ///
     /// Returns [`io::ErrorKind::Unsupported`] if its filename has no supported suffix.

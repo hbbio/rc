@@ -156,7 +156,7 @@ impl AppState {
 
     fn open_panel_sort_order_dialog(&mut self, panel: ActivePanel) {
         let sort_mode = self.panels[panel.index()].sort_mode;
-        let is_archive = self.panels[panel.index()].is_archive();
+        let is_archive = self.panels[panel.index()].is_virtual();
         let items = SortField::ALL
             .into_iter()
             .map(|field| {
@@ -272,12 +272,7 @@ impl AppState {
         }
 
         let destination_dir = self.passive_panel().cwd.clone();
-        let source_base_dir = self
-            .active_panel()
-            .archive_location()
-            .and_then(|location| location.local_archive().parent())
-            .unwrap_or(&self.active_panel().cwd)
-            .to_path_buf();
+        let source_base_dir = self.active_panel().local_directory().to_path_buf();
         self.start_transfer_dialog_for_paths(
             kind,
             sources,
@@ -562,7 +557,25 @@ impl AppState {
                     self.reopen_history_entry(entry);
                 }
             }
+            (
+                Some(PendingDialogAction::VfsList { mounts }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(mount) = index.and_then(|index| mounts.get(index)) {
+                    self.inspect_vfs_mount(Arc::clone(mount));
+                }
+            }
+            (
+                Some(PendingDialogAction::VfsMount { mount }),
+                DialogResult::ListboxSubmitted {
+                    index: Some(index), ..
+                },
+            ) => self.act_on_vfs_mount(mount, index),
             (None, result) => self.set_status(result.status_line()),
+            (
+                Some(PendingDialogAction::ViewVfsFile { base }),
+                DialogResult::InputSubmitted(value),
+            ) => self.view_vfs_file_input(&base, &value),
             (
                 Some(PendingDialogAction::ConfirmDelete { targets, origin }),
                 DialogResult::ConfirmAccepted,

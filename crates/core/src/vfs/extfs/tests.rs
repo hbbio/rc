@@ -269,6 +269,25 @@ esac
 }
 
 #[test]
+fn manual_invalidation_reloads_standalone_helper_metadata_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = helper(dir.path(), "catalog+", "cat \"$0.listing\"");
+    let listing = dir.path().join("catalog+.listing");
+    fs::write(&listing, b"-rw-r--r-- 1 0 0 4 Jan 1 2025 before\n").unwrap();
+    let mount = open(catalog, None, VfsPath::Local(dir.path().into()), None).unwrap();
+    fs::write(&listing, b"-rw-r--r-- 1 0 0 4 Jan 1 2025 after\n").unwrap();
+    let entries = || {
+        mount
+            .root()
+            .read_directory(SortMode::default(), true, None)
+            .unwrap()
+    };
+    assert!(entries().iter().any(|entry| entry.name == "before"));
+    mount.invalidate();
+    assert!(entries().iter().any(|entry| entry.name == "after"));
+}
+
+#[test]
 fn helper_cancellation_and_process_limits_do_not_leave_workers_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let slow = helper(dir.path(), "slow+", "sleep 60");

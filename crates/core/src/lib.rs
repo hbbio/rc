@@ -52,6 +52,7 @@ mod state_flow;
 mod tree;
 mod user_menu;
 pub mod vfs;
+mod vfs_flow;
 mod viewer;
 mod viewer_flow;
 
@@ -230,6 +231,7 @@ pub enum AppCommand {
     ViewEntry,
     ViewFile,
     OpenFileHistory,
+    OpenActiveVfs,
     OpenCommandHistory,
     FilteredView,
     OpenJobOutput,
@@ -460,6 +462,7 @@ impl AppCommand {
             | Self::EditConfigurationFile(_)
             | Self::ViewFile
             | Self::OpenFileHistory
+            | Self::OpenActiveVfs
             | Self::OpenCommandHistory
             | Self::FilteredView
             | Self::OpenJobOutput
@@ -817,7 +820,7 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
         AppCommand::OpenFileHistory,
     ),
     MenuEntry::action_with_literal_shortcut("Directory hotlist", "C-\\", AppCommand::OpenHotlist),
-    MenuEntry::stub("Active VFS list", "C-x a"),
+    MenuEntry::action_with_shortcut("Active VFS list", "C-x a", AppCommand::OpenActiveVfs),
     MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
     MenuEntry::action_with_shortcut("Screen list", "M-`", AppCommand::OpenScreenList),
     MenuEntry::separator(),
@@ -1266,6 +1269,8 @@ pub enum PanelListingSource {
     Directory,
     /// Read-only archive listing whose pane paths are synthetic member identities.
     Archive(ArchiveLocation),
+    /// A mounted helper or remote directory; paths are display identities.
+    Mounted(vfs::MountedPath),
     Panelize {
         command: String,
     },
@@ -1283,6 +1288,16 @@ pub struct DiskUsageSummary {
 }
 
 impl PanelListingSource {
+    pub fn is_virtual(&self) -> bool {
+        matches!(self, Self::Archive(_) | Self::Mounted(_))
+    }
+    pub fn location(&self, cwd: &Path) -> vfs::VfsPath {
+        match self {
+            Self::Archive(location) => location.clone().into(),
+            Self::Mounted(path) => vfs::VfsPath::Mounted(path.clone()),
+            _ => vfs::VfsPath::Local(cwd.to_path_buf()),
+        }
+    }
     fn is_panelized(&self) -> bool {
         matches!(self, Self::Panelize { .. } | Self::FindResults { .. })
     }
@@ -1360,12 +1375,9 @@ impl PanelState {
     pub fn refresh(&mut self) -> io::Result<()> {
         self.clear_canonical_paths();
         let (mut entries, mut panelized_entries) = match &self.source {
-            PanelListingSource::Archive(location) => (
-                vfs::VfsPath::from(location.clone()).read_directory(
-                    self.sort_mode,
-                    self.show_hidden_files,
-                    None,
-                )?,
+            PanelListingSource::Archive(_) | PanelListingSource::Mounted(_) => (
+                self.location()
+                    .read_directory(self.sort_mode, self.show_hidden_files, None)?,
                 None,
             ),
             PanelListingSource::Directory => {
@@ -1413,8 +1425,11 @@ impl PanelState {
         }
         let entries = apply_panel_filter(entries, &self.filter)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let (canonical_cwd, canonical_home_directory) =
-            canonical_panel_paths(&self.cwd, self.home_directory.as_deref());
+        let (canonical_cwd, canonical_home_directory) = if self.is_virtual() {
+            (None, None)
+        } else {
+            canonical_panel_paths(&self.cwd, self.home_directory.as_deref())
+        };
         self.panelized_entries = panelized_entries;
         self.apply_entries(entries);
         self.set_canonical_paths(canonical_cwd, canonical_home_directory);
@@ -1630,66 +1645,57 @@ impl PanelState {
         )
     }
 
-    pub fn open_selected_directory(&mut self) -> bool {
-        let Some((path, is_dir_hint)) = self
-            .selected_entry()
-            .map(|entry| (entry.path.clone(), entry.is_dir()))
-        else {
-            return false;
-        };
-        let is_dir = is_dir_hint
-            || (!self.is_archive() && fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()));
-        if !is_dir {
-            return false;
-        }
-
-        let source = if let Some(location) = self.archive_location() {
-            if path == location.parent_path() && location.directory.as_os_str().is_empty() {
-                location
-                    .parent_location()
-                    .map_or(PanelListingSource::Directory, PanelListingSource::Archive)
-            } else {
-                let Ok(directory) = location.member_path(&path) else {
-                    return false;
-                };
-                PanelListingSource::Archive(location.in_directory(directory))
+    pub fn set_location(&mut self, location: vfs::VfsPath) -> io::Result<()> {
+        let location = match location {
+            vfs::VfsPath::Local(path) => {
+                vfs::VfsPath::Local(crate::quick_cd::lexically_normalize(&path))
             }
-        } else {
-            PanelListingSource::Directory
+            location => location,
         };
-        self.cwd = path;
+        let source = match &location {
+            vfs::VfsPath::Local(_) => PanelListingSource::Directory,
+            vfs::VfsPath::Archive { location, path } => {
+                PanelListingSource::Archive(location.in_directory(location.member_path(path)?))
+            }
+            vfs::VfsPath::Mounted(path) => PanelListingSource::Mounted(path.clone()),
+        };
+        self.cwd = location.identity();
+        self.source = source;
         self.clear_canonical_paths();
         self.move_cursor_home();
-        self.source = source;
         self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
+        self.disk_usage = None;
         self.loading = true;
-        true
+        Ok(())
+    }
+
+    pub fn open_selected_directory(&mut self) -> bool {
+        let Some(entry) = self.selected_entry() else {
+            return false;
+        };
+        if !entry.is_dir()
+            && (self.is_virtual()
+                || !fs::metadata(&entry.path).is_ok_and(|metadata| metadata.is_dir()))
+        {
+            return false;
+        }
+        let location = self.location();
+        let next = if entry.is_parent() {
+            location.parent().ok().flatten()
+        } else {
+            location.resolve_identity(entry.path.clone()).ok()
+        };
+        next.is_some_and(|next| self.set_location(next).is_ok())
     }
 
     pub fn go_parent(&mut self) -> bool {
-        let parent_path = self.archive_location().map(ArchiveLocation::parent_path);
-        let Some(parent) = parent_path.as_deref().or_else(|| self.cwd.parent()) else {
-            return false;
-        };
-
-        let source = if let Some(location) = self.archive_location() {
-            location
-                .parent_location()
-                .map_or(PanelListingSource::Directory, PanelListingSource::Archive)
-        } else {
-            PanelListingSource::Directory
-        };
-        self.cwd = parent.to_path_buf();
-        self.clear_canonical_paths();
-        self.move_cursor_home();
-        self.source = source;
-        self.panelized_entries = None;
-        self.tagged.clear();
-        self.entries.clear();
-        self.loading = true;
-        true
+        self.location()
+            .parent()
+            .ok()
+            .flatten()
+            .is_some_and(|parent| self.set_location(parent).is_ok())
     }
 
     pub fn exit_panelize(&mut self) -> bool {
@@ -1745,18 +1751,29 @@ impl PanelState {
     }
 
     pub fn location(&self) -> vfs::VfsPath {
-        match self.archive_location() {
-            Some(location) => location.clone().into(),
-            None => vfs::VfsPath::Local(self.cwd.clone()),
-        }
+        self.source.location(&self.cwd)
     }
 
     /// Local directory represented by this panel for previous-directory history.
     pub fn local_directory(&self) -> &Path {
-        match self.archive_location() {
-            Some(location) => location.local_archive().parent().unwrap_or(Path::new(".")),
-            None => &self.cwd,
+        match &self.source {
+            PanelListingSource::Archive(location) => {
+                location.local_archive().parent().unwrap_or(Path::new("."))
+            }
+            PanelListingSource::Mounted(path) => path.mount().return_to().local_directory(),
+            _ => &self.cwd,
         }
+    }
+
+    pub fn mounted_location(&self) -> Option<&vfs::MountedPath> {
+        match &self.source {
+            PanelListingSource::Mounted(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        self.source.is_virtual()
     }
 
     pub fn is_archive(&self) -> bool {
@@ -2138,6 +2155,15 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    ViewVfsFile {
+        base: vfs::VfsPath,
+    },
+    VfsList {
+        mounts: Vec<Arc<vfs::Mount>>,
+    },
+    VfsMount {
+        mount: Arc<vfs::Mount>,
+    },
     UserMenu(user_menu::UserMenu),
     UserMenuDebug(user_menu::UserMenu),
     ActionPrompt(Box<action_flow::PendingAction>),
@@ -2488,6 +2514,7 @@ pub struct AppState {
     routes: Vec<Route>,
     suspended_screens: Vec<Vec<Route>>,
     file_history: Vec<file_history::FileHistoryEntry>,
+    vfs_workflow: vfs_flow::VfsWorkflow,
     command_outputs: HashMap<JobId, command_output::CommandOutput>,
     command_line: CommandLineModel,
     next_command_line_activation_id: u64,

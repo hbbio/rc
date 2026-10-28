@@ -242,7 +242,7 @@ fn extract_selection(
     result
 }
 
-fn cleanup_stage(path: &Path) {
+pub(super) fn cleanup_stage(path: &Path) {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };

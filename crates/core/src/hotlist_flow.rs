@@ -130,7 +130,7 @@ impl AppState {
     }
 
     pub(crate) fn start_hotlist_add_dialog(&mut self) {
-        let cwd = self.active_panel().cwd.clone();
+        let cwd = self.active_panel().local_directory().to_path_buf();
         self.push_dialog(
             DialogState::pair_input(
                 "Add hotlist entry",
@@ -155,7 +155,7 @@ impl AppState {
             self.set_status("No hotlist entry selected");
             return;
         };
-        let base_dir = self.active_panel().cwd.clone();
+        let base_dir = self.active_panel().local_directory().to_path_buf();
         let label = entry.label.clone();
         let path = rc_shell::encode_path_text(entry.path.as_os_str());
         self.push_dialog(
@@ -334,7 +334,7 @@ impl AppState {
             return Ok(());
         };
 
-        let resolved = resolve_path(&self.active_panel().cwd, &entry.path);
+        let resolved = resolve_path(self.active_panel().local_directory(), &entry.path);
         let destination = match validate_directory(&resolved) {
             Ok(path) => path,
             Err(error) => {

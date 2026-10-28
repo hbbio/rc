@@ -124,7 +124,30 @@ impl AppState {
 
     pub(crate) fn submit_quick_cd(&mut self, input: String, selected_path: Option<PathBuf>) {
         let panel = self.active_panel;
-        let cwd = self.active_panel().cwd.clone();
+        if selected_path.is_none()
+            && let Some(arguments) = shlex::split(&input)
+            && let [argument] = arguments.as_slice()
+        {
+            let path = PathBuf::from(rc_shell::decode_path_text(argument));
+            let inside_mount = self
+                .active_panel()
+                .mounted_location()
+                .is_some_and(|mounted| path.starts_with(mounted.mount().root().identity()));
+            if !inside_mount && self.open_helper_uri(panel, &path) {
+                return;
+            }
+            if self.active_panel().is_virtual() && !argument.starts_with('~') && argument != "-" {
+                match self.active_panel().location().resolve_input(&path) {
+                    Ok(location) => {
+                        self.enter_vfs_location(panel, location, true);
+                        self.set_status("Loading directory...");
+                    }
+                    Err(error) => self.reopen_quick_cd_after_error(input, error.to_string()),
+                }
+                return;
+            }
+        }
+        let cwd = self.active_panel().local_directory().to_path_buf();
         let previous = self.previous_panel_directories[panel.index()].as_deref();
         let destination = match selected_path {
             Some(path) => lexically_normalize(&path),
@@ -213,7 +236,7 @@ impl AppState {
             _ => return,
         };
 
-        if query.trim().is_empty() {
+        if query.trim().is_empty() || self.active_panel().is_virtual() {
             self.stop_quick_cd_search();
             if let Some(quick_cd) = self.quick_cd_dialog_mut() {
                 quick_cd.clear_search();
@@ -221,7 +244,7 @@ impl AppState {
             return;
         }
 
-        let cwd = self.active_panel().cwd.clone();
+        let cwd = self.active_panel().local_directory().to_path_buf();
         let home = current_user_home_directory();
         let root = filesystem_root(&cwd);
         let previous_directory = self.previous_panel_directories[self.active_panel.index()].clone();

@@ -263,7 +263,7 @@ impl AppState {
             return;
         };
         let local =
-            (!self.active_panel().is_archive()).then_some(self.active_panel().cwd.as_path());
+            (!self.active_panel().is_virtual()).then_some(self.active_panel().cwd.as_path());
         match self.configuration_files.prepare_for_edit(file, local) {
             Ok(path) => {
                 let cwd = path.parent().unwrap_or(Path::new(".")).to_path_buf();

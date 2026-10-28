@@ -319,7 +319,7 @@ impl AppState {
     }
 
     pub(crate) fn open_user_menu(&mut self) {
-        if self.active_panel().archive_location().is_some() {
+        if self.active_panel().is_virtual() {
             self.set_status("User menu requires a local directory");
             return;
         }

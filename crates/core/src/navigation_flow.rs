@@ -31,6 +31,9 @@ impl AppState {
                 self.restore_panelized_results_for(panel);
             }
             AppCommand::Panel(panel, PanelCommand::Reread) => {
+                if let Some(path) = self.panels[panel.index()].mounted_location() {
+                    path.mount().invalidate();
+                }
                 self.queue_panel_refresh(panel);
                 self.set_status(format!("Refreshing {} panel...", panel.label()));
             }

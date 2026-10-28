@@ -135,7 +135,7 @@ impl AppState {
             self.set_status("Permissions and ownership operations require Unix");
             return;
         }
-        if self.active_panel().is_archive() {
+        if self.active_panel().is_virtual() {
             self.set_status("Archives are read-only");
             return;
         }

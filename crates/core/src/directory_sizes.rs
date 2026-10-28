@@ -91,10 +91,20 @@ impl AppState {
         }
         let cwd = state.cwd.clone();
         let source = state.source.clone();
-        let archive = state.archive_location().cloned();
         let count = paths.len();
+        let request = if let Some(location) = state.mounted_location() {
+            JobRequest::Vfs(vfs::tasks::Task::DirectorySizes {
+                location: location.clone(),
+                paths,
+            })
+        } else {
+            JobRequest::MeasureDirectories {
+                paths,
+                archive: state.archive_location().cloned(),
+            }
+        };
         self.cancel_directory_sizes(panel);
-        let id = self.queue_worker_job_request(JobRequest::MeasureDirectories { paths, archive });
+        let id = self.queue_worker_job_request(request);
         self.directory_size_jobs[panel.index()] = Some(DirectorySizePending { id, cwd, source });
         self.set_status(format!("Calculating sizes for {count} directories..."));
     }

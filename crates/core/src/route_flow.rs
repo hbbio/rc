@@ -16,6 +16,7 @@ impl AppState {
             AppCommand::OpenCommandLine => self.open_command_line(),
             AppCommand::ViewFile => self.open_view_file_dialog(),
             AppCommand::OpenFileHistory => self.open_file_history(),
+            AppCommand::OpenActiveVfs => self.open_active_vfs(),
             AppCommand::OpenCommandHistory => self.open_command_history(),
             AppCommand::FilteredView => self.open_filtered_view(),
             AppCommand::OpenJobOutput => self.open_selected_job_output(),

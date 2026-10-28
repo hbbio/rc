@@ -100,15 +100,25 @@ impl AppState {
             return false;
         }
 
-        let request = match self.active_panel().archive_location() {
-            Some(location) => JobRequest::LoadArchiveViewer {
-                location: location.clone(),
-                path: entry.path.clone(),
+        let request = if let Some(location) = self.active_panel().mounted_location() {
+            let Ok(path) = location.resolve_identity(&entry.path) else {
+                return false;
+            };
+            JobRequest::Vfs(vfs::tasks::Task::View {
+                path,
                 quick_view: None,
-            },
-            None => JobRequest::LoadViewer {
-                path: entry.path.clone(),
-            },
+            })
+        } else {
+            match self.active_panel().archive_location() {
+                Some(location) => JobRequest::LoadArchiveViewer {
+                    location: location.clone(),
+                    path: entry.path.clone(),
+                    quick_view: None,
+                },
+                None => JobRequest::LoadViewer {
+                    path: entry.path.clone(),
+                },
+            }
         };
         self.queue_worker_job_request(request);
         true

@@ -238,10 +238,7 @@ fn directory(path: PathBuf) -> Member {
             kind: FileEntryKind::Directory,
             size: 0,
             modified: None,
-            metadata: FileEntryMetadata {
-                mode: Some(0o040555),
-                ..FileEntryMetadata::default()
-            },
+            metadata: FileEntryMetadata::default(),
         },
     }
 }

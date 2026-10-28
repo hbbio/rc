@@ -11,11 +11,25 @@ pub(crate) struct FileHistoryEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FileHistoryAction {
     View(Option<ArchiveLocation>),
+    ViewMounted(vfs::MountedPath),
     Edit { cwd: PathBuf },
 }
 
 impl AppState {
     pub(crate) fn open_view_file_dialog(&mut self) {
+        if self.active_panel().is_virtual() {
+            self.push_dialog(
+                DialogState::input(
+                    "View file",
+                    "File path (relative to the panel directory):",
+                    "",
+                ),
+                PendingDialogAction::ViewVfsFile {
+                    base: self.active_panel().location(),
+                },
+            );
+            return;
+        }
         self.push_dialog(
             DialogState::input(
                 "View file",
@@ -53,6 +67,41 @@ impl AppState {
         });
     }
 
+    pub(crate) fn view_vfs_file_input(&mut self, base: &vfs::VfsPath, value: &str) {
+        if value.is_empty() {
+            self.set_status("No file path entered");
+            return;
+        }
+        let path = match base.resolve_input(Path::new(&rc_shell::decode_path_text(value))) {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_status(error.to_string());
+                return;
+            }
+        };
+        let request = match path {
+            vfs::VfsPath::Local(path) => JobRequest::LoadViewer { path },
+            vfs::VfsPath::Archive { location, path } => JobRequest::LoadArchiveViewer {
+                location,
+                path,
+                quick_view: None,
+            },
+            vfs::VfsPath::Mounted(path) => JobRequest::Vfs(vfs::tasks::Task::View {
+                path,
+                quick_view: None,
+            }),
+        };
+        self.queue_worker_job_request(request);
+        self.set_status("Opening viewer...");
+    }
+
+    pub(crate) fn record_viewed_mount(&mut self, path: vfs::MountedPath) {
+        self.remember_file(FileHistoryEntry {
+            path: path.identity(),
+            action: FileHistoryAction::ViewMounted(path),
+        });
+    }
+
     /// Record a successfully completed external editor invocation in session history.
     pub fn record_edited_file(&mut self, request: &ExternalEditRequest) {
         self.remember_file(FileHistoryEntry {
@@ -79,7 +128,7 @@ impl AppState {
             .iter()
             .map(|entry| {
                 let action = match entry.action {
-                    FileHistoryAction::View(_) => "View",
+                    FileHistoryAction::View(_) | FileHistoryAction::ViewMounted(_) => "View",
                     FileHistoryAction::Edit { .. } => "Edit",
                 };
                 sanitize_display_line(&format!("{action}: {}", entry.path.display()))
@@ -93,6 +142,17 @@ impl AppState {
 
     pub(crate) fn reopen_history_entry(&mut self, entry: &FileHistoryEntry) {
         match &entry.action {
+            FileHistoryAction::ViewMounted(path) => {
+                if path.mount().is_closed() {
+                    self.set_status("This VFS mount has been closed");
+                    return;
+                }
+                self.queue_worker_job_request(JobRequest::Vfs(vfs::tasks::Task::View {
+                    path: path.clone(),
+                    quick_view: None,
+                }));
+                self.set_status("Opening viewer...");
+            }
             FileHistoryAction::View(archive) => {
                 let request = match archive {
                     Some(location) => JobRequest::LoadArchiveViewer {

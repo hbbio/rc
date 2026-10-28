@@ -206,6 +206,7 @@ impl AppState {
     pub(crate) fn macro_context(&self) -> MacroContext {
         MacroContext {
             panels: [self.active_panel(), self.passive_panel()].map(|panel| MacroPanel {
+                virtual_paths: panel.is_virtual(),
                 directory: panel.cwd.clone(),
                 selected: panel
                     .selected_entry()
@@ -218,7 +219,7 @@ impl AppState {
     }
 
     pub(crate) fn try_extension_action(&mut self, action: ExtensionAction) -> bool {
-        if self.active_panel().is_archive() {
+        if self.active_panel().is_virtual() {
             return false;
         }
         let Some(entry) = self.selected_non_parent_entry() else {
@@ -490,6 +491,9 @@ impl AppState {
                 return false;
             }
         }
+        if self.open_helper_uri(self.active_panel, &path) {
+            return true;
+        }
         match self.set_active_panel_directory(path) {
             Ok(true) => {
                 self.set_status("Loading directory...");
@@ -509,6 +513,9 @@ impl AppState {
     pub(crate) fn apply_builtin_file_action(&mut self, action: ExtensionAction) {
         match action {
             ExtensionAction::Open => {
+                if self.open_selected_helper() {
+                    return;
+                }
                 let opened_archive = match self.open_selected_archive() {
                     Ok(opened) => opened,
                     Err(error) => {
@@ -519,7 +526,7 @@ impl AppState {
                 if opened_archive || self.open_selected_directory() {
                     self.queue_panel_refresh(self.active_panel);
                     self.set_status("Loading selected directory...");
-                } else if self.active_panel().is_archive() {
+                } else if self.active_panel().is_virtual() {
                     if self.open_selected_file_in_viewer() {
                         self.set_status("Opening viewer...");
                     } else {

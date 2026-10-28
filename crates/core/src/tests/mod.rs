@@ -91,6 +91,13 @@ pub(super) fn drain_background(app: &mut AppState) {
                     let job_id = job.id;
                     let (event_tx, event_rx) = std::sync::mpsc::channel();
                     match &job.request {
+                        JobRequest::Vfs(_) => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            vfs::tasks::execute(job, &event_tx, &background_tx);
+                            for event in background_rx.try_iter() {
+                                app.handle_background_event(event);
+                            }
+                        }
                         JobRequest::ProbeFileType { .. } | JobRequest::LoadActionViewer { .. } => {
                             let (background_tx, background_rx) = std::sync::mpsc::channel();
                             if matches!(job.request, JobRequest::ProbeFileType { .. }) {

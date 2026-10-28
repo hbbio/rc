@@ -64,6 +64,10 @@ impl PanelRefreshStreamRequest {
 
 #[derive(Clone, Debug)]
 pub enum BackgroundEvent {
+    VfsMounted {
+        job_id: JobId,
+        mount: Arc<crate::vfs::Mount>,
+    },
     FileTypeProbed {
         job_id: JobId,
         result: Result<Option<Vec<u8>>, String>,
@@ -152,6 +156,7 @@ pub fn refresh_panel_event(
     let disk_usage = result
         .as_ref()
         .ok()
+        .filter(|_| !request.source.is_virtual())
         .and_then(|_| read_disk_usage(request.cwd.as_path()));
     BackgroundEvent::PanelRefreshed {
         panel: request.panel,
@@ -188,7 +193,8 @@ pub fn refresh_panel_entries(
     cancel_flag: &AtomicBool,
 ) -> io::Result<Vec<FileEntry>> {
     match source {
-        PanelListingSource::Archive(location) => crate::vfs::VfsPath::from(location.clone())
+        PanelListingSource::Archive(_) | PanelListingSource::Mounted(_) => source
+            .location(cwd)
             .read_directory(sort_mode, show_hidden_files, Some(cancel_flag)),
         PanelListingSource::Directory => crate::vfs::VfsPath::Local(cwd.to_path_buf())
             .read_directory(sort_mode, show_hidden_files, Some(cancel_flag)),
@@ -224,8 +230,8 @@ where
     F: FnMut(BackgroundEvent) -> bool,
 {
     let mut result = match &request.source {
-        PanelListingSource::Archive(location) => {
-            let entries = crate::vfs::VfsPath::from(location.clone()).read_directory(
+        PanelListingSource::Archive(_) | PanelListingSource::Mounted(_) => {
+            let entries = request.source.location(&request.cwd).read_directory(
                 request.sort_mode,
                 request.show_hidden_files,
                 Some(cancel_flag),
@@ -258,10 +264,15 @@ where
             stream_panelized_source_entries(request, cancel_flag, &mut emit_chunk)
         }
     }?;
-    let identity =
-        resolve_panel_path_identity(&request.cwd, request.home_directory.as_deref(), cancel_flag)?;
-    result.canonical_cwd = identity.canonical_cwd;
-    result.canonical_home_directory = identity.canonical_home_directory;
+    if !request.source.is_virtual() {
+        let identity = resolve_panel_path_identity(
+            &request.cwd,
+            request.home_directory.as_deref(),
+            cancel_flag,
+        )?;
+        result.canonical_cwd = identity.canonical_cwd;
+        result.canonical_home_directory = identity.canonical_home_directory;
+    }
     Ok(result)
 }
 
@@ -358,7 +369,9 @@ where
         } => {
             stream_panelized_paths_with_cancel(base_dir, paths, Some(cancel_flag), &mut emit_entry)
         }
-        PanelListingSource::Directory | PanelListingSource::Archive(_) => {
+        PanelListingSource::Directory
+        | PanelListingSource::Archive(_)
+        | PanelListingSource::Mounted(_) => {
             unreachable!("directory sources use directory streaming")
         }
     }?;

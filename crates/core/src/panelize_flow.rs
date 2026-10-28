@@ -55,7 +55,9 @@ impl AppState {
         let source_label = match source {
             PanelListingSource::Panelize { .. } => "external",
             PanelListingSource::FindResults { .. } => "find",
-            PanelListingSource::Directory | PanelListingSource::Archive(_) => {
+            PanelListingSource::Directory
+            | PanelListingSource::Archive(_)
+            | PanelListingSource::Mounted(_) => {
                 self.set_status("Stored panelized results are invalid");
                 return;
             }

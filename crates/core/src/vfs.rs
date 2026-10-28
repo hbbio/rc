@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{ArchiveLocation, FileEntry, FileEntryKind, FileEntryMetadata, SortMode};
 
+pub mod tasks;
+pub(crate) mod walk;
+
 #[cfg(unix)]
 pub mod extfs;
 #[cfg(unix)]
@@ -90,6 +93,8 @@ pub trait Backend: Send + Sync {
     /// Release resources without waiting for readers; their cancellation context
     /// is already marked closed when this hook runs.
     fn close(&self) {}
+    /// Drop reusable metadata without interrupting readers of an older snapshot.
+    fn invalidate(&self) {}
     /// Native containers that must never be overwritten by extraction.
     fn protected_local_paths(&self) -> Vec<PathBuf> {
         Vec::new()
@@ -160,6 +165,11 @@ impl Mount {
     pub fn close(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.backend.close();
+        }
+    }
+    pub fn invalidate(&self) {
+        if !self.is_closed() {
+            self.backend.invalidate();
         }
     }
     pub fn root(self: &Arc<Self>) -> VfsPath {
@@ -246,6 +256,48 @@ impl From<ArchiveLocation> for VfsPath {
 }
 
 impl VfsPath {
+    /// Relative input follows typed parents, including leaving a mount at its
+    /// root. Absolute input selects a native path unless it is an identity in
+    /// this virtual location.
+    pub fn resolve_input(&self, input: &Path) -> io::Result<Self> {
+        let root = match self {
+            Self::Mounted(path) => Some(path.mount().root()),
+            Self::Archive { location, .. } => Some(location.in_directory(PathBuf::new()).into()),
+            _ => None,
+        };
+        if let Some(root) = root
+            && let Ok(relative) = input.strip_prefix(root.identity())
+        {
+            return root.resolve_relative_input(relative);
+        }
+        if input.is_absolute() {
+            return Ok(Self::Local(input.to_path_buf()));
+        }
+        self.resolve_relative_input(input)
+    }
+    fn resolve_relative_input(&self, input: &Path) -> io::Result<Self> {
+        let mut location = self.clone();
+        for component in input.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if let Some(parent) = location.parent()? {
+                        location = parent;
+                    }
+                }
+                Component::Normal(name) => {
+                    location = location.resolve_identity(location.identity().join(name))?
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid VFS input path",
+                    ));
+                }
+            }
+        }
+        Ok(location)
+    }
     pub fn protected_local_paths(&self) -> Vec<PathBuf> {
         match self {
             Self::Local(_) => Vec::new(),

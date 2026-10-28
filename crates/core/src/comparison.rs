@@ -82,7 +82,7 @@ fn build_comparison_process(
 
 impl AppState {
     fn comparison_panels_are_local(&mut self) -> bool {
-        if self.panels.iter().any(PanelState::is_archive) {
+        if self.panels.iter().any(PanelState::is_virtual) {
             self.set_status("Copy archive entries to local directories before comparing");
             return false;
         }

@@ -1098,6 +1098,9 @@ async fn run_runtime_loop(
                         let runtime_shutdown_policy =
                             worker_runtime_shutdown_policy(&worker_job.request);
                         let (limit, worker_class) = match &worker_job.request {
+                            JobRequest::Vfs(rc_core::vfs::tasks::Task::Copy { .. }) => (Arc::clone(&fs_mutation_limit), "fs_mutation"),
+                            JobRequest::Vfs(rc_core::vfs::tasks::Task::Measure { .. } | rc_core::vfs::tasks::Task::DirectorySizes { .. }) => (Arc::clone(&background_scan_limit), "scan"),
+                            JobRequest::Vfs(_) => (Arc::clone(&background_process_limit), "process"),
                             JobRequest::PersistSettings { .. } => {
                                 (Arc::clone(&settings_limit), "settings")
                             }
@@ -1471,6 +1474,9 @@ fn execute_runtime_worker_job(
 ) {
     let cancel_flag = worker_job.cancel_flag();
     match worker_job.request.clone() {
+        JobRequest::Vfs(_) => {
+            rc_core::vfs::tasks::execute(worker_job, worker_event_tx, background_event_tx)
+        }
         JobRequest::ProbeFileType { .. } => {
             rc_core::execute_file_type_probe(worker_job, worker_event_tx, background_event_tx)
         }
@@ -2125,6 +2131,7 @@ fn execute_refresh_worker_job(
     let disk_usage = event_result
         .as_ref()
         .ok()
+        .filter(|_| !request.source.is_virtual())
         .and_then(|_| read_disk_usage(request.cwd.as_path()));
     let event = BackgroundEvent::PanelRefreshed {
         panel: request.panel,
@@ -2477,6 +2484,11 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
     match command {
         WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => CommandPriority::High,
         WorkerCommand::Run(job) => match job.request {
+            JobRequest::Vfs(rc_core::vfs::tasks::Task::View { .. }) => CommandPriority::High,
+            JobRequest::Vfs(
+                rc_core::vfs::tasks::Task::Measure { .. }
+                | rc_core::vfs::tasks::Task::DirectorySizes { .. },
+            ) => CommandPriority::Low,
             JobRequest::OpenDesktop { .. }
             | JobRequest::LoadViewer { .. }
             | JobRequest::LoadArchiveViewer { .. }

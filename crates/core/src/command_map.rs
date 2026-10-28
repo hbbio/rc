@@ -145,6 +145,9 @@ impl AppCommand {
                 Some(Self::CancelJob)
             }
             (KeyContext::FileManager, KeyCommand::OpenFileHistory) => Some(Self::OpenFileHistory),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::VfsList) => {
+                Some(Self::OpenActiveVfs)
+            }
             (KeyContext::FileManager | KeyContext::CommandLine, KeyCommand::OpenCommandHistory) => {
                 Some(Self::OpenCommandHistory)
             }

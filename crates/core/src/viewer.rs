@@ -85,6 +85,7 @@ enum ViewerGotoTarget {
 pub struct ViewerState {
     path: PathBuf,
     pub(crate) archive_location: Option<crate::ArchiveLocation>,
+    pub(crate) mounted_location: Option<Box<crate::vfs::MountedPath>>,
     output: Option<Box<ViewerOutputState>>,
     nroff: Option<NroffState>,
     pub bytes: Vec<u8>,
@@ -192,8 +193,12 @@ impl ViewerState {
         let (size, bytes, hit_limit) =
             result.ok_or_else(|| io::Error::other("VFS backend did not provide file data"))?;
         let mut viewer = Self::from_prefix(path.identity(), size, bytes, hit_limit);
-        if let crate::vfs::VfsPath::Archive { location, .. } = path {
-            viewer.archive_location = Some(location);
+        match path {
+            crate::vfs::VfsPath::Archive { location, .. } => {
+                viewer.archive_location = Some(location)
+            }
+            crate::vfs::VfsPath::Mounted(path) => viewer.mounted_location = Some(Box::new(path)),
+            _ => {}
         }
         Ok(viewer)
     }
@@ -219,6 +224,7 @@ impl ViewerState {
         Self {
             path,
             archive_location: None,
+            mounted_location: None,
             output: None,
             nroff: None,
             bytes,
@@ -718,6 +724,7 @@ mod tests {
             nroff: None,
             path: PathBuf::from("fixture"),
             archive_location: None,
+            mounted_location: None,
             output: None,
             bytes: bytes.to_vec(),
             line_offsets: compute_line_offsets(&content),

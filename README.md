@@ -166,7 +166,42 @@ navigation, viewer, or copy flows. Typed locations and the shared read interface
 in [`crates/core/src/vfs.rs`](crates/core/src/vfs.rs) distinguish native paths,
 archive members, and mounted backends. Mounted readers inherit job cancellation
 and mount closure; their display identities cannot be obtained as native paths.
-Helper and remote connections are still listed in the roadmap.
+
+On Unix, installed MC extfs helpers add read-only package and archive formats.
+`Enter` uses `u7z`, `urar`, `rpm`, `deb`, `uar`, or `ucpio` for matching extensions
+when installed. Quick cd also accepts `/path/package/u7z://subdirectory` and
+standalone helper prefixes such as `rpms://`. An extension action can use
+`Open=%cd %f/u7z://`. Helpers are discovered in absolute directories from
+`RC_EXTFS_PATH`, then `$XDG_DATA_HOME/rust-commander/extfs.d` and
+`$XDG_DATA_HOME/mc/extfs.d` (default `~/.local/share`), followed by common system
+and Homebrew MC directories. Helper executables and their external tools must be
+installed separately.
+
+Mounted panels support navigation, sorting, filtering, tagging, F3, View file,
+Quick view, file history, selection totals, directory sizes, and F5 copies to
+local directories. Relative Quick cd and View file paths stay inside the typed
+location; `..` leaves a mount at its root. Quick cd suggestions are disabled in
+virtual panels. Helpers use MC's `list` and `copyout` protocol; previews therefore
+materialize the selected member in private temporary storage. A zero listed size
+may mean unknown, as with generated RPM entries. Listing totals can undercount
+these entries; reads and copy progress use actual sizes. Links and special files cannot be copied. Copy
+failures restore overwritten destinations, and copies cannot replace a source
+container. Mutation and shell commands require local locations.
+Action macros also reject references to virtual files in the passive panel;
+actions using only the active local panel continue to work.
+
+**Command → Active VFS list** (`Ctrl-X a`) lists up to 16 mounted connections.
+Select one to open it in either panel or close it. Closing cancels its jobs and
+dependent mounts and returns affected panels to their containing location.
+Leaving a mount with `..` keeps it available in this list. Manual reread refreshes
+helper metadata. Helpers have a five-minute deadline, 16 MiB listing limit,
+100,000-entry/64 MiB metadata limit, and 256-component path limit. Temporary
+members are limited to 512 MiB each and 1 GiB in total, with one extra guard byte
+per output to detect truncation. Native filename bytes are preserved when the
+helper's listing format preserves them; leading whitespace needs the MC `./`
+prefix convention, and names containing newlines cannot use this line format.
+
+Remote connection providers remain in the roadmap.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;

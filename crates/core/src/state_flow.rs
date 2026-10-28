@@ -25,6 +25,8 @@ impl AppState {
             return;
         }
         let reload = self.prepare_panel_refresh_swap();
+        self.cancel_pending_mount(ActivePanel::Left);
+        self.cancel_pending_mount(ActivePanel::Right);
         self.invalidate_selection_sizes_for_swap();
         for panel in [ActivePanel::Left, ActivePanel::Right] {
             self.deactivate_quick_view(panel);
@@ -50,7 +52,7 @@ impl AppState {
         for panel in [ActivePanel::Left, ActivePanel::Right] {
             if reload[panel.index()] {
                 self.queue_panel_refresh(panel);
-            } else if !self.panels[panel.index()].is_archive()
+            } else if !self.panels[panel.index()].is_virtual()
                 && self.panels[panel.index()].canonical_cwd().is_none()
             {
                 self.queue_panel_identity_resolution(panel);
@@ -100,6 +102,7 @@ impl AppState {
             routes: vec![Route::FileManager],
             suspended_screens: Vec::new(),
             file_history: Vec::new(),
+            vfs_workflow: vfs_flow::VfsWorkflow::default(),
             command_outputs: HashMap::new(),
             command_line: CommandLineModel::new(settings.shell.history),
             next_command_line_activation_id: 1,
@@ -351,6 +354,9 @@ impl AppState {
     }
 
     pub fn refresh_active_panel(&mut self) {
+        if let Some(path) = self.active_panel().mounted_location() {
+            path.mount().invalidate();
+        }
         self.queue_panel_refresh(self.active_panel);
     }
 
@@ -408,7 +414,7 @@ impl AppState {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
         let previous_local_directory = self.active_panel().local_directory().to_path_buf();
-        let archive_parent = self.active_panel().is_archive()
+        let archive_parent = self.active_panel().is_virtual()
             && self
                 .active_panel()
                 .selected_entry()
@@ -432,6 +438,9 @@ impl AppState {
     }
 
     pub(crate) fn open_selected_archive(&mut self) -> io::Result<bool> {
+        if self.active_panel().mounted_location().is_some() {
+            return Ok(false);
+        }
         let Some(path) = self
             .selected_non_parent_entry()
             .filter(|entry| !entry.is_dir() && ArchiveFormat::for_path(&entry.path).is_some())
@@ -475,7 +484,7 @@ impl AppState {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
         let previous_local_directory = self.active_panel().local_directory().to_path_buf();
-        let was_archive = self.active_panel().is_archive();
+        let was_archive = self.active_panel().is_virtual();
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().go_parent();

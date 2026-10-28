@@ -23,7 +23,7 @@ impl AppState {
             self.set_status("Link operations require Unix");
             return None;
         }
-        if self.active_panel().is_archive() {
+        if self.active_panel().is_virtual() {
             self.set_status("Archives are read-only");
             return None;
         }
@@ -44,7 +44,7 @@ impl AppState {
         let Some(sources) = self.link_operation_paths() else {
             return;
         };
-        if self.passive_panel().is_archive() {
+        if self.passive_panel().is_virtual() {
             self.set_status("Links need a local destination; leave the passive archive first");
             return;
         }

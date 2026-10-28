@@ -34,7 +34,7 @@ const LIST_LIMIT: usize = 16 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(300);
 static STORAGE_BYTES: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Helper {
     path: PathBuf,
     name: String,
@@ -314,6 +314,7 @@ struct ExtfsBackend {
     source: Option<VfsPath>,
     cached: Mutex<Option<Arc<Snapshot>>>,
     building: AtomicBool,
+    revision: AtomicU64,
     closed: AtomicBool,
 }
 impl ExtfsBackend {
@@ -343,6 +344,7 @@ impl ExtfsBackend {
             }
             std::thread::sleep(Duration::from_millis(5));
         };
+        let revision = self.revision.load(Ordering::Acquire);
         let lock = || {
             self.cached
                 .lock()
@@ -379,7 +381,9 @@ impl ExtfsBackend {
             snapshot.verify()?;
             cancel.check()?;
             let mut cached = lock()?;
-            if !self.closed.load(Ordering::Acquire) {
+            if !self.closed.load(Ordering::Acquire)
+                && self.revision.load(Ordering::Acquire) == revision
+            {
                 *cached = Some(Arc::clone(&snapshot));
             }
             Ok(snapshot)
@@ -471,6 +475,11 @@ impl Backend for ExtfsBackend {
         let old = self.cached.lock().ok().and_then(|mut cached| cached.take());
         drop(old);
     }
+    fn invalidate(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        let old = self.cached.lock().ok().and_then(|mut cached| cached.take());
+        drop(old);
+    }
     fn protected_local_paths(&self) -> Vec<PathBuf> {
         match &self.source {
             Some(VfsPath::Local(path)) => vec![path.clone()],
@@ -508,6 +517,7 @@ pub fn open(
         source,
         cached: Mutex::new(None),
         building: AtomicBool::new(false),
+        revision: AtomicU64::new(0),
         closed: AtomicBool::new(false),
     });
     backend.snapshot(&Cancellation {

@@ -7,6 +7,8 @@ const ACTION_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MacroPanel {
+    /// Display identities from a virtual panel cannot be passed to native tools.
+    pub virtual_paths: bool,
     pub directory: PathBuf,
     pub selected: Option<PathBuf>,
     pub tagged: Vec<PathBuf>,
@@ -221,6 +223,11 @@ impl ActionTemplate {
                 Token::Panel { letter, quoted } => {
                     let index = usize::from(letter.is_ascii_uppercase());
                     let panel = &mut panels[index];
+                    if panel.virtual_paths
+                        && !(index == 0 && *letter == 'f' && context.local_file.is_some())
+                    {
+                        return Err("This action references a virtual panel; copy its files to a local directory first".into());
+                    }
                     let values = panel_values(
                         panel,
                         letter.to_ascii_lowercase(),
@@ -572,11 +579,13 @@ mod tests {
         MacroContext {
             panels: [
                 MacroPanel {
+                    virtual_paths: false,
                     directory: "/active".into(),
                     selected: Some("/active/file name.tar.gz".into()),
                     tagged: vec!["/active/one file".into(), "/active/two'file".into()],
                 },
                 MacroPanel {
+                    virtual_paths: false,
                     directory: "/other dir".into(),
                     selected: Some("/other dir/other.txt".into()),
                     tagged: vec!["/other dir/tagged".into()],

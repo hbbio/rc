@@ -196,6 +196,25 @@ impl PanelRefreshPostWorkflow {
 }
 
 impl AppState {
+    pub(crate) fn discard_closed_vfs_reverts(&mut self) {
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            if self.panel_refresh_post.reverts[panel.index()]
+                .as_ref()
+                .is_some_and(|revert| {
+                    revert
+                        .panel
+                        .mounted_location()
+                        .is_some_and(|path| path.mount().is_closed())
+                })
+            {
+                self.discard_panel_refresh_revert(panel);
+                self.panel_refresh_post.clear_focus_target_for_panel(panel);
+            }
+        }
+    }
+    pub(crate) fn panel_refresh_generation(&self, panel: ActivePanel) -> u64 {
+        self.panel_refresh.request_ids[panel.index()]
+    }
     pub(crate) fn prepare_panel_refresh_swap(&mut self) -> [bool; 2] {
         let loading = [ActivePanel::Left, ActivePanel::Right].map(|panel| {
             self.panels[panel.index()].loading || self.panel_refresh_post.has_revert(panel)
@@ -220,7 +239,7 @@ impl AppState {
     /// False means the caller must retain the invalidation and retry once idle.
     pub fn refresh_directory_if_idle(&mut self, panel: ActivePanel) -> bool {
         if self.panels[panel.index()].source.is_panelized()
-            || self.panels[panel.index()].is_archive()
+            || self.panels[panel.index()].is_virtual()
         {
             return true;
         }
