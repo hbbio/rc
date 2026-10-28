@@ -19,3 +19,6 @@ unicode-segmentation.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }
+portable-pty = { version = "0.9", default-features = false }
+tempfile.workspace = true
+getrandom.workspace = true

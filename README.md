@@ -408,8 +408,8 @@ intermediate multiplexer must allow OSC 52 clipboard writes.
 - `crates/platform` (`rust-commander-platform`): platform-specific terminal and
   process integration
 - `crates/ui` (`rust-commander-ui`): Ratatui rendering and skin support
-- `crates/shell` (`rust-commander-shell`): shell selection, completion, and
-  cancelable process primitives
+- `crates/shell` (`rust-commander-shell`): shell selection, completion, cancelable
+  process primitives, and the Unix persistent PTY transport and prompt protocol
 - [ROADMAP.md](https://github.com/hbbio/rc/blob/main/ROADMAP.md): remaining product work
 
 ## Development

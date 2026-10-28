@@ -7,6 +7,8 @@ mod completion;
 mod display;
 mod native_arguments;
 mod path_text;
+#[cfg(unix)]
+pub mod subshell;
 
 pub use backend::{
     COMMAND_PLACEHOLDER, CustomShell, ResolvedShell, ShellDialect, ShellHistoryMode,
