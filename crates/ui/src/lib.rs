@@ -3457,6 +3457,22 @@ mod tests {
                         let job_id = job.id;
                         let (event_tx, event_rx) = mpsc::channel();
                         match &job.request {
+                            JobRequest::ProbeFileType { .. }
+                            | JobRequest::LoadActionViewer { .. } => {
+                                let (background_tx, background_rx) = std::sync::mpsc::channel();
+                                if matches!(job.request, JobRequest::ProbeFileType { .. }) {
+                                    rc_core::execute_file_type_probe(
+                                        job,
+                                        &event_tx,
+                                        &background_tx,
+                                    );
+                                } else {
+                                    rc_core::execute_action_viewer(job, &event_tx, &background_tx);
+                                }
+                                for event in background_rx.try_iter() {
+                                    state.handle_background_event(event);
+                                }
+                            }
                             JobRequest::RefreshPanel {
                                 panel,
                                 cwd,

@@ -1128,6 +1128,8 @@ async fn run_runtime_loop(
                                 (Arc::clone(&capture_limit), "capture")
                             }
                             JobRequest::LoadViewer { .. }
+                            | JobRequest::LoadActionViewer { .. }
+                            | JobRequest::ProbeFileType { .. }
                             | JobRequest::LoadArchiveViewer { .. }
                             | JobRequest::LoadQuickView { .. } => {
                                 (Arc::clone(&background_process_limit), "process")
@@ -1469,6 +1471,12 @@ fn execute_runtime_worker_job(
 ) {
     let cancel_flag = worker_job.cancel_flag();
     match worker_job.request.clone() {
+        JobRequest::ProbeFileType { .. } => {
+            rc_core::execute_file_type_probe(worker_job, worker_event_tx, background_event_tx)
+        }
+        JobRequest::LoadActionViewer { .. } => {
+            rc_core::execute_action_viewer(worker_job, worker_event_tx, background_event_tx)
+        }
         JobRequest::MeasureDirectories { .. } => {
             rc_core::execute_directory_sizes(worker_job, worker_event_tx, background_event_tx)
         }

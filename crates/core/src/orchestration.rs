@@ -294,6 +294,9 @@ impl AppState {
             BackgroundEvent::DirectorySizesMeasured { job_id, sizes } => {
                 self.apply_directory_sizes(job_id, sizes)
             }
+            BackgroundEvent::FileTypeProbed { job_id, result } => {
+                self.finish_extension_probe(job_id, result)
+            }
             BackgroundEvent::CommandOutput { job_id, bytes } => {
                 self.append_command_output(job_id, &bytes)
             }
@@ -759,6 +762,13 @@ impl AppState {
         self.handle_quick_cd_search_cancel_requested(job_id);
         self.handle_selection_size_cancel_requested(job_id);
         self.invalidate_directory_sizes_for_job(job_id);
+        if self
+            .pending_extension
+            .as_ref()
+            .is_some_and(|(id, _)| *id == job_id)
+        {
+            self.pending_extension = None;
+        }
         let job_kind = self
             .jobs
             .job(job_id)

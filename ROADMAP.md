@@ -5,10 +5,6 @@ in the project [README](README.md).
 
 ## Extension rules and user menus
 
-- Parse MC `mc.ext.ini` files, including ordered rules, `Include=`
-  composition, and Open/View/Edit actions.
-- Expand MC action macros safely and route command output to the internal viewer
-  when requested.
 - Parse `mc.menu`, evaluate its conditions, and implement the F2 user menu.
 - Support menu macros for current and passive panels, tagged files, quoting modes,
   interactive prompts, and `%view{...}` output.

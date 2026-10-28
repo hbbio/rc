@@ -628,6 +628,7 @@ fn run_event_loop(
         dispatch_pending_clipboard_copy_requests(terminal.backend_mut(), state);
         dispatch_pending_external_edit_requests(terminal, state);
         dispatch_pending_external_execute_requests(terminal, state);
+        dispatch_pending_external_action_requests(terminal, state);
         dispatch_pending_foreground_shell_requests(terminal, state);
         if TERMINAL_RECOVERY_FAILED.load(AtomicOrdering::Relaxed) {
             return Err(anyhow!(
@@ -927,6 +928,7 @@ fn dispatch_pending_external_edit_requests(
             state.record_edited_file(&request);
         }
         state.reload_file_highlights();
+        state.reload_extension_rules();
     }
 }
 
@@ -959,40 +961,96 @@ fn dispatch_pending_foreground_shell_requests(
     }
 }
 
+fn dispatch_pending_external_action_requests(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) {
+    for request in state.take_pending_external_action_requests() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(&request.script)
+            .envs(request.environment.iter().map(|(key, value)| (key, value)));
+        let result = run_terminal_shell_command(
+            terminal,
+            &mut command,
+            &request.cwd,
+            &request.label,
+            "action",
+            request.edited_path.is_none(),
+        );
+        match result {
+            Ok(status) if status.success() => {
+                if let Some(path) = request.edited_path {
+                    state.record_edited_file(&ExternalEditRequest {
+                        editor_command: String::new(),
+                        path,
+                        cwd: request.cwd,
+                    });
+                }
+                state.set_status(format!("Finished {}", request.label));
+            }
+            Ok(status) => state.set_status(format!("Action {status}")),
+            Err(error) => state.set_status(format!("Action failed: {error}")),
+        }
+        let directories: std::collections::HashSet<_> =
+            state.panels.iter().map(|panel| panel.cwd.clone()).collect();
+        for directory in directories {
+            state.refresh_panels_in_directory(&directory);
+        }
+        state.reload_file_highlights();
+        state.reload_extension_rules();
+    }
+}
+
 fn run_foreground_shell_request(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     request: &ForegroundShellRequest,
 ) -> Result<ExitStatus> {
-    use std::io::{IsTerminal as _, Write as _};
-
-    suspend_terminal_for_external_command(terminal)?;
     let invocation = request.shell.invocation(&request.command);
     let mut command = Command::new(&invocation.program);
+    command.args(&invocation.arguments);
+    run_terminal_shell_command(
+        terminal,
+        &mut command,
+        &request.cwd,
+        &request.command,
+        &request.shell.identity,
+        true,
+    )
+}
+
+fn run_terminal_shell_command(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    command: &mut Command,
+    directory: &std::path::Path,
+    label: &str,
+    identity: &str,
+    acknowledge: bool,
+) -> Result<ExitStatus> {
+    use std::io::{IsTerminal as _, Write as _};
+    suspend_terminal_for_external_command(terminal)?;
     command
-        .args(&invocation.arguments)
-        .current_dir(&request.cwd)
+        .current_dir(directory)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let cwd = sanitize_display_field(&request.cwd.to_string_lossy());
-    let submitted = sanitize_display_field(&request.command);
+    let cwd = sanitize_display_field(&directory.to_string_lossy());
+    let submitted = sanitize_display_field(label);
     let echo = sanitize_display_line(&format!("{cwd} > {submitted}"));
-    let run_result = run_interactive_process_after_prepare(&mut command, || {
+    let run_result = run_interactive_process_after_prepare(command, || {
         println!("{echo}");
         io::stdout().flush()
     })
-    .with_context(|| {
-        format!(
-            "failed to launch {}",
-            sanitize_display_field(&request.shell.identity)
-        )
-    });
+    .with_context(|| format!("failed to launch {}", sanitize_display_field(identity)));
 
-    let acknowledgement_result = if let Ok(status) = &run_result {
+    let acknowledgement_result = if let Ok(status) = &run_result
+        && acknowledge
+    {
         let notice = sanitize_display_line(&format!(
             "[{}:{}] Press Enter to return to rc",
-            sanitize_display_field(&request.shell.identity),
+            sanitize_display_field(identity),
             exit_status_number(*status)
         ));
         println!("{notice}");

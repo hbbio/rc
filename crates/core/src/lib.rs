@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod action_flow;
 pub mod action_macros;
 mod archive;
 mod background;
@@ -60,6 +61,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
+pub use action_flow::{ExternalActionRequest, execute_action_viewer, execute_file_type_probe};
 pub use archive::{ArchiveFormat, ArchiveLocation, measure_archive_selection};
 pub use background::{
     BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
@@ -2122,6 +2124,7 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    ActionPrompt(Box<action_flow::PendingAction>),
     SetFilenameEncoding {
         panel: ActivePanel,
     },
@@ -2444,6 +2447,9 @@ impl KeybindingHints {
 pub struct AppState {
     settings: Settings,
     configuration_files: ConfigurationFiles,
+    extension_rules: Result<Arc<extension_rules::ExtensionRules>, String>,
+    pending_extension: Option<(JobId, action_flow::PendingExtension)>,
+    pending_external_action_requests: Vec<ExternalActionRequest>,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     panel_views: [PanelViewMode; 2],

@@ -48,7 +48,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
         "File manager quick keys:\n\
   {{fm_switch_panel}} switch panel\n\
   {{fm_open_entry}} enter directory/archive, run executable, or open file\n\
-  {{fm_view_entry}} view file internally\n\
+  {{fm_view_entry}} view file using extension rules or the internal viewer\n\
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
   {{fm_command_line}} open command line (Unix)\n\

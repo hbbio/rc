@@ -222,6 +222,7 @@ impl AppState {
     pub fn set_configuration_files(&mut self, files: ConfigurationFiles) {
         self.configuration_files = files;
         self.reload_file_highlights();
+        self.reload_extension_rules();
     }
 
     pub(crate) fn edit_configuration_file(&mut self, file: ConfigurationFile) {

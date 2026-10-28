@@ -10,6 +10,65 @@ use crate::{FOUNDATION_SLO, JOB_CANCELED_MESSAGE, VIEWER_TEXT_PREVIEW_LIMIT_BYTE
 
 const VIEWER_READ_CHUNK_BYTES: usize = 64 * 1024;
 
+#[derive(Clone, Debug, Default)]
+struct NroffState {
+    escape: NroffEscape,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum NroffEscape {
+    #[default]
+    Text,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+impl NroffState {
+    fn append(&mut self, content: &mut String, text: &str, dirty_start: &mut usize) {
+        for ch in text.chars() {
+            match self.escape {
+                NroffEscape::Escape => {
+                    self.escape = match ch {
+                        '[' => NroffEscape::Csi,
+                        ']' => NroffEscape::Osc,
+                        _ => NroffEscape::Text,
+                    };
+                }
+                NroffEscape::Csi => {
+                    if ('@'..='~').contains(&ch) {
+                        self.escape = NroffEscape::Text;
+                    }
+                }
+                NroffEscape::Osc => {
+                    if ch == '\u{7}' {
+                        self.escape = NroffEscape::Text;
+                    } else if ch == '\u{1b}' {
+                        self.escape = NroffEscape::OscEscape;
+                    }
+                }
+                NroffEscape::OscEscape => {
+                    self.escape = if ch == '\\' {
+                        NroffEscape::Text
+                    } else {
+                        NroffEscape::Osc
+                    };
+                }
+                NroffEscape::Text => match ch {
+                    '\u{1b}' => self.escape = NroffEscape::Escape,
+                    '\u{8}' if !content.ends_with('\n') => {
+                        content.pop();
+                        *dirty_start = (*dirty_start).min(content.len());
+                    }
+                    '\u{8}' | '\r' => {}
+                    _ => content.push(ch),
+                },
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ViewerSearchDirection {
     Forward,
@@ -27,6 +86,7 @@ pub struct ViewerState {
     path: PathBuf,
     pub(crate) archive_location: Option<crate::ArchiveLocation>,
     output: Option<Box<ViewerOutputState>>,
+    nroff: Option<NroffState>,
     pub bytes: Vec<u8>,
     content: String,
     text_is_preview: bool,
@@ -157,6 +217,7 @@ impl ViewerState {
             path,
             archive_location: None,
             output: None,
+            nroff: None,
             bytes,
             content,
             text_is_preview,
@@ -212,25 +273,37 @@ impl ViewerState {
     pub(crate) fn append_output(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
         let output = self.output.as_mut().expect("command output viewer");
+        if self.nroff.is_some() {
+            output.content_hasher.write(bytes);
+        }
         let mut pending = std::mem::take(&mut output.utf8_tail);
         pending.extend_from_slice(bytes);
         let mut remaining = pending.as_slice();
-        let start = self.content.len();
+        let mut start = self.content.len();
+        let content = &mut self.content;
+        let nroff = &mut self.nroff;
+        let mut append = |text: &str| {
+            if let Some(nroff) = nroff {
+                nroff.append(content, text, &mut start);
+            } else {
+                content.push_str(text);
+            }
+        };
         while !remaining.is_empty() {
             match std::str::from_utf8(remaining) {
                 Ok(text) => {
-                    self.content.push_str(text);
+                    append(text);
                     break;
                 }
                 Err(error) => {
                     let valid = error.valid_up_to();
-                    self.content.push_str(
+                    append(
                         std::str::from_utf8(&remaining[..valid]).expect("validated UTF-8 prefix"),
                     );
                     remaining = &remaining[valid..];
                     match error.error_len() {
                         Some(count) => {
-                            self.content.push('\u{fffd}');
+                            append("\u{fffd}");
                             remaining = &remaining[count..];
                         }
                         None => {
@@ -256,10 +329,18 @@ impl ViewerState {
             }
         }
         let output = self.output.as_mut().expect("command output viewer");
-        output
-            .content_hasher
-            .write(&self.content.as_bytes()[start..]);
-        self.content_fingerprint = output.content_hasher.finish();
+        if self.nroff.is_some() {
+            // Nroff overstrikes can remove text. Hash its original byte stream,
+            // plus visible length so a final incomplete UTF-8 tail invalidates
+            // the cache without making the key depend on chunk boundaries.
+            self.content_fingerprint =
+                fingerprint(&(output.content_hasher.finish(), self.content.len()));
+        } else {
+            output
+                .content_hasher
+                .write(&self.content.as_bytes()[start..]);
+            self.content_fingerprint = output.content_hasher.finish();
+        }
     }
 
     pub(crate) fn finish_output(&mut self, status: String) {
@@ -281,6 +362,18 @@ impl ViewerState {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    pub(crate) fn apply_action_view_options(&mut self, options: crate::action_macros::ViewOptions) {
+        self.hex_mode = options.hex;
+        if options.nroff {
+            let original = std::mem::take(&mut self.content);
+            let mut state = NroffState::default();
+            state.append(&mut self.content, &original, &mut 0);
+            self.line_offsets = compute_line_offsets(&self.content);
+            self.content_fingerprint = fingerprint(&self.content);
+            self.nroff = Some(state);
+        }
     }
 
     /// Access a text line without scanning the preceding contents, even in hex mode.
@@ -615,6 +708,7 @@ mod tests {
     fn viewer(bytes: &[u8]) -> ViewerState {
         let content = String::from_utf8_lossy(bytes).into_owned();
         ViewerState {
+            nroff: None,
             path: PathBuf::from("fixture"),
             archive_location: None,
             output: None,

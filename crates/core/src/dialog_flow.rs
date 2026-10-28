@@ -511,6 +511,13 @@ impl AppState {
                 }
             }
             (
+                Some(PendingDialogAction::ActionPrompt(pending)),
+                DialogResult::InputSubmitted(answer),
+            ) => self.answer_action_prompt(*pending, answer),
+            (Some(PendingDialogAction::ActionPrompt(_)), DialogResult::Canceled) => {
+                self.set_status("Action canceled")
+            }
+            (
                 Some(PendingDialogAction::CommandHistory { commands }),
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {

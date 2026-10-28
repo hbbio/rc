@@ -14,6 +14,11 @@ pub struct CommandCaptureSpec {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CapturedCommand {
+    Action {
+        script: std::ffi::OsString,
+        environment: Vec<(String, std::ffi::OsString)>,
+        label: String,
+    },
     Shell {
         script: String,
         shell: ShellSettings,
@@ -35,6 +40,7 @@ impl CommandCaptureSpec {
 
     pub fn summary(&self) -> String {
         sanitize_display_line(&match &self.command {
+            CapturedCommand::Action { label, .. } => label.clone(),
             CapturedCommand::Shell { script, .. } => script.clone(),
             CapturedCommand::Compare { left, right, .. } => {
                 format!("Compare {} ↔ {}", left.display(), right.display())
@@ -62,6 +68,18 @@ pub fn execute_command_capture(
     let _ = jobs.send(JobEvent::Started { id });
     let result = (|| {
         let mut command = match &spec.command {
+            CapturedCommand::Action {
+                script,
+                environment,
+                ..
+            } => {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .arg("-c")
+                    .arg(script)
+                    .envs(environment.iter().map(|(key, value)| (key, value)));
+                command
+            }
             CapturedCommand::Shell { script, shell } => {
                 let invocation = rc_shell::resolve_shell(shell, &spec.cwd)?
                     .shell
@@ -126,11 +144,15 @@ impl AppState {
     }
 
     pub(crate) fn start_command_capture(&mut self, spec: CommandCaptureSpec) {
+        self.try_start_command_capture(spec);
+    }
+
+    pub(crate) fn try_start_command_capture(&mut self, spec: CommandCaptureSpec) -> Option<JobId> {
         if let CapturedCommand::Shell { script, .. } = &spec.command
             && (script.len() > COMMAND_BUFFER_LIMIT_BYTES || script.contains('\0'))
         {
             self.set_status("Command is too long or contains NUL");
-            return;
+            return None;
         }
         if self.command_outputs.len() >= OUTPUT_HISTORY_LIMIT {
             let oldest = self
@@ -143,7 +165,7 @@ impl AppState {
                 self.command_outputs.remove(&id);
             } else {
                 self.set_status("Close or finish an output screen before starting another command");
-                return;
+                return None;
             }
         }
         let title = spec.summary();
@@ -157,6 +179,7 @@ impl AppState {
         );
         self.routes.push(Route::CommandOutput(job_id));
         self.set_status("Capturing command output; Esc returns to panels, Alt-J cancels, Jobs/Enter reopens output");
+        Some(job_id)
     }
 
     pub(crate) fn append_command_output(&mut self, id: JobId, bytes: &[u8]) {

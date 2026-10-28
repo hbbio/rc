@@ -86,6 +86,9 @@ pub struct ExtensionRules {
 }
 
 impl ExtensionRules {
+    pub fn has_directory_match(&self, path: &Path) -> bool {
+        self.rules.iter().any(|rule| matches!(&rule.matcher, Matcher::Directory(regex) if regex.is_match(path.as_os_str().as_encoded_bytes())))
+    }
     pub fn parse(source: &str) -> Result<Self, String> {
         let sections = mc_ini::parse(source)?;
         let version = sections

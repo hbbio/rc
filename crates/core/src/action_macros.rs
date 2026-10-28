@@ -389,7 +389,7 @@ fn panel_values(
     Ok(vec![value])
 }
 
-fn os_from_bytes(bytes: &[u8]) -> Result<OsString, String> {
+pub(crate) fn os_from_bytes(bytes: &[u8]) -> Result<OsString, String> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

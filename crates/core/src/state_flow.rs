@@ -73,6 +73,12 @@ impl AppState {
         let mut state = Self {
             settings: settings.clone(),
             configuration_files: ConfigurationFiles::default(),
+            extension_rules: extension_rules::ExtensionRules::parse(
+                ConfigurationFile::Extensions.bundled(),
+            )
+            .map(Arc::new),
+            pending_extension: None,
+            pending_external_action_requests: Vec::new(),
             panels: [left, right],
             active_panel: ActivePanel::Left,
             panel_views: [PanelViewMode::Listing; 2],
@@ -134,6 +140,7 @@ impl AppState {
             pending_quit: false,
         };
         state.reload_file_highlights();
+        state.reload_extension_rules();
         Ok(state)
     }
 
@@ -433,6 +440,10 @@ impl AppState {
         else {
             return false;
         };
+        self.open_archive_path(path)
+    }
+
+    pub(crate) fn open_archive_path(&mut self, path: PathBuf) -> bool {
         let panel = self.active_panel;
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);

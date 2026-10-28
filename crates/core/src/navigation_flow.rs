@@ -106,54 +106,16 @@ impl AppState {
                 }
             }
             AppCommand::RestorePanelizedResults => self.restore_panelized_results(),
-            AppCommand::OpenEntry => {
-                if self.open_selected_archive() || self.open_selected_directory() {
-                    self.queue_panel_refresh(self.active_panel);
-                    self.set_status("Loading selected directory...");
-                } else if self.active_panel().is_archive() {
-                    if self.open_selected_file_in_viewer() {
-                        self.set_status("Opening viewer...");
-                    } else {
-                        self.set_status("No entry selected");
-                    }
-                } else {
-                    match self.execute_selected_file() {
-                        ExecuteSelectionResult::OpenedExternal => {
-                            self.set_status("Executing selected file...")
-                        }
-                        ExecuteSelectionResult::QueuedDesktopOpen => {
-                            self.set_status("Opening with the default application...")
-                        }
-                        ExecuteSelectionResult::NoEntrySelected => {
-                            self.set_status("No entry selected")
-                        }
-                        ExecuteSelectionResult::SelectedEntryIsDirectory => {
-                            self.set_status("Selected directory could not be opened")
-                        }
-                    }
+            AppCommand::OpenEntry | AppCommand::ViewEntry | AppCommand::EditEntry => {
+                let action = match command {
+                    AppCommand::OpenEntry => extension_rules::ExtensionAction::Open,
+                    AppCommand::ViewEntry => extension_rules::ExtensionAction::View,
+                    _ => extension_rules::ExtensionAction::Edit,
+                };
+                if !self.try_extension_action(action) {
+                    self.apply_builtin_file_action(action);
                 }
             }
-            AppCommand::ViewEntry => {
-                if self.open_selected_directory() {
-                    self.queue_panel_refresh(self.active_panel);
-                    self.set_status("Loading selected directory...");
-                } else if self.open_selected_file_in_viewer() {
-                    self.set_status("Opening viewer...");
-                } else {
-                    self.set_status("No entry selected");
-                }
-            }
-            AppCommand::EditEntry => match self.open_selected_file_in_editor() {
-                EditSelectionResult::OpenedExternal => {
-                    self.set_status("Opening external editor...")
-                }
-                EditSelectionResult::NoEditorResolved => self
-                    .set_status("No external editor found; set editor_command, EDITOR, or VISUAL"),
-                EditSelectionResult::NoEntrySelected => self.set_status("No entry selected"),
-                EditSelectionResult::SelectedEntryIsDirectory => {
-                    self.set_status("Directory cannot be edited");
-                }
-            },
             AppCommand::CdUp => {
                 if self.exit_panelize_mode() {
                     self.queue_panel_refresh(self.active_panel);

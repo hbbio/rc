@@ -39,6 +39,7 @@ impl fmt::Display for JobId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
+    FileType,
     Links,
     ChangeMetadata,
     MeasureDirectories,
@@ -62,6 +63,7 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::FileType => "file-type",
             Self::Links => "links",
             Self::ChangeMetadata => "permissions/ownership",
             Self::MeasureDirectories => "directory-sizes",
@@ -104,6 +106,13 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    LoadActionViewer {
+        path: PathBuf,
+        options: crate::action_macros::ViewOptions,
+    },
+    ProbeFileType {
+        path: PathBuf,
+    },
     CreateLinks {
         kind: crate::LinkKind,
         sources: Vec<PathBuf>,
@@ -232,6 +241,8 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::LoadActionViewer { .. } => JobKind::LoadViewer,
+            Self::ProbeFileType { .. } => JobKind::FileType,
             Self::CreateLinks { .. } | Self::EditSymlinks { .. } => JobKind::Links,
             Self::ChangeMetadata { .. } => JobKind::ChangeMetadata,
             Self::MeasureDirectories { .. } => JobKind::MeasureDirectories,
@@ -264,6 +275,8 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::LoadActionViewer { .. } => 1,
+            Self::ProbeFileType { .. } => 1,
             Self::CreateLinks { sources, .. } => sources.len(),
             Self::EditSymlinks { paths, .. } => paths.len(),
             Self::ChangeMetadata { paths, .. } => paths.len(),
@@ -291,6 +304,8 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::LoadActionViewer { path, .. } => format!("view {}", path.display()),
+            Self::ProbeFileType { path } => format!("identify {}", path.display()),
             Self::CreateLinks {
                 kind,
                 sources,
@@ -1176,7 +1191,10 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "desktop-open jobs are executed by the runtime adapter",
         )),
-        JobRequest::LoadViewer { .. } | JobRequest::CaptureCommand { .. } => Err(io::Error::new(
+        JobRequest::LoadViewer { .. }
+        | JobRequest::CaptureCommand { .. }
+        | JobRequest::ProbeFileType { .. }
+        | JobRequest::LoadActionViewer { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "viewer jobs are executed by the runtime adapter",
         )),
@@ -2084,6 +2102,8 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
         | JobRequest::CaptureCommand { .. }
+        | JobRequest::ProbeFileType { .. }
+        | JobRequest::LoadActionViewer { .. }
         | JobRequest::LoadArchiveViewer { .. }
         | JobRequest::MeasureArchiveSelection { .. }
         | JobRequest::LoadQuickView { .. }

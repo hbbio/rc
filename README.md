@@ -152,6 +152,31 @@ renaming still update the panels.
 
 ### Viewer and external programs
 
+- Local **Open**, **View**, and **Edit** actions honor ordered `mc.ext.ini` rules
+  on Enter, F3, and F4. Files require `[mc.ext.ini]` with `Version=4.0`.
+  Matching supports `Directory`, `Regex`, literal `Shell` names/suffixes, and
+  `Type` patterns against cancelable background `file -L -b` output. Case flags
+  apply to each matcher. `Include=name` supplies actions from `[Include/name]`;
+  missing actions fall back to `[Default]`, while empty actions suppress that
+  fallback. Invalid configurations report errors; correcting them and closing the
+  configuration editor reloads the rules. Unmatched actions retain normal behavior.
+  Directory navigation changes only when an explicit Directory rule matches.
+- Actions use `/bin/sh` and MC macros: `%f`, `%p`, `%n`, `%x`, `%d`, `%t`, `%s`,
+  `%u`, their uppercase passive-panel forms, `%%`, `%{prompt}`, and
+  `%var{NAME:default}`. Values are quoted by default and preserve native filename
+  bytes. `%1` explicitly enables quoting; `%0` inserts raw shell source.
+  `%u` clears the expanded tags only after the action is scheduled. Extension
+  helpers receive `MC_EXT_FILENAME`, `MC_EXT_BASENAME`, `MC_EXT_CURRENTDIR`,
+  `MC_EXT_SELECTED`, and `MC_EXT_ONLYTAGGED`.
+- `%view{ascii,hex,nroff,unform}` routes action output to the internal viewer;
+  a bare `%view` loads the selected file. Hex retains original bytes; nroff makes
+  overstrikes and ANSI formatting readable as plain text. `%cd` changes to a
+  literal expanded path; native TAR/ZIP paths ending in `/utar://` or `/uzip://`
+  open an archive. Prompt cancellation launches nothing and preserves tags.
+  Templates and expanded arguments are bounded to 64 KiB. Here-document templates
+  report an unsupported-template error; pass macros as arguments to a separate
+  script instead. Regex patterns use the same Rust regex syntax as panel filters,
+  with doubled backslashes for INI escaping.
 - **Command → Edit extension file / Edit menu file / Edit highlighting group file**
   opens `mc.ext.ini`, `mc.menu`, or `filehighlight.ini` in the configured external
   editor. Files in `~/.config/mc` take precedence over MC files installed under
