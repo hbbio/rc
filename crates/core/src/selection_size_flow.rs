@@ -88,6 +88,14 @@ impl SelectionSizeWorkflow {
 }
 
 impl AppState {
+    pub(crate) fn invalidate_selection_sizes_for_swap(&mut self) {
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            if let Some(id) = self.selection_size.invalidate(panel) {
+                let _ = self.request_cancel_for_job(id);
+            }
+        }
+    }
+
     pub fn selection_size_state(&self, panel: ActivePanel) -> &SelectionSizeState {
         &self.selection_sizes[panel.index()]
     }

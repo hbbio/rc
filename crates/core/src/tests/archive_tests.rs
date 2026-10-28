@@ -111,6 +111,25 @@ fn file_history_reopens_archive_member_after_leaving_archive() {
     assert_eq!(app.active_viewer().unwrap().bytes, b"archive history");
 }
 
+#[test]
+fn swapping_archive_panel_preserves_browsing_and_tagged_members() {
+    let fixture = Fixture::new(&[("member.txt", b"archive swap")]);
+    let mut app = fixture.app();
+    select(&mut app, &fixture.zip.join("member.txt"));
+    app.apply(AppCommand::ToggleTag).unwrap();
+    app.apply(AppCommand::SwapPanels).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_panel, ActivePanel::Right);
+    assert!(app.active_panel().is_archive());
+    assert!(
+        app.active_panel()
+            .is_tagged(&fixture.zip.join("member.txt"))
+    );
+    app.apply(AppCommand::ViewEntry).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_viewer().unwrap().bytes, b"archive swap");
+}
+
 fn enter(app: &mut AppState, path: &Path) {
     select(app, path);
     app.apply(AppCommand::OpenEntry).unwrap();

@@ -19,7 +19,7 @@ in the project [README](README.md).
 
 - Add chmod, chown, advanced chown, hard-link, symlink, relative-symlink, and
   edit-symlink operations with tagged-file support.
-- Add panel swapping, directory-size calculation on demand, and a screen selector.
+- Add directory-size calculation on demand and a screen selector.
 - Support user-defined panel listing formats in addition to Full, Brief, and Long.
 
 ## Command output, diff, and subshell

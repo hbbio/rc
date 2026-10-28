@@ -6,6 +6,58 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::*;
 
 impl AppState {
+    pub(crate) fn swap_panels(&mut self) {
+        if !matches!(self.top_route(), Route::FileManager) {
+            return;
+        }
+        // An initial panelize command cannot be replayed safely, and its partial
+        // entries must not become the cached complete result when requeued.
+        if [ActivePanel::Left, ActivePanel::Right]
+            .into_iter()
+            .any(|side| {
+                let panel = &self.panels[side.index()];
+                panel.source.is_panelized()
+                    && (panel.loading || self.panel_has_pending_navigation(side))
+                    && panel.panelized_entries.is_none()
+            })
+        {
+            self.set_status("Wait for panelized results to finish before swapping panels");
+            return;
+        }
+        let reload = self.prepare_panel_refresh_swap();
+        self.invalidate_selection_sizes_for_swap();
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            self.deactivate_quick_view(panel);
+        }
+        self.panels.swap(0, 1);
+        self.panel_views.swap(0, 1);
+        self.panel_listing_formats.swap(0, 1);
+        self.selection_sizes.swap(0, 1);
+        self.panelized_result_history.swap(0, 1);
+        self.previous_panel_directories.swap(0, 1);
+        self.panel_mkdirs.latest_job_ids.swap(0, 1);
+        for pending in self.panel_mkdirs.pending.values_mut() {
+            pending.panel = pending.panel.other();
+        }
+        self.active_panel = self.active_panel.other();
+        self.settings.panel_options.listing_formats.swap(0, 1);
+        self.settings.panel_options.sort_modes.swap(0, 1);
+        self.settings.panel_options.filters.swap(0, 1);
+        self.settings.mark_dirty();
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            if reload[panel.index()] {
+                self.queue_panel_refresh(panel);
+            } else if !self.panels[panel.index()].is_archive()
+                && self.panels[panel.index()].canonical_cwd().is_none()
+            {
+                self.queue_panel_identity_resolution(panel);
+            }
+            self.sync_selection_size(panel, true);
+            self.sync_quick_view_from(panel, true);
+        }
+        self.set_status("Panels swapped");
+    }
+
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
         let start_path = std::path::absolute(start_path)?;
         let settings = Settings::default();

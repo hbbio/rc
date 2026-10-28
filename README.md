@@ -12,6 +12,8 @@ and fast directory navigation.
 ### Panels and navigation
 
 - Two independent directory panels with Full, Brief, and Long layouts.
+- `Ctrl-U` swaps the panels with their selection, tags, listing settings, and
+  navigation history. Focus follows the active listing.
 - Browse ZIP, TAR, gzip TAR, and bzip2 TAR archives as read-only folders, with
   normal navigation, sorting, filtering, and tagging.
 - Native filesystem notifications automatically refresh both panels and the open

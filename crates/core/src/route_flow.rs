@@ -63,6 +63,7 @@ impl AppState {
                     self.set_status("The other panel is not a file listing");
                 }
             }
+            AppCommand::SwapPanels => self.swap_panels(),
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
             AppCommand::Navigate(NavigationTarget::Jobs, motion) => {

@@ -168,6 +168,7 @@ pub enum AppCommand {
     PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
+    SwapPanels,
     SetOtherPanelView(PanelViewMode),
     Panel(ActivePanel, PanelCommand),
     Navigate(NavigationTarget, NavigationMotion),
@@ -424,6 +425,7 @@ impl AppCommand {
             | Self::PanelizePresetRemove
             | Self::EnterXMap
             | Self::SwitchPanel
+            | Self::SwapPanels
             | Self::Panel(_, PanelCommand::OpenTree)
             | Self::OpenJobsScreen
             | Self::CloseJobsScreen
@@ -706,7 +708,7 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     MenuEntry::stub("User menu", "F2"),
     MenuEntry::action("Directory tree", AppCommand::OpenTree),
     MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
-    MenuEntry::stub("Swap panels", "C-u"),
+    MenuEntry::action_with_shortcut("Swap panels", "C-u", AppCommand::SwapPanels),
     MenuEntry::stub("Switch panels on/off", "C-o"),
     MenuEntry::action_with_literal_shortcut(
         "Compare directories",

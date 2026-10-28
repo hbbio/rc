@@ -196,6 +196,26 @@ impl PanelRefreshPostWorkflow {
 }
 
 impl AppState {
+    pub(crate) fn prepare_panel_refresh_swap(&mut self) -> [bool; 2] {
+        let loading = [ActivePanel::Left, ActivePanel::Right].map(|panel| {
+            self.panels[panel.index()].loading || self.panel_refresh_post.has_revert(panel)
+        });
+        let mut reverts = std::mem::take(&mut self.panel_refresh_post.reverts);
+        let focus_target = self.panel_refresh_post.focus_target.take();
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            self.cancel_and_invalidate_panel_refresh(panel);
+        }
+        reverts.swap(0, 1);
+        self.panel_refresh_post.reverts = reverts;
+        self.panel_refresh_post.focus_target =
+            focus_target.map(|(panel, path)| (panel.other(), path));
+        [loading[1], loading[0]]
+    }
+
+    pub(crate) fn panel_has_pending_navigation(&self, panel: ActivePanel) -> bool {
+        self.panel_refresh_post.has_revert(panel)
+    }
+
     /// Refresh an invalidated directory without interrupting a scan or navigation.
     /// False means the caller must retain the invalidation and retry once idle.
     pub fn refresh_directory_if_idle(&mut self, panel: ActivePanel) -> bool {
