@@ -23,6 +23,28 @@ pub enum KeyContext {
 }
 
 impl KeyContext {
+    pub fn section_name(self) -> &'static str {
+        match self {
+            Self::FileManager => "filemanager",
+            Self::FileManagerXMap => "filemanager:xmap",
+            Self::CommandLine => "commandline",
+            Self::Help => "help",
+            Self::Jobs => "jobs",
+            Self::FindResults => "findresults",
+            Self::Tree => "tree",
+            Self::Hotlist => "hotlist",
+            Self::Dialog => "dialog",
+            Self::Input => "input",
+            Self::FindDialog => "finddialog",
+            Self::Listbox => "listbox",
+            Self::Menu => "menu",
+            Self::Editor => "editor",
+            Self::Viewer => "viewer",
+            Self::ViewerHex => "viewer:hex",
+            Self::DiffViewer => "diffviewer",
+        }
+    }
+
     fn from_section(section_name: &str) -> Option<Self> {
         let normalized = section_name.trim().to_ascii_lowercase();
         if normalized == "viewer:hex" {
@@ -94,6 +116,30 @@ pub struct KeyChord {
 }
 
 impl KeyChord {
+    pub fn config_token(self) -> String {
+        let mut token = String::new();
+        if self.modifiers.ctrl {
+            token.push_str("ctrl-");
+        }
+        if self.modifiers.alt {
+            token.push_str("alt-");
+        }
+        if self.modifiers.shift {
+            token.push_str("shift-");
+        }
+        token.push_str(&match self.code {
+            KeyCode::Char(' ') => "space".into(),
+            KeyCode::Char(';') => "semicolon".into(),
+            KeyCode::Char('-') => "minus".into(),
+            _ => crate::format_key_chord(Self {
+                code: self.code,
+                modifiers: KeyModifiers::default(),
+            })
+            .to_ascii_lowercase(),
+        });
+        token
+    }
+
     pub const fn new(code: KeyCode) -> Self {
         Self {
             code,
@@ -343,12 +389,73 @@ pub struct KeymapParseReport {
     pub skipped_bindings: Vec<SkippedKeyBinding>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Keymap {
     bindings: HashMap<KeyContext, HashMap<KeyChord, KeyCommand>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LearnedBinding {
+    pub context: String,
+    pub action: String,
+    pub chord: String,
+}
+
+impl LearnedBinding {
+    pub fn parse(&self) -> Result<(KeyContext, KeyChord, KeyCommand), String> {
+        let context = KeyContext::from_section(&self.context).ok_or("Unknown key context")?;
+        if self.context.trim().to_ascii_lowercase() != context.section_name() {
+            return Err(format!("Use context {}", context.section_name()));
+        }
+        if self.action.is_empty()
+            || !self
+                .action
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ' '))
+        {
+            return Err("Enter a command name such as View, Copy, or Swap".into());
+        }
+        let chord = parse_key_token(&self.chord)?;
+        let command = KeyCommand::from_name(&self.action);
+        let available = crate::AppCommand::from_key_command(context, &command).or_else(|| {
+            (context == KeyContext::FileManagerXMap)
+                .then(|| crate::AppCommand::from_key_command(KeyContext::FileManager, &command))
+                .flatten()
+        });
+        if available.is_none() {
+            return Err("Command is not available in this context".into());
+        }
+        if context == KeyContext::CommandLine
+            && !available.is_some_and(crate::AppCommand::is_command_line_action)
+        {
+            return Err("Command is not available in the command line".into());
+        }
+        if matches!(context, KeyContext::Input | KeyContext::FindDialog)
+            && matches!(chord.code, KeyCode::Char(_))
+            && !chord.modifiers.ctrl
+            && !chord.modifiers.alt
+        {
+            return Err("Text input requires a modified key or a special key".into());
+        }
+        Ok((context, chord, command))
+    }
+}
+
 impl Keymap {
+    pub fn from_learned_bindings(bindings: &[LearnedBinding]) -> Self {
+        let mut keymap = Self::default();
+        for binding in bindings {
+            if let Ok((context, chord, command)) = binding.parse() {
+                keymap
+                    .bindings
+                    .entry(context)
+                    .or_default()
+                    .insert(chord, command);
+            }
+        }
+        keymap
+    }
+
     pub fn bundled_mc_default() -> Result<Self, KeymapParseError> {
         let (keymap, _) = Self::bundled_mc_default_with_report()?;
         Ok(keymap)
@@ -582,7 +689,7 @@ fn parse_key_code(name: String) -> Result<KeyCode, String> {
         _ => {}
     }
 
-    if name.len() == 1 {
+    if name.chars().count() == 1 {
         let ch = name.chars().next().expect("single-char token");
         return Ok(KeyCode::Char(ch));
     }

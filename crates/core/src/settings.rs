@@ -243,6 +243,7 @@ impl Default for DisplayBitsSettings {
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct LearnKeysSettings {
     pub last_learned_binding: Option<String>,
+    pub bindings: Vec<crate::keymap::LearnedBinding>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -19,6 +19,7 @@ pub mod jobs;
 mod keybinding_help;
 pub mod keymap;
 pub mod layout;
+mod learn_keys;
 mod navigation_flow;
 mod orchestration;
 mod panel;
@@ -393,6 +394,20 @@ pub(crate) enum CommandOutcome {
 }
 
 impl AppCommand {
+    pub const fn is_command_line_action(self) -> bool {
+        matches!(
+            self,
+            Self::OpenHelp
+                | Self::OpenCommandHistory
+                | Self::EnterXMap
+                | Self::PutCurrentSelected
+                | Self::PutCurrentFullSelected
+                | Self::PutCurrentTagged
+                | Self::PutOtherTagged
+                | Self::CopySelectedPath
+        )
+    }
+
     pub(crate) const fn domain(self) -> CommandDomain {
         match self {
             Self::OpenHelp
@@ -1987,6 +2002,7 @@ enum SettingsEntryAction {
     ToggleUtf8Output,
     ToggleEightBitInput,
     LearnKeysCapture,
+    EditLearnedBinding(usize),
     ToggleVfsEnabled,
     ToggleVfsFtpEnabled,
     ToggleVfsShellLinkEnabled,
@@ -2022,6 +2038,10 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    LearnKey {
+        chord: KeyChord,
+        original: Option<keymap::LearnedBinding>,
+    },
     FilteredView {
         cwd: PathBuf,
     },
@@ -2366,6 +2386,8 @@ pub struct AppState {
     panel_mkdirs: PanelMkdirTracker,
     tree_mutations: TreeMutationTracker,
     keybinding_hints: KeybindingHints,
+    base_keymap: Keymap,
+    learned_keymap: Keymap,
     keymap_unknown_actions: usize,
     keymap_invalid_bindings: usize,
     pending_learn_keys_capture: bool,

@@ -159,6 +159,10 @@ renaming still update the panels.
 
 - MC-style top menus, contextual help, mouse support, and a parsed
   `mc.default.keymap` with user overrides.
+- Options → Learn keys captures a chord and assigns a command in a chosen context.
+  Learned bindings apply immediately over the bundled/custom keymap. Select a
+  learned binding to edit it, or clear its command to restore the underlying
+  binding. Save setup persists them in `settings.ini`.
 - Bundled MC skins plus custom and system skin discovery.
 - Typed settings for layout, panels, confirmations, appearance, display, shell,
   and command history.

@@ -691,6 +691,23 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.learn_keys.last_learned_binding = Some(value.to_string());
                 }
             }
+            ("learn_keys", "binding") => {
+                let mut fields = value.splitn(3, '\t');
+                if let (Some(context), Some(action), Some(chord)) = (
+                    fields.next().and_then(unescape_settings_field),
+                    fields.next().and_then(unescape_settings_field),
+                    fields.next().and_then(unescape_settings_field),
+                ) {
+                    let binding = crate::keymap::LearnedBinding {
+                        context,
+                        action,
+                        chord,
+                    };
+                    if binding.parse().is_ok() && settings.learn_keys.bindings.len() < 128 {
+                        settings.learn_keys.bindings.push(binding);
+                    }
+                }
+            }
             ("virtual_fs", "vfs_enabled") => {
                 if let Some(parsed) = parse_bool(value) {
                     settings.virtual_fs.vfs_enabled = parsed;
@@ -931,6 +948,14 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
 
     lines.push(String::new());
     lines.push(String::from("[learn_keys]"));
+    for binding in &settings.learn_keys.bindings {
+        lines.push(format!(
+            "binding={}\t{}\t{}",
+            escape_settings_field(&binding.context),
+            escape_settings_field(&binding.action),
+            escape_settings_field(&binding.chord)
+        ));
+    }
     if let Some(binding) = settings.learn_keys.last_learned_binding.as_ref() {
         lines.push(format!("last_learned_binding={binding}"));
     } else {

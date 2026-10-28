@@ -139,7 +139,9 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenPanelizeDialog) => {
                 Some(Self::OpenPanelizeDialog)
             }
-            (KeyContext::FileManager, KeyCommand::EnterXMap) => Some(Self::EnterXMap),
+            (KeyContext::FileManager | KeyContext::CommandLine, KeyCommand::EnterXMap) => {
+                Some(Self::EnterXMap)
+            }
             (KeyContext::FileManagerXMap, KeyCommand::AddHotlist) => {
                 Some(Self::HotlistAddCurrentDirectory)
             }

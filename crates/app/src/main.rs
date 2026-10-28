@@ -747,13 +747,15 @@ fn handle_key(
     if state.capture_learn_keys_chord(chord) {
         return Ok(false);
     }
-    let key_command = keymap.resolve(context, chord).or_else(|| {
-        if context == KeyContext::ViewerHex {
-            keymap.resolve(KeyContext::Viewer, chord)
-        } else {
-            None
-        }
-    });
+    let key_command = state
+        .resolve_key_command(keymap, context, chord)
+        .or_else(|| {
+            if context == KeyContext::ViewerHex {
+                state.resolve_key_command(keymap, KeyContext::Viewer, chord)
+            } else {
+                None
+            }
+        });
     let command = key_command.and_then(|key_command| {
         AppCommand::from_key_command(context, key_command).or_else(|| {
             (context == KeyContext::FileManagerXMap)
@@ -795,21 +797,19 @@ fn command_line_keymap_command(
         KeyContext::FileManager
     };
     let chord = map_key_event_to_chord(*key_event, input_compatibility)?;
-    let command = keymap
-        .resolve(context, chord)
-        .and_then(|key_command| AppCommand::from_key_command(context, key_command))?;
-    matches!(
-        command,
-        AppCommand::OpenHelp
-            | AppCommand::OpenCommandHistory
-            | AppCommand::EnterXMap
-            | AppCommand::PutCurrentSelected
-            | AppCommand::PutCurrentFullSelected
-            | AppCommand::PutCurrentTagged
-            | AppCommand::PutOtherTagged
-            | AppCommand::CopySelectedPath
-    )
-    .then_some(command)
+    let command = (!state.is_xmap_pending())
+        .then(|| {
+            state
+                .resolve_key_command(keymap, KeyContext::CommandLine, chord)
+                .and_then(|key| AppCommand::from_key_command(KeyContext::CommandLine, key))
+        })
+        .flatten()
+        .or_else(|| {
+            state
+                .resolve_key_command(keymap, context, chord)
+                .and_then(|key| AppCommand::from_key_command(context, key))
+        })?;
+    command.is_command_line_action().then_some(command)
 }
 
 fn handle_mouse(
@@ -3797,6 +3797,48 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn learned_binding_is_used_by_actual_event_dispatch() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-dispatch-{stamp}"));
+        fs::create_dir_all(&root).unwrap();
+        let mut state = AppState::new(root.clone()).unwrap();
+        let keymap = Keymap::bundled_mc_default().unwrap();
+        let mut settings = state.persisted_settings_snapshot();
+        settings
+            .learn_keys
+            .bindings
+            .push(rc_core::keymap::LearnedBinding {
+                context: "filemanager".into(),
+                action: "Swap".into(),
+                chord: "f3".into(),
+            });
+        state.replace_settings(settings);
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::F(3), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .unwrap();
+        assert_eq!(state.active_panel, rc_core::ActivePanel::Right);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

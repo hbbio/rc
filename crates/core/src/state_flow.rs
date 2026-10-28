@@ -120,6 +120,8 @@ impl AppState {
             panel_mkdirs: PanelMkdirTracker::default(),
             tree_mutations: TreeMutationTracker::default(),
             keybinding_hints: KeybindingHints::default(),
+            base_keymap: Keymap::default(),
+            learned_keymap: Keymap::default(),
             keymap_unknown_actions: 0,
             keymap_invalid_bindings: 0,
             pending_learn_keys_capture: false,
@@ -190,6 +192,7 @@ impl AppState {
 
     pub fn replace_settings(&mut self, settings: Settings) {
         self.settings = settings;
+        self.refresh_learned_keymap();
         self.command_line
             .set_history_mode(self.settings.shell.history);
         self.hotlist_cursor = self
@@ -637,7 +640,8 @@ impl AppState {
     }
 
     pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
-        self.keybinding_hints = KeybindingHints::from_keymap(keymap);
+        self.base_keymap = keymap.clone();
+        self.refresh_learned_keymap();
     }
 
     pub fn set_keymap_parse_report(&mut self, report: &KeymapParseReport) {
@@ -663,17 +667,8 @@ impl AppState {
         let captured = format_key_chord(chord);
         self.settings.learn_keys.last_learned_binding = Some(captured.clone());
         self.settings.mark_dirty();
-        let target = self
-            .settings
-            .configuration
-            .keymap_override
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("<none>"));
-        self.set_status(format!(
-            "Captured key chord: {captured} (override target: {target})"
-        ));
         self.refresh_settings_entries();
+        self.open_learned_binding(chord, None);
         true
     }
 

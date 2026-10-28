@@ -229,42 +229,54 @@ impl AppState {
                     SettingsEntryAction::ToggleEightBitInput,
                 ),
             ],
-            SettingsCategory::LearnKeys => vec![
-                SettingsEntry::new(
-                    "Last learned binding",
-                    self.settings
-                        .learn_keys
-                        .last_learned_binding
-                        .clone()
-                        .unwrap_or_else(|| String::from("<none>")),
-                    SettingsEntryAction::Info,
-                ),
-                SettingsEntry::new(
-                    "Override target",
-                    self.settings
-                        .configuration
-                        .keymap_override
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| String::from("<none>")),
-                    SettingsEntryAction::Info,
-                ),
-                SettingsEntry::new(
-                    "Unknown keymap actions",
-                    self.keymap_unknown_actions.to_string(),
-                    SettingsEntryAction::Info,
-                ),
-                SettingsEntry::new(
-                    "Invalid key bindings",
-                    self.keymap_invalid_bindings.to_string(),
-                    SettingsEntryAction::Info,
-                ),
-                SettingsEntry::new(
-                    "Capture binding (scaffold)",
-                    "",
-                    SettingsEntryAction::LearnKeysCapture,
-                ),
-            ],
+            SettingsCategory::LearnKeys => {
+                let mut entries = vec![
+                    SettingsEntry::new(
+                        "Last learned binding",
+                        self.settings
+                            .learn_keys
+                            .last_learned_binding
+                            .clone()
+                            .unwrap_or_else(|| String::from("<none>")),
+                        SettingsEntryAction::Info,
+                    ),
+                    SettingsEntry::new(
+                        "Custom keymap",
+                        self.settings
+                            .configuration
+                            .keymap_override
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| String::from("<none>")),
+                        SettingsEntryAction::Info,
+                    ),
+                    SettingsEntry::new(
+                        "Unknown keymap actions",
+                        self.keymap_unknown_actions.to_string(),
+                        SettingsEntryAction::Info,
+                    ),
+                    SettingsEntry::new(
+                        "Invalid key bindings",
+                        self.keymap_invalid_bindings.to_string(),
+                        SettingsEntryAction::Info,
+                    ),
+                    SettingsEntry::new(
+                        "Capture and assign binding",
+                        "",
+                        SettingsEntryAction::LearnKeysCapture,
+                    ),
+                ];
+                entries.extend(self.settings.learn_keys.bindings.iter().enumerate().map(
+                    |(index, binding)| {
+                        SettingsEntry::new(
+                            format!("{} {}", binding.context, binding.chord),
+                            binding.action.clone(),
+                            SettingsEntryAction::EditLearnedBinding(index),
+                        )
+                    },
+                ));
+                entries
+            }
             SettingsCategory::VirtualFs => vec![
                 SettingsEntry::new(
                     "Enable virtual FS",
@@ -476,6 +488,7 @@ impl AppState {
                 self.pending_learn_keys_capture = true;
                 self.set_status("Press a key chord to capture (Esc to cancel)");
             }
+            SettingsEntryAction::EditLearnedBinding(index) => self.edit_learned_binding(index),
             SettingsEntryAction::ToggleVfsEnabled => {
                 self.settings.virtual_fs.vfs_enabled = !self.settings.virtual_fs.vfs_enabled;
                 self.settings.mark_dirty();

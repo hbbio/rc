@@ -405,6 +405,10 @@ impl AppState {
         }
         match (pending, result) {
             (
+                Some(PendingDialogAction::LearnKey { chord, original }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.save_learned_binding(chord, original, first, second),
+            (
                 Some(PendingDialogAction::FilteredView { cwd }),
                 DialogResult::InputSubmitted(command),
             ) => {
