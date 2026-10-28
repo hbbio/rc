@@ -304,6 +304,7 @@ pub enum AppCommand {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
+    OpenShellLink,
     OpenSftp,
     OpenEncoding,
     SetView(PanelViewMode),
@@ -587,6 +588,7 @@ impl AppCommand {
                 _,
                 PanelCommand::OpenListingFormat
                 | PanelCommand::OpenSftp
+                | PanelCommand::OpenShellLink
                 | PanelCommand::OpenEncoding
                 | PanelCommand::OpenSortOrder
                 | PanelCommand::OpenFilter,
@@ -737,7 +739,10 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
         ),
         MenuEntry::separator(),
         MenuEntry::stub("FTP link...", ""),
-        MenuEntry::stub("Shell link...", ""),
+        MenuEntry::action(
+            "Shell link...",
+            AppCommand::Panel(panel, PanelCommand::OpenShellLink),
+        ),
         MenuEntry::action(
             "SFTP link...",
             AppCommand::Panel(panel, PanelCommand::OpenSftp),
@@ -2160,8 +2165,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
-    SftpConnection {
+    SshConnection {
         panel: ActivePanel,
+        shell: bool,
     },
     ViewVfsFile {
         base: vfs::VfsPath,

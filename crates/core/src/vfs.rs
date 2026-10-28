@@ -22,6 +22,8 @@ mod remote_cache;
 #[cfg(unix)]
 pub mod sftp;
 #[cfg(unix)]
+pub mod shell_link;
+#[cfg(unix)]
 pub mod ssh;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

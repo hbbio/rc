@@ -90,6 +90,31 @@ fn global_vfs_setting_blocks_new_archives_and_helpers() {
 }
 
 #[test]
+fn shell_link_menu_uses_its_own_setting_and_worker() {
+    let (_dir, mut app, _, _) = fixture();
+    app.settings.virtual_fs.sftp_enabled = false;
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenShellLink,
+    ))
+    .unwrap();
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "host-alias".into(),
+        second: "/space dir".into(),
+    });
+    assert!(app.take_pending_worker_commands().into_iter().any(|command| matches!(command, WorkerCommand::Run(job) if matches!(job.request, JobRequest::Vfs(Task::OpenShell { .. })))));
+    app.settings.virtual_fs.shell_link_enabled = false;
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::OpenShellLink,
+    ))
+    .unwrap();
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(app.status_line.contains("Enable"));
+}
+
+#[test]
 fn reconnect_runs_in_a_worker_and_refreshes_only_panels_still_on_the_mount() {
     struct Remote;
     impl vfs::Backend for Remote {

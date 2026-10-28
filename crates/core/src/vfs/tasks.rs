@@ -12,6 +12,11 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Task {
+    #[cfg(unix)]
+    OpenShell {
+        connection: super::sftp::Connection,
+        return_to: VfsPath,
+    },
     Reconnect {
         location: MountedPath,
     },
@@ -53,7 +58,9 @@ impl Task {
         match self {
             Self::Reconnect { .. } => JobKind::RefreshPanel,
             #[cfg(unix)]
-            Self::OpenHelper { .. } | Self::OpenSftp { .. } => JobKind::RefreshPanel,
+            Self::OpenHelper { .. } | Self::OpenSftp { .. } | Self::OpenShell { .. } => {
+                JobKind::RefreshPanel
+            }
             Self::View { quick_view, .. } => {
                 if quick_view.is_some() {
                     JobKind::LoadQuickView
@@ -81,6 +88,10 @@ impl Task {
             #[cfg(unix)]
             Self::OpenSftp { connection, .. } => {
                 format!("connect SFTP {}", connection.endpoint.authority())
+            }
+            #[cfg(unix)]
+            Self::OpenShell { connection, .. } => {
+                format!("connect Shell {}", connection.endpoint.authority())
             }
             Self::View { path, .. } => format!("view {}", path.identity().display()),
             Self::Measure { paths, .. } => format!("measure {} VFS entries", paths.len()),
@@ -111,7 +122,7 @@ impl Task {
                 ..
             } => Some(path.mount().id()),
             #[cfg(unix)]
-            Self::OpenHelper { .. } | Self::OpenSftp { .. } => None,
+            Self::OpenHelper { .. } | Self::OpenSftp { .. } | Self::OpenShell { .. } => None,
         }
     }
 }
@@ -129,6 +140,14 @@ pub fn execute(job: WorkerJob, jobs: &Sender<JobEvent>, events: &Sender<Backgrou
     let _ = jobs.send(JobEvent::Started { id });
     let result = (|| -> io::Result<()> {
         let event = match task {
+            #[cfg(unix)]
+            Task::OpenShell {
+                connection,
+                return_to,
+            } => BackgroundEvent::VfsMounted {
+                job_id: id,
+                mount: super::shell_link::open(connection, return_to.clone(), Some(&cancel))?,
+            },
             Task::Reconnect { location } => {
                 VfsPath::Mounted(location.clone()).read_directory(
                     crate::SortMode::default(),

@@ -96,6 +96,7 @@ pub(super) struct Attributes {
     gid: Option<u32>,
     atime: Option<u32>,
     mtime: Option<u32>,
+    identity: Option<Vec<u8>>,
 }
 impl Attributes {
     fn decode(input: &mut Decoder<'_>) -> io::Result<Self> {
@@ -124,8 +125,14 @@ impl Attributes {
                 return Err(invalid("too many extended attributes"));
             }
             for _ in 0..count {
-                input.string()?;
-                input.string()?;
+                let key = input.string()?;
+                let value = input.string()?;
+                if key == b"rc-identity@rust-commander" {
+                    if value.len() > 256 || attrs.identity.is_some() {
+                        return Err(invalid("invalid source identity"));
+                    }
+                    attrs.identity = Some(value.to_vec());
+                }
             }
         }
         Ok(attrs)
@@ -169,7 +176,8 @@ impl Attributes {
     }
     pub fn verify(&self, current: &Self) -> io::Result<()> {
         // Access times may change as a consequence of this read.
-        if self.size != current.size
+        if self.identity != current.identity
+            || self.size != current.size
             || self.mode != current.mode
             || self.mtime != current.mtime
             || self.uid != current.uid

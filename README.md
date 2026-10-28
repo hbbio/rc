@@ -224,8 +224,20 @@ by SFTP v3, including size and second-resolution modification time.
 
 **Options → Virtual FS** controls new mounts. Disabling VFS blocks new archive,
 helper, and remote mounts; existing mounts remain usable until closed. The SFTP
-toggle separately controls new SFTP links. FTP and shell providers remain in the
-roadmap.
+and Shell toggles separately control new links of each type.
+
+**Left / Right → Shell link** uses SSH to run an in-memory read-only helper on a
+Unix remote host with Python 3.6 or newer (`python3` on its PATH). It accepts the
+same address and directory fields as SFTP, shares its host verification,
+authentication, streaming, limits, and reconnect behavior, and does not require
+the server's SFTP subsystem. Nothing is installed on the remote host. The helper
+runs in Python's [isolated mode](https://docs.python.org/3/using/cmdline.html#cmdoption-I)
+and exchanges binary paths, preserving native bytes without interpreting them
+as shell commands. It supports regular-file reads and directory listings;
+mutation requests are rejected. Source-change checks also include device,
+inode, and nanosecond modification/change times when using this helper.
+
+FTP links remain in the roadmap.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;

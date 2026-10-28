@@ -27,6 +27,7 @@ fn mount(directory: &Path, program: PathBuf) -> Arc<Mount> {
         VfsPath::Local(directory.into()),
         None,
         program,
+        Transport::Sftp,
     )
     .unwrap()
 }
@@ -132,6 +133,7 @@ fn cancellation_interrupts_handshake_and_reaps_transport() {
             VfsPath::Local(dir.path().into()),
             Some(&canceled),
             program,
+            Transport::Sftp,
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);

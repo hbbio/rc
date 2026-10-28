@@ -12,7 +12,10 @@ impl AppState {
 
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
-            AppCommand::Panel(panel, PanelCommand::OpenSftp) => self.open_sftp_dialog(panel),
+            AppCommand::Panel(panel, PanelCommand::OpenSftp) => self.open_ssh_dialog(panel, false),
+            AppCommand::Panel(panel, PanelCommand::OpenShellLink) => {
+                self.open_ssh_dialog(panel, true)
+            }
             AppCommand::OpenEncoding => self.open_encoding_dialog(self.active_panel),
             AppCommand::Panel(panel, PanelCommand::OpenEncoding) => {
                 self.open_encoding_dialog(panel)
@@ -573,9 +576,9 @@ impl AppState {
                 },
             ) => self.act_on_vfs_mount(mount, index),
             (
-                Some(PendingDialogAction::SftpConnection { panel }),
+                Some(PendingDialogAction::SshConnection { panel, shell }),
                 DialogResult::PairInputSubmitted { first, second },
-            ) => self.submit_sftp_connection(panel, &first, &second),
+            ) => self.submit_ssh_connection(panel, shell, &first, &second),
             (None, result) => self.set_status(result.status_line()),
             (
                 Some(PendingDialogAction::ViewVfsFile { base }),

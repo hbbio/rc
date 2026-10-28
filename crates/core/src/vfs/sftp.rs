@@ -22,7 +22,44 @@ pub struct Connection {
     pub directory: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Transport {
+    Sftp,
+    Shell,
+}
+impl Transport {
+    fn kind(self) -> BackendKind {
+        match self {
+            Self::Sftp => BackendKind::Sftp,
+            Self::Shell => BackendKind::Shell,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sftp => "SFTP",
+            Self::Shell => "Shell",
+        }
+    }
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Sftp => "sftp",
+            Self::Shell => "sh",
+        }
+    }
+    fn command(self, endpoint: &Endpoint, program: &Path) -> std::process::Command {
+        match self {
+            Self::Sftp => {
+                let mut command = endpoint.command(program, true);
+                command.arg("sftp");
+                command
+            }
+            Self::Shell => super::shell_link::command(endpoint, program),
+        }
+    }
+}
+
 struct SftpBackend {
+    transport: Transport,
     endpoint: Endpoint,
     program: PathBuf,
     root: PathBuf,
@@ -35,8 +72,7 @@ struct SftpBackend {
 
 impl SftpBackend {
     fn connect(&self, cancel: &Cancellation<'_>) -> io::Result<Session> {
-        let mut command = self.endpoint.command(&self.program, true);
-        command.arg("sftp");
+        let command = self.transport.command(&self.endpoint, &self.program);
         Session::open(command, cancel)
     }
     fn with_session<T>(
@@ -98,7 +134,7 @@ impl SftpBackend {
 
 impl Backend for SftpBackend {
     fn kind(&self) -> BackendKind {
-        BackendKind::Sftp
+        self.transport.kind()
     }
     fn read_directory(&self, path: &Path, cancel: &Cancellation<'_>) -> io::Result<Vec<FileEntry>> {
         cancel.check()?;
@@ -152,25 +188,34 @@ pub fn open(
     return_to: VfsPath,
     cancel: Option<&AtomicBool>,
 ) -> io::Result<Arc<Mount>> {
-    let program = rc_shell::find_program_on_path(OsStr::new("ssh"), return_to.local_directory())
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Install OpenSSH to use SFTP links")
-        })?;
-    open_with_program(connection, return_to, cancel, program)
+    open_transport(connection, return_to, cancel, Transport::Sftp)
 }
 
-fn open_with_program(
+pub(super) fn open_transport(
+    connection: &Connection,
+    return_to: VfsPath,
+    cancel: Option<&AtomicBool>,
+    transport: Transport,
+) -> io::Result<Arc<Mount>> {
+    let program = rc_shell::find_program_on_path(OsStr::new("ssh"), return_to.local_directory())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Install OpenSSH to use SSH links")
+        })?;
+    open_with_program(connection, return_to, cancel, program, transport)
+}
+
+pub(super) fn open_with_program(
     connection: &Connection,
     return_to: VfsPath,
     cancel: Option<&AtomicBool>,
     program: PathBuf,
+    transport: Transport,
 ) -> io::Result<Arc<Mount>> {
     let cancellation = Cancellation {
         requested: cancel,
         closed: None,
     };
-    let mut command = connection.endpoint.command(&program, true);
-    command.arg("sftp");
+    let command = transport.command(&connection.endpoint, &program);
     let mut session = Session::open(command, &cancellation)?;
     let directory = if connection.directory.as_os_str().is_empty() {
         Path::new(".")
@@ -181,13 +226,18 @@ fn open_with_program(
     if session.stat(&root, &cancellation)?.file_type()? != 0o040000 {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
-            "SFTP location is not a directory",
+            "Remote location is not a directory",
         ));
     }
     let entries = session.list(&root, Path::new(""), &cancellation)?;
-    let display_root = PathBuf::from(format!("sftp://{}/", connection.endpoint.authority()))
-        .join(root.strip_prefix("/").map_err(io::Error::other)?);
+    let display_root = PathBuf::from(format!(
+        "{}://{}/",
+        transport.scheme(),
+        connection.endpoint.authority()
+    ))
+    .join(root.strip_prefix("/").map_err(io::Error::other)?);
     let backend = SftpBackend {
+        transport,
         endpoint: connection.endpoint.clone(),
         program,
         root,
@@ -200,7 +250,7 @@ fn open_with_program(
     backend.cache.insert(Path::new(""), &entries, 0);
     cancellation.check()?;
     Mount::new(
-        format!("SFTP {}", connection.endpoint.authority()),
+        format!("{} {}", transport.label(), connection.endpoint.authority()),
         display_root,
         return_to,
         Arc::new(backend),

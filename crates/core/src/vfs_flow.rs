@@ -23,32 +23,47 @@ pub(crate) struct VfsWorkflow {
 }
 
 impl AppState {
-    pub(crate) fn open_sftp_dialog(&mut self, panel: ActivePanel) {
-        if !self.settings.virtual_fs.vfs_enabled || !self.settings.virtual_fs.sftp_enabled {
-            self.set_status("Enable VFS and SFTP links in Options → Virtual FS first");
+    fn ssh_link_enabled(&self, shell: bool) -> bool {
+        self.settings.virtual_fs.vfs_enabled
+            && if shell {
+                self.settings.virtual_fs.shell_link_enabled
+            } else {
+                self.settings.virtual_fs.sftp_enabled
+            }
+    }
+    pub(crate) fn open_ssh_dialog(&mut self, panel: ActivePanel, shell: bool) {
+        let label = if shell { "Shell" } else { "SFTP" };
+        if !self.ssh_link_enabled(shell) {
+            self.set_status(format!(
+                "Enable VFS and {label} links in Options → Virtual FS first"
+            ));
             return;
         }
         self.push_dialog(
             DialogState::pair_input(
-                "SFTP link (SSH keys / agent)",
+                format!("{label} link (SSH keys / agent)"),
                 "Address [user@]host[:port]:",
                 "",
                 "Directory:",
                 ".",
             ),
-            PendingDialogAction::SftpConnection { panel },
+            PendingDialogAction::SshConnection { panel, shell },
         );
     }
-    pub(crate) fn submit_sftp_connection(
+    pub(crate) fn submit_ssh_connection(
         &mut self,
         panel: ActivePanel,
+        shell: bool,
         address: &str,
         directory: &str,
     ) {
         #[cfg(unix)]
         {
-            if !self.settings.virtual_fs.vfs_enabled || !self.settings.virtual_fs.sftp_enabled {
-                self.set_status("SFTP links are disabled in Options → Virtual FS");
+            let label = if shell { "Shell" } else { "SFTP" };
+            if !self.ssh_link_enabled(shell) {
+                self.set_status(format!(
+                    "{label} links are disabled in Options → Virtual FS"
+                ));
                 return;
             }
             let endpoint = match vfs::ssh::Endpoint::parse(address) {
@@ -56,13 +71,13 @@ impl AppState {
                 Err(error) => {
                     self.push_dialog(
                         DialogState::pair_input(
-                            "SFTP link",
+                            format!("{label} link"),
                             "Address [user@]host[:port]:",
                             address,
                             "Directory:",
                             directory,
                         ),
-                        PendingDialogAction::SftpConnection { panel },
+                        PendingDialogAction::SshConnection { panel, shell },
                     );
                     self.set_status(error.to_string());
                     return;
@@ -70,22 +85,30 @@ impl AppState {
             };
             let directory = PathBuf::from(rc_shell::decode_path_text(directory));
             let return_to = self.panels[panel.index()].location();
+            let connection = vfs::sftp::Connection {
+                endpoint,
+                directory,
+            };
             self.queue_mount_task(
                 panel,
-                Task::OpenSftp {
-                    connection: vfs::sftp::Connection {
-                        endpoint,
-                        directory,
-                    },
-                    return_to,
+                if shell {
+                    Task::OpenShell {
+                        connection,
+                        return_to,
+                    }
+                } else {
+                    Task::OpenSftp {
+                        connection,
+                        return_to,
+                    }
                 },
                 PathBuf::new(),
             );
         }
         #[cfg(not(unix))]
         {
-            let _ = (panel, address, directory);
-            self.set_status("SFTP links require Unix OpenSSH");
+            let _ = (panel, shell, address, directory);
+            self.set_status("SSH links require Unix OpenSSH");
         }
     }
     pub(crate) fn cancel_vfs_open(&mut self, job: JobId) {
