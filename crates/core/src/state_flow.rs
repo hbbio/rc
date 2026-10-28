@@ -70,7 +70,7 @@ impl AppState {
         let mut right = PanelState::new(start_path)?;
         right.set_home_directory(home_directory);
 
-        Ok(Self {
+        let mut state = Self {
             settings: settings.clone(),
             configuration_files: ConfigurationFiles::default(),
             panels: [left, right],
@@ -132,7 +132,9 @@ impl AppState {
             xmap_pending: false,
             pending_save_setup: false,
             pending_quit: false,
-        })
+        };
+        state.reload_file_highlights();
+        Ok(state)
     }
 
     pub fn settings(&self) -> &Settings {

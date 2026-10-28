@@ -11,6 +11,7 @@ pub mod configuration_files;
 pub mod dialog;
 mod dialog_flow;
 mod directory_sizes;
+mod file_highlight;
 mod file_history;
 mod filename_encoding;
 mod find_engine;
@@ -24,6 +25,7 @@ pub mod layout;
 mod learn_keys;
 mod link_flow;
 mod listing_format;
+mod mc_ini;
 mod metadata_change;
 mod navigation_flow;
 mod orchestration;
@@ -1097,6 +1099,8 @@ pub struct FileEntry {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FileEntryMetadata {
+    /// Some(true): symlink with a resolved target; Some(false): unresolved symlink.
+    pub symlink_target: Option<bool>,
     pub accessed: Option<SystemTime>,
     pub changed: Option<SystemTime>,
     pub mode: Option<u32>,
@@ -1117,6 +1121,7 @@ impl FileEntryMetadata {
             use std::os::unix::fs::MetadataExt as _;
 
             Self {
+                symlink_target: None,
                 accessed: metadata.accessed().ok(),
                 changed: system_time_from_unix_parts(metadata.ctime(), metadata.ctime_nsec()),
                 mode: Some(metadata.mode()),
@@ -1303,6 +1308,7 @@ pub struct PanelState {
     pub cursor: usize,
     pub sort_mode: SortMode,
     pub filename_encoding: FilenameEncoding,
+    file_highlights: Arc<file_highlight::FileHighlightRules>,
     mouse_viewport: Option<PanelViewport>,
     home_directory: Option<PathBuf>,
     canonical_cwd: Option<PathBuf>,
@@ -1324,6 +1330,7 @@ impl PanelState {
             cursor: 0,
             sort_mode: SortMode::default(),
             filename_encoding: FilenameEncoding::Utf8,
+            file_highlights: file_highlight::default_rules(),
             mouse_viewport: None,
             home_directory: None,
             canonical_cwd: None,

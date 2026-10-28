@@ -44,17 +44,15 @@ pub(crate) fn read_entries_with_visibility_cancel(
             continue;
         }
         let file_type = entry.file_type()?;
-        let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
+        let (metadata, symlink_target) = read_local_metadata(&path);
         let is_dir = file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
-        if is_dir {
-            entries.push(FileEntry::directory_from_metadata(
-                name,
-                path,
-                metadata.as_ref(),
-            ));
+        let mut entry = if is_dir {
+            FileEntry::directory_from_metadata(name, path, metadata.as_ref())
         } else {
-            entries.push(FileEntry::file_from_metadata(name, path, metadata.as_ref()));
-        }
+            FileEntry::file_from_metadata(name, path, metadata.as_ref())
+        };
+        entry.metadata.symlink_target = symlink_target;
+        entries.push(entry);
     }
 
     sort_file_entries(&mut entries, sort_mode);
@@ -237,15 +235,32 @@ fn panelized_path_entry(
         return Ok(None);
     }
 
-    let metadata = fs::metadata(&path).ok();
+    let (metadata, symlink_target) = read_local_metadata(&path);
     let name = panelized_entry_label(base_dir, &path);
     let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
-    let entry = if is_dir {
+    let mut entry = if is_dir {
         FileEntry::directory_from_metadata(name, path, metadata.as_ref())
     } else {
         FileEntry::file_from_metadata(name, path, metadata.as_ref())
     };
+    entry.metadata.symlink_target = symlink_target;
     Ok(Some(entry))
+}
+
+/// Keep target metadata for existing listing behavior while also retaining link
+/// identity for highlighting. All filesystem access remains in listing workers.
+pub(crate) fn read_local_metadata(path: &Path) -> (Option<fs::Metadata>, Option<bool>) {
+    let metadata = fs::symlink_metadata(path).ok();
+    if metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.is_symlink())
+    {
+        let target = fs::metadata(path).ok();
+        let resolved = target.is_some();
+        (target.or(metadata), Some(resolved))
+    } else {
+        (metadata, None)
+    }
 }
 
 pub(crate) fn ensure_panel_refresh_not_canceled(

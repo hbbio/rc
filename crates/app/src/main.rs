@@ -926,6 +926,7 @@ fn dispatch_pending_external_edit_requests(
         } else {
             state.record_edited_file(&request);
         }
+        state.reload_file_highlights();
     }
 }
 

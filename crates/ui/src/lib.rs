@@ -1347,8 +1347,8 @@ fn panel_entry_style(
     } else {
         skin.style("core", "_default_")
     };
-    if entry.is_dir() {
-        style = style.patch(skin.style("filehighlight", "directory"));
+    if !tagged && let Some(group) = panel.file_highlight_group(entry) {
+        style = style.patch(skin.style("filehighlight", group));
     }
     if selected {
         style = style.patch(if tagged {
@@ -4062,6 +4062,48 @@ mod tests {
         };
 
         assert_eq!(format_file_mode(&entry), "-rwsr-x--x");
+    }
+
+    #[test]
+    fn file_highlighting_preserves_tagged_and_selected_colors() {
+        let root = temp_root("file-highlight-colors");
+        fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        let mut app = app_with_loaded_panels(root.clone());
+        app.set_configuration_files(rc_core::ConfigurationFiles {
+            user_directory: Some(root.clone()),
+            system_directories: vec![],
+        });
+        let index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.name == "main.rs")
+            .unwrap();
+        app.active_panel_mut().cursor = index;
+        let entry = app.active_panel().entries[index].clone();
+        let skin = current_skin();
+        let normal = skin
+            .style("core", "_default_")
+            .patch(skin.style("filehighlight", "source"));
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, false, &skin),
+            normal
+        );
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, true, &skin),
+            normal.patch(skin.style("core", "selected"))
+        );
+        app.active_panel_mut().toggle_tag_on_cursor();
+        let tagged = skin.style("core", "marked");
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, false, &skin),
+            tagged
+        );
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, true, &skin),
+            tagged.patch(skin.style("core", "markselect"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -160,6 +160,14 @@ renaming still update the panels.
   On Unix, a regular `.mc.menu` in the active directory takes precedence when it is
   owned by the current user or root and is not writable by group or others;
   local symlinks are ignored. The same discovery is shared by configuration readers.
+- `filehighlight.ini` controls panel colors through groups in the active skin.
+  Rules match in file order and support `type`, `regexp`, and semicolon-separated
+  `extensions`, with optional `extensions_case=true`. Type takes precedence over
+  regexp, which takes precedence over extensions. Regex backslashes must be doubled
+  for INI escaping. Link, directory, executable, device, special-file, and hardlink
+  types use cached listing metadata. Tagged and selected colors retain precedence.
+  Rules load at startup and reload when the external editor closes; invalid edits
+  report an error and retain the last valid rules.
 - Internal text and hex viewer with syntax highlighting, search in both directions,
   goto, wrapping, and bounded previews for large files.
 - File → View file opens an entered local path, including relative paths and `~/`.

@@ -357,7 +357,7 @@ fn drain_background(app: &mut AppState) {
     }
 }
 
-fn app_with_loaded_panels(root: PathBuf) -> AppState {
+pub(super) fn app_with_loaded_panels(root: PathBuf) -> AppState {
     let mut app = AppState::new(root).expect("app should initialize");
     app.refresh_panels();
     drain_background(&mut app);
@@ -434,6 +434,7 @@ fn toggle_panel_flips_between_left_and_right() {
 fn move_cursor_stays_in_bounds() {
     let mut panel = PanelState {
         filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
@@ -591,6 +592,7 @@ fn size_sort_listing_populates_metadata_fields() {
 fn toggle_and_invert_tags_work_for_non_parent_entries() {
     let mut panel = PanelState {
         filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries: vec![
             FileEntry::parent(PathBuf::from("/")),
@@ -639,6 +641,7 @@ fn page_home_end_navigation_stays_bounded() {
     ];
     let mut panel = PanelState {
         filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries,
         cursor: 1,
@@ -673,6 +676,7 @@ fn page_home_end_navigation_stays_bounded() {
 fn sort_mode_cycles_and_toggles_direction() {
     let mut panel = PanelState {
         filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries: Vec::new(),
         cursor: 0,

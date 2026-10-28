@@ -285,9 +285,7 @@ where
             ensure_panel_refresh_not_canceled(Some(cancel_flag))?;
             // Cache the result paths, not their filesystem metadata: mutations
             // must be visible without executing a panelize command again.
-            let metadata = fs::metadata(&entry.path)
-                .ok()
-                .or_else(|| fs::symlink_metadata(&entry.path).ok());
+            let (metadata, symlink_target) = crate::panel::read_local_metadata(&entry.path);
             let mut entry = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
                 FileEntry::directory_from_metadata(
                     entry.name.clone(),
@@ -301,6 +299,7 @@ where
                     metadata.as_ref(),
                 )
             };
+            entry.metadata.symlink_target = symlink_target;
             request
                 .filename_encoding
                 .update_entry(&mut entry, &request.cwd, &request.source);
@@ -440,13 +439,14 @@ where
             continue;
         }
         let file_type = entry.file_type()?;
-        let metadata = fs::metadata(&path).ok().or_else(|| entry.metadata().ok());
+        let (metadata, symlink_target) = crate::panel::read_local_metadata(&path);
         let is_dir = file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
-        let panel_entry = if is_dir {
+        let mut panel_entry = if is_dir {
             FileEntry::directory_from_metadata(name, path, metadata.as_ref())
         } else {
             FileEntry::file_from_metadata(name, path, metadata.as_ref())
         };
+        panel_entry.metadata.symlink_target = symlink_target;
         if !matcher.matches(&panel_entry) {
             continue;
         }
