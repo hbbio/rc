@@ -12,6 +12,7 @@ impl AppState {
 
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
+            AppCommand::Panel(panel, PanelCommand::OpenFtp) => self.open_ftp_dialog(panel),
             AppCommand::Panel(panel, PanelCommand::OpenSftp) => self.open_ssh_dialog(panel, false),
             AppCommand::Panel(panel, PanelCommand::OpenShellLink) => {
                 self.open_ssh_dialog(panel, true)
@@ -579,6 +580,10 @@ impl AppState {
                 Some(PendingDialogAction::SshConnection { panel, shell }),
                 DialogResult::PairInputSubmitted { first, second },
             ) => self.submit_ssh_connection(panel, shell, &first, &second),
+            (
+                Some(PendingDialogAction::FtpConnection { panel }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_ftp_connection(panel, &first, &second),
             (None, result) => self.set_status(result.status_line()),
             (
                 Some(PendingDialogAction::ViewVfsFile { base }),

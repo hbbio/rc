@@ -4892,34 +4892,21 @@ OpenConfirmDialog = f2
     }
 
     #[test]
-    fn render_styles_unimplemented_menu_entries_as_inactive() {
-        let root = temp_root("menu-inactive");
+    fn remote_links_render_as_available_menu_actions() {
+        let root = temp_root("menu-remote-links");
         let mut app = AppState::new(root.clone()).expect("app should initialize");
         app.apply(AppCommand::OpenMenuBarAt(0))
             .expect("menu route should open");
 
         let buffer = render_to_buffer(&app, 120, 40);
-        let skin = current_skin();
-        let inactive_style = skin.style("menu", "menuinactive");
-        let disabled_cell = first_cell_for_text(&buffer, "FTP link...")
-            .expect("unimplemented menu entry should render");
-        assert_eq!(
-            disabled_cell.fg,
-            inactive_style.fg.unwrap_or(Color::Reset),
-            "unimplemented menu label should use inactive foreground"
-        );
-        assert_eq!(
-            disabled_cell.bg,
-            inactive_style.bg.unwrap_or(Color::Reset),
-            "unimplemented menu label should use inactive background"
-        );
-
         let enabled_cell = first_cell_for_text(&buffer, "Listing format...")
             .expect("implemented menu entry should render");
-        assert_ne!(
-            disabled_cell.fg, enabled_cell.fg,
-            "implemented and unimplemented menu entries should be visually distinct"
-        );
+        for label in ["FTP link...", "Shell link...", "SFTP link..."] {
+            let cell =
+                first_cell_for_text(&buffer, label).expect("remote link menu entry should render");
+            assert_eq!(cell.fg, enabled_cell.fg, "{label} must appear available");
+            assert_eq!(cell.bg, enabled_cell.bg, "{label} must appear available");
+        }
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }

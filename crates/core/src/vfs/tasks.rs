@@ -13,6 +13,11 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Task {
     #[cfg(unix)]
+    OpenFtp {
+        connection: super::ftp::Connection,
+        return_to: VfsPath,
+    },
+    #[cfg(unix)]
     OpenShell {
         connection: super::sftp::Connection,
         return_to: VfsPath,
@@ -58,9 +63,10 @@ impl Task {
         match self {
             Self::Reconnect { .. } => JobKind::RefreshPanel,
             #[cfg(unix)]
-            Self::OpenHelper { .. } | Self::OpenSftp { .. } | Self::OpenShell { .. } => {
-                JobKind::RefreshPanel
-            }
+            Self::OpenHelper { .. }
+            | Self::OpenSftp { .. }
+            | Self::OpenShell { .. }
+            | Self::OpenFtp { .. } => JobKind::RefreshPanel,
             Self::View { quick_view, .. } => {
                 if quick_view.is_some() {
                     JobKind::LoadQuickView
@@ -82,6 +88,8 @@ impl Task {
     }
     pub fn summary(&self) -> String {
         match self {
+            #[cfg(unix)]
+            Self::OpenFtp { connection, .. } => format!("connect {}", connection.label()),
             Self::Reconnect { location } => format!("reconnect {}", location.mount().label()),
             #[cfg(unix)]
             Self::OpenHelper { helper, .. } => format!("open extfs {}", helper.name()),
@@ -122,7 +130,10 @@ impl Task {
                 ..
             } => Some(path.mount().id()),
             #[cfg(unix)]
-            Self::OpenHelper { .. } | Self::OpenSftp { .. } | Self::OpenShell { .. } => None,
+            Self::OpenHelper { .. }
+            | Self::OpenSftp { .. }
+            | Self::OpenShell { .. }
+            | Self::OpenFtp { .. } => None,
         }
     }
 }
@@ -140,6 +151,14 @@ pub fn execute(job: WorkerJob, jobs: &Sender<JobEvent>, events: &Sender<Backgrou
     let _ = jobs.send(JobEvent::Started { id });
     let result = (|| -> io::Result<()> {
         let event = match task {
+            #[cfg(unix)]
+            Task::OpenFtp {
+                connection,
+                return_to,
+            } => BackgroundEvent::VfsMounted {
+                job_id: id,
+                mount: super::ftp::open(connection, return_to.clone(), Some(&cancel))?,
+            },
             #[cfg(unix)]
             Task::OpenShell {
                 connection,

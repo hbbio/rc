@@ -1387,12 +1387,17 @@ fn menu_route_supports_keyboard_navigation_and_selection() {
 }
 
 #[test]
-fn menu_stub_action_reports_not_implemented_status() {
+fn every_menu_action_is_implemented_and_ftp_opens_its_connection_dialog() {
+    for menu in top_menus() {
+        for entry in menu.entries.iter().filter(|entry| entry.selectable) {
+            assert!(entry.is_implemented(), "{} → {}", menu.title, entry.label);
+        }
+    }
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
         .as_nanos();
-    let root = env::temp_dir().join(format!("rc-menu-stub-action-{stamp}"));
+    let root = env::temp_dir().join(format!("rc-menu-ftp-action-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
@@ -1400,12 +1405,8 @@ fn menu_stub_action_reports_not_implemented_status() {
         .expect("left menu should open");
     move_menu_selection_to_label(&mut app, "FTP link...");
     app.apply(AppCommand::MenuAccept)
-        .expect("accepting stub menu action should succeed");
-    assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert!(
-        app.status_line.contains("not implemented"),
-        "stub actions should report a not-implemented status"
-    );
+        .expect("accepting FTP menu action should succeed");
+    assert_eq!(app.key_context(), KeyContext::Input);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }

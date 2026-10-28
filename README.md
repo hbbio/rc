@@ -237,7 +237,36 @@ as shell commands. It supports regular-file reads and directory listings;
 mutation requests are rejected. Source-change checks also include device,
 inode, and nanosecond modification/change times when using this helper.
 
-FTP links remain in the roadmap.
+**Left / Right → FTP link** opens a read-only FTP/FTPS panel using an installed
+curl with FTP and TLS support. A bare `[user@]host[:port]` or `ftpes://` address
+requires explicit TLS (default port 21); `ftps://` uses implicit TLS (default
+port 990). Both control and data connections require TLS, with certificate and
+hostname verification. `ftp://host[:port]` permits anonymous access only. The
+directory is entered separately; an absolute directory starts at the server
+root, and a relative directory starts at the login directory.
+
+For authenticated FTP, put credentials in `~/.netrc`, owned by your user with no
+group or other permissions (normally `chmod 600 ~/.netrc`). RC accepts a regular
+file of at most 64 KiB, rejects symlinks, and passes its contents to curl through
+a pipe. Passwords never appear in the connection dialog, URL, process arguments,
+settings, or error messages. A username in the address selects that login from
+the host's netrc entries. Without credentials, TLS connections use anonymous
+login. Plain FTP never reads the credential file. Curl configuration files and
+proxy environment settings are disabled for these connections.
+
+FTP servers must support [MLSD](https://www.rfc-editor.org/rfc/rfc3659.html#section-7)
+with type and regular-file size facts. Listings retain native filename bytes;
+names containing CR, LF, or NUL are unsupported. Listings are limited to 16 MiB,
+100,000 entries, and a 16 MiB metadata budget. Each curl transfer has a five-minute
+deadline and stops after 30 seconds without transfer progress. A file read also
+performs separate before/after metadata listings. Reads stream
+without temporary downloads, check the reported size, and compare server
+metadata before and after reading. Their change detection is limited by the
+size, timestamps, and mode/ownership facts the server provides. Reported links
+and special files cannot be read or copied; FTP servers may expose a followed
+link as an ordinary file. Each operation opens a fresh connection. Rescan and
+Reconnect clear the 30-second metadata cache; Reconnect also cancels that mount's
+jobs and refreshes visible panels. The FTP toggle controls new FTP/FTPS mounts.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;

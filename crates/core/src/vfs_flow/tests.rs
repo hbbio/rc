@@ -115,6 +115,41 @@ fn shell_link_menu_uses_its_own_setting_and_worker() {
 }
 
 #[test]
+fn ftp_dialog_rejects_plaintext_credentials_and_uses_the_selected_panel() {
+    let (_dir, mut app, _, _) = fixture();
+    app.apply(AppCommand::Panel(ActivePanel::Right, PanelCommand::OpenFtp))
+        .unwrap();
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "ftp://user@host".into(),
+        second: ".".into(),
+    });
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    assert!(app.take_pending_worker_commands().is_empty());
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "user@host".into(),
+        second: "/data".into(),
+    });
+    let job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            if let WorkerCommand::Run(job) = command {
+                Some(job)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(matches!(job.request, JobRequest::Vfs(Task::OpenFtp { .. })));
+    assert_eq!(app.vfs_workflow.pending[&job.id].panel, ActivePanel::Right);
+    app.settings.virtual_fs.ftp_enabled = false;
+    app.apply(AppCommand::Panel(ActivePanel::Left, PanelCommand::OpenFtp))
+        .unwrap();
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(app.status_line.contains("Enable"));
+}
+
+#[test]
 fn reconnect_runs_in_a_worker_and_refreshes_only_panels_still_on_the_mount() {
     struct Remote;
     impl vfs::Backend for Remote {

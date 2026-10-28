@@ -304,6 +304,7 @@ pub enum AppCommand {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
+    OpenFtp,
     OpenShellLink,
     OpenSftp,
     OpenEncoding,
@@ -588,6 +589,7 @@ impl AppCommand {
                 _,
                 PanelCommand::OpenListingFormat
                 | PanelCommand::OpenSftp
+                | PanelCommand::OpenFtp
                 | PanelCommand::OpenShellLink
                 | PanelCommand::OpenEncoding
                 | PanelCommand::OpenSortOrder
@@ -667,16 +669,6 @@ impl MenuEntry {
         }
     }
 
-    const fn stub(label: &'static str, shortcut: &'static str) -> Self {
-        Self {
-            label,
-            shortcut,
-            literal_shortcut: true,
-            command: AppCommand::MenuNotImplemented(label),
-            selectable: true,
-        }
-    }
-
     const fn separator() -> Self {
         Self {
             label: "",
@@ -738,7 +730,10 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
             AppCommand::Panel(panel, PanelCommand::OpenEncoding),
         ),
         MenuEntry::separator(),
-        MenuEntry::stub("FTP link...", ""),
+        MenuEntry::action(
+            "FTP link...",
+            AppCommand::Panel(panel, PanelCommand::OpenFtp),
+        ),
         MenuEntry::action(
             "Shell link...",
             AppCommand::Panel(panel, PanelCommand::OpenShellLink),
@@ -2165,6 +2160,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    FtpConnection {
+        panel: ActivePanel,
+    },
     SshConnection {
         panel: ActivePanel,
         shell: bool,

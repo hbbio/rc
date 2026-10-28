@@ -12,6 +12,9 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    pub(super) fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
     pub fn parse(input: &str) -> io::Result<Self> {
         let invalid = || {
             io::Error::new(

@@ -16,6 +16,8 @@ pub(crate) mod walk;
 #[cfg(unix)]
 pub mod extfs;
 #[cfg(unix)]
+pub mod ftp;
+#[cfg(unix)]
 mod process;
 #[cfg(unix)]
 mod remote_cache;

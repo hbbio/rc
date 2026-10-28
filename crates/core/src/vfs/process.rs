@@ -184,13 +184,14 @@ pub(super) fn ensure_success(output: Output) -> io::Result<Vec<u8>> {
 /// subprocess. Every wait polls cancellation and drains both output pipes.
 pub(super) struct Duplex {
     child: OwnedChild,
-    input: std::process::ChildStdin,
+    input: Option<std::process::ChildStdin>,
     output: std::process::ChildStdout,
     errors: std::process::ChildStderr,
     pending: VecDeque<u8>,
     diagnostics: Vec<u8>,
     output_closed: bool,
     limit: usize,
+    hide_diagnostics: bool,
 }
 
 impl Duplex {
@@ -217,13 +218,14 @@ impl Duplex {
         nonblocking(&errors)?;
         Ok(Self {
             child,
-            input,
+            input: Some(input),
             output,
             errors,
             pending: VecDeque::new(),
             diagnostics: Vec::new(),
             output_closed: false,
             limit,
+            hide_diagnostics: false,
         })
     }
     fn error(&self, message: &str) -> io::Error {
@@ -231,7 +233,7 @@ impl Duplex {
         let detail = detail.trim();
         io::Error::new(
             io::ErrorKind::ConnectionAborted,
-            if detail.is_empty() {
+            if detail.is_empty() || self.hide_diagnostics {
                 message.into()
             } else {
                 format!("{message}: {detail}")
@@ -249,18 +251,18 @@ impl Duplex {
         drain(&mut self.errors, &mut self.diagnostics, STDERR_LIMIT)?;
         let mut buffer = [0_u8; 8192];
         for _ in 0..8 {
-            match self.output.read(&mut buffer) {
+            let available = buffer
+                .len()
+                .min(self.limit.saturating_sub(self.pending.len()));
+            if available == 0 {
+                break;
+            }
+            match self.output.read(&mut buffer[..available]) {
                 Ok(0) => {
                     self.output_closed = true;
                     break;
                 }
                 Ok(count) => {
-                    if self.pending.len().saturating_add(count) > self.limit {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "remote response exceeds its buffer limit",
-                        ));
-                    }
                     self.pending.extend(&buffer[..count]);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -268,8 +270,10 @@ impl Duplex {
                 Err(error) => return Err(error),
             }
         }
-        if self.child.status()?.is_some_and(|status| !status.success()) {
-            return Err(self.error("remote transport failed"));
+        if let Some(status) = self.child.status()?
+            && !status.success()
+        {
+            return Err(self.error(&format!("remote transport failed ({status})")));
         }
         Ok(())
     }
@@ -287,7 +291,11 @@ impl Duplex {
         }
         while !bytes.is_empty() {
             self.poll(deadline, cancel)?;
-            match self.input.write(bytes) {
+            let input = self
+                .input
+                .as_mut()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "remote input closed"))?;
+            match input.write(bytes) {
                 Ok(0) => return Err(self.error("remote transport input closed")),
                 Ok(count) => bytes = &bytes[count..],
                 Err(error)
@@ -327,5 +335,36 @@ impl Duplex {
             }
         }
         cancel.check()
+    }
+
+    pub fn hide_diagnostics(&mut self) {
+        self.hide_diagnostics = true;
+    }
+    pub fn close_input(&mut self) {
+        self.input.take();
+    }
+    pub fn read_chunk(
+        &mut self,
+        bytes: &mut [u8],
+        deadline: Instant,
+        cancel: &Cancellation<'_>,
+    ) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            self.poll(deadline, cancel)?;
+            let count = bytes.len().min(self.pending.len());
+            for target in &mut bytes[..count] {
+                *target = self.pending.pop_front().expect("count checked");
+            }
+            if count > 0 {
+                return Ok(count);
+            }
+            if self.output_closed && self.child.status()?.is_some() {
+                return Ok(0);
+            }
+            std::thread::sleep(TICK);
+        }
     }
 }

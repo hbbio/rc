@@ -23,6 +23,70 @@ pub(crate) struct VfsWorkflow {
 }
 
 impl AppState {
+    pub(crate) fn open_ftp_dialog(&mut self, panel: ActivePanel) {
+        if !self.settings.virtual_fs.vfs_enabled || !self.settings.virtual_fs.ftp_enabled {
+            self.set_status("Enable VFS and FTP links in Options → Virtual FS first");
+            return;
+        }
+        self.push_dialog(
+            DialogState::pair_input(
+                "FTP link (TLS; credentials in ~/.netrc)",
+                "Address [user@]host[:port]:",
+                "",
+                "Directory:",
+                ".",
+            ),
+            PendingDialogAction::FtpConnection { panel },
+        );
+    }
+    pub(crate) fn submit_ftp_connection(
+        &mut self,
+        panel: ActivePanel,
+        address: &str,
+        directory: &str,
+    ) {
+        #[cfg(unix)]
+        {
+            if !self.settings.virtual_fs.vfs_enabled || !self.settings.virtual_fs.ftp_enabled {
+                self.set_status("FTP links are disabled in Options → Virtual FS");
+                return;
+            }
+            match vfs::ftp::Connection::parse(
+                address,
+                PathBuf::from(rc_shell::decode_path_text(directory)),
+            ) {
+                Ok(connection) => {
+                    let return_to = self.panels[panel.index()].location();
+                    self.queue_mount_task(
+                        panel,
+                        Task::OpenFtp {
+                            connection,
+                            return_to,
+                        },
+                        PathBuf::new(),
+                    );
+                }
+                Err(error) => {
+                    self.push_dialog(
+                        DialogState::pair_input(
+                            "FTP link (TLS; credentials in ~/.netrc)",
+                            "Address [user@]host[:port]:",
+                            address,
+                            "Directory:",
+                            directory,
+                        ),
+                        PendingDialogAction::FtpConnection { panel },
+                    );
+                    self.set_status(error.to_string());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (panel, address, directory);
+            self.set_status("FTP links require Unix curl");
+        }
+    }
     fn ssh_link_enabled(&self, shell: bool) -> bool {
         self.settings.virtual_fs.vfs_enabled
             && if shell {
