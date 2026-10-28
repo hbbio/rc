@@ -127,6 +127,8 @@ renaming still update the panels.
 - `>` opens a modal prompt in the active panel directory.
 - Fish-aware or generic completion, live prefix filtering, bounded history, and
   draft preservation.
+- Command → Command history (`Alt-Shift-H`) lists recent commands and recalls a
+  selection into the prompt for editing. Cancel preserves the current draft.
 - Successful literal `cd` commands refresh and synchronize the active panel.
 - `Alt-Enter` / `Ctrl-Enter` inserts the selected name,
   `Ctrl-Shift-Enter` inserts its full path, and `Ctrl-X t` /

@@ -801,6 +801,7 @@ fn command_line_keymap_command(
     matches!(
         command,
         AppCommand::OpenHelp
+            | AppCommand::OpenCommandHistory
             | AppCommand::EnterXMap
             | AppCommand::PutCurrentSelected
             | AppCommand::PutCurrentFullSelected

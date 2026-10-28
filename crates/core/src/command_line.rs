@@ -589,6 +589,39 @@ impl CommandLineSession {
 }
 
 impl AppState {
+    pub(crate) fn open_command_history(&mut self) {
+        if self.command_line.history_mode() == ShellHistoryMode::Off {
+            self.set_status("Command history is disabled");
+            return;
+        }
+        let commands: Vec<String> = self.command_line.history().iter().rev().cloned().collect();
+        if commands.is_empty() {
+            self.set_status("Command history is empty");
+            return;
+        }
+        self.cancel_and_close_completion();
+        let labels = commands
+            .iter()
+            .map(|command| normalize_status_message(command.clone()))
+            .collect();
+        self.push_dialog(
+            crate::DialogState::listbox_with_hint(
+                "Command history",
+                labels,
+                0,
+                "Enter: recall for editing",
+            ),
+            crate::PendingDialogAction::CommandHistory { commands },
+        );
+    }
+
+    pub(crate) fn recall_command(&mut self, command: &str) {
+        self.command_line.leave_history_navigation();
+        self.command_line
+            .replace(command.to_owned(), command.chars().count());
+        self.open_command_line();
+    }
+
     pub fn command_line_model(&self) -> &CommandLineModel {
         &self.command_line
     }
@@ -1398,6 +1431,78 @@ mod tests {
 
     fn model_with_history() -> CommandLineModel {
         CommandLineModel::new(ShellHistoryMode::Session)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_history_recalls_for_editing_without_executing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = AppState::new(root.path().to_path_buf()).unwrap();
+        app.command_line.record_history("echo first");
+        app.command_line
+            .record_history("printf 'a\\nb'\necho second");
+        app.command_line.replace("draft".into(), 2);
+        app.apply(AppCommand::OpenCommandHistory).unwrap();
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("history dialog")
+        };
+        let crate::DialogKind::Listbox(list) = &dialog.kind else {
+            panic!("history list")
+        };
+        assert_eq!(list.items.len(), 2);
+        assert!(!list.items[0].contains('\n'));
+        app.apply(AppCommand::DialogAccept).unwrap();
+        let request = app.take_pending_shell_resolution_request().unwrap();
+        app.handle_shell_resolution_response(resolve_shell_request_blocking(request));
+        assert!(app.command_line_session().is_some());
+        assert_eq!(app.command_line.value(), "printf 'a\\nb'\necho second");
+        assert_eq!(
+            app.command_line.cursor_codepoint(),
+            app.command_line.value().chars().count()
+        );
+        assert!(app.take_pending_foreground_shell_requests().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_history_cancel_preserves_draft_and_off_hides_retained_history() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = AppState::new(root.path().to_path_buf()).unwrap();
+        open_command_line_for_test(&mut app);
+        app.command_line.record_history("old command");
+        app.command_line.replace("draft text".into(), 3);
+        app.apply(AppCommand::OpenCommandHistory).unwrap();
+        app.apply(AppCommand::DialogCancel).unwrap();
+        assert!(app.command_line_session().is_some());
+        assert_eq!(app.command_line.value(), "draft text");
+        assert_eq!(app.command_line.cursor_codepoint(), 3);
+        app.command_line.set_history_mode(ShellHistoryMode::Off);
+        app.apply(AppCommand::OpenCommandHistory).unwrap();
+        assert!(matches!(app.top_route(), Route::CommandLine(_)));
+        assert!(app.status_line.contains("disabled"));
+    }
+
+    #[test]
+    fn command_history_binding_preserves_hotlist_shortcut() {
+        use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, KeyModifiers, Keymap};
+        let keymap = Keymap::bundled_mc_default().unwrap();
+        for (shift, expected) in [
+            (true, KeyCommand::OpenCommandHistory),
+            (false, KeyCommand::OpenHotlist),
+        ] {
+            let chord = KeyChord {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers {
+                    alt: true,
+                    ctrl: false,
+                    shift,
+                },
+            };
+            assert_eq!(
+                keymap.resolve(KeyContext::FileManager, chord),
+                Some(&expected)
+            );
+        }
     }
 
     #[cfg(unix)]

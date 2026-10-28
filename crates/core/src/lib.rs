@@ -191,6 +191,7 @@ pub enum AppCommand {
     ViewEntry,
     ViewFile,
     OpenFileHistory,
+    OpenCommandHistory,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -394,6 +395,7 @@ impl AppCommand {
             | Self::OpenUserMenu
             | Self::ViewFile
             | Self::OpenFileHistory
+            | Self::OpenCommandHistory
             | Self::OpenMenuBar
             | Self::OpenMenuBarAt(_)
             | Self::CloseMenu
@@ -704,7 +706,7 @@ const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
     ),
     MenuEntry::stub("Show directory sizes", "C-Space"),
     MenuEntry::separator(),
-    MenuEntry::stub("Command history", "M-h"),
+    MenuEntry::action_with_shortcut("Command history", "M-H", AppCommand::OpenCommandHistory),
     MenuEntry::action_with_shortcut(
         "Viewed/edited files history",
         "M-E",
@@ -1995,6 +1997,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    CommandHistory {
+        commands: Vec<String>,
+    },
     ViewFile {
         base_dir: PathBuf,
     },

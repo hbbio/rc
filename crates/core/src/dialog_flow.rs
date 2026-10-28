@@ -405,6 +405,14 @@ impl AppState {
         }
         match (pending, result) {
             (
+                Some(PendingDialogAction::CommandHistory { commands }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(command) = index.and_then(|index| commands.get(index)) {
+                    self.recall_command(command);
+                }
+            }
+            (
                 Some(PendingDialogAction::ViewFile { base_dir }),
                 DialogResult::InputSubmitted(value),
             ) => {

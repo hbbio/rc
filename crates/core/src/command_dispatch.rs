@@ -20,6 +20,7 @@ impl AppState {
             && matches!(
                 command,
                 AppCommand::OpenCommandLine
+                    | AppCommand::OpenCommandHistory
                     | AppCommand::PutCurrentSelected
                     | AppCommand::PutCurrentFullSelected
                     | AppCommand::PutCurrentTagged

@@ -527,6 +527,7 @@ CdQuick = slash; alt-c
 OpenTree = alt-t
 CycleListingFormat = alt-shift-t
 OpenHotlist = alt-h
+CommandHistory = alt-shift-h
 OpenPanelizeDialog = alt-p; ctrl-p
 OpenCommandLine = greater
 

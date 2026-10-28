@@ -17,6 +17,7 @@ impl AppState {
             AppCommand::OpenCommandLine => self.open_command_line(),
             AppCommand::ViewFile => self.open_view_file_dialog(),
             AppCommand::OpenFileHistory => self.open_file_history(),
+            AppCommand::OpenCommandHistory => self.open_command_history(),
             AppCommand::PutCurrentSelected
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged
