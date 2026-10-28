@@ -117,15 +117,25 @@ impl AppState {
     pub fn active_viewer(&self) -> Option<&ViewerState> {
         self.routes.iter().rev().find_map(|route| match route {
             Route::Viewer(viewer) => Some(viewer),
+            Route::CommandOutput(id) => self.command_outputs.get(id).map(|output| &output.viewer),
             _ => None,
         })
     }
 
     pub(crate) fn active_viewer_mut(&mut self) -> Option<&mut ViewerState> {
-        self.routes.iter_mut().rev().find_map(|route| match route {
+        let route = self
+            .routes
+            .iter_mut()
+            .rev()
+            .find(|route| matches!(route, Route::Viewer(_) | Route::CommandOutput(_)))?;
+        match route {
             Route::Viewer(viewer) => Some(viewer),
+            Route::CommandOutput(id) => self
+                .command_outputs
+                .get_mut(id)
+                .map(|output| &mut output.viewer),
             _ => None,
-        })
+        }
     }
 
     pub(crate) fn open_viewer_search_dialog(&mut self, direction: ViewerSearchDirection) {

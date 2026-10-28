@@ -5,6 +5,7 @@ mod background;
 mod command_dispatch;
 mod command_line;
 mod command_map;
+mod command_output;
 pub mod dialog;
 mod dialog_flow;
 mod file_history;
@@ -59,6 +60,7 @@ pub use command_line::{
     OpenCompletion, PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest,
     ShellResolutionResponse, resolve_shell_request_blocking, sanitize_paste,
 };
+pub use command_output::{CommandCaptureSpec, execute_command_capture};
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
     FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
@@ -192,6 +194,8 @@ pub enum AppCommand {
     ViewFile,
     OpenFileHistory,
     OpenCommandHistory,
+    FilteredView,
+    OpenJobOutput,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -396,6 +400,8 @@ impl AppCommand {
             | Self::ViewFile
             | Self::OpenFileHistory
             | Self::OpenCommandHistory
+            | Self::FilteredView
+            | Self::OpenJobOutput
             | Self::OpenMenuBar
             | Self::OpenMenuBarAt(_)
             | Self::CloseMenu
@@ -669,7 +675,7 @@ const RIGHT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::
 const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("View", "F3", AppCommand::ViewEntry),
     MenuEntry::action("View file...", AppCommand::ViewFile),
-    MenuEntry::stub("Filtered view", "M-!"),
+    MenuEntry::action_with_shortcut("Filtered view", "M-!", AppCommand::FilteredView),
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
     MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
     MenuEntry::stub("Chmod", "C-x c"),
@@ -1997,6 +2003,9 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    FilteredView {
+        cwd: PathBuf,
+    },
     CommandHistory {
         commands: Vec<String>,
     },
@@ -2141,6 +2150,7 @@ impl DerefMut for DialogRoute {
 
 #[derive(Clone, Debug)]
 pub enum Route {
+    CommandOutput(JobId),
     FileManager,
     CommandLine(CommandLineSession),
     Help(HelpState),
@@ -2307,6 +2317,7 @@ pub struct AppState {
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
     file_history: Vec<file_history::FileHistoryEntry>,
+    command_outputs: HashMap<JobId, command_output::CommandOutput>,
     command_line: CommandLineModel,
     next_command_line_activation_id: u64,
     #[cfg(unix)]

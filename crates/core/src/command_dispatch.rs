@@ -21,6 +21,7 @@ impl AppState {
                 command,
                 AppCommand::OpenCommandLine
                     | AppCommand::OpenCommandHistory
+                    | AppCommand::FilteredView
                     | AppCommand::PutCurrentSelected
                     | AppCommand::PutCurrentFullSelected
                     | AppCommand::PutCurrentTagged

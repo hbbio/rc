@@ -37,6 +37,7 @@ impl AppState {
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
             file_history: Vec::new(),
+            command_outputs: HashMap::new(),
             command_line: CommandLineModel::new(settings.shell.history),
             next_command_line_activation_id: 1,
             #[cfg(unix)]
@@ -645,6 +646,17 @@ impl AppState {
             Route::Jobs => KeyContext::Jobs,
             Route::Viewer(viewer) => {
                 if viewer.hex_mode {
+                    KeyContext::ViewerHex
+                } else {
+                    KeyContext::Viewer
+                }
+            }
+            Route::CommandOutput(id) => {
+                if self
+                    .command_outputs
+                    .get(id)
+                    .is_some_and(|output| output.viewer.hex_mode)
+                {
                     KeyContext::ViewerHex
                 } else {
                     KeyContext::Viewer

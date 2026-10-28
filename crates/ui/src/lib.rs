@@ -159,7 +159,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
         Route::Jobs => render_jobs_screen(frame, state, skin.as_ref()),
-        Route::Viewer(_) => {}
+        Route::Viewer(_) | Route::CommandOutput(_) => {}
         Route::FindResults(results) => {
             render_find_results_screen(frame, state, results, skin.as_ref())
         }
@@ -1487,7 +1487,7 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     let title = fit_single_line(
         format!(
             "{} | {} {}/{} | wrap:{}",
-            viewer.path().to_string_lossy(),
+            viewer.title(),
             if viewer.hex_mode { "row" } else { "line" },
             viewer.current_line_number(),
             viewer.line_count(),
@@ -2465,11 +2465,9 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
     .style(skin.style("dialog", "_default_"))
     .highlight_style(skin.style("core", "selected"))
     .highlight_symbol(">> ")
-    .block(
-        Block::default()
-            .borders(Borders::NONE)
-            .title(format!("Up/Down select | {cancel} cancel | {close} close")),
-    );
+    .block(Block::default().borders(Borders::NONE).title(format!(
+        "Up/Down select | Enter output | {cancel} cancel | {close} close"
+    )));
 
     let mut table_state = TableState::default();
     if !state.jobs.jobs().is_empty() {
@@ -4745,8 +4743,8 @@ OpenConfirmDialog = f2
         let buffer = render_to_buffer(&app, 120, 40);
         let skin = current_skin();
         let inactive_style = skin.style("menu", "menuinactive");
-        let disabled_cell = first_cell_for_text(&buffer, "Filtered view")
-            .expect("unimplemented menu entry should render");
+        let disabled_cell =
+            first_cell_for_text(&buffer, "Chmod").expect("unimplemented menu entry should render");
         assert_eq!(
             disabled_cell.fg,
             inactive_style.fg.unwrap_or(Color::Reset),

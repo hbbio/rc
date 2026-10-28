@@ -37,6 +37,7 @@ impl fmt::Display for JobId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
+    Command,
     Copy,
     Move,
     Delete,
@@ -56,6 +57,7 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Command => "command",
             Self::Copy => "copy",
             Self::Move => "move",
             Self::Delete => "delete",
@@ -94,6 +96,9 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    CaptureCommand {
+        spec: crate::CommandCaptureSpec,
+    },
     /// Copies selected regular members and directory subtrees to the local filesystem.
     ///
     /// Sources are synthetic `location.archive.join(member)` paths. Each selection
@@ -201,6 +206,7 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::CaptureCommand { .. } => JobKind::Command,
             Self::ExtractArchive { .. } => JobKind::Copy,
             Self::LoadArchiveViewer { quick_view, .. } => {
                 if quick_view.is_some() {
@@ -229,6 +235,7 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::CaptureCommand { .. } => 1,
             Self::ExtractArchive { sources, .. } => sources.len(),
             Self::LoadArchiveViewer { .. } => 1,
             Self::MeasureArchiveSelection { paths, .. } => paths.len(),
@@ -251,6 +258,7 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::CaptureCommand { spec } => crate::sanitize_display_line(&spec.command),
             Self::ExtractArchive {
                 sources,
                 destination_dir,
@@ -1105,7 +1113,7 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "desktop-open jobs are executed by the runtime adapter",
         )),
-        JobRequest::LoadViewer { .. } => Err(io::Error::new(
+        JobRequest::LoadViewer { .. } | JobRequest::CaptureCommand { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "viewer jobs are executed by the runtime adapter",
         )),
@@ -1998,6 +2006,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::CaptureCommand { .. }
         | JobRequest::LoadArchiveViewer { .. }
         | JobRequest::MeasureArchiveSelection { .. }
         | JobRequest::LoadQuickView { .. }

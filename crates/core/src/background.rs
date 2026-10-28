@@ -63,6 +63,14 @@ impl PanelRefreshStreamRequest {
 
 #[derive(Clone, Debug)]
 pub enum BackgroundEvent {
+    CommandOutput {
+        job_id: JobId,
+        bytes: Vec<u8>,
+    },
+    CommandCompleted {
+        job_id: JobId,
+        status: String,
+    },
     PanelEntriesChunk {
         panel: ActivePanel,
         cwd: PathBuf,

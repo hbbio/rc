@@ -405,6 +405,18 @@ impl AppState {
         }
         match (pending, result) {
             (
+                Some(PendingDialogAction::FilteredView { cwd }),
+                DialogResult::InputSubmitted(command),
+            ) => {
+                if !command.trim().is_empty() {
+                    self.start_command_capture(CommandCaptureSpec {
+                        cwd,
+                        command,
+                        shell: self.settings.shell.clone(),
+                    });
+                }
+            }
+            (
                 Some(PendingDialogAction::CommandHistory { commands }),
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {

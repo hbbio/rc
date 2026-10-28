@@ -87,6 +87,11 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::ViewEntry) => Some(Self::ViewEntry),
             (KeyContext::FileManager, KeyCommand::ViewFile) => Some(Self::ViewFile),
+            (KeyContext::FileManager, KeyCommand::FilteredView) => Some(Self::FilteredView),
+            (KeyContext::Jobs, KeyCommand::OpenEntry) => Some(Self::OpenJobOutput),
+            (KeyContext::Viewer | KeyContext::ViewerHex, KeyCommand::CancelJob) => {
+                Some(Self::CancelJob)
+            }
             (KeyContext::FileManager, KeyCommand::OpenFileHistory) => Some(Self::OpenFileHistory),
             (KeyContext::FileManager | KeyContext::CommandLine, KeyCommand::OpenCommandHistory) => {
                 Some(Self::OpenCommandHistory)

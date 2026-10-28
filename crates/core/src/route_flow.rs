@@ -18,6 +18,8 @@ impl AppState {
             AppCommand::ViewFile => self.open_view_file_dialog(),
             AppCommand::OpenFileHistory => self.open_file_history(),
             AppCommand::OpenCommandHistory => self.open_command_history(),
+            AppCommand::FilteredView => self.open_filtered_view(),
+            AppCommand::OpenJobOutput => self.open_selected_job_output(),
             AppCommand::PutCurrentSelected
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged
@@ -332,6 +334,7 @@ impl AppState {
             Route::Dialog(_)
             | Route::Jobs
             | Route::Viewer(_)
+            | Route::CommandOutput(_)
             | Route::Help(_)
             | Route::Settings(_) => None,
         }
@@ -376,7 +379,7 @@ impl AppState {
     }
 
     pub(crate) fn close_viewer(&mut self) {
-        if matches!(self.top_route(), Route::Viewer(_)) {
+        if matches!(self.top_route(), Route::Viewer(_) | Route::CommandOutput(_)) {
             self.routes.pop();
             self.set_status("Closed viewer");
         }

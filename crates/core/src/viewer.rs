@@ -26,6 +26,7 @@ enum ViewerGotoTarget {
 pub struct ViewerState {
     path: PathBuf,
     pub(crate) archive_location: Option<crate::ArchiveLocation>,
+    output: Option<Box<ViewerOutputState>>,
     pub bytes: Vec<u8>,
     content: String,
     text_is_preview: bool,
@@ -38,6 +39,13 @@ pub struct ViewerState {
     last_search_query: Option<String>,
     last_search_match_offset: Option<usize>,
     last_search_direction: ViewerSearchDirection,
+}
+
+#[derive(Clone, Debug)]
+struct ViewerOutputState {
+    status: String,
+    utf8_tail: Vec<u8>,
+    content_hasher: std::collections::hash_map::DefaultHasher,
 }
 
 impl ViewerState {
@@ -148,6 +156,7 @@ impl ViewerState {
         Self {
             path,
             archive_location: None,
+            output: None,
             bytes,
             content,
             text_is_preview,
@@ -181,6 +190,93 @@ impl ViewerState {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn title(&self) -> String {
+        match &self.output {
+            Some(output) => format!("[{}] {}", output.status, self.path.display()),
+            None => self.path.display().to_string(),
+        }
+    }
+
+    pub(crate) fn command_output(title: String) -> Self {
+        let mut viewer = Self::from_prefix(PathBuf::from(title), 0, Vec::new(), false);
+        viewer.output = Some(Box::new(ViewerOutputState {
+            status: "running".into(),
+            utf8_tail: Vec::new(),
+            content_hasher: std::collections::hash_map::DefaultHasher::new(),
+        }));
+        viewer
+    }
+
+    pub(crate) fn append_output(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+        let output = self.output.as_mut().expect("command output viewer");
+        let mut pending = std::mem::take(&mut output.utf8_tail);
+        pending.extend_from_slice(bytes);
+        let mut remaining = pending.as_slice();
+        let start = self.content.len();
+        while !remaining.is_empty() {
+            match std::str::from_utf8(remaining) {
+                Ok(text) => {
+                    self.content.push_str(text);
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    self.content.push_str(
+                        std::str::from_utf8(&remaining[..valid]).expect("validated UTF-8 prefix"),
+                    );
+                    remaining = &remaining[valid..];
+                    match error.error_len() {
+                        Some(count) => {
+                            self.content.push('\u{fffd}');
+                            remaining = &remaining[count..];
+                        }
+                        None => {
+                            output.utf8_tail.extend_from_slice(remaining);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.index_appended_output(start);
+    }
+
+    fn index_appended_output(&mut self, start: usize) {
+        for index in start.saturating_sub(1)..self.content.len().saturating_sub(1) {
+            if self.content.as_bytes()[index] == b'\n'
+                && self
+                    .line_offsets
+                    .last()
+                    .is_none_or(|last| *last < index + 1)
+            {
+                self.line_offsets.push(index + 1);
+            }
+        }
+        let output = self.output.as_mut().expect("command output viewer");
+        output
+            .content_hasher
+            .write(&self.content.as_bytes()[start..]);
+        self.content_fingerprint = output.content_hasher.finish();
+    }
+
+    pub(crate) fn finish_output(&mut self, status: String) {
+        let output = self.output.as_mut().expect("command output viewer");
+        if !output.utf8_tail.is_empty() {
+            output.utf8_tail.clear();
+            let start = self.content.len();
+            self.content.push('\u{fffd}');
+            self.index_appended_output(start);
+        }
+        self.set_output_status(status);
+    }
+
+    pub(crate) fn set_output_status(&mut self, status: String) {
+        if let Some(output) = self.output.as_mut() {
+            output.status = status;
+        }
     }
 
     pub fn content(&self) -> &str {
@@ -521,6 +617,7 @@ mod tests {
         ViewerState {
             path: PathBuf::from("fixture"),
             archive_location: None,
+            output: None,
             bytes: bytes.to_vec(),
             line_offsets: compute_line_offsets(&content),
             content,

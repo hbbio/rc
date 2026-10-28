@@ -169,6 +169,7 @@ impl AppState {
                     }
                 }
                 Err(error) => {
+                    self.fail_command_output(id, &error);
                     self.panel_mkdirs.finish(id, false);
                     let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
@@ -276,6 +277,12 @@ impl AppState {
 
     pub fn handle_background_event(&mut self, event: BackgroundEvent) {
         match event {
+            BackgroundEvent::CommandOutput { job_id, bytes } => {
+                self.append_command_output(job_id, &bytes)
+            }
+            BackgroundEvent::CommandCompleted { job_id, status } => {
+                self.complete_command_output(job_id, status)
+            }
             BackgroundEvent::PanelEntriesChunk {
                 panel,
                 cwd,
@@ -710,10 +717,10 @@ impl AppState {
     }
 
     pub(crate) fn cancel_latest_job(&mut self) {
-        let selected_id = if matches!(self.top_route(), Route::Jobs) {
-            self.selected_job_record().map(|job| job.id)
-        } else {
-            None
+        let selected_id = match self.top_route() {
+            Route::Jobs => self.selected_job_record().map(|job| job.id),
+            Route::CommandOutput(id) => Some(*id),
+            _ => None,
         };
         let Some(job_id) = selected_id.or_else(|| self.jobs.newest_cancelable_job_id()) else {
             self.set_status("No active job to cancel");

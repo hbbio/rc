@@ -575,6 +575,7 @@ Cancel = esc
 Quit = f10
 
 [jobs]
+Enter = enter
 Up = up
 Down = down
 CancelJob = alt-j
@@ -633,6 +634,7 @@ End = end
 
 [viewer]
 Quit = f10; esc; q
+CancelJob = alt-j
 Up = up
 Down = down
 PageUp = pgup
@@ -649,6 +651,7 @@ ToggleHex = h
 
 [viewer:hex]
 Quit = f10; esc; q
+CancelJob = alt-j
 Up = up
 Down = down
 PageUp = pgup

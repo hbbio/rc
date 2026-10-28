@@ -114,6 +114,13 @@ renaming still update the panels.
 - Internal text and hex viewer with syntax highlighting, search in both directions,
   goto, wrapping, and bounded previews for large files.
 - File → View file opens an entered local path, including relative paths and `~/`.
+- File → Filtered view (`Alt-!`) runs a shell command in the active local
+  directory and streams stdout and stderr into the searchable text/hex viewer.
+  `Esc` returns to the panels while the command continues; `Alt-J` cancels it.
+  Open Jobs, select the command, and press `Enter` to return to its output.
+  The title records completion or failure. Capture stops at 8 MiB per command;
+  up to eight outputs are retained, evicting the oldest completed, closed output.
+  Captured commands use the configured shell and have no interactive standard input.
 - `Alt-Shift-E` opens the session's viewed/edited-file history. Its 100 most recent
   entries reopen with the original action, including files inside archives.
 - External editing through a configured command, `$EDITOR`, `$VISUAL`, or

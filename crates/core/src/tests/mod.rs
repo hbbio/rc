@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 mod archive_tests;
+mod command_output_tests;
 mod file_history_tests;
 mod find_tests;
 mod group_selection_tests;
@@ -76,6 +77,14 @@ fn drain_background(app: &mut AppState) {
                     let job_id = job.id;
                     let (event_tx, event_rx) = std::sync::mpsc::channel();
                     match &job.request {
+                        JobRequest::CaptureCommand { .. } => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            execute_command_capture(job, &event_tx, &background_tx);
+                            drop(background_tx);
+                            for event in background_rx {
+                                app.handle_background_event(event);
+                            }
+                        }
                         JobRequest::LoadArchiveViewer {
                             location,
                             path,

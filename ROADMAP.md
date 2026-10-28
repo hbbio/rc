@@ -19,19 +19,14 @@ in the project [README](README.md).
 
 - Add chmod, chown, advanced chown, hard-link, symlink, relative-symlink, and
   edit-symlink operations with tagged-file support.
-- Add filtered-view command handling.
 - Add explicit directory and file comparison commands.
 - Add panel swapping, directory-size calculation on demand, and a screen selector.
 - Support user-defined panel listing formats in addition to Full, Brief, and Long.
 
 ## Command output, diff, and subshell
 
-- Add a reusable output viewer that streams stdout and stderr, supports search and
-  paging, and records command completion.
 - Run file comparisons through `difftastic` when available, with `diff` as the
   fallback, and display their output in that viewer.
-- Support captured and background command execution without blocking the
-  interface.
 - Add a persistent PTY-backed shell with a prompt protocol and bidirectional
   working-directory synchronization.
 - Implement `Ctrl-O` panel hiding around the persistent shell.
