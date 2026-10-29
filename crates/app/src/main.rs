@@ -904,6 +904,26 @@ fn handle_mouse(
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
+    if let Some(direction) = match mouse_event.kind {
+        MouseEventKind::ScrollUp => Some(rc_ui::ScrollDirection::Up),
+        MouseEventKind::ScrollDown => Some(rc_ui::ScrollDirection::Down),
+        _ => None,
+    } {
+        click_tracker.clear();
+        for command in rc_ui::commands_for_scroll(
+            state,
+            mouse_event.column,
+            mouse_event.row,
+            viewport_width,
+            viewport_height,
+            direction,
+        ) {
+            if apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
     if state.key_context() == KeyContext::CommandLine {
         state.clear_xmap();
         click_tracker.clear();
@@ -2699,6 +2719,111 @@ mod tests {
             if matches!(&job.request, JobRequest::RefreshPanel { cwd, .. } if cwd == &target))
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wheel_events_target_hovered_panels_and_clear_double_click_state() {
+        let root = tempfile::tempdir().unwrap();
+        for n in 0..20 {
+            fs::create_dir(root.path().join(format!("d{n:02}"))).unwrap();
+        }
+        let mut state = AppState::new(root.path().into()).unwrap();
+        for panel in &mut state.panels {
+            panel.refresh().unwrap();
+        }
+        let (mut runtime, _commands) = runtime::test_runtime_bridge_with_capacity(32);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 61,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(
+            &mut state,
+            click,
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        let selected = state.panels[1].cursor;
+        assert!(tracker.previous.is_some());
+        for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp] {
+            handle_mouse(
+                &mut state,
+                MouseEvent { kind, ..click },
+                120,
+                40,
+                &mut tracker,
+                &mut runtime,
+                &skin_runtime,
+            )
+            .unwrap();
+            assert!(tracker.previous.is_none());
+            assert_eq!(state.active_panel, ActivePanel::Right);
+            assert_eq!(state.panels[0].cursor, 0);
+        }
+        assert_eq!(state.panels[1].cursor, selected);
+        handle_mouse(
+            &mut state,
+            click,
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            state.active_panel().cwd,
+            root.path(),
+            "scrolling between clicks must prevent activation"
+        );
+        state.apply(AppCommand::OpenHelp).unwrap();
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                ..click
+            },
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            state.panels[1].cursor, selected,
+            "wheel outside modal must not reach a panel"
+        );
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 60,
+                row: 20,
+                ..click
+            },
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert!(matches!(state.top_route(), rc_core::Route::Help(help) if help.scroll() == 3));
     }
 
     #[test]

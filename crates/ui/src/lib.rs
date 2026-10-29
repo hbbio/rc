@@ -4,7 +4,7 @@ mod bundled_skins;
 mod mouse;
 mod skin;
 
-pub use mouse::commands_for_left_click;
+pub use mouse::{ScrollDirection, commands_for_left_click, commands_for_scroll};
 
 use chrono::{DateTime, Local};
 use ratatui::Frame;

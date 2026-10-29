@@ -1,6 +1,230 @@
 use super::*;
 use rc_core::MouseClickTarget;
 
+fn scroll(app: &mut AppState, x: u16, y: u16, width: u16, height: u16, direction: ScrollDirection) {
+    for command in commands_for_scroll(app, x, y, width, height, direction) {
+        app.apply(command).unwrap();
+    }
+}
+
+#[test]
+fn wheel_scrolls_the_hovered_panel_using_its_rendered_grid_and_clamps() {
+    let root = temp_root("wheel-grid");
+    for n in 0..95 {
+        fs::write(root.join(format!("f{n:02}")), "data").unwrap();
+    }
+    let mut app = app_with_loaded_panels(root.clone());
+    for format in PanelListingFormat::ALL {
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            set_format(&mut app, panel, format);
+        }
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            app.active_panel = panel;
+            app.apply(AppCommand::Panel(panel, PanelCommand::SelectAt(0)))
+                .unwrap();
+            for (width, height) in [(120, 12), (65, 9), (181, 15)] {
+                let content = root_areas(Rect::new(0, 0, width, height), &app)[1];
+                let area = if uses_single_panel_layout(&app) {
+                    content
+                } else {
+                    dual_panel_areas(content)[panel.index()]
+                };
+                let listing =
+                    panel_content_areas(Block::default().borders(Borders::ALL).inner(area))[0];
+                let other = app.panels[panel.other().index()].cursor;
+                // Scrolling a passive pane must target that pane, not the active one.
+                if !uses_single_panel_layout(&app) {
+                    app.active_panel = panel.other();
+                }
+                for direction in [ScrollDirection::Down, ScrollDirection::Up] {
+                    for _ in 0..40 {
+                        scroll(
+                            &mut app,
+                            listing.x,
+                            listing.bottom() - 1,
+                            width,
+                            height,
+                            direction,
+                        );
+                        assert_eq!(app.active_panel, panel);
+                        assert_eq!(app.panels[panel.other().index()].cursor, other);
+                        let state = &app.panels[panel.index()];
+                        let columns = if format == PanelListingFormat::Brief {
+                            BriefGrid::new(state.entries.len(), listing.width).columns
+                        } else {
+                            1
+                        };
+                        let rows = listing
+                            .height
+                            .saturating_sub(u16::from(format != PanelListingFormat::Brief))
+                            as usize;
+                        let (start, end) = state.visible_window(rows, columns);
+                        assert!(
+                            (start..end)
+                                .contains(&(state.cursor % state.entries.len().div_ceil(columns)))
+                        );
+                    }
+                }
+                assert_rendered_entries_are_clickable(&app, width, height);
+                assert_eq!(
+                    app.panels[panel.index()].cwd,
+                    root,
+                    "scrolling must not open an entry"
+                );
+            }
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wheel_routes_to_modal_lists_and_help_without_falling_through() {
+    let root = temp_root("wheel-modals");
+    for n in 0..30 {
+        fs::write(root.join(format!("f{n:02}")), "data").unwrap();
+    }
+    let mut app = app_with_loaded_panels(root.clone());
+    app.apply(AppCommand::OpenPanelizeDialog).unwrap();
+    let expected = match app.top_route() {
+        Route::Dialog(dialog) => match &dialog.kind {
+            DialogKind::Listbox(list) => {
+                (list.selected + 3).min(list.items.len().saturating_sub(1))
+            }
+            _ => panic!("expected preset list"),
+        },
+        _ => panic!("expected preset dialog"),
+    };
+    let rect = listbox_dialog_layout(ScreenRect::new(0, 0, 120, 40), 2).list;
+    scroll(&mut app, rect.x, rect.y, 120, 40, ScrollDirection::Down);
+    assert!(
+        matches!(app.top_route(), Route::Dialog(dialog) if matches!(&dialog.kind, DialogKind::Listbox(list) if list.selected == expected)),
+        "{:?}",
+        app.top_route()
+    );
+    scroll(&mut app, 1, 5, 120, 40, ScrollDirection::Down);
+    assert_eq!(app.panels[0].cursor, 0);
+    assert_eq!(app.panels[1].cursor, 0);
+    app.apply(AppCommand::DialogCancel).unwrap();
+    app.apply(AppCommand::OpenOptionsConfiguration).unwrap();
+    scroll(&mut app, 60, 20, 120, 40, ScrollDirection::Down);
+    assert!(matches!(app.top_route(), Route::Settings(settings) if settings.selected_entry == 3));
+    app.apply(AppCommand::DialogCancel).unwrap();
+    app.apply(AppCommand::OpenHelp).unwrap();
+    scroll(&mut app, 60, 20, 120, 40, ScrollDirection::Down);
+    assert!(matches!(app.top_route(), Route::Help(help) if help.scroll() == 3));
+    scroll(&mut app, 60, 20, 120, 40, ScrollDirection::Up);
+    assert!(matches!(app.top_route(), Route::Help(help) if help.scroll() == 0));
+    assert!(app.panels.iter().all(|panel| panel.cursor == 0));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wheel_stops_at_the_end_of_a_short_brief_column() {
+    let root = temp_root("wheel-brief-tail");
+    for n in 0..25 {
+        fs::write(root.join(format!("f{n:02}")), "data").unwrap();
+    }
+    let mut app = app_with_loaded_panels(root.clone());
+    set_format(&mut app, ActivePanel::Left, PanelListingFormat::Brief);
+    let last = app.active_panel().entries.len() - 1;
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::SelectAt(last),
+    ))
+    .unwrap();
+    for _ in 0..10 {
+        scroll(&mut app, 5, 5, 120, 12, ScrollDirection::Down);
+        assert_eq!(app.active_panel().cursor, last);
+    }
+    assert_rendered_entries_are_clickable(&app, 120, 12);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wheel_scrolls_viewer_and_quick_preview_without_activating_preview() {
+    let root = temp_root("wheel-viewers");
+    let text = (0..80).map(|n| format!("line {n}\n")).collect::<String>();
+    fs::write(root.join("text"), text).unwrap();
+    let mut app = app_with_loaded_panels(root.clone());
+    let index = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.name == "text")
+        .unwrap();
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::SelectAt(index),
+    ))
+    .unwrap();
+    app.apply(AppCommand::ViewEntry).unwrap();
+    drain_background(&mut app);
+    scroll(&mut app, 20, 5, 120, 40, ScrollDirection::Down);
+    assert_eq!(app.active_viewer().unwrap().scroll, 3);
+    app.apply(AppCommand::ViewerGoto).unwrap();
+    scroll(&mut app, 20, 5, 120, 40, ScrollDirection::Down);
+    assert_eq!(
+        app.active_viewer().unwrap().scroll,
+        3,
+        "input dialog blocks viewer scrolling"
+    );
+    app.apply(AppCommand::DialogCancel).unwrap();
+    app.apply(AppCommand::CloseViewer).unwrap();
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::SetView(PanelViewMode::QuickView),
+    ))
+    .unwrap();
+    drain_background(&mut app);
+    scroll(&mut app, 70, 5, 120, 40, ScrollDirection::Down);
+    assert_eq!(
+        app.quick_view_state(ActivePanel::Right)
+            .viewer()
+            .unwrap()
+            .scroll,
+        3
+    );
+    assert_eq!(app.active_panel, ActivePanel::Left);
+    assert_eq!(app.active_panel().cursor, index);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wheel_ignores_borders_headers_and_tiny_or_outside_viewports() {
+    let root = temp_root("wheel-bounds");
+    let app = app_with_loaded_panels(root.clone());
+    for (x, y) in [
+        (0, 5),
+        (59, 5),
+        (60, 5),
+        (119, 5),
+        (1, 2),
+        (61, 2),
+        (1, 14),
+        (1, 15),
+        (120, 5),
+        (1, 40),
+    ] {
+        assert!(
+            commands_for_scroll(&app, x, y, 120, 16, ScrollDirection::Down).is_empty(),
+            "{x},{y}"
+        );
+    }
+    for width in 0..6 {
+        for height in 0..5 {
+            for x in 0..=width {
+                for y in 0..=height {
+                    assert!(
+                        commands_for_scroll(&app, x, y, width, height, ScrollDirection::Down)
+                            .is_empty()
+                    );
+                }
+            }
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn set_format(app: &mut AppState, panel: ActivePanel, format: PanelListingFormat) {
     app.apply(AppCommand::Panel(panel, PanelCommand::OpenListingFormat))
         .unwrap();

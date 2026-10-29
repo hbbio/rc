@@ -12,6 +12,13 @@ impl AppState {
         command: AppCommand,
     ) -> io::Result<CommandOutcome> {
         match command {
+            AppCommand::Panel(panel, PanelCommand::ScrollQuickView(lines)) => {
+                if self.panel_view_mode(panel) == PanelViewMode::QuickView
+                    && let QuickViewState::Ready(viewer) = &mut self.quick_views[panel.index()]
+                {
+                    viewer.move_lines(lines);
+                }
+            }
             AppCommand::Navigate(NavigationTarget::FileManager, motion) => {
                 self.apply_file_manager_navigation(motion);
             }

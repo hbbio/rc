@@ -74,6 +74,8 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_quit}} quit\n\
 \n\
 File operations:\n\
+  Wheel/touchpad scrolls the pane under the pointer, three rows at a time.\n\
+  Scrollable modals receive scrolling while open; background panels stay still.\n\
   {{fm_move}} move cursor\n\
   {{fm_toggle_tag}} toggle selection\n\
   {{fm_file_ops}} copy/move/delete\n\
@@ -185,6 +187,7 @@ See also [File manager](file-manager) and [Panelize and VFS](panelize).",
         "Viewer",
         "Viewer basics:\n\
   {{viewer_scroll}} scroll\n\
+  Mouse wheel and touchpad scroll here and in quick previews.\n\
   {{viewer_search}} search, {{viewer_search_back}} reverse search\n\
   {{viewer_search_continue}} continue search\n\
   {{viewer_goto}} goto line or offset\n\

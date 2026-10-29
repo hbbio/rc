@@ -481,6 +481,12 @@ interface.
 
 Left-click an entry in either pane to select it and make that pane active.
 Double-click to open the entry.
+Mouse-wheel and terminal-reported touchpad scrolling move three rows at a time
+in the pane under the pointer. Scrolling a listing focuses that pane; scrolling
+a quick preview leaves the listing focused. Scrollable modals (lists, menus,
+settings, help, jobs, search results, trees, and hotlists) receive scrolling while
+open, and panels behind them stay unchanged. Viewers and Quick cd suggestions
+also support scrolling. Scrolling never opens or accepts an entry.
 
 ### Command line
 

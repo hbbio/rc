@@ -304,6 +304,7 @@ pub enum AppCommand {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
+    ScrollQuickView(isize),
     OpenFtp,
     OpenShellLink,
     OpenSftp,
@@ -523,6 +524,7 @@ impl AppCommand {
                 PanelCommand::SetView(_)
                 | PanelCommand::SelectAt(_)
                 | PanelCommand::SelectAtInViewport { .. }
+                | PanelCommand::ScrollQuickView(_)
                 | PanelCommand::RestorePanelizedResults
                 | PanelCommand::Reread,
             )
