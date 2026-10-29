@@ -5,6 +5,28 @@ All notable changes to Rust Commander are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Browse ZIP archives as read-only folders in either pane without decompressing
+  their contents. Copy selected or tagged files and directories out with F5,
+  decompressing only those entries, and preview individual files with Enter,
+  F3, or Quick view.
+- Browse TAR, gzip TAR (`.tar.gz`, `.tgz`), and bzip2 TAR (`.tar.bz2`, `.tbz2`,
+  `.tbz`) through the same read-only archive backend, with selective F5 extraction.
+  Share cached metadata between panes, seek directly in plain TAR, and resume
+  compressed TAR reads through bounded gzip checkpoints or bzip2 block indexes.
+  Validate compressed streams during the first scan and invalidate stale indexes.
+
+### Fixed
+
+- Preserve safe non-UTF-8 TAR paths on Unix through navigation, previews, directory
+  extraction, and Rename copies. Report unsupported names or destination filename
+  encodings instead of silently omitting members from successful copies.
+- Allow the `bzip2-1.0.6` license used by the Rust bzip2 backend in dependency-policy
+  checks.
+
 ## [0.2.2] - 2026-10-12
 
 ### Fixed

@@ -47,7 +47,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
         "File Manager",
         "File manager quick keys:\n\
   {{fm_switch_panel}} switch panel\n\
-  {{fm_open_entry}} enter directory, run executable, or open file\n\
+  {{fm_open_entry}} enter directory/archive, run executable, or open file\n\
   {{fm_view_entry}} view file internally\n\
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
@@ -232,6 +232,21 @@ The side-panel Panelize entry restores that panel's latest completed results.\n\
 How this differs from VFS:\n\
   VFS mounts archives/remote locations as browsable trees.\n\
   Panelize does not mount filesystems; it only lists paths.\n\
+\n\
+Archives:\n\
+  Enter browses ZIP, TAR, TAR.GZ/TGZ and TAR.BZ2/TBZ2/TBZ in the current pane.\n\
+  Enter opens folders or previews a file; F3 and Quick view also preview files.\n\
+  Backspace or .. goes up and leaves the archive at its root.\n\
+  F5 copies selected/tagged files and directories to a local directory.\n\
+  ZIP browsing reads metadata; plain TAR skips file data. Compressed TAR\n\
+  needs an initial cancellable scan; cached indexes speed up later access.\n\
+  Only selected files are written. Compressed TAR may also decompress\n\
+  preceding bytes or blocks to reach a selected file. No full TAR is staged.\n\
+  Archive contents are read-only: edit, move, delete, rename, mkdir and\n\
+  writes into the archive are blocked. Shell, Find, tree, external panelize\n\
+  and adding the current directory to the hotlist require a local directory.\n\
+  Encrypted ZIP contents, links, sparse and special files cannot be read.\n\
+  Nested archives are not supported. Refresh manually after external changes.\n\
 \n\
 Back to [File manager](file-manager) or [Find results](find-results).",
     ),

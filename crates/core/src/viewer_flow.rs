@@ -100,9 +100,17 @@ impl AppState {
             return false;
         }
 
-        self.queue_worker_job_request(JobRequest::LoadViewer {
-            path: entry.path.clone(),
-        });
+        let request = match self.active_panel().archive_location() {
+            Some(location) => JobRequest::LoadArchiveViewer {
+                location: location.clone(),
+                path: entry.path.clone(),
+                quick_view: None,
+            },
+            None => JobRequest::LoadViewer {
+                path: entry.path.clone(),
+            },
+        };
+        self.queue_worker_job_request(request);
         true
     }
 

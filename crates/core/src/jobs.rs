@@ -15,6 +15,7 @@ use nix::errno::Errno;
 #[cfg(unix)]
 use nix::unistd::{Gid, Uid, chown};
 
+use crate::ArchiveLocation;
 use crate::settings::Settings;
 use crate::settings_io::{SettingsPaths, save_settings};
 use crate::{
@@ -22,6 +23,7 @@ use crate::{
 };
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+mod archive_extract;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -92,6 +94,37 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    /// Copies selected regular members and directory subtrees to the local filesystem.
+    ///
+    /// Sources are synthetic `location.archive.join(member)` paths. Each selection
+    /// is staged before replacing its destination; earlier completed selections
+    /// remain committed if a later selection fails or the job is canceled.
+    ExtractArchive {
+        location: ArchiveLocation,
+        sources: Vec<PathBuf>,
+        destination_dir: PathBuf,
+        overwrite: OverwritePolicy,
+    },
+    /// Loads a bounded archive preview on a runtime worker.
+    ///
+    /// `path` is a synthetic archive member identity. `quick_view` identifies the
+    /// target panel and request when loading a quick-view preview.
+    /// See [`crate::ViewerState::open_archive_cancellable`] for I/O and error behavior.
+    LoadArchiveViewer {
+        location: ArchiveLocation,
+        path: PathBuf,
+        quick_view: Option<(ActivePanel, u64)>,
+    },
+    /// Measures selected synthetic archive paths on a runtime worker.
+    ///
+    /// The panel and request ID associate the result with the originating selection.
+    /// See [`crate::measure_archive_selection`] for indexing costs and error behavior.
+    MeasureArchiveSelection {
+        location: ArchiveLocation,
+        panel: ActivePanel,
+        paths: Vec<PathBuf>,
+        request_id: u64,
+    },
     Copy {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
@@ -168,6 +201,15 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::ExtractArchive { .. } => JobKind::Copy,
+            Self::LoadArchiveViewer { quick_view, .. } => {
+                if quick_view.is_some() {
+                    JobKind::LoadQuickView
+                } else {
+                    JobKind::LoadViewer
+                }
+            }
+            Self::MeasureArchiveSelection { .. } => JobKind::MeasureSelection,
             Self::Copy { .. } => JobKind::Copy,
             Self::Move { .. } => JobKind::Move,
             Self::Delete { .. } => JobKind::Delete,
@@ -187,6 +229,9 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::ExtractArchive { sources, .. } => sources.len(),
+            Self::LoadArchiveViewer { .. } => 1,
+            Self::MeasureArchiveSelection { paths, .. } => paths.len(),
             Self::Copy { sources, .. } => sources.len(),
             Self::Move { sources, .. } => sources.len(),
             Self::Delete { targets } => targets.len(),
@@ -206,6 +251,23 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::ExtractArchive {
+                sources,
+                destination_dir,
+                overwrite,
+                ..
+            } => format!(
+                "extract {} archive item(s) -> {} [{}]",
+                sources.len(),
+                destination_dir.display(),
+                overwrite.label()
+            ),
+            Self::LoadArchiveViewer { path, .. } => {
+                format!("view archive member {}", path.display())
+            }
+            Self::MeasureArchiveSelection { paths, .. } => {
+                format!("measure {} selected archive item(s)", paths.len())
+            }
             Self::Copy {
                 sources,
                 destination_dir,
@@ -265,6 +327,7 @@ impl JobRequest {
                 ..
             } => {
                 let source_label = match source {
+                    PanelListingSource::Archive(_) => "archive",
                     PanelListingSource::Directory => "directory",
                     PanelListingSource::Panelize { .. } => "panelize",
                     PanelListingSource::FindResults { .. } => "find-results",
@@ -950,6 +1013,36 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
+        JobRequest::ExtractArchive {
+            location,
+            sources,
+            destination_dir,
+            overwrite,
+        } => archive_extract::extract_archive(
+            &location,
+            &sources,
+            &destination_dir,
+            overwrite,
+            progress,
+        )
+        .map_err(|error| {
+            #[cfg(unix)]
+            if error.raw_os_error() == Some(Errno::EILSEQ as i32) {
+                return io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "destination filesystem cannot represent an archive member name: {error}"
+                    ),
+                );
+            }
+            error
+        }),
+        JobRequest::LoadArchiveViewer { .. } | JobRequest::MeasureArchiveSelection { .. } => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Archive preview and size jobs are executed by the runtime adapter",
+            ))
+        }
         JobRequest::Copy {
             sources,
             destination_dir,
@@ -1600,8 +1693,7 @@ fn renamed_destination(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination.parent().unwrap_or(Path::new("."));
     let file_name = destination
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from("item"));
+        .unwrap_or_else(|| std::ffi::OsStr::new("item"));
 
     for index in 1_usize.. {
         let suffix = if index == 1 {
@@ -1609,7 +1701,9 @@ fn renamed_destination(destination: &Path) -> io::Result<PathBuf> {
         } else {
             format!("copy{index}")
         };
-        let candidate = parent.join(format!("{file_name}.{suffix}"));
+        let mut candidate_name = file_name.to_os_string();
+        candidate_name.push(format!(".{suffix}"));
+        let candidate = parent.join(candidate_name);
         if !path_entry_exists(&candidate)? {
             return Ok(candidate);
         }
@@ -1890,6 +1984,9 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
+        JobRequest::ExtractArchive {
+            location, sources, ..
+        } => archive_extract::measure_archive_totals(location, sources, cancel_flag),
         JobRequest::Copy { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Move { sources, .. } => measure_paths_totals(sources, cancel_flag),
         JobRequest::Delete { targets } => measure_paths_totals(targets, cancel_flag),
@@ -1901,6 +1998,8 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::LoadArchiveViewer { .. }
+        | JobRequest::MeasureArchiveSelection { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),

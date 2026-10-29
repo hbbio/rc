@@ -105,9 +105,15 @@ impl AppState {
             }
             AppCommand::RestorePanelizedResults => self.restore_panelized_results(),
             AppCommand::OpenEntry => {
-                if self.open_selected_directory() {
+                if self.open_selected_archive() || self.open_selected_directory() {
                     self.queue_panel_refresh(self.active_panel);
                     self.set_status("Loading selected directory...");
+                } else if self.active_panel().is_archive() {
+                    if self.open_selected_file_in_viewer() {
+                        self.set_status("Opening viewer...");
+                    } else {
+                        self.set_status("No entry selected");
+                    }
                 } else {
                     match self.execute_selected_file() {
                         ExecuteSelectionResult::OpenedExternal => {
@@ -1059,7 +1065,7 @@ impl AppState {
         }
 
         let panel_index = panel_id.index();
-        let previous_directory = self.panels[panel_index].cwd.clone();
+        let previous_directory = self.panels[panel_index].local_directory().to_path_buf();
         let revert = self.panel_refresh_revert_snapshot(panel_id);
         if let Some(snapshot) = self.completed_panelized_result_snapshot(panel_id) {
             self.panelized_result_history[panel_index] = Some(snapshot);
