@@ -10,7 +10,6 @@ const MOUNT_LIMIT: usize = 16;
 struct PendingMount {
     panel: ActivePanel,
     from: VfsPath,
-    refresh_id: u64,
     directory: PathBuf,
 }
 
@@ -281,14 +280,12 @@ impl AppState {
         }
         let from = self.panels[panel.index()].location();
         self.cancel_pending_mount(panel);
-        let refresh_id = self.panel_refresh_generation(panel);
         let id = self.queue_worker_job_request(JobRequest::Vfs(task));
         self.vfs_workflow.pending.insert(
             id,
             PendingMount {
                 panel,
                 from,
-                refresh_id,
                 directory,
             },
         );
@@ -405,7 +402,6 @@ impl AppState {
             return;
         };
         if self.panels[pending.panel.index()].location() != pending.from
-            || self.panel_refresh_generation(pending.panel) != pending.refresh_id
             || self.vfs_workflow.mounts.len() >= MOUNT_LIMIT
         {
             mount.close();

@@ -212,9 +212,6 @@ impl AppState {
             }
         }
     }
-    pub(crate) fn panel_refresh_generation(&self, panel: ActivePanel) -> u64 {
-        self.panel_refresh.request_ids[panel.index()]
-    }
     pub(crate) fn prepare_panel_refresh_swap(&mut self) -> [bool; 2] {
         let loading = [ActivePanel::Left, ActivePanel::Right].map(|panel| {
             self.panels[panel.index()].loading || self.panel_refresh_post.has_revert(panel)
@@ -433,6 +430,8 @@ impl AppState {
         panel: ActivePanel,
         snapshot: PanelRefreshRevert,
     ) {
+        // A navigation supersedes pending opens; ordinary listing refreshes do not.
+        self.cancel_pending_mount(panel);
         self.panel_refresh_post.ensure_revert(panel, snapshot);
     }
 
@@ -524,6 +523,7 @@ impl AppState {
     }
 
     pub(crate) fn cancel_and_invalidate_panel_refresh(&mut self, panel: ActivePanel) {
+        self.cancel_pending_mount(panel);
         if let Some(job_id) = self.panel_refresh.invalidate_request(panel) {
             let _ = self.request_cancel_for_job(job_id);
         }

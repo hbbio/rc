@@ -25,8 +25,6 @@ impl AppState {
             return;
         }
         let reload = self.prepare_panel_refresh_swap();
-        self.cancel_pending_mount(ActivePanel::Left);
-        self.cancel_pending_mount(ActivePanel::Right);
         self.invalidate_selection_sizes_for_swap();
         for panel in [ActivePanel::Left, ActivePanel::Right] {
             self.deactivate_quick_view(panel);

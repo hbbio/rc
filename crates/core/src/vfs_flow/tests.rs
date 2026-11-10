@@ -474,6 +474,73 @@ fn closing_a_mount_drops_reverts_from_an_inflight_exit_and_cancels_nested_opens(
 }
 
 #[test]
+fn pending_mounts_survive_automatic_and_manual_directory_refreshes() {
+    for automatic in [true, false] {
+        let (dir, mut app, helper, source) = fixture();
+        app.queue_helper_mount(
+            ActivePanel::Left,
+            helper,
+            Some(VfsPath::Local(source)),
+            PathBuf::new(),
+        );
+        fs::write(dir.path().join("unrelated"), b"change").unwrap();
+        if automatic {
+            assert!(app.refresh_directory_if_idle(ActivePanel::Left));
+        } else {
+            app.apply(AppCommand::Reread).unwrap();
+        }
+        drain_background(&mut app);
+        let mounted = app
+            .active_panel()
+            .mounted_location()
+            .expect("a directory refresh must not discard the pending mount");
+        assert!(!mounted.mount().is_closed());
+        assert!(
+            app.active_panel()
+                .entries
+                .iter()
+                .any(|entry| entry.name == "tree")
+        );
+    }
+}
+
+#[test]
+fn completed_mount_is_discarded_after_navigation_away_and_back() {
+    let (dir, mut app, helper, source) = fixture();
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    let job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| match command {
+            WorkerCommand::Run(job) => Some(*job),
+            _ => None,
+        })
+        .unwrap();
+    let id = job.id;
+    let (jobs, _job_events) = std::sync::mpsc::channel();
+    let (events, background) = std::sync::mpsc::channel();
+    vfs::tasks::execute(job, &jobs, &events);
+    let BackgroundEvent::VfsMounted { mount, .. } = background.try_recv().unwrap() else {
+        panic!("mount completion");
+    };
+    let other = dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    assert!(app.set_active_panel_directory(other).unwrap());
+    assert!(app.set_active_panel_directory(dir.path().into()).unwrap());
+    app.handle_vfs_mounted(id, Arc::clone(&mount));
+    drain_background(&mut app);
+    assert!(mount.is_closed());
+    assert!(!app.active_panel().is_virtual());
+    assert!(app.vfs_workflow.pending.is_empty());
+    assert!(app.vfs_workflow.mounts.is_empty());
+}
+
+#[test]
 fn helper_uri_parsing_and_stale_completion_do_not_replace_newer_navigation() {
     let (dir, mut app, helper, source) = fixture();
     let uri = source.join("fake://tree");
