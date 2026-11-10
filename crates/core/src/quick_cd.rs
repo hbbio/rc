@@ -18,6 +18,23 @@ pub(crate) enum QuickCdError {
     HomeLookup(String),
 }
 
+enum QuickCdInput {
+    Path(PathBuf),
+    // Home, previous-directory, and selected suggestions leave virtual panels.
+    Local(PathBuf),
+}
+
+impl QuickCdInput {
+    fn resolve_local(self, cwd: &Path) -> PathBuf {
+        let (Self::Path(path) | Self::Local(path)) = self;
+        lexically_normalize(&if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct QuickCdSearchWorkflow {
     job_id: Option<JobId>,
@@ -124,18 +141,38 @@ impl AppState {
 
     pub(crate) fn submit_quick_cd(&mut self, input: String, selected_path: Option<PathBuf>) {
         let panel = self.active_panel;
-        let cwd = self.active_panel().cwd.clone();
+        let cwd = self.active_panel().local_directory().to_path_buf();
         let previous = self.previous_panel_directories[panel.index()].as_deref();
-        let destination = match selected_path {
-            Some(path) => lexically_normalize(&path),
-            None => match resolve_quick_cd_input(&input, &cwd, previous) {
-                Ok(destination) => destination,
+        let parsed = match selected_path {
+            Some(path) => QuickCdInput::Local(path),
+            None => match parse_quick_cd_input(&input, previous, system_home_directory) {
+                Ok(parsed) => parsed,
                 Err(error) => {
                     self.reopen_quick_cd_after_error(input, error.to_string());
                     return;
                 }
             },
         };
+        if let QuickCdInput::Path(path) = &parsed {
+            let inside_mount = self
+                .active_panel()
+                .mounted_location()
+                .is_some_and(|mounted| path.starts_with(mounted.mount().root().identity()));
+            if !inside_mount && self.open_helper_uri(panel, path) {
+                return;
+            }
+            if self.active_panel().is_virtual() {
+                match self.active_panel().location().resolve_input(path) {
+                    Ok(location) => {
+                        self.enter_vfs_location(panel, location, true);
+                        self.set_status("Loading directory...");
+                    }
+                    Err(error) => self.reopen_quick_cd_after_error(input, error.to_string()),
+                }
+                return;
+            }
+        }
+        let destination = parsed.resolve_local(&cwd);
 
         let metadata = match fs::metadata(&destination) {
             Ok(metadata) => metadata,
@@ -154,7 +191,7 @@ impl AppState {
             );
             return;
         }
-        if destination == cwd {
+        if self.active_panel().location() == vfs::VfsPath::Local(destination.clone()) {
             self.set_status(format!("Already in {}", destination.to_string_lossy()));
             return;
         }
@@ -213,7 +250,7 @@ impl AppState {
             _ => return,
         };
 
-        if query.trim().is_empty() {
+        if query.trim().is_empty() || self.active_panel().is_virtual() {
             self.stop_quick_cd_search();
             if let Some(quick_cd) = self.quick_cd_dialog_mut() {
                 quick_cd.clear_search();
@@ -221,7 +258,7 @@ impl AppState {
             return;
         }
 
-        let cwd = self.active_panel().cwd.clone();
+        let cwd = self.active_panel().local_directory().to_path_buf();
         let home = current_user_home_directory();
         let root = filesystem_root(&cwd);
         let previous_directory = self.previous_panel_directories[self.active_panel.index()].clone();
@@ -339,8 +376,31 @@ fn resolve_quick_cd_input_with_home(
     input: &str,
     cwd: &Path,
     previous_directory: Option<&Path>,
-    mut home_directory: impl FnMut(Option<&str>) -> Result<Option<PathBuf>, String>,
+    home_directory: impl FnMut(Option<&str>) -> Result<Option<PathBuf>, String>,
 ) -> Result<PathBuf, QuickCdError> {
+    Ok(parse_quick_cd_input(input, previous_directory, home_directory)?.resolve_local(cwd))
+}
+
+fn parse_quick_cd_input(
+    input: &str,
+    previous_directory: Option<&Path>,
+    mut home_directory: impl FnMut(Option<&str>) -> Result<Option<PathBuf>, String>,
+) -> Result<QuickCdInput, QuickCdError> {
+    if input.contains("\"$RC_NATIVE_HEX_")
+        && let Some(rc_shell::LiteralCd::Path { path, expand_home }) =
+            rc_shell::parse_literal_cd(&format!("cd {input}"), rc_shell::ShellDialect::Posix)
+    {
+        return if expand_home {
+            let home = home_directory(None)
+                .map_err(QuickCdError::HomeLookup)?
+                .ok_or(QuickCdError::HomeDirectoryUnavailable)?;
+            Ok(QuickCdInput::Local(home.join(
+                path.strip_prefix("~").unwrap_or_else(|_| Path::new("")),
+            )))
+        } else {
+            Ok(QuickCdInput::Path(path))
+        };
+    }
     let arguments = shlex::split(input).ok_or(QuickCdError::InvalidQuoting)?;
     let argument = match arguments.as_slice() {
         [] => return Err(QuickCdError::Empty),
@@ -350,27 +410,21 @@ fn resolve_quick_cd_input_with_home(
 
     if argument == "-" {
         return previous_directory
-            .map(Path::to_path_buf)
+            .map(|path| QuickCdInput::Local(path.to_path_buf()))
             .ok_or(QuickCdError::NoPreviousDirectory);
     }
 
-    let expanded = if let Some(tilde) = parse_tilde(argument) {
+    if let Some(tilde) = parse_tilde(argument) {
         let home = home_directory(tilde.user)
             .map_err(QuickCdError::HomeLookup)?
             .ok_or_else(|| match tilde.user {
                 Some(user) => QuickCdError::UnknownUser(user.to_string()),
                 None => QuickCdError::HomeDirectoryUnavailable,
             })?;
-        home.join(tilde.remainder)
+        Ok(QuickCdInput::Local(home.join(tilde.remainder)))
     } else {
-        PathBuf::from(argument)
-    };
-    let absolute = if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    };
-    Ok(lexically_normalize(&absolute))
+        Ok(QuickCdInput::Path(PathBuf::from(argument)))
+    }
 }
 
 struct TildeExpansion<'a> {
@@ -504,6 +558,28 @@ mod tests {
         )
         .expect("quoted path should resolve");
         assert_eq!(resolved, root.join("projects/rc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_argument_directory_is_resolved_without_loss() {
+        use std::os::unix::ffi::OsStringExt;
+        let name = std::ffi::OsString::from_vec(b"dir\xff\n".to_vec());
+        let token = rc_shell::quote_native_argument(&name, rc_shell::ShellDialect::Posix);
+        assert_eq!(
+            resolve_quick_cd_input(&token, Path::new("/work"), None).unwrap(),
+            Path::new("/work").join(&name)
+        );
+        assert_eq!(
+            resolve_quick_cd_input_with_home(
+                &format!("~/{token}"),
+                Path::new("/work"),
+                None,
+                |_| Ok(Some(PathBuf::from("/native-home")))
+            )
+            .unwrap(),
+            Path::new("/native-home").join(name)
+        );
     }
 
     #[test]

@@ -1,12 +1,22 @@
 #![forbid(unsafe_code)]
 
+mod action_flow;
+pub mod action_macros;
 mod archive;
 mod background;
 mod command_dispatch;
 mod command_line;
 mod command_map;
+mod command_output;
+mod comparison;
+pub mod configuration_files;
 pub mod dialog;
 mod dialog_flow;
+mod directory_sizes;
+pub mod extension_rules;
+mod file_highlight;
+mod file_history;
+mod filename_encoding;
 mod find_engine;
 mod find_flow;
 pub mod help;
@@ -15,6 +25,11 @@ pub mod jobs;
 mod keybinding_help;
 pub mod keymap;
 pub mod layout;
+mod learn_keys;
+mod link_flow;
+mod listing_format;
+mod mc_ini;
+mod metadata_change;
 mod navigation_flow;
 mod orchestration;
 mod panel;
@@ -25,6 +40,8 @@ mod quick_cd_search;
 mod quick_view_flow;
 mod refresh_flow;
 mod route_flow;
+mod screens;
+mod selection_flow;
 mod selection_size;
 mod selection_size_flow;
 pub mod settings;
@@ -33,6 +50,9 @@ pub mod settings_io;
 pub mod slo;
 mod state_flow;
 mod tree;
+mod user_menu;
+pub mod vfs;
+mod vfs_flow;
 mod viewer;
 mod viewer_flow;
 
@@ -44,7 +64,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Instant, SystemTime};
 
-pub use archive::{ArchiveFormat, ArchiveLocation, measure_archive_selection};
+pub use action_flow::{ExternalActionRequest, execute_action_viewer, execute_file_type_probe};
+pub use archive::{
+    ArchiveFormat, ArchiveLocation, configure_archive_index_cache, measure_archive_selection,
+};
 pub use background::{
     BackgroundEvent, PanelPathIdentity, PanelRefreshResult, PanelRefreshStreamRequest,
     build_tree_ready_event, read_disk_usage, refresh_panel_entries, refresh_panel_event,
@@ -57,11 +80,15 @@ pub use command_line::{
     OpenCompletion, PASTE_PAYLOAD_LIMIT_BYTES, PendingCompletion, ShellResolutionRequest,
     ShellResolutionResponse, resolve_shell_request_blocking, sanitize_paste,
 };
+pub use command_output::{CapturedCommand, CommandCaptureSpec, execute_command_capture};
+pub use configuration_files::{ConfigurationFile, ConfigurationFiles};
 pub use dialog::{
     DialogButtonFocus, DialogKind, DialogResult, DialogState, FilterDialogField, FilterDialogState,
     FindDialogField, FindDialogState, PairInputDialogState, PairInputField, QuickCdDialogState,
     QuickCdSearchStatus,
 };
+pub use directory_sizes::execute_directory_sizes;
+pub use filename_encoding::FilenameEncoding;
 pub use find_engine::{
     FindNameMode, FindSearchError, FindSearchIssue, FindSearchIssueKind, FindSearchReport,
     FindSpec, run_find_entries, stream_find_entries,
@@ -72,14 +99,17 @@ pub use jobs::{
     JobProgress, JobRecord, JobRequest, JobRetryHint, JobStatus, JobStatusCounts, OverwritePolicy,
     WorkerCommand, WorkerJob, execute_worker_job, run_worker,
 };
+pub use link_flow::LinkKind;
+pub use listing_format::{DEFAULT_USER_LISTING_FORMAT, ListingField, UserListingFormat};
+pub use metadata_change::{MetadataChange, PermissionChange};
 #[cfg(test)]
 use panel::read_entries;
 #[cfg(test)]
 pub(crate) use panel::read_panelized_entries_with_process_backend;
 pub(crate) use panel::{
     PANEL_REFRESH_CANCELED_MESSAGE, ensure_panel_refresh_not_canceled,
-    read_entries_with_visibility_cancel, read_panelized_entries_with_cancel, read_panelized_paths,
-    sort_file_entries, stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
+    read_panelized_entries_with_cancel, read_panelized_paths, sort_file_entries,
+    stream_panelized_entries_with_cancel, stream_panelized_paths_with_cancel,
 };
 pub use panel_filter::{MAX_PANEL_FILTER_CHARS, PanelFilter, PanelFilterError};
 pub use quick_cd::current_user_home_directory;
@@ -119,6 +149,7 @@ pub(crate) use tree::{
 pub use viewer::ViewerState;
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
+#[cfg(test)]
 use crate::panel::read_entries_with_visibility;
 use crate::panel_filter::apply_panel_filter;
 use crate::quick_cd::QuickCdSearchWorkflow;
@@ -142,6 +173,7 @@ pub enum AppCommand {
     CopySelectedPath,
     CloseHelp,
     OpenUserMenu,
+    EditConfigurationFile(ConfigurationFile),
     OpenMenuBar,
     OpenMenuBarAt(usize),
     CloseMenu,
@@ -163,28 +195,48 @@ pub enum AppCommand {
     PanelizePresetRemove,
     EnterXMap,
     SwitchPanel,
+    SwapPanels,
+    TogglePanels,
+    ShowDirectorySizes,
     SetOtherPanelView(PanelViewMode),
     Panel(ActivePanel, PanelCommand),
     Navigate(NavigationTarget, NavigationMotion),
     ToggleTag,
     InvertTags,
+    SelectGroup,
+    UnselectGroup,
     CycleListingFormat,
     OpenListingFormat,
+    OpenEncoding,
     OpenSortOrder,
     OpenPanelFilter,
     SortNext,
     SortReverse,
     Copy,
+    Chmod,
+    Chown,
+    AdvancedChown,
+    CreateLink(LinkKind),
+    EditSymlink,
     Move,
     Delete,
     CancelJob,
     OpenJobsScreen,
+    OpenScreenList,
     CloseJobsScreen,
     /// Activate the selected entry: descend into directories, execute runnable files,
     /// or delegate documents to the operating system's configured application.
     OpenEntry,
     /// Open the selected file in rc's internal viewer.
     ViewEntry,
+    ViewFile,
+    OpenFileHistory,
+    OpenActiveVfs,
+    OpenCommandHistory,
+    FilteredView,
+    OpenJobOutput,
+    CompareFiles,
+    CompareDirectories,
     EditEntry,
     CdUp,
     OpenQuickCd,
@@ -252,6 +304,11 @@ pub enum AppCommand {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PanelCommand {
+    ScrollQuickView(isize),
+    OpenFtp,
+    OpenShellLink,
+    OpenSftp,
+    OpenEncoding,
     SetView(PanelViewMode),
     /// Focus this listing panel and select an entry by index.
     SelectAt(usize),
@@ -290,16 +347,18 @@ pub enum PanelListingFormat {
     Full,
     Brief,
     Long,
+    User,
 }
 
 impl PanelListingFormat {
-    pub const ALL: [Self; 3] = [Self::Full, Self::Brief, Self::Long];
+    pub const ALL: [Self; 4] = [Self::Full, Self::Brief, Self::Long, Self::User];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Full => "Full",
             Self::Brief => "Brief",
             Self::Long => "Long",
+            Self::User => "User defined...",
         }
     }
 
@@ -308,6 +367,7 @@ impl PanelListingFormat {
             Self::Full => "full",
             Self::Brief => "brief",
             Self::Long => "long",
+            Self::User => "user",
         }
     }
 
@@ -315,7 +375,8 @@ impl PanelListingFormat {
         match self {
             Self::Full => Self::Brief,
             Self::Brief => Self::Long,
-            Self::Long => Self::Full,
+            Self::Long => Self::User,
+            Self::User => Self::Full,
         }
     }
 
@@ -324,6 +385,7 @@ impl PanelListingFormat {
             Self::Full => 0,
             Self::Brief => 1,
             Self::Long => 2,
+            Self::User => 3,
         }
     }
 
@@ -375,6 +437,21 @@ pub(crate) enum CommandOutcome {
 }
 
 impl AppCommand {
+    pub const fn is_command_line_action(self) -> bool {
+        matches!(
+            self,
+            Self::OpenHelp
+                | Self::OpenCommandHistory
+                | Self::TogglePanels
+                | Self::EnterXMap
+                | Self::PutCurrentSelected
+                | Self::PutCurrentFullSelected
+                | Self::PutCurrentTagged
+                | Self::PutOtherTagged
+                | Self::CopySelectedPath
+        )
+    }
+
     pub(crate) const fn domain(self) -> CommandDomain {
         match self {
             Self::OpenHelp
@@ -386,6 +463,15 @@ impl AppCommand {
             | Self::CopySelectedPath
             | Self::CloseHelp
             | Self::OpenUserMenu
+            | Self::EditConfigurationFile(_)
+            | Self::ViewFile
+            | Self::OpenFileHistory
+            | Self::OpenActiveVfs
+            | Self::OpenCommandHistory
+            | Self::FilteredView
+            | Self::OpenJobOutput
+            | Self::CompareFiles
+            | Self::CompareDirectories
             | Self::OpenMenuBar
             | Self::OpenMenuBarAt(_)
             | Self::CloseMenu
@@ -403,8 +489,12 @@ impl AppCommand {
             | Self::PanelizePresetRemove
             | Self::EnterXMap
             | Self::SwitchPanel
+            | Self::SwapPanels
+            | Self::TogglePanels
+            | Self::ShowDirectorySizes
             | Self::Panel(_, PanelCommand::OpenTree)
             | Self::OpenJobsScreen
+            | Self::OpenScreenList
             | Self::CloseJobsScreen
             | Self::MenuAccept
             | Self::MenuSelectAt(_)
@@ -434,6 +524,7 @@ impl AppCommand {
                 PanelCommand::SetView(_)
                 | PanelCommand::SelectAt(_)
                 | PanelCommand::SelectAtInViewport { .. }
+                | PanelCommand::ScrollQuickView(_)
                 | PanelCommand::RestorePanelizedResults
                 | PanelCommand::Reread,
             )
@@ -481,16 +572,28 @@ impl AppCommand {
             | Self::ViewerToggleWrap
             | Self::ViewerToggleHex => CommandDomain::Viewer,
             Self::OpenConfirmDialog
+            | Self::Chmod
+            | Self::Chown
+            | Self::AdvancedChown
+            | Self::CreateLink(_)
+            | Self::EditSymlink
             | Self::OpenInputDialog
             | Self::OpenQuickCd
             | Self::OpenListboxDialog
             | Self::OpenSkinDialog
             | Self::OpenListingFormat
+            | Self::OpenEncoding
             | Self::OpenSortOrder
             | Self::OpenPanelFilter
+            | Self::SelectGroup
+            | Self::UnselectGroup
             | Self::Panel(
                 _,
                 PanelCommand::OpenListingFormat
+                | PanelCommand::OpenSftp
+                | PanelCommand::OpenFtp
+                | PanelCommand::OpenShellLink
+                | PanelCommand::OpenEncoding
                 | PanelCommand::OpenSortOrder
                 | PanelCommand::OpenFilter,
             )
@@ -568,16 +671,6 @@ impl MenuEntry {
         }
     }
 
-    const fn stub(label: &'static str, shortcut: &'static str) -> Self {
-        Self {
-            label,
-            shortcut,
-            literal_shortcut: true,
-            command: AppCommand::MenuNotImplemented(label),
-            selectable: true,
-        }
-    }
-
     const fn separator() -> Self {
         Self {
             label: "",
@@ -633,11 +726,24 @@ const fn side_menu_entries(panel: ActivePanel) -> [MenuEntry; 16] {
             "Filter...",
             AppCommand::Panel(panel, PanelCommand::OpenFilter),
         ),
-        MenuEntry::stub("Encoding...", "M-e"),
+        MenuEntry::action_with_literal_shortcut(
+            "Encoding...",
+            "M-e",
+            AppCommand::Panel(panel, PanelCommand::OpenEncoding),
+        ),
         MenuEntry::separator(),
-        MenuEntry::stub("FTP link...", ""),
-        MenuEntry::stub("Shell link...", ""),
-        MenuEntry::stub("SFTP link...", ""),
+        MenuEntry::action(
+            "FTP link...",
+            AppCommand::Panel(panel, PanelCommand::OpenFtp),
+        ),
+        MenuEntry::action(
+            "Shell link...",
+            AppCommand::Panel(panel, PanelCommand::OpenShellLink),
+        ),
+        MenuEntry::action(
+            "SFTP link...",
+            AppCommand::Panel(panel, PanelCommand::OpenSftp),
+        ),
         MenuEntry::action(
             "Panelize",
             AppCommand::Panel(panel, PanelCommand::RestorePanelizedResults),
@@ -656,54 +762,87 @@ const RIGHT_SIDE_MENU_ENTRIES: [MenuEntry; 16] = side_menu_entries(ActivePanel::
 
 const FILE_MENU_ENTRIES: [MenuEntry; 22] = [
     MenuEntry::action_with_shortcut("View", "F3", AppCommand::ViewEntry),
-    MenuEntry::stub("View file...", ""),
-    MenuEntry::stub("Filtered view", "M-!"),
+    MenuEntry::action("View file...", AppCommand::ViewFile),
+    MenuEntry::action_with_shortcut("Filtered view", "M-!", AppCommand::FilteredView),
     MenuEntry::action_with_shortcut("Edit", "F4", AppCommand::EditEntry),
     MenuEntry::action_with_shortcut("Copy", "F5", AppCommand::Copy),
-    MenuEntry::stub("Chmod", "C-x c"),
-    MenuEntry::stub("Link", "C-x l"),
-    MenuEntry::stub("Symlink", "C-x s"),
-    MenuEntry::stub("Relative symlink", "C-x v"),
-    MenuEntry::stub("Edit symlink", "C-x C-s"),
-    MenuEntry::stub("Chown", "C-x o"),
-    MenuEntry::stub("Advanced chown", ""),
+    MenuEntry::action_with_literal_shortcut("Chmod", "C-x c", AppCommand::Chmod),
+    MenuEntry::action_with_literal_shortcut(
+        "Link",
+        "C-x l",
+        AppCommand::CreateLink(LinkKind::Hard),
+    ),
+    MenuEntry::action_with_literal_shortcut(
+        "Symlink",
+        "C-x s",
+        AppCommand::CreateLink(LinkKind::Symbolic),
+    ),
+    MenuEntry::action_with_literal_shortcut(
+        "Relative symlink",
+        "C-x v",
+        AppCommand::CreateLink(LinkKind::RelativeSymbolic),
+    ),
+    MenuEntry::action_with_literal_shortcut("Edit symlink", "C-x C-s", AppCommand::EditSymlink),
+    MenuEntry::action_with_literal_shortcut("Chown", "C-x o", AppCommand::Chown),
+    MenuEntry::action("Advanced chown", AppCommand::AdvancedChown),
     MenuEntry::action_with_shortcut("Rename/Move", "F6", AppCommand::Move),
     MenuEntry::action_with_shortcut("Mkdir", "F7", AppCommand::OpenInputDialog),
     MenuEntry::action_with_shortcut("Delete", "F8", AppCommand::Delete),
     MenuEntry::action_with_shortcut("Quick cd", "M-c", AppCommand::OpenQuickCd),
     MenuEntry::separator(),
-    MenuEntry::stub("Select group", "+"),
-    MenuEntry::stub("Unselect group", "-"),
+    MenuEntry::action_with_shortcut("Select group", "+", AppCommand::SelectGroup),
+    MenuEntry::action_with_shortcut("Unselect group", "-", AppCommand::UnselectGroup),
     MenuEntry::action_with_shortcut("Invert selection", "*", AppCommand::InvertTags),
     MenuEntry::separator(),
     MenuEntry::action_with_shortcut("Exit", "F10", AppCommand::Quit),
 ];
 
 const COMMAND_MENU_ENTRIES: [MenuEntry; 20] = [
-    MenuEntry::stub("User menu", "F2"),
+    MenuEntry::action_with_shortcut("User menu", "F2", AppCommand::OpenUserMenu),
     MenuEntry::action("Directory tree", AppCommand::OpenTree),
     MenuEntry::action_with_literal_shortcut("Find file", "M-?", AppCommand::OpenFindDialog),
-    MenuEntry::stub("Swap panels", "C-u"),
-    MenuEntry::stub("Switch panels on/off", "C-o"),
-    MenuEntry::stub("Compare directories", "C-x d"),
-    MenuEntry::stub("Compare files", "C-x C-d"),
+    MenuEntry::action_with_shortcut("Swap panels", "C-u", AppCommand::SwapPanels),
+    MenuEntry::action_with_shortcut("Switch panels on/off", "C-o", AppCommand::TogglePanels),
+    MenuEntry::action_with_literal_shortcut(
+        "Compare directories",
+        "C-x d",
+        AppCommand::CompareDirectories,
+    ),
+    MenuEntry::action_with_literal_shortcut("Compare files", "C-x C-d", AppCommand::CompareFiles),
     MenuEntry::action_with_literal_shortcut(
         "External panelize",
         "C-x !",
         AppCommand::OpenPanelizeDialog,
     ),
-    MenuEntry::stub("Show directory sizes", "C-Space"),
+    MenuEntry::action_with_shortcut(
+        "Show directory sizes",
+        "C-Space",
+        AppCommand::ShowDirectorySizes,
+    ),
     MenuEntry::separator(),
-    MenuEntry::stub("Command history", "M-h"),
-    MenuEntry::stub("Viewed/edited files history", "M-E"),
+    MenuEntry::action_with_shortcut("Command history", "M-H", AppCommand::OpenCommandHistory),
+    MenuEntry::action_with_shortcut(
+        "Viewed/edited files history",
+        "M-E",
+        AppCommand::OpenFileHistory,
+    ),
     MenuEntry::action_with_literal_shortcut("Directory hotlist", "C-\\", AppCommand::OpenHotlist),
-    MenuEntry::stub("Active VFS list", "C-x a"),
+    MenuEntry::action_with_shortcut("Active VFS list", "C-x a", AppCommand::OpenActiveVfs),
     MenuEntry::action_with_literal_shortcut("Background jobs", "C-x j", AppCommand::OpenJobsScreen),
-    MenuEntry::stub("Screen list", "M-`"),
+    MenuEntry::action_with_shortcut("Screen list", "M-`", AppCommand::OpenScreenList),
     MenuEntry::separator(),
-    MenuEntry::stub("Edit extension file", ""),
-    MenuEntry::stub("Edit menu file", ""),
-    MenuEntry::stub("Edit highlighting group file", ""),
+    MenuEntry::action(
+        "Edit extension file",
+        AppCommand::EditConfigurationFile(ConfigurationFile::Extensions),
+    ),
+    MenuEntry::action(
+        "Edit menu file",
+        AppCommand::EditConfigurationFile(ConfigurationFile::Menu),
+    ),
+    MenuEntry::action(
+        "Edit highlighting group file",
+        AppCommand::EditConfigurationFile(ConfigurationFile::Highlighting),
+    ),
 ];
 
 const OPTIONS_MENU_ENTRIES: [MenuEntry; 9] = [
@@ -982,6 +1121,8 @@ pub struct FileEntry {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FileEntryMetadata {
+    /// Some(true): symlink with a resolved target; Some(false): unresolved symlink.
+    pub symlink_target: Option<bool>,
     pub accessed: Option<SystemTime>,
     pub changed: Option<SystemTime>,
     pub mode: Option<u32>,
@@ -1002,6 +1143,7 @@ impl FileEntryMetadata {
             use std::os::unix::fs::MetadataExt as _;
 
             Self {
+                symlink_target: None,
                 accessed: metadata.accessed().ok(),
                 changed: system_time_from_unix_parts(metadata.ctime(), metadata.ctime_nsec()),
                 mode: Some(metadata.mode()),
@@ -1134,6 +1276,8 @@ pub enum PanelListingSource {
     Directory,
     /// Read-only archive listing whose pane paths are synthetic member identities.
     Archive(ArchiveLocation),
+    /// A mounted helper or remote directory; paths are display identities.
+    Mounted(vfs::MountedPath),
     Panelize {
         command: String,
     },
@@ -1151,6 +1295,16 @@ pub struct DiskUsageSummary {
 }
 
 impl PanelListingSource {
+    pub fn is_virtual(&self) -> bool {
+        matches!(self, Self::Archive(_) | Self::Mounted(_))
+    }
+    pub fn location(&self, cwd: &Path) -> vfs::VfsPath {
+        match self {
+            Self::Archive(location) => location.clone().into(),
+            Self::Mounted(path) => vfs::VfsPath::Mounted(path.clone()),
+            _ => vfs::VfsPath::Local(cwd.to_path_buf()),
+        }
+    }
     fn is_panelized(&self) -> bool {
         matches!(self, Self::Panelize { .. } | Self::FindResults { .. })
     }
@@ -1187,6 +1341,8 @@ pub struct PanelState {
     pub entries: Vec<FileEntry>,
     pub cursor: usize,
     pub sort_mode: SortMode,
+    pub filename_encoding: FilenameEncoding,
+    file_highlights: Arc<file_highlight::FileHighlightRules>,
     mouse_viewport: Option<PanelViewport>,
     home_directory: Option<PathBuf>,
     canonical_cwd: Option<PathBuf>,
@@ -1207,6 +1363,8 @@ impl PanelState {
             entries: Vec::new(),
             cursor: 0,
             sort_mode: SortMode::default(),
+            filename_encoding: FilenameEncoding::Utf8,
+            file_highlights: file_highlight::default_rules(),
             mouse_viewport: None,
             home_directory: None,
             canonical_cwd: None,
@@ -1223,16 +1381,17 @@ impl PanelState {
 
     pub fn refresh(&mut self) -> io::Result<()> {
         self.clear_canonical_paths();
-        let (entries, panelized_entries) = match &self.source {
-            PanelListingSource::Archive(location) => (
-                location.read_entries(self.sort_mode, self.show_hidden_files, None)?,
+        let (mut entries, mut panelized_entries) = match &self.source {
+            PanelListingSource::Archive(_) | PanelListingSource::Mounted(_) => (
+                self.location()
+                    .read_directory(self.sort_mode, self.show_hidden_files, None)?,
                 None,
             ),
             PanelListingSource::Directory => {
-                let entries = read_entries_with_visibility(
-                    &self.cwd,
+                let entries = vfs::VfsPath::Local(self.cwd.clone()).read_directory(
                     self.sort_mode,
                     self.show_hidden_files,
+                    None,
                 )?;
                 (entries, None)
             }
@@ -1257,10 +1416,27 @@ impl PanelState {
                 (entries, Some(Arc::<[FileEntry]>::from(discovered_entries)))
             }
         };
+        for entry in &mut entries {
+            self.filename_encoding
+                .update_entry(entry, &self.cwd, &self.source);
+        }
+        if let Some(cached) = &mut panelized_entries {
+            for entry in Arc::make_mut(cached) {
+                self.filename_encoding
+                    .update_entry(entry, &self.cwd, &self.source);
+            }
+        }
+        let skip = usize::from(entries.first().is_some_and(FileEntry::is_parent));
+        if self.sort_mode.field != SortField::Unsorted {
+            sort_file_entries(&mut entries[skip..], self.sort_mode);
+        }
         let entries = apply_panel_filter(entries, &self.filter)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let (canonical_cwd, canonical_home_directory) =
-            canonical_panel_paths(&self.cwd, self.home_directory.as_deref());
+        let (canonical_cwd, canonical_home_directory) = if self.is_virtual() {
+            (None, None)
+        } else {
+            canonical_panel_paths(&self.cwd, self.home_directory.as_deref())
+        };
         self.panelized_entries = panelized_entries;
         self.apply_entries(entries);
         self.set_canonical_paths(canonical_cwd, canonical_home_directory);
@@ -1476,71 +1652,57 @@ impl PanelState {
         )
     }
 
-    pub fn open_selected_directory(&mut self) -> bool {
-        let Some((path, is_dir_hint)) = self
-            .selected_entry()
-            .map(|entry| (entry.path.clone(), entry.is_dir()))
-        else {
-            return false;
-        };
-        let is_dir = is_dir_hint
-            || (!self.is_archive() && fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()));
-        if !is_dir {
-            return false;
-        }
-
-        let source = if let Some(location) = self.archive_location() {
-            if path == location.parent_path() && location.directory.as_os_str().is_empty() {
-                PanelListingSource::Directory
-            } else {
-                let Ok(directory) = location.member_path(&path) else {
-                    return false;
-                };
-                PanelListingSource::Archive(ArchiveLocation {
-                    archive: location.archive.clone(),
-                    directory,
-                })
+    pub fn set_location(&mut self, location: vfs::VfsPath) -> io::Result<()> {
+        let location = match location {
+            vfs::VfsPath::Local(path) => {
+                vfs::VfsPath::Local(crate::quick_cd::lexically_normalize(&path))
             }
-        } else {
-            PanelListingSource::Directory
+            location => location,
         };
-        self.cwd = path;
+        let source = match &location {
+            vfs::VfsPath::Local(_) => PanelListingSource::Directory,
+            vfs::VfsPath::Archive { location, path } => {
+                PanelListingSource::Archive(location.in_directory(location.member_path(path)?))
+            }
+            vfs::VfsPath::Mounted(path) => PanelListingSource::Mounted(path.clone()),
+        };
+        self.cwd = location.identity();
+        self.source = source;
         self.clear_canonical_paths();
         self.move_cursor_home();
-        self.source = source;
         self.panelized_entries = None;
         self.tagged.clear();
         self.entries.clear();
+        self.disk_usage = None;
         self.loading = true;
-        true
+        Ok(())
+    }
+
+    pub fn open_selected_directory(&mut self) -> bool {
+        let Some(entry) = self.selected_entry() else {
+            return false;
+        };
+        if !entry.is_dir()
+            && (self.is_virtual()
+                || !fs::metadata(&entry.path).is_ok_and(|metadata| metadata.is_dir()))
+        {
+            return false;
+        }
+        let location = self.location();
+        let next = if entry.is_parent() {
+            location.parent().ok().flatten()
+        } else {
+            location.resolve_identity(entry.path.clone()).ok()
+        };
+        next.is_some_and(|next| self.set_location(next).is_ok())
     }
 
     pub fn go_parent(&mut self) -> bool {
-        let parent_path = self.archive_location().map(ArchiveLocation::parent_path);
-        let Some(parent) = parent_path.as_deref().or_else(|| self.cwd.parent()) else {
-            return false;
-        };
-
-        let source = if let Some(location) = self.archive_location() {
-            match location.directory.parent() {
-                Some(directory) => PanelListingSource::Archive(ArchiveLocation {
-                    archive: location.archive.clone(),
-                    directory: directory.to_path_buf(),
-                }),
-                None => PanelListingSource::Directory,
-            }
-        } else {
-            PanelListingSource::Directory
-        };
-        self.cwd = parent.to_path_buf();
-        self.clear_canonical_paths();
-        self.move_cursor_home();
-        self.source = source;
-        self.panelized_entries = None;
-        self.tagged.clear();
-        self.entries.clear();
-        self.loading = true;
-        true
+        self.location()
+            .parent()
+            .ok()
+            .flatten()
+            .is_some_and(|parent| self.set_location(parent).is_ok())
     }
 
     pub fn exit_panelize(&mut self) -> bool {
@@ -1595,12 +1757,30 @@ impl PanelState {
         }
     }
 
+    pub fn location(&self) -> vfs::VfsPath {
+        self.source.location(&self.cwd)
+    }
+
     /// Local directory represented by this panel for previous-directory history.
-    pub(crate) fn local_directory(&self) -> &Path {
-        match self.archive_location() {
-            Some(location) => location.archive.parent().unwrap_or(Path::new(".")),
-            None => &self.cwd,
+    pub fn local_directory(&self) -> &Path {
+        match &self.source {
+            PanelListingSource::Archive(location) => {
+                location.local_archive().parent().unwrap_or(Path::new("."))
+            }
+            PanelListingSource::Mounted(path) => path.mount().return_to().local_directory(),
+            _ => &self.cwd,
         }
+    }
+
+    pub fn mounted_location(&self) -> Option<&vfs::MountedPath> {
+        match &self.source {
+            PanelListingSource::Mounted(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        self.source.is_virtual()
     }
 
     pub fn is_archive(&self) -> bool {
@@ -1946,6 +2126,7 @@ enum SettingsEntryAction {
     ToggleUtf8Output,
     ToggleEightBitInput,
     LearnKeysCapture,
+    EditLearnedBinding(usize),
     ToggleVfsEnabled,
     ToggleVfsFtpEnabled,
     ToggleVfsShellLinkEnabled,
@@ -1981,6 +2162,62 @@ struct PanelMkdirTracker {
 
 #[derive(Clone, Debug)]
 enum PendingDialogAction {
+    FtpConnection {
+        panel: ActivePanel,
+    },
+    SshConnection {
+        panel: ActivePanel,
+        shell: bool,
+    },
+    ViewVfsFile {
+        base: vfs::VfsPath,
+    },
+    VfsList {
+        mounts: Vec<Arc<vfs::Mount>>,
+    },
+    VfsMount {
+        mount: Arc<vfs::Mount>,
+    },
+    UserMenu(user_menu::UserMenu),
+    UserMenuDebug(user_menu::UserMenu),
+    ActionPrompt(Box<action_flow::PendingAction>),
+    SetFilenameEncoding {
+        panel: ActivePanel,
+    },
+    CreateLinks {
+        kind: LinkKind,
+        sources: Vec<PathBuf>,
+        base: PathBuf,
+        panel: ActivePanel,
+    },
+    EditSymlinks {
+        paths: Vec<PathBuf>,
+        panel: ActivePanel,
+    },
+    MetadataChange {
+        action: metadata_change::MetadataAction,
+        paths: Vec<PathBuf>,
+        panel: ActivePanel,
+    },
+    SelectScreen {
+        targets: Vec<screens::ScreenTarget>,
+    },
+    LearnKey {
+        chord: KeyChord,
+        original: Option<keymap::LearnedBinding>,
+    },
+    FilteredView {
+        cwd: PathBuf,
+    },
+    CommandHistory {
+        commands: Vec<String>,
+    },
+    ViewFile {
+        base_dir: PathBuf,
+    },
+    FileHistory {
+        entries: Vec<file_history::FileHistoryEntry>,
+    },
     ConfirmDelete {
         targets: Vec<PathBuf>,
         origin: OperationOrigin,
@@ -2005,7 +2242,7 @@ enum PendingDialogAction {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
-        destination_names: Vec<String>,
+        destination_names: Vec<std::ffi::OsString>,
         origin: OperationOrigin,
     },
     TransferOverwrite {
@@ -2021,12 +2258,19 @@ enum PendingDialogAction {
     SetPanelListingFormat {
         panel: ActivePanel,
     },
+    SetUserListingFormat {
+        panel: ActivePanel,
+    },
     SetPanelSortOrder {
         panel: ActivePanel,
         reverse: bool,
     },
     SetPanelFilter {
         panel: ActivePanel,
+    },
+    SetGroupSelection {
+        panel: ActivePanel,
+        select: bool,
     },
     ViewerSearch {
         direction: ViewerSearchDirection,
@@ -2112,6 +2356,7 @@ impl DerefMut for DialogRoute {
 
 #[derive(Clone, Debug)]
 pub enum Route {
+    CommandOutput(JobId),
     FileManager,
     CommandLine(CommandLineSession),
     Help(HelpState),
@@ -2257,6 +2502,10 @@ impl KeybindingHints {
 #[derive(Debug)]
 pub struct AppState {
     settings: Settings,
+    configuration_files: ConfigurationFiles,
+    extension_rules: Result<Arc<extension_rules::ExtensionRules>, String>,
+    pending_extension: Option<(JobId, action_flow::PendingExtension)>,
+    pending_external_action_requests: Vec<ExternalActionRequest>,
     pub panels: [PanelState; 2],
     pub active_panel: ActivePanel,
     panel_views: [PanelViewMode; 2],
@@ -2277,6 +2526,10 @@ pub struct AppState {
     pending_skin_preview: Option<String>,
     pending_skin_revert: Option<String>,
     routes: Vec<Route>,
+    suspended_screens: Vec<Vec<Route>>,
+    file_history: Vec<file_history::FileHistoryEntry>,
+    vfs_workflow: vfs_flow::VfsWorkflow,
+    command_outputs: HashMap<JobId, command_output::CommandOutput>,
     command_line: CommandLineModel,
     next_command_line_activation_id: u64,
     #[cfg(unix)]
@@ -2287,6 +2540,8 @@ pub struct AppState {
     pending_completion_requests: Vec<CompletionRequest>,
     pending_completion_cancellations: Vec<CompletionCancellation>,
     pending_foreground_shell_requests: Vec<ForegroundShellRequest>,
+    pending_panel_toggle: bool,
+    shell_available: bool,
     paused_find_results: Option<FindResultsState>,
     pending_find_tree_picker: Option<FindDialogState>,
     pending_worker_commands: Vec<WorkerCommand>,
@@ -2300,11 +2555,14 @@ pub struct AppState {
     panel_refresh_post: PanelRefreshPostWorkflow,
     quick_view: QuickViewWorkflow,
     selection_size: SelectionSizeWorkflow,
+    directory_size_jobs: [Option<directory_sizes::DirectorySizePending>; 2],
     find_pause_flags: HashMap<JobId, Arc<AtomicBool>>,
     deferred_persist_settings_request: Option<JobRequest>,
     panel_mkdirs: PanelMkdirTracker,
     tree_mutations: TreeMutationTracker,
     keybinding_hints: KeybindingHints,
+    base_keymap: Keymap,
+    learned_keymap: Keymap,
     keymap_unknown_actions: usize,
     keymap_invalid_bindings: usize,
     pending_learn_keys_capture: bool,

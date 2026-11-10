@@ -8,15 +8,32 @@ use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
+mod action_tests;
 mod archive_tests;
+mod command_output_tests;
+mod comparison_tests;
+mod configuration_file_tests;
+mod directory_size_tests;
+mod encoding_tests;
+mod file_history_tests;
 mod find_tests;
+mod group_selection_tests;
+mod learned_key_tests;
+mod link_tests;
+mod metadata_tests;
 mod mouse_tests;
+mod native_path_tests;
+mod nested_archive_tests;
 mod panelize_tests;
 mod quick_cd_tests;
 mod quick_view_tests;
 mod refresh_tests;
 mod route_command_tests;
+mod screen_tests;
 mod selection_size_tests;
+#[cfg(unix)]
+mod subshell_tests;
+mod swap_tests;
 mod tar_tests;
 mod viewer_tests;
 
@@ -59,7 +76,7 @@ impl ProcessBackend for PermissionDeniedProcessBackend {
     }
 }
 
-fn drain_background(app: &mut AppState) {
+pub(super) fn drain_background(app: &mut AppState) {
     loop {
         let mut progressed = false;
 
@@ -74,6 +91,40 @@ fn drain_background(app: &mut AppState) {
                     let job_id = job.id;
                     let (event_tx, event_rx) = std::sync::mpsc::channel();
                     match &job.request {
+                        JobRequest::Vfs(_) => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            vfs::tasks::execute(job, &event_tx, &background_tx);
+                            for event in background_rx.try_iter() {
+                                app.handle_background_event(event);
+                            }
+                        }
+                        JobRequest::ProbeFileType { .. } | JobRequest::LoadActionViewer { .. } => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            if matches!(job.request, JobRequest::ProbeFileType { .. }) {
+                                execute_file_type_probe(job, &event_tx, &background_tx);
+                            } else {
+                                execute_action_viewer(job, &event_tx, &background_tx);
+                            }
+                            for event in background_rx.try_iter() {
+                                app.handle_background_event(event);
+                            }
+                        }
+                        JobRequest::MeasureDirectories { .. } => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            execute_directory_sizes(job, &event_tx, &background_tx);
+                            drop(background_tx);
+                            for event in background_rx {
+                                app.handle_background_event(event);
+                            }
+                        }
+                        JobRequest::CaptureCommand { .. } => {
+                            let (background_tx, background_rx) = std::sync::mpsc::channel();
+                            execute_command_capture(job, &event_tx, &background_tx);
+                            drop(background_tx);
+                            for event in background_rx {
+                                app.handle_background_event(event);
+                            }
+                        }
                         JobRequest::LoadArchiveViewer {
                             location,
                             path,
@@ -133,6 +184,7 @@ fn drain_background(app: &mut AppState) {
                             cwd,
                             source,
                             sort_mode,
+                            filename_encoding,
                             filter,
                             show_hidden_files,
                             cached_panelized_entries,
@@ -147,6 +199,7 @@ fn drain_background(app: &mut AppState) {
                                     cwd: cwd.clone(),
                                     source: source.clone(),
                                     sort_mode: *sort_mode,
+                                    filename_encoding: *filename_encoding,
                                     filter: filter.clone(),
                                     show_hidden_files: *show_hidden_files,
                                     cached_panelized_entries: cached_panelized_entries.clone(),
@@ -327,7 +380,7 @@ fn drain_background(app: &mut AppState) {
     }
 }
 
-fn app_with_loaded_panels(root: PathBuf) -> AppState {
+pub(super) fn app_with_loaded_panels(root: PathBuf) -> AppState {
     let mut app = AppState::new(root).expect("app should initialize");
     app.refresh_panels();
     drain_background(&mut app);
@@ -403,6 +456,8 @@ fn toggle_panel_flips_between_left_and_right() {
 #[test]
 fn move_cursor_stays_in_bounds() {
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries: vec![file_entry("a"), file_entry("b")],
         cursor: 0,
@@ -559,6 +614,8 @@ fn size_sort_listing_populates_metadata_fields() {
 #[test]
 fn toggle_and_invert_tags_work_for_non_parent_entries() {
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries: vec![
             FileEntry::parent(PathBuf::from("/")),
@@ -606,6 +663,8 @@ fn page_home_end_navigation_stays_bounded() {
         file_entry("c"),
     ];
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries,
         cursor: 1,
@@ -639,6 +698,8 @@ fn page_home_end_navigation_stays_bounded() {
 #[test]
 fn sort_mode_cycles_and_toggles_direction() {
     let mut panel = PanelState {
+        filename_encoding: crate::FilenameEncoding::Utf8,
+        file_highlights: file_highlight::default_rules(),
         cwd: PathBuf::from("/tmp"),
         entries: Vec::new(),
         cursor: 0,
@@ -1326,31 +1387,32 @@ fn menu_route_supports_keyboard_navigation_and_selection() {
 }
 
 #[test]
-fn menu_stub_action_reports_not_implemented_status() {
+fn every_menu_action_is_implemented_and_ftp_opens_its_connection_dialog() {
+    for menu in top_menus() {
+        for entry in menu.entries.iter().filter(|entry| entry.selectable) {
+            assert!(entry.is_implemented(), "{} → {}", menu.title, entry.label);
+        }
+    }
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
         .as_nanos();
-    let root = env::temp_dir().join(format!("rc-menu-stub-action-{stamp}"));
+    let root = env::temp_dir().join(format!("rc-menu-ftp-action-{stamp}"));
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
     app.apply(AppCommand::OpenMenuBarAt(0))
         .expect("left menu should open");
-    move_menu_selection_to_label(&mut app, "Encoding...");
+    move_menu_selection_to_label(&mut app, "FTP link...");
     app.apply(AppCommand::MenuAccept)
-        .expect("accepting stub menu action should succeed");
-    assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert!(
-        app.status_line.contains("not implemented"),
-        "stub actions should report a not-implemented status"
-    );
+        .expect("accepting FTP menu action should succeed");
+    assert_eq!(app.key_context(), KeyContext::Input);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
 
 #[test]
-fn user_menu_command_reports_that_it_is_unavailable() {
+fn user_menu_command_opens_bundled_entries() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be monotonic")
@@ -1359,11 +1421,21 @@ fn user_menu_command_reports_that_it_is_unavailable() {
     fs::create_dir_all(&root).expect("must create temp root");
 
     let mut app = AppState::new(root.clone()).expect("app should initialize");
+    app.set_configuration_files(ConfigurationFiles {
+        user_directory: None,
+        system_directories: vec![],
+    });
     app.apply(AppCommand::OpenUserMenu)
-        .expect("user menu placeholder should be handled");
+        .expect("user menu should open");
 
-    assert_eq!(app.key_context(), KeyContext::FileManager);
-    assert_eq!(app.status_line, "User menu is not available");
+    assert_eq!(app.key_context(), KeyContext::Listbox);
+    let Route::Dialog(dialog) = app.top_route() else {
+        panic!("expected dialog");
+    };
+    let DialogKind::Listbox(listbox) = &dialog.kind else {
+        panic!("expected menu");
+    };
+    assert_eq!(listbox.items, ["v  File information", "d  Directory sizes"]);
 
     fs::remove_dir_all(&root).expect("must remove temp root");
 }
@@ -1592,6 +1664,7 @@ fn listing_format_shortcut_cycles_the_active_panel_only() {
     for expected in [
         PanelListingFormat::Brief,
         PanelListingFormat::Long,
+        PanelListingFormat::User,
         PanelListingFormat::Full,
     ] {
         app.apply(AppCommand::CycleListingFormat)
@@ -1605,6 +1678,58 @@ fn listing_format_shortcut_cycles_the_active_panel_only() {
 
     assert!(app.settings().save_setup.dirty);
     fs::remove_dir_all(root).expect("must remove temp root");
+}
+
+#[test]
+fn user_listing_format_validates_before_applying_and_follows_panel_swap() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = app_with_loaded_panels(root.path().to_path_buf());
+    app.apply(AppCommand::OpenListingFormat).unwrap();
+    app.apply(AppCommand::DialogListboxSelectAt(3)).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    let set_value = |app: &mut AppState, value: &str| {
+        let Some(Route::Dialog(dialog)) = app.routes.last_mut() else {
+            panic!("expected format input")
+        };
+        let DialogKind::Input(input) = &mut dialog.kind else {
+            panic!("expected input")
+        };
+        input.value = value.into();
+    };
+    set_value(&mut app, "name:0");
+    app.apply(AppCommand::DialogAccept).unwrap();
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Left),
+        PanelListingFormat::Full
+    );
+    assert!(matches!(app.routes.last(), Some(Route::Dialog(_))));
+    set_value(&mut app, "perm name size:9");
+    app.apply(AppCommand::DialogAccept).unwrap();
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Left),
+        PanelListingFormat::User
+    );
+    assert_eq!(
+        app.settings.panel_options.user_listing_formats[1],
+        DEFAULT_USER_LISTING_FORMAT
+    );
+    app.apply(AppCommand::SwapPanels).unwrap();
+    assert_eq!(
+        app.panel_listing_format(ActivePanel::Right),
+        PanelListingFormat::User
+    );
+    assert_eq!(
+        app.settings.panel_options.user_listing_formats[1],
+        "perm name size:9"
+    );
+    app.apply(AppCommand::OpenListingFormat).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    set_value(&mut app, "name");
+    app.apply(AppCommand::DialogCancel).unwrap();
+    assert_eq!(
+        app.settings.panel_options.user_listing_formats[1],
+        "perm name size:9"
+    );
 }
 
 #[test]

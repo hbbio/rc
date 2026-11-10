@@ -121,20 +121,30 @@ fn complete_with_fish_then_generic(
     };
     let prefix = &request.buffer[start_byte..request.cursor_byte];
     let command_position = request.buffer[..start_byte].trim().is_empty();
-    let local_candidates = if command_position && !prefix.contains('/') && !prefix.starts_with('~')
+    let mut local_candidates =
+        if command_position && !prefix.contains('/') && !prefix.starts_with('~') {
+            cwd_command_candidates(
+                prefix,
+                &request.cwd,
+                start_byte,
+                end_byte,
+                request.shell.dialect,
+                cancel,
+                Instant::now(),
+            )
+        } else {
+            Vec::new()
+        };
+    if !command_position
+        && let CompletionOutcome::Candidates { candidates, .. } =
+            generic_completion(request, cancel)
     {
-        cwd_command_candidates(
-            prefix,
-            &request.cwd,
-            start_byte,
-            end_byte,
-            request.shell.dialect,
-            cancel,
-            Instant::now(),
-        )
-    } else {
-        Vec::new()
-    };
+        local_candidates.extend(
+            candidates
+                .into_iter()
+                .filter(|candidate| candidate.edit.replacement.starts_with("\"$RC_NATIVE_HEX_")),
+        );
+    }
     if cancel.load(Ordering::Relaxed) {
         return CompletionOutcome::Canceled;
     }
@@ -658,14 +668,28 @@ fn generic_completion(request: &CompletionRequest, cancel: &AtomicBool) -> Compl
     if cancel.load(Ordering::Relaxed) {
         return CompletionOutcome::Canceled;
     }
-    let Some((start_byte, end_byte)) =
-        simple_token_range(&request.buffer, request.cursor_byte, false, true)
+    let native = native_completion_token(request);
+    let Some((start_byte, end_byte)) = native
+        .as_ref()
+        .map(|(start, end, _)| (*start, *end))
+        .or_else(|| simple_token_range(&request.buffer, request.cursor_byte, false, true))
     else {
         return CompletionOutcome::Empty(CompletionProvider::Generic);
     };
     let prefix = &request.buffer[start_byte..request.cursor_byte];
     let command_position = request.buffer[..start_byte].trim().is_empty();
-    let candidates = if let Some(variable_prefix) = prefix.strip_prefix('$')
+    let candidates = if let Some((_, _, path)) = native {
+        merge_sorted_candidate_sources([filesystem_candidates_native(
+            path.as_os_str(),
+            false,
+            &request.cwd,
+            start_byte,
+            end_byte,
+            request.shell.dialect,
+            cancel,
+            started,
+        )])
+    } else if let Some(variable_prefix) = prefix.strip_prefix('$')
         && !variable_prefix.contains('/')
     {
         merge_sorted_candidate_sources([environment_candidates(
@@ -723,6 +747,36 @@ fn generic_completion(request: &CompletionRequest, cancel: &AtomicBool) -> Compl
             candidates,
             notice: None,
         }
+    }
+}
+
+fn native_completion_token(request: &CompletionRequest) -> Option<(usize, usize, PathBuf)> {
+    let buffer = &request.buffer;
+    let cursor = request.cursor_byte;
+    if cursor > buffer.len() || !buffer.is_char_boundary(cursor) {
+        return None;
+    }
+    let start = buffer[..cursor].rfind([' ', '\t']).map_or(0, |i| i + 1);
+    if !buffer[start..cursor].starts_with("\"$RC_NATIVE_HEX_") {
+        return None;
+    }
+    let end = buffer[cursor..]
+        .find([' ', '\t'])
+        .map_or(buffer.len(), |i| cursor + i);
+    // Both the edited prefix and the complete replacement range must be literal data.
+    crate::parse_literal_cd(
+        &format!("cd {}", &buffer[start..end]),
+        request.shell.dialect,
+    )?;
+    match crate::parse_literal_cd(
+        &format!("cd {}", &buffer[start..cursor]),
+        request.shell.dialect,
+    )? {
+        crate::LiteralCd::Path {
+            path,
+            expand_home: false,
+        } => Some((start, end, path)),
+        _ => None,
     }
 }
 
@@ -809,25 +863,30 @@ fn cwd_command_candidates(
         {
             break;
         }
-        let Some(name) = entry.file_name().to_str().map(ToString::to_string) else {
-            continue;
-        };
-        if !name.starts_with(prefix) {
+        let name = entry.file_name();
+        if !name.as_encoded_bytes().starts_with(prefix.as_bytes()) {
             continue;
         }
         let path = entry.path();
         let is_directory = path.metadata().is_ok_and(|metadata| metadata.is_dir());
         let (raw_replacement, description) = if is_directory {
-            (format!("{name}/"), String::from("directory"))
+            (
+                {
+                    let mut path = name.clone();
+                    path.push("/");
+                    path
+                },
+                String::from("directory"),
+            )
         } else if is_executable_file(&path) {
             (
-                format!("./{name}"),
+                Path::new(".").join(&name).into_os_string(),
                 String::from("current directory executable"),
             )
         } else {
             continue;
         };
-        let Some(mut candidate) = make_candidate(
+        let Some(mut candidate) = make_native_candidate(
             raw_replacement,
             Some(description),
             start_byte,
@@ -838,7 +897,7 @@ fn cwd_command_candidates(
             continue;
         };
         if !is_directory {
-            candidate.display = name;
+            candidate.display = crate::encode_path_text(&name);
         }
         candidates.push(candidate);
     }
@@ -873,7 +932,7 @@ fn executable_candidates_from_path(
     cancel: &AtomicBool,
     started: Instant,
 ) -> Vec<CompletionCandidate> {
-    let mut found = BTreeMap::<String, PathBuf>::new();
+    let mut found = BTreeMap::<std::ffi::OsString, PathBuf>::new();
     for directory in std::env::split_paths(search_path) {
         if completion_should_stop(cancel, started) || found.len() >= COMPLETION_CANDIDATE_LIMIT {
             break;
@@ -892,13 +951,10 @@ fn executable_candidates_from_path(
                 break;
             }
             let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if name.starts_with(prefix) && is_executable_file(&entry.path()) {
-                found
-                    .entry(name.to_string())
-                    .or_insert_with(|| entry.path());
+            if name.as_encoded_bytes().starts_with(prefix.as_bytes())
+                && is_executable_file(&entry.path())
+            {
+                found.entry(name).or_insert_with(|| entry.path());
             }
         }
     }
@@ -906,21 +962,23 @@ fn executable_candidates_from_path(
         .into_iter()
         .filter_map(|(name, path)| {
             let replacement = if dialect == ShellDialect::Fish
-                && command_name_needs_disambiguation(&name, dialect)
+                && name
+                    .to_str()
+                    .is_none_or(|name| command_name_needs_disambiguation(name, dialect))
             {
-                path.to_str()?.to_owned()
+                path.as_os_str().to_owned()
             } else {
                 name.clone()
             };
-            let mut candidate = make_candidate(
+            let mut candidate = make_native_candidate(
                 replacement,
-                Some(path.to_string_lossy().into_owned()),
+                Some(crate::encode_path_text(path.as_os_str())),
                 start_byte,
                 end_byte,
                 dialect,
                 TokenRole::CommandName,
             )?;
-            candidate.display = name;
+            candidate.display = crate::encode_path_text(&name);
             Some(candidate)
         })
         .collect()
@@ -982,7 +1040,30 @@ fn filesystem_candidates(
     cancel: &AtomicBool,
     started: Instant,
 ) -> Vec<CompletionCandidate> {
-    if prefix == "~" {
+    filesystem_candidates_native(
+        OsStr::new(prefix),
+        true,
+        cwd,
+        start_byte,
+        end_byte,
+        dialect,
+        cancel,
+        started,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn filesystem_candidates_native(
+    prefix: &OsStr,
+    expand_home: bool,
+    cwd: &Path,
+    start_byte: usize,
+    end_byte: usize,
+    dialect: ShellDialect,
+    cancel: &AtomicBool,
+    started: Instant,
+) -> Vec<CompletionCandidate> {
+    if expand_home && prefix == "~" {
         return make_candidate(
             String::from("~/"),
             Some(String::from("home directory")),
@@ -994,12 +1075,16 @@ fn filesystem_candidates(
         .into_iter()
         .collect();
     }
-    let expanded = if prefix.starts_with("~/") {
+    let home_prefix = expand_home && prefix.as_encoded_bytes().starts_with(b"~/");
+    let expanded = if home_prefix {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return Vec::new();
         };
-        let suffix = prefix.strip_prefix("~/").unwrap_or_default();
-        home.join(suffix.trim_start_matches('/'))
+        home.join(
+            Path::new(prefix)
+                .strip_prefix("~")
+                .unwrap_or_else(|_| Path::new("")),
+        )
     } else {
         let path = PathBuf::from(prefix);
         if path.is_absolute() {
@@ -1008,19 +1093,22 @@ fn filesystem_candidates(
             cwd.join(path)
         }
     };
-    let directory_prefix =
-        prefix.ends_with('/') || matches!(prefix.rsplit('/').next(), Some("." | ".."));
+    let directory_prefix = prefix.as_encoded_bytes().ends_with(b"/")
+        || matches!(
+            prefix
+                .as_encoded_bytes()
+                .rsplit(|byte| *byte == b'/')
+                .next(),
+            Some(b"." | b"..")
+        );
     let (directory, name_prefix) = if prefix.is_empty() {
-        (cwd.to_path_buf(), "")
+        (cwd.to_path_buf(), OsStr::new(""))
     } else if directory_prefix {
-        (expanded.clone(), "")
+        (expanded.clone(), OsStr::new(""))
     } else {
         (
             expanded.parent().unwrap_or(cwd).to_path_buf(),
-            expanded
-                .file_name()
-                .and_then(OsStr::to_str)
-                .unwrap_or_default(),
+            expanded.file_name().unwrap_or_default(),
         )
     };
     let Ok(entries) = fs::read_dir(&directory) else {
@@ -1037,10 +1125,11 @@ fn filesystem_candidates(
         {
             break;
         }
-        let Some(name) = entry.file_name().to_str().map(ToString::to_string) else {
-            continue;
-        };
-        if !name.starts_with(name_prefix) {
+        let name = entry.file_name();
+        if !name
+            .as_encoded_bytes()
+            .starts_with(name_prefix.as_encoded_bytes())
+        {
             continue;
         }
         // DirEntry::file_type deliberately describes the symlink itself. Path::metadata follows
@@ -1049,15 +1138,23 @@ fn filesystem_candidates(
             .path()
             .metadata()
             .is_ok_and(|metadata| metadata.is_dir());
-        let mut replacement = if Path::new(prefix).is_absolute() {
-            entry.path().to_string_lossy().into_owned()
+        let mut replacement = if Path::new(prefix).is_absolute()
+            || (home_prefix
+                && (prefix
+                    .to_str()
+                    .is_none_or(|text| text.chars().any(char::is_control))
+                    || name
+                        .to_str()
+                        .is_none_or(|name| name.chars().any(char::is_control))))
+        {
+            entry.path().into_os_string()
         } else {
-            input_parent.join(&name).to_string_lossy().into_owned()
+            input_parent.join(&name).into_os_string()
         };
         if is_directory {
-            replacement.push('/');
+            replacement.push("/");
         }
-        if let Some(candidate) = make_candidate(
+        if let Some(candidate) = make_native_candidate(
             replacement,
             is_directory.then(|| String::from("directory")),
             start_byte,
@@ -1073,6 +1170,50 @@ fn filesystem_candidates(
 
 fn completion_should_stop(cancel: &AtomicBool, started: Instant) -> bool {
     cancel.load(Ordering::Relaxed) || started.elapsed() >= COMPLETION_DEADLINE
+}
+
+fn make_native_candidate(
+    value: std::ffi::OsString,
+    description: Option<String>,
+    start_byte: usize,
+    end_byte: usize,
+    dialect: ShellDialect,
+    role: TokenRole,
+) -> Option<CompletionCandidate> {
+    if let Some(text) = value.to_str()
+        && !text.chars().any(char::is_control)
+    {
+        let mut candidate = make_candidate(
+            text.to_owned(),
+            description,
+            start_byte,
+            end_byte,
+            dialect,
+            role,
+        )?;
+        candidate.display = crate::encode_path_text(&value);
+        validate_candidate_field(&candidate.display).ok()?;
+        return Some(candidate);
+    }
+    let display = crate::encode_path_text(&value);
+    let replacement = crate::quote_native_argument(&value, dialect);
+    if replacement.len() > COMPLETION_FIELD_LIMIT_BYTES
+        || validate_candidate_field(&display).is_err()
+        || description
+            .as_deref()
+            .is_some_and(|d| validate_candidate_field(d).is_err())
+    {
+        return None;
+    }
+    Some(CompletionCandidate {
+        edit: CompletionEdit {
+            start_byte,
+            end_byte,
+            replacement,
+        },
+        display,
+        description,
+    })
 }
 
 fn make_candidate(
@@ -1355,6 +1496,96 @@ mod tests {
             generic_completion(&request, &AtomicBool::new(false)),
             CompletionOutcome::Empty(CompletionProvider::Generic)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_directory_completion_can_continue_into_children() {
+        let root = completion_temp_dir("native-directory");
+        let name = "directory\n";
+        fs::create_dir(root.join(name)).unwrap();
+        fs::write(root.join(name).join("child\n.txt"), "data").unwrap();
+        for dialect in [ShellDialect::Posix, ShellDialect::Fish] {
+            let first = filesystem_candidates(
+                "directory",
+                &root,
+                4,
+                13,
+                dialect,
+                &AtomicBool::new(false),
+                Instant::now(),
+            )
+            .remove(0);
+            assert_eq!(first.display, r"directory\x0A/");
+            let buffer = format!("cat {}ch", first.edit.replacement);
+            let request = CompletionRequest {
+                activation_id: 1,
+                request_id: 1,
+                buffer_revision: 1,
+                cursor_byte: buffer.len(),
+                buffer,
+                cwd: root.clone(),
+                shell: shell(dialect),
+            };
+            let CompletionOutcome::Candidates { candidates, .. } =
+                generic_completion(&request, &AtomicBool::new(false))
+            else {
+                panic!("native directory children should complete");
+            };
+            assert_eq!(candidates.len(), 1);
+            let candidate = &candidates[0];
+            let script = format!("printf '%s' {}", candidate.edit.replacement);
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .envs(crate::native_argument_environment(&script))
+                .output()
+                .unwrap();
+            assert_eq!(output.stdout, b"directory\n/child\n.txt");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_completion_candidate_preserves_invalid_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let value = std::ffi::OsString::from_vec(b"raw\xff\n".to_vec());
+        let candidate = make_native_candidate(
+            value.clone(),
+            None,
+            2,
+            4,
+            ShellDialect::Posix,
+            TokenRole::Argument,
+        )
+        .unwrap();
+        assert_eq!(candidate.display, r"raw\xFF\x0A");
+        assert_eq!(
+            crate::native_argument_environment(&candidate.edit.replacement)[0].1,
+            value
+        );
+        let newline = make_native_candidate(
+            "a\n".into(),
+            None,
+            0,
+            1,
+            ShellDialect::Posix,
+            TokenRole::Argument,
+        )
+        .unwrap();
+        let literal = make_native_candidate(
+            r"a\x0A".into(),
+            None,
+            0,
+            1,
+            ShellDialect::Posix,
+            TokenRole::Argument,
+        )
+        .unwrap();
+        assert_eq!(newline.display, r"a\x0A");
+        assert_eq!(literal.display, r"a\\x0A");
+        assert_ne!(newline.edit.replacement, literal.edit.replacement);
     }
 
     #[test]

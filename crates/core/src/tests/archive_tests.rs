@@ -93,6 +93,59 @@ fn select(app: &mut AppState, path: &Path) {
         .unwrap_or_else(|| panic!("{} is not listed", path.display()));
 }
 
+#[test]
+fn file_history_reopens_archive_member_after_leaving_archive() {
+    let fixture = Fixture::new(&[("member.txt", b"archive history")]);
+    let mut app = fixture.app();
+    select(&mut app, &fixture.zip.join("member.txt"));
+    app.apply(AppCommand::ViewEntry).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_viewer().unwrap().bytes, b"archive history");
+    app.apply(AppCommand::CloseViewer).unwrap();
+    app.apply(AppCommand::CdUp).unwrap();
+    drain_background(&mut app);
+    assert!(!app.active_panel().is_archive());
+    app.apply(AppCommand::OpenFileHistory).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_viewer().unwrap().bytes, b"archive history");
+}
+
+#[test]
+fn swapping_archive_panel_preserves_browsing_and_tagged_members() {
+    let fixture = Fixture::new(&[("member.txt", b"archive swap")]);
+    let mut app = fixture.app();
+    select(&mut app, &fixture.zip.join("member.txt"));
+    app.apply(AppCommand::ToggleTag).unwrap();
+    app.apply(AppCommand::SwapPanels).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_panel, ActivePanel::Right);
+    assert!(app.active_panel().is_archive());
+    assert!(
+        app.active_panel()
+            .is_tagged(&fixture.zip.join("member.txt"))
+    );
+    app.apply(AppCommand::ViewEntry).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_viewer().unwrap().bytes, b"archive swap");
+}
+
+#[test]
+fn archive_directory_sizes_use_member_sizes_without_extracting() {
+    let fixture = Fixture::new(&[("folder/one", b"one"), ("folder/sub/two", b"second")]);
+    let mut app = fixture.app();
+    app.apply(AppCommand::ShowDirectorySizes).unwrap();
+    drain_background(&mut app);
+    let folder = app
+        .active_panel()
+        .entries
+        .iter()
+        .find(|entry| entry.name == "folder")
+        .unwrap();
+    assert_eq!(folder.size, 9);
+    assert!(fs::read_dir(&fixture.output).unwrap().next().is_none());
+}
+
 fn enter(app: &mut AppState, path: &Path) {
     select(app, path);
     app.apply(AppCommand::OpenEntry).unwrap();
@@ -106,6 +159,28 @@ fn zip_navigation_preserves_quick_cd_local_history() {
         &fixture.root,
         &fixture.zip,
     );
+}
+
+#[test]
+fn zip_group_selection_tags_synthetic_member_paths() {
+    let fixture = Fixture::new(&[("first.txt", b"one"), ("second.md", b"two")]);
+    let mut app = fixture.app();
+    app.apply(AppCommand::SelectGroup).unwrap();
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter {
+        pattern: String::from("*.txt"),
+        ..PanelFilter::default()
+    }));
+    assert_eq!(
+        app.active_panel().tagged_paths(),
+        vec![fixture.zip.join("first.txt")]
+    );
+    assert!(app.active_panel().is_archive());
+    app.apply(AppCommand::UnselectGroup).unwrap();
+    app.finish_dialog(DialogResult::FilterSubmitted(PanelFilter {
+        pattern: String::from("*"),
+        ..PanelFilter::default()
+    }));
+    assert!(app.active_panel().tagged_paths().is_empty());
 }
 
 #[test]

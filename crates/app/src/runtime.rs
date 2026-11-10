@@ -28,6 +28,7 @@ const FS_MUTATION_CONCURRENCY_LIMIT: usize = 2;
 const SETTINGS_CONCURRENCY_LIMIT: usize = 1;
 const SCAN_CONCURRENCY_LIMIT: usize = 4;
 const PROCESS_CONCURRENCY_LIMIT: usize = 2;
+const CAPTURE_CONCURRENCY_LIMIT: usize = 4;
 const DESKTOP_OPEN_CONCURRENCY_LIMIT: usize = 4;
 #[cfg(target_os = "linux")]
 const DESKTOP_PORTAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -1059,6 +1060,7 @@ async fn run_runtime_loop(
     let settings_limit = Arc::new(Semaphore::new(SETTINGS_CONCURRENCY_LIMIT));
     let background_scan_limit = Arc::new(Semaphore::new(SCAN_CONCURRENCY_LIMIT));
     let background_process_limit = Arc::new(Semaphore::new(PROCESS_CONCURRENCY_LIMIT));
+    let capture_limit = Arc::new(Semaphore::new(CAPTURE_CONCURRENCY_LIMIT));
     let desktop_open_limit = Arc::new(Semaphore::new(DESKTOP_OPEN_CONCURRENCY_LIMIT));
     let shutdown = CancellationToken::new();
     let mut settings_sequence_tail = None;
@@ -1096,10 +1098,16 @@ async fn run_runtime_loop(
                         let runtime_shutdown_policy =
                             worker_runtime_shutdown_policy(&worker_job.request);
                         let (limit, worker_class) = match &worker_job.request {
+                            JobRequest::Vfs(rc_core::vfs::tasks::Task::Copy { .. }) => (Arc::clone(&fs_mutation_limit), "fs_mutation"),
+                            JobRequest::Vfs(rc_core::vfs::tasks::Task::Measure { .. } | rc_core::vfs::tasks::Task::DirectorySizes { .. }) => (Arc::clone(&background_scan_limit), "scan"),
+                            JobRequest::Vfs(_) => (Arc::clone(&background_process_limit), "process"),
                             JobRequest::PersistSettings { .. } => {
                                 (Arc::clone(&settings_limit), "settings")
                             }
                             JobRequest::Copy { .. }
+                            | JobRequest::ChangeMetadata { .. }
+                            | JobRequest::CreateLinks { .. }
+                            | JobRequest::EditSymlinks { .. }
                             | JobRequest::ExtractArchive { .. }
                             | JobRequest::Move { .. }
                             | JobRequest::Delete { .. }
@@ -1111,6 +1119,7 @@ async fn run_runtime_loop(
                             | JobRequest::QuickCdSearch { .. }
                             | JobRequest::ResolvePanelIdentity { .. }
                             | JobRequest::MeasureSelection { .. }
+                            | JobRequest::MeasureDirectories { .. }
                             | JobRequest::MeasureArchiveSelection { .. }
                             | JobRequest::BuildTree { .. } => {
                                 (Arc::clone(&background_scan_limit), "scan")
@@ -1118,7 +1127,12 @@ async fn run_runtime_loop(
                             JobRequest::OpenDesktop { .. } => {
                                 (Arc::clone(&desktop_open_limit), "desktop_open")
                             }
+                            JobRequest::CaptureCommand { .. } => {
+                                (Arc::clone(&capture_limit), "capture")
+                            }
                             JobRequest::LoadViewer { .. }
+                            | JobRequest::LoadActionViewer { .. }
+                            | JobRequest::ProbeFileType { .. }
                             | JobRequest::LoadArchiveViewer { .. }
                             | JobRequest::LoadQuickView { .. } => {
                                 (Arc::clone(&background_process_limit), "process")
@@ -1394,6 +1408,7 @@ fn finish_canceled_worker_before_start(
             cwd,
             source,
             sort_mode,
+            filename_encoding,
             filter,
             show_hidden_files,
             cached_panelized_entries,
@@ -1405,6 +1420,7 @@ fn finish_canceled_worker_before_start(
                 cwd: cwd.clone(),
                 source: source.clone(),
                 sort_mode: *sort_mode,
+                filename_encoding: *filename_encoding,
                 filter: filter.clone(),
                 show_hidden_files: *show_hidden_files,
                 cached_panelized_entries: cached_panelized_entries.clone(),
@@ -1458,11 +1474,27 @@ fn execute_runtime_worker_job(
 ) {
     let cancel_flag = worker_job.cancel_flag();
     match worker_job.request.clone() {
+        JobRequest::Vfs(_) => {
+            rc_core::vfs::tasks::execute(worker_job, worker_event_tx, background_event_tx)
+        }
+        JobRequest::ProbeFileType { .. } => {
+            rc_core::execute_file_type_probe(worker_job, worker_event_tx, background_event_tx)
+        }
+        JobRequest::LoadActionViewer { .. } => {
+            rc_core::execute_action_viewer(worker_job, worker_event_tx, background_event_tx)
+        }
+        JobRequest::MeasureDirectories { .. } => {
+            rc_core::execute_directory_sizes(worker_job, worker_event_tx, background_event_tx)
+        }
+        JobRequest::CaptureCommand { .. } => {
+            rc_core::execute_command_capture(worker_job, worker_event_tx, background_event_tx)
+        }
         JobRequest::RefreshPanel {
             panel,
             cwd,
             source,
             sort_mode,
+            filename_encoding,
             filter,
             show_hidden_files,
             cached_panelized_entries,
@@ -1475,6 +1507,7 @@ fn execute_runtime_worker_job(
                 cwd,
                 source,
                 sort_mode,
+                filename_encoding,
                 filter,
                 show_hidden_files,
                 cached_panelized_entries,
@@ -2098,6 +2131,7 @@ fn execute_refresh_worker_job(
     let disk_usage = event_result
         .as_ref()
         .ok()
+        .filter(|_| !request.source.is_virtual())
         .and_then(|_| read_disk_usage(request.cwd.as_path()));
     let event = BackgroundEvent::PanelRefreshed {
         panel: request.panel,
@@ -2450,6 +2484,11 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
     match command {
         WorkerCommand::Cancel(_) | WorkerCommand::Shutdown => CommandPriority::High,
         WorkerCommand::Run(job) => match job.request {
+            JobRequest::Vfs(rc_core::vfs::tasks::Task::View { .. }) => CommandPriority::High,
+            JobRequest::Vfs(
+                rc_core::vfs::tasks::Task::Measure { .. }
+                | rc_core::vfs::tasks::Task::DirectorySizes { .. },
+            ) => CommandPriority::Low,
             JobRequest::OpenDesktop { .. }
             | JobRequest::LoadViewer { .. }
             | JobRequest::LoadArchiveViewer { .. }
@@ -2850,6 +2889,7 @@ mod tests {
         request_id: u64,
     ) -> PanelRefreshStreamRequest {
         PanelRefreshStreamRequest {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel,
             cwd,
             source,
@@ -2979,6 +3019,56 @@ mod tests {
             .join()
             .expect("runtime loop thread should terminate cleanly");
         fs::remove_dir_all(&root).expect("temp root should be removable");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn captured_commands_do_not_starve_file_viewer_workers() {
+        let root = make_temp_dir("capture-viewer-concurrency");
+        let path = root.join("fixture.txt");
+        fs::write(&path, "viewer remains responsive").unwrap();
+        let (command_tx, _worker_event_rx, background_event_rx, runtime_handle) =
+            spawn_runtime_loop_thread();
+        let mut manager = JobManager::new();
+        let shell = rc_core::ShellSettings::custom(
+            "/bin/sh",
+            rc_core::ShellDialect::Posix,
+            None,
+            rc_core::ShellHistoryMode::Session,
+        )
+        .unwrap();
+        for _ in 0..CAPTURE_CONCURRENCY_LIMIT {
+            let job = manager.enqueue(JobRequest::CaptureCommand {
+                spec: rc_core::CommandCaptureSpec::shell(
+                    root.clone(),
+                    "printf ready; sleep 30".into(),
+                    shell.clone(),
+                ),
+            });
+            send_run(&command_tx, job);
+        }
+        let mut ready = std::collections::HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ready.len() < CAPTURE_CONCURRENCY_LIMIT && Instant::now() < deadline {
+            if let Ok(BackgroundEvent::CommandOutput { job_id, .. }) =
+                background_event_rx.recv_timeout(Duration::from_millis(100))
+            {
+                ready.insert(job_id);
+            }
+        }
+        let viewer_job = manager.enqueue(JobRequest::LoadViewer { path: path.clone() });
+        send_run(&command_tx, viewer_job);
+        let loaded = matches!(background_event_rx.recv_timeout(Duration::from_secs(3)),
+            Ok(BackgroundEvent::ViewerLoaded { path: loaded_path, result: Ok(_) }) if loaded_path == path);
+        command_tx.blocking_send(RuntimeCommand::Shutdown).unwrap();
+        runtime_handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            ready.len(),
+            CAPTURE_CONCURRENCY_LIMIT,
+            "all capture slots should be occupied"
+        );
+        assert!(loaded, "file viewer must load before captures complete");
     }
 
     fn recv_event(event_rx: &Receiver<JobEvent>, timeout: Duration) -> JobEvent {
@@ -3203,6 +3293,7 @@ mod tests {
             path: PathBuf::from("/tmp/medium"),
         });
         let low_job = manager.enqueue(JobRequest::RefreshPanel {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel: ActivePanel::Left,
             cwd: PathBuf::from("/tmp"),
             source: PanelListingSource::Directory,
@@ -3261,6 +3352,7 @@ mod tests {
             path: root.join("first"),
         });
         let low_id = state.enqueue_worker_job_request(JobRequest::RefreshPanel {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel: ActivePanel::Left,
             cwd: root.clone(),
             source: PanelListingSource::Directory,
@@ -3510,6 +3602,7 @@ mod tests {
             }
             let location = rc_core::ArchiveLocation::root(archive);
             let job = manager.enqueue(JobRequest::RefreshPanel {
+                filename_encoding: rc_core::FilenameEncoding::Utf8,
                 panel: ActivePanel::Left,
                 cwd: location.path(),
                 source: PanelListingSource::Archive(location),
@@ -4490,6 +4583,7 @@ mod tests {
         let root = make_temp_dir("refresh-canceled-before-start");
         let mut manager = JobManager::new();
         let job = manager.enqueue(JobRequest::RefreshPanel {
+            filename_encoding: rc_core::FilenameEncoding::Utf8,
             panel: ActivePanel::Right,
             cwd: root.clone(),
             source: PanelListingSource::Directory,

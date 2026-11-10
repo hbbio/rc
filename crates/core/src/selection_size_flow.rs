@@ -88,6 +88,14 @@ impl SelectionSizeWorkflow {
 }
 
 impl AppState {
+    pub(crate) fn invalidate_selection_sizes_for_swap(&mut self) {
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            if let Some(id) = self.selection_size.invalidate(panel) {
+                let _ = self.request_cancel_for_job(id);
+            }
+        }
+    }
+
     pub fn selection_size_state(&self, panel: ActivePanel) -> &SelectionSizeState {
         &self.selection_sizes[panel.index()]
     }
@@ -113,18 +121,27 @@ impl AppState {
         let selected_items = paths.len();
         let (request_id, previous_job_id) = self.selection_size.begin_request(panel, paths.clone());
         self.selection_sizes[panel.index()] = SelectionSizeState::Calculating { selected_items };
-        let request = match self.panels[panel.index()].archive_location() {
-            Some(location) => JobRequest::MeasureArchiveSelection {
+        let request = if let Some(location) = self.panels[panel.index()].mounted_location() {
+            JobRequest::Vfs(vfs::tasks::Task::Measure {
                 location: location.clone(),
-                panel,
                 paths,
-                request_id,
-            },
-            None => JobRequest::MeasureSelection {
                 panel,
-                paths,
                 request_id,
-            },
+            })
+        } else {
+            match self.panels[panel.index()].archive_location() {
+                Some(location) => JobRequest::MeasureArchiveSelection {
+                    location: location.clone(),
+                    panel,
+                    paths,
+                    request_id,
+                },
+                None => JobRequest::MeasureSelection {
+                    panel,
+                    paths,
+                    request_id,
+                },
+            }
         };
 
         if let Some(previous_job_id) = previous_job_id {

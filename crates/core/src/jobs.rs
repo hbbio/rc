@@ -24,6 +24,9 @@ use crate::{
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 mod archive_extract;
+mod links;
+mod metadata;
+mod vfs_extract;
 pub const JOB_CANCELED_MESSAGE: &str = "job canceled";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -37,6 +40,11 @@ impl fmt::Display for JobId {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
+    FileType,
+    Links,
+    ChangeMetadata,
+    MeasureDirectories,
+    Command,
     Copy,
     Move,
     Delete,
@@ -56,6 +64,11 @@ pub enum JobKind {
 impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::FileType => "file-type",
+            Self::Links => "links",
+            Self::ChangeMetadata => "permissions/ownership",
+            Self::MeasureDirectories => "directory-sizes",
+            Self::Command => "command",
             Self::Copy => "copy",
             Self::Move => "move",
             Self::Delete => "delete",
@@ -94,6 +107,34 @@ impl OverwritePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobRequest {
+    Vfs(crate::vfs::tasks::Task),
+    LoadActionViewer {
+        path: PathBuf,
+        options: crate::action_macros::ViewOptions,
+    },
+    ProbeFileType {
+        path: PathBuf,
+    },
+    CreateLinks {
+        kind: crate::LinkKind,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+    },
+    EditSymlinks {
+        paths: Vec<PathBuf>,
+        target: PathBuf,
+    },
+    ChangeMetadata {
+        paths: Vec<PathBuf>,
+        change: crate::MetadataChange,
+    },
+    MeasureDirectories {
+        paths: Vec<PathBuf>,
+        archive: Option<ArchiveLocation>,
+    },
+    CaptureCommand {
+        spec: crate::CommandCaptureSpec,
+    },
     /// Copies selected regular members and directory subtrees to the local filesystem.
     ///
     /// Sources are synthetic `location.archive.join(member)` paths. Each selection
@@ -133,7 +174,7 @@ pub enum JobRequest {
     Move {
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
-        destination_names: Option<Vec<String>>,
+        destination_names: Option<Vec<std::ffi::OsString>>,
         overwrite: OverwritePolicy,
     },
     Delete {
@@ -155,6 +196,7 @@ pub enum JobRequest {
         cwd: PathBuf,
         source: PanelListingSource,
         sort_mode: SortMode,
+        filename_encoding: crate::FilenameEncoding,
         filter: PanelFilter,
         show_hidden_files: bool,
         cached_panelized_entries: Option<Arc<[FileEntry]>>,
@@ -201,6 +243,13 @@ pub enum JobRequest {
 impl JobRequest {
     pub fn kind(&self) -> JobKind {
         match self {
+            Self::Vfs(task) => task.kind(),
+            Self::LoadActionViewer { .. } => JobKind::LoadViewer,
+            Self::ProbeFileType { .. } => JobKind::FileType,
+            Self::CreateLinks { .. } | Self::EditSymlinks { .. } => JobKind::Links,
+            Self::ChangeMetadata { .. } => JobKind::ChangeMetadata,
+            Self::MeasureDirectories { .. } => JobKind::MeasureDirectories,
+            Self::CaptureCommand { .. } => JobKind::Command,
             Self::ExtractArchive { .. } => JobKind::Copy,
             Self::LoadArchiveViewer { quick_view, .. } => {
                 if quick_view.is_some() {
@@ -229,6 +278,14 @@ impl JobRequest {
 
     pub fn item_count(&self) -> usize {
         match self {
+            Self::Vfs(task) => task.item_count(),
+            Self::LoadActionViewer { .. } => 1,
+            Self::ProbeFileType { .. } => 1,
+            Self::CreateLinks { sources, .. } => sources.len(),
+            Self::EditSymlinks { paths, .. } => paths.len(),
+            Self::ChangeMetadata { paths, .. } => paths.len(),
+            Self::MeasureDirectories { paths, .. } => paths.len(),
+            Self::CaptureCommand { .. } => 1,
             Self::ExtractArchive { sources, .. } => sources.len(),
             Self::LoadArchiveViewer { .. } => 1,
             Self::MeasureArchiveSelection { paths, .. } => paths.len(),
@@ -251,6 +308,29 @@ impl JobRequest {
 
     pub fn summary(&self) -> String {
         match self {
+            Self::Vfs(task) => task.summary(),
+            Self::LoadActionViewer { path, .. } => format!("view {}", path.display()),
+            Self::ProbeFileType { path } => format!("identify {}", path.display()),
+            Self::CreateLinks {
+                kind,
+                sources,
+                destination,
+            } => format!(
+                "{} {} entries -> {}",
+                kind.label(),
+                sources.len(),
+                destination.display()
+            ),
+            Self::EditSymlinks { paths, target } => {
+                format!("edit {} symlinks -> {}", paths.len(), target.display())
+            }
+            Self::ChangeMetadata { paths, .. } => {
+                format!("change permissions/ownership of {} entries", paths.len())
+            }
+            Self::MeasureDirectories { paths, .. } => {
+                format!("measure {} directories", paths.len())
+            }
+            Self::CaptureCommand { spec } => spec.summary(),
             Self::ExtractArchive {
                 sources,
                 destination_dir,
@@ -287,7 +367,14 @@ impl JobRequest {
             } => {
                 let destination_suffix = match destination_names {
                     Some(destination_names) if !destination_names.is_empty() => {
-                        format!(" with custom names [{}]", destination_names.join(", "))
+                        format!(
+                            " with custom names [{}]",
+                            destination_names
+                                .iter()
+                                .map(|name| rc_shell::encode_path_text(name))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                     Some(_) => String::from(""),
                     None => String::from(""),
@@ -328,6 +415,7 @@ impl JobRequest {
             } => {
                 let source_label = match source {
                     PanelListingSource::Archive(_) => "archive",
+                    PanelListingSource::Mounted(_) => "VFS",
                     PanelListingSource::Directory => "directory",
                     PanelListingSource::Panelize { .. } => "panelize",
                     PanelListingSource::FindResults { .. } => "find-results",
@@ -1013,6 +1101,33 @@ fn execute_job(
     fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     match request {
+        JobRequest::Vfs(crate::vfs::tasks::Task::Copy {
+            location,
+            sources,
+            destination_dir,
+            overwrite,
+        }) => vfs_extract::extract(
+            &crate::vfs::VfsPath::Mounted(location),
+            &sources,
+            &destination_dir,
+            overwrite,
+            progress,
+        ),
+        JobRequest::Vfs(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "VFS task requires the runtime adapter",
+        )),
+        JobRequest::CreateLinks {
+            kind,
+            sources,
+            destination,
+        } => links::create_links(kind, &sources, &destination, progress),
+        JobRequest::EditSymlinks { paths, target } => {
+            links::edit_symlinks(&paths, &target, progress)
+        }
+        JobRequest::ChangeMetadata { paths, change } => {
+            metadata::change_metadata(&paths, &change, progress)
+        }
         JobRequest::ExtractArchive {
             location,
             sources,
@@ -1105,7 +1220,10 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "desktop-open jobs are executed by the runtime adapter",
         )),
-        JobRequest::LoadViewer { .. } => Err(io::Error::new(
+        JobRequest::LoadViewer { .. }
+        | JobRequest::CaptureCommand { .. }
+        | JobRequest::ProbeFileType { .. }
+        | JobRequest::LoadActionViewer { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "viewer jobs are executed by the runtime adapter",
         )),
@@ -1113,10 +1231,12 @@ fn execute_job(
             io::ErrorKind::Unsupported,
             "quick-view jobs are executed by the runtime adapter",
         )),
-        JobRequest::MeasureSelection { .. } => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "selection-size jobs are executed by the runtime adapter",
-        )),
+        JobRequest::MeasureSelection { .. } | JobRequest::MeasureDirectories { .. } => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "selection-size jobs are executed by the runtime adapter",
+            ))
+        }
         JobRequest::BuildTree { .. } => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "tree jobs are executed by the runtime adapter",
@@ -1148,7 +1268,7 @@ fn copy_paths(
 fn move_paths(
     sources: &[PathBuf],
     destination_dir: &Path,
-    destination_names: Option<&[String]>,
+    destination_names: Option<&[std::ffi::OsString]>,
     overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
@@ -1198,7 +1318,7 @@ struct PlannedMove<'a> {
 fn build_move_plan<'a>(
     sources: &'a [PathBuf],
     destination_dir: &Path,
-    destination_names: Option<&[String]>,
+    destination_names: Option<&[std::ffi::OsString]>,
 ) -> io::Result<Vec<PlannedMove<'a>>> {
     sources
         .iter()
@@ -1227,7 +1347,7 @@ fn build_move_plan<'a>(
         .collect()
 }
 
-fn validate_custom_destination_name(destination_name: &str) -> io::Result<()> {
+fn validate_custom_destination_name(destination_name: &std::ffi::OsStr) -> io::Result<()> {
     let path = Path::new(destination_name);
     let mut components = path.components();
     let is_single_normal_component = matches!(
@@ -1984,6 +2104,30 @@ struct JobTotals {
 
 fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io::Result<JobTotals> {
     match request {
+        JobRequest::Vfs(crate::vfs::tasks::Task::Copy {
+            location, sources, ..
+        }) => {
+            let scan = crate::vfs::walk::scan(
+                &crate::vfs::VfsPath::Mounted(location.clone()),
+                sources,
+                cancel_flag,
+                true,
+            )?;
+            Ok(vfs_extract::totals(scan.entries.values()))
+        }
+        JobRequest::Vfs(_) => Ok(JobTotals { items: 1, bytes: 0 }),
+        JobRequest::CreateLinks { sources, .. } => Ok(JobTotals {
+            items: sources.len() as u64,
+            bytes: 0,
+        }),
+        JobRequest::EditSymlinks { paths, .. } => Ok(JobTotals {
+            items: paths.len() as u64,
+            bytes: 0,
+        }),
+        JobRequest::ChangeMetadata { paths, .. } => Ok(JobTotals {
+            items: paths.len() as u64,
+            bytes: 0,
+        }),
         JobRequest::ExtractArchive {
             location, sources, ..
         } => archive_extract::measure_archive_totals(location, sources, cancel_flag),
@@ -1998,10 +2142,14 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::CaptureCommand { .. }
+        | JobRequest::ProbeFileType { .. }
+        | JobRequest::LoadActionViewer { .. }
         | JobRequest::LoadArchiveViewer { .. }
         | JobRequest::MeasureArchiveSelection { .. }
         | JobRequest::LoadQuickView { .. }
         | JobRequest::MeasureSelection { .. }
+        | JobRequest::MeasureDirectories { .. }
         | JobRequest::BuildTree { .. } => Ok(JobTotals { items: 1, bytes: 0 }),
         JobRequest::Find { .. } => Ok(JobTotals { items: 0, bytes: 0 }),
     }
@@ -3413,7 +3561,7 @@ mod tests {
             JobRequest::Move {
                 sources: vec![first_source.clone(), second_source.clone()],
                 destination_dir: root.clone(),
-                destination_names: Some(vec![String::from("a.bak"), String::from("a.bak.bak")]),
+                destination_names: Some(vec!["a.bak".into(), "a.bak.bak".into()]),
                 overwrite: OverwritePolicy::Overwrite,
             },
             &LocalFsBackend,
@@ -3462,10 +3610,7 @@ mod tests {
             JobRequest::Move {
                 sources: vec![first_source.clone(), second_source.clone()],
                 destination_dir: root.clone(),
-                destination_names: Some(vec![
-                    String::from("renamed.txt"),
-                    String::from("renamed.txt"),
-                ]),
+                destination_names: Some(vec!["renamed.txt".into(), "renamed.txt".into()]),
                 overwrite: OverwritePolicy::Overwrite,
             },
             &LocalFsBackend,
@@ -3523,7 +3668,7 @@ mod tests {
                 JobRequest::Move {
                     sources: vec![source.clone()],
                     destination_dir: destination_dir.clone(),
-                    destination_names: Some(vec![invalid_name]),
+                    destination_names: Some(vec![invalid_name.into()]),
                     overwrite: OverwritePolicy::Overwrite,
                 },
                 &LocalFsBackend,
@@ -3610,7 +3755,7 @@ mod tests {
                 JobRequest::Move {
                     sources: vec![source],
                     destination_dir: policy_root.clone(),
-                    destination_names: Some(vec![String::from("FOO.txt")]),
+                    destination_names: Some(vec!["FOO.txt".into()]),
                     overwrite,
                 },
                 &LocalFsBackend,

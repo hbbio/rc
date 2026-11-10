@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::ShellDialect;
@@ -11,7 +12,7 @@ pub enum LiteralCd {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LiteralToken {
-    value: String,
+    value: OsString,
     decorated: bool,
     unquoted_tilde_start: bool,
     expand_home: bool,
@@ -44,7 +45,10 @@ fn literal_path(token: &LiteralToken) -> Option<LiteralCd> {
         return None;
     }
     let expand_home = token.expand_home;
-    if token.unquoted_tilde_start && token.value.starts_with('~') && !expand_home {
+    if token.unquoted_tilde_start
+        && token.value.as_encoded_bytes().starts_with(b"~")
+        && !expand_home
+    {
         // Named-user expansion is shell-owned until rc has a tested account lookup adapter.
         return None;
     }
@@ -72,7 +76,7 @@ fn scan_literal_tokens(command: &str, dialect: ShellDialect) -> Option<Vec<Liter
             break;
         }
 
-        let mut value = String::new();
+        let mut value = Vec::new();
         let mut decorated = false;
         let mut unquoted_tilde_start = false;
         let mut expand_home = false;
@@ -95,28 +99,28 @@ fn scan_literal_tokens(command: &str, dialect: ShellDialect) -> Option<Vec<Liter
                 '\\' if dialect == ShellDialect::Fish => return None,
                 '\\' => {
                     decorated = true;
-                    value.push(characters.next()?);
+                    push_char(&mut value, characters.next()?);
                 }
                 character if is_ambiguous_unquoted(character, dialect) => return None,
                 character if character.is_control() => return None,
                 character => {
                     if value.is_empty() && character == '~' {
                         unquoted_tilde_start = true;
-                    } else if unquoted_tilde_start && value == "~" && character == '/' {
+                    } else if unquoted_tilde_start && value == b"~" && character == '/' {
                         expand_home = true;
                     }
-                    value.push(character);
+                    push_char(&mut value, character);
                 }
             }
         }
         if !token_started {
             return None;
         }
-        if unquoted_tilde_start && value == "~" {
+        if unquoted_tilde_start && value == b"~" {
             expand_home = true;
         }
         tokens.push(LiteralToken {
-            value,
+            value: native_value(value)?,
             decorated,
             unquoted_tilde_start,
             expand_home,
@@ -128,7 +132,7 @@ fn scan_literal_tokens(command: &str, dialect: ShellDialect) -> Option<Vec<Liter
 
 fn scan_single_quoted(
     characters: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    value: &mut String,
+    value: &mut Vec<u8>,
     dialect: ShellDialect,
 ) -> Option<()> {
     while let Some(character) = characters.next() {
@@ -137,13 +141,13 @@ fn scan_single_quoted(
             '\\' if dialect == ShellDialect::Fish => {
                 let escaped = characters.next()?;
                 if matches!(escaped, '\\' | '\'') {
-                    value.push(escaped);
+                    push_char(value, escaped);
                 } else {
                     return None;
                 }
             }
             character if character.is_control() => return None,
-            character => value.push(character),
+            character => push_char(value, character),
         }
     }
     None
@@ -151,35 +155,63 @@ fn scan_single_quoted(
 
 fn scan_double_quoted(
     characters: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    value: &mut String,
+    value: &mut Vec<u8>,
     dialect: ShellDialect,
 ) -> Option<()> {
     while let Some(character) = characters.next() {
         match character {
             '"' => return Some(()),
-            '$' | '`' => return None,
+            '$' => {
+                let mut name = String::new();
+                while let Some(ch) = characters.peek().copied()
+                    && (ch.is_ascii_alphanumeric() || ch == '_')
+                {
+                    name.push(ch);
+                    characters.next();
+                }
+                let native = crate::native_arguments::decode_native_variable(&name)?;
+                value.extend_from_slice(native.as_encoded_bytes());
+            }
+            '`' => return None,
             '(' if dialect == ShellDialect::Fish => return None,
             '\\' => {
                 let escaped = characters.next()?;
                 match dialect {
                     ShellDialect::Fish if matches!(escaped, '\\' | '"' | '$') => {
-                        value.push(escaped);
+                        push_char(value, escaped);
                     }
                     ShellDialect::Fish => return None,
                     ShellDialect::Posix if matches!(escaped, '\\' | '"' | '$' | '`') => {
-                        value.push(escaped);
+                        push_char(value, escaped);
                     }
                     ShellDialect::Posix => {
-                        value.push('\\');
-                        value.push(escaped);
+                        push_char(value, '\\');
+                        push_char(value, escaped);
                     }
                 }
             }
             character if character.is_control() => return None,
-            character => value.push(character),
+            character => push_char(value, character),
         }
     }
     None
+}
+
+fn push_char(bytes: &mut Vec<u8>, ch: char) {
+    let mut buffer = [0; 4];
+    bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+}
+
+fn native_value(bytes: Vec<u8>) -> Option<OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(OsString::from_vec(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(OsString::from)
+    }
 }
 
 fn is_ambiguous_unquoted(character: char, dialect: ShellDialect) -> bool {
@@ -195,6 +227,28 @@ fn is_ambiguous_unquoted(character: char, dialect: ShellDialect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn literal_cd_decodes_native_arguments_without_expanding_other_variables() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = OsString::from_vec(b"dir\xff\n".to_vec());
+        for dialect in [ShellDialect::Posix, ShellDialect::Fish] {
+            let token = crate::quote_native_argument(&path, dialect);
+            assert_eq!(
+                parse_literal_cd(&format!("cd -- {token}/child"), dialect),
+                Some(LiteralCd::Path {
+                    path: PathBuf::from(&path).join("child"),
+                    expand_home: false
+                })
+            );
+            assert_eq!(parse_literal_cd("cd \"$HOME\"", dialect), None);
+            assert_eq!(
+                parse_literal_cd("cd \"$RC_NATIVE_HEX_FFZZ\"", dialect),
+                None
+            );
+        }
+    }
 
     #[test]
     fn parses_supported_posix_cd_forms() {

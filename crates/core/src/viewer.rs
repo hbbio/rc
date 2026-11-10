@@ -10,6 +10,65 @@ use crate::{FOUNDATION_SLO, JOB_CANCELED_MESSAGE, VIEWER_TEXT_PREVIEW_LIMIT_BYTE
 
 const VIEWER_READ_CHUNK_BYTES: usize = 64 * 1024;
 
+#[derive(Clone, Debug, Default)]
+struct NroffState {
+    escape: NroffEscape,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum NroffEscape {
+    #[default]
+    Text,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+impl NroffState {
+    fn append(&mut self, content: &mut String, text: &str, dirty_start: &mut usize) {
+        for ch in text.chars() {
+            match self.escape {
+                NroffEscape::Escape => {
+                    self.escape = match ch {
+                        '[' => NroffEscape::Csi,
+                        ']' => NroffEscape::Osc,
+                        _ => NroffEscape::Text,
+                    };
+                }
+                NroffEscape::Csi => {
+                    if ('@'..='~').contains(&ch) {
+                        self.escape = NroffEscape::Text;
+                    }
+                }
+                NroffEscape::Osc => {
+                    if ch == '\u{7}' {
+                        self.escape = NroffEscape::Text;
+                    } else if ch == '\u{1b}' {
+                        self.escape = NroffEscape::OscEscape;
+                    }
+                }
+                NroffEscape::OscEscape => {
+                    self.escape = if ch == '\\' {
+                        NroffEscape::Text
+                    } else {
+                        NroffEscape::Osc
+                    };
+                }
+                NroffEscape::Text => match ch {
+                    '\u{1b}' => self.escape = NroffEscape::Escape,
+                    '\u{8}' if !content.ends_with('\n') => {
+                        content.pop();
+                        *dirty_start = (*dirty_start).min(content.len());
+                    }
+                    '\u{8}' | '\r' => {}
+                    _ => content.push(ch),
+                },
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ViewerSearchDirection {
     Forward,
@@ -25,6 +84,10 @@ enum ViewerGotoTarget {
 #[derive(Clone, Debug)]
 pub struct ViewerState {
     path: PathBuf,
+    pub(crate) archive_location: Option<crate::ArchiveLocation>,
+    pub(crate) mounted_location: Option<Box<crate::vfs::MountedPath>>,
+    output: Option<Box<ViewerOutputState>>,
+    nroff: Option<NroffState>,
     pub bytes: Vec<u8>,
     content: String,
     text_is_preview: bool,
@@ -37,6 +100,13 @@ pub struct ViewerState {
     last_search_query: Option<String>,
     last_search_match_offset: Option<usize>,
     last_search_direction: ViewerSearchDirection,
+}
+
+#[derive(Clone, Debug)]
+struct ViewerOutputState {
+    status: String,
+    utf8_tail: Vec<u8>,
+    content_hasher: std::collections::hash_map::DefaultHasher,
 }
 
 impl ViewerState {
@@ -83,7 +153,8 @@ impl ViewerState {
     /// the archive root. The returned viewer retains that synthetic identity.
     /// Preview bytes are limited by the viewer memory budget, but building the
     /// shared index for a compressed TAR can first decompress its entire stream.
-    /// No extracted files are written.
+    /// Nested containers may use private temporary files; the viewed member
+    /// itself is read directly into the bounded preview buffer.
     ///
     /// # Errors
     ///
@@ -97,31 +168,39 @@ impl ViewerState {
         path: PathBuf,
         cancel: &AtomicBool,
     ) -> io::Result<Self> {
-        let mut reader = crate::archive::ArchiveReader::open(location, Some(cancel))?;
-        let member_path = location.member_path(&path)?;
-        let member = reader.members.get(&member_path).cloned().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "archive member no longer exists")
-        })?;
-        if member.is_dir {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "viewer supports files only",
-            ));
-        }
-        member.ensure_extractable()?;
-        let size = member.size;
-        let mut input =
-            crate::archive::normalize_archive_io_result(reader.open_member(&member), Some(cancel))?;
+        Self::open_vfs_cancellable(
+            crate::vfs::VfsPath::Archive {
+                location: location.clone(),
+                path,
+            },
+            cancel,
+        )
+    }
+
+    pub fn open_vfs_cancellable(
+        path: crate::vfs::VfsPath,
+        cancel: &AtomicBool,
+    ) -> io::Result<Self> {
         let limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let (bytes, hit_limit) = crate::archive::normalize_archive_io_result(
-            read_prefix(&mut input, limit, Some(cancel)),
-            Some(cancel),
-        )?;
-        drop(input);
-        reader.verify_source()?;
-        Ok(Self::from_prefix(path, size, bytes, hit_limit))
+        let mut result = None;
+        path.with_file(Some(cancel), &mut |entry, input| {
+            let (bytes, hit_limit) = read_prefix(input, limit, Some(cancel))?;
+            result = Some((entry.size, bytes, hit_limit));
+            Ok(())
+        })?;
+        let (size, bytes, hit_limit) =
+            result.ok_or_else(|| io::Error::other("VFS backend did not provide file data"))?;
+        let mut viewer = Self::from_prefix(path.identity(), size, bytes, hit_limit);
+        match path {
+            crate::vfs::VfsPath::Archive { location, .. } => {
+                viewer.archive_location = Some(location)
+            }
+            crate::vfs::VfsPath::Mounted(path) => viewer.mounted_location = Some(Box::new(path)),
+            _ => {}
+        }
+        Ok(viewer)
     }
 
     fn from_prefix(path: PathBuf, total_size: u64, bytes: Vec<u8>, hit_read_limit: bool) -> Self {
@@ -144,6 +223,10 @@ impl ViewerState {
 
         Self {
             path,
+            archive_location: None,
+            mounted_location: None,
+            output: None,
+            nroff: None,
             bytes,
             content,
             text_is_preview,
@@ -179,8 +262,127 @@ impl ViewerState {
         &self.path
     }
 
+    pub fn title(&self) -> String {
+        match &self.output {
+            Some(output) => format!("[{}] {}", output.status, self.path.display()),
+            None => self.path.display().to_string(),
+        }
+    }
+
+    pub(crate) fn command_output(title: String) -> Self {
+        let mut viewer = Self::from_prefix(PathBuf::from(title), 0, Vec::new(), false);
+        viewer.output = Some(Box::new(ViewerOutputState {
+            status: "running".into(),
+            utf8_tail: Vec::new(),
+            content_hasher: std::collections::hash_map::DefaultHasher::new(),
+        }));
+        viewer
+    }
+
+    pub(crate) fn append_output(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+        let output = self.output.as_mut().expect("command output viewer");
+        if self.nroff.is_some() {
+            output.content_hasher.write(bytes);
+        }
+        let mut pending = std::mem::take(&mut output.utf8_tail);
+        pending.extend_from_slice(bytes);
+        let mut remaining = pending.as_slice();
+        let mut start = self.content.len();
+        let content = &mut self.content;
+        let nroff = &mut self.nroff;
+        let mut append = |text: &str| {
+            if let Some(nroff) = nroff {
+                nroff.append(content, text, &mut start);
+            } else {
+                content.push_str(text);
+            }
+        };
+        while !remaining.is_empty() {
+            match std::str::from_utf8(remaining) {
+                Ok(text) => {
+                    append(text);
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    append(
+                        std::str::from_utf8(&remaining[..valid]).expect("validated UTF-8 prefix"),
+                    );
+                    remaining = &remaining[valid..];
+                    match error.error_len() {
+                        Some(count) => {
+                            append("\u{fffd}");
+                            remaining = &remaining[count..];
+                        }
+                        None => {
+                            output.utf8_tail.extend_from_slice(remaining);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.index_appended_output(start);
+    }
+
+    fn index_appended_output(&mut self, start: usize) {
+        for index in start.saturating_sub(1)..self.content.len().saturating_sub(1) {
+            if self.content.as_bytes()[index] == b'\n'
+                && self
+                    .line_offsets
+                    .last()
+                    .is_none_or(|last| *last < index + 1)
+            {
+                self.line_offsets.push(index + 1);
+            }
+        }
+        let output = self.output.as_mut().expect("command output viewer");
+        if self.nroff.is_some() {
+            // Nroff overstrikes can remove text. Hash its original byte stream,
+            // plus visible length so a final incomplete UTF-8 tail invalidates
+            // the cache without making the key depend on chunk boundaries.
+            self.content_fingerprint =
+                fingerprint(&(output.content_hasher.finish(), self.content.len()));
+        } else {
+            output
+                .content_hasher
+                .write(&self.content.as_bytes()[start..]);
+            self.content_fingerprint = output.content_hasher.finish();
+        }
+    }
+
+    pub(crate) fn finish_output(&mut self, status: String) {
+        let output = self.output.as_mut().expect("command output viewer");
+        if !output.utf8_tail.is_empty() {
+            output.utf8_tail.clear();
+            let start = self.content.len();
+            self.content.push('\u{fffd}');
+            self.index_appended_output(start);
+        }
+        self.set_output_status(status);
+    }
+
+    pub(crate) fn set_output_status(&mut self, status: String) {
+        if let Some(output) = self.output.as_mut() {
+            output.status = status;
+        }
+    }
+
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    pub(crate) fn apply_action_view_options(&mut self, options: crate::action_macros::ViewOptions) {
+        self.hex_mode = options.hex;
+        if options.nroff {
+            let original = std::mem::take(&mut self.content);
+            let mut state = NroffState::default();
+            state.append(&mut self.content, &original, &mut 0);
+            self.line_offsets = compute_line_offsets(&self.content);
+            self.content_fingerprint = fingerprint(&self.content);
+            self.nroff = Some(state);
+        }
     }
 
     /// Access a text line without scanning the preceding contents, even in hex mode.
@@ -359,12 +561,16 @@ fn read_file_prefix(
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<(Vec<u8>, bool)> {
     ensure_viewer_not_canceled(cancel_flag)?;
-    let mut file = fs::File::open(path)?;
-    read_prefix(&mut file, byte_limit, cancel_flag)
+    let mut result = None;
+    crate::vfs::VfsPath::Local(path.to_path_buf()).with_file(cancel_flag, &mut |_, file| {
+        result = Some(read_prefix(file, byte_limit, cancel_flag)?);
+        Ok(())
+    })?;
+    result.ok_or_else(|| io::Error::other("file reader did not provide data"))
 }
 
 fn read_prefix(
-    file: &mut impl Read,
+    file: &mut (impl Read + ?Sized),
     byte_limit: usize,
     cancel_flag: Option<&AtomicBool>,
 ) -> io::Result<(Vec<u8>, bool)> {
@@ -515,7 +721,11 @@ mod tests {
     fn viewer(bytes: &[u8]) -> ViewerState {
         let content = String::from_utf8_lossy(bytes).into_owned();
         ViewerState {
+            nroff: None,
             path: PathBuf::from("fixture"),
+            archive_location: None,
+            mounted_location: None,
+            output: None,
             bytes: bytes.to_vec(),
             line_offsets: compute_line_offsets(&content),
             content,

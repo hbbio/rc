@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 use globset::{GlobBuilder, GlobMatcher};
-use regex::{Regex, RegexBuilder};
+use regex::bytes::{Regex, RegexBuilder};
 
 use crate::{FileEntry, FindNameMode};
 
@@ -115,10 +115,14 @@ impl CompiledPanelFilter {
         if entry.is_parent() || (self.files_only && entry.is_dir()) {
             return true;
         }
+        self.matches_path(Path::new(&entry.name))
+    }
+
+    pub(crate) fn matches_path(&self, path: &Path) -> bool {
         match &self.matcher {
             PanelNameMatcher::Any => true,
-            PanelNameMatcher::Glob(matcher) => matcher.is_match(Path::new(&entry.name)),
-            PanelNameMatcher::Regex(regex) => regex.is_match(&entry.name),
+            PanelNameMatcher::Glob(matcher) => matcher.is_match(path),
+            PanelNameMatcher::Regex(regex) => regex.is_match(path.as_os_str().as_encoded_bytes()),
         }
     }
 }

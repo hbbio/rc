@@ -470,6 +470,7 @@ fn tar_formats_support_gnu_long_names_pax_paths_sizes_and_fractional_times() {
         let location = ArchiveLocation {
             archive: fixture.archive.clone(),
             directory: "pax".into(),
+            parent: None,
         };
         let entries = location
             .read_entries(SortMode::default(), true, None)

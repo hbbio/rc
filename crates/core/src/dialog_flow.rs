@@ -1,3 +1,4 @@
+use rc_shell::{decode_path_text, encode_path_text};
 use std::path::{Path, PathBuf};
 
 use crate::dialog::DialogEvent;
@@ -11,6 +12,26 @@ impl AppState {
 
     pub(super) fn apply_dialog_command(&mut self, command: AppCommand) -> CommandOutcome {
         match command {
+            AppCommand::Panel(panel, PanelCommand::OpenFtp) => self.open_ftp_dialog(panel),
+            AppCommand::Panel(panel, PanelCommand::OpenSftp) => self.open_ssh_dialog(panel, false),
+            AppCommand::Panel(panel, PanelCommand::OpenShellLink) => {
+                self.open_ssh_dialog(panel, true)
+            }
+            AppCommand::OpenEncoding => self.open_encoding_dialog(self.active_panel),
+            AppCommand::Panel(panel, PanelCommand::OpenEncoding) => {
+                self.open_encoding_dialog(panel)
+            }
+            AppCommand::CreateLink(kind) => self.open_link_dialog(kind),
+            AppCommand::EditSymlink => self.open_edit_symlink_dialog(),
+            AppCommand::Chmod => {
+                self.open_metadata_dialog(crate::metadata_change::MetadataAction::Chmod)
+            }
+            AppCommand::Chown => {
+                self.open_metadata_dialog(crate::metadata_change::MetadataAction::Chown)
+            }
+            AppCommand::AdvancedChown => {
+                self.open_metadata_dialog(crate::metadata_change::MetadataAction::Advanced)
+            }
             AppCommand::OpenConfirmDialog => self.start_rename_dialog(),
             AppCommand::OpenInputDialog => self.start_mkdir_dialog(),
             AppCommand::OpenQuickCd => self.start_quick_cd_dialog(),
@@ -21,6 +42,16 @@ impl AppState {
             }
             AppCommand::OpenSortOrder => self.open_panel_sort_order_dialog(self.active_panel),
             AppCommand::OpenPanelFilter => self.open_panel_filter_dialog(self.active_panel),
+            AppCommand::SelectGroup | AppCommand::UnselectGroup => {
+                self.open_group_selection_dialog(
+                    self.active_panel,
+                    command == AppCommand::SelectGroup,
+                    &PanelFilter {
+                        pattern: String::from("*"),
+                        ..PanelFilter::default()
+                    },
+                );
+            }
             AppCommand::Panel(panel, PanelCommand::OpenListingFormat) => {
                 self.open_panel_listing_format_dialog(panel)
             }
@@ -59,7 +90,9 @@ impl AppState {
                 }
             }
             AppCommand::DialogInputChar(ch) => {
-                if ch != ' ' || !self.toggle_panel_sort_dialog_reverse() {
+                if !self.accept_user_menu_hotkey(ch)
+                    && (ch != ' ' || !self.toggle_panel_sort_dialog_reverse())
+                {
                     let quick_cd_changed = self.quick_cd_dialog_is_active();
                     self.handle_dialog_event(DialogEvent::InsertChar(ch));
                     if quick_cd_changed {
@@ -112,9 +145,23 @@ impl AppState {
         self.set_status(format!("{} panel: choose listing format", panel.label()));
     }
 
+    fn push_user_listing_format_dialog(&mut self, panel: ActivePanel, value: Option<String>) {
+        let value = value.unwrap_or_else(|| {
+            self.settings.panel_options.user_listing_formats[panel.index()].clone()
+        });
+        self.push_dialog(
+            DialogState::input(
+                "User listing format",
+                "Columns: name size mtime perm nlink uid gid inode; optional :width",
+                value,
+            ),
+            PendingDialogAction::SetUserListingFormat { panel },
+        );
+    }
+
     fn open_panel_sort_order_dialog(&mut self, panel: ActivePanel) {
         let sort_mode = self.panels[panel.index()].sort_mode;
-        let is_archive = self.panels[panel.index()].is_archive();
+        let is_archive = self.panels[panel.index()].is_virtual();
         let items = SortField::ALL
             .into_iter()
             .map(|field| {
@@ -197,13 +244,13 @@ impl AppState {
             sources
                 .first()
                 .and_then(|source| source.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
+                .map(encode_path_text)
                 .unwrap_or_else(|| String::from("*"))
         };
         let dialog = DialogState::pair_input_with_default(
             "Move",
             "Destination directory:",
-            destination_dir.to_string_lossy(),
+            encode_path_text(destination_dir.as_os_str()),
             "New name:",
             &default_name,
             &default_name,
@@ -230,12 +277,7 @@ impl AppState {
         }
 
         let destination_dir = self.passive_panel().cwd.clone();
-        let source_base_dir = self
-            .active_panel()
-            .archive_location()
-            .and_then(|location| location.archive.parent())
-            .unwrap_or(&self.active_panel().cwd)
-            .to_path_buf();
+        let source_base_dir = self.active_panel().local_directory().to_path_buf();
         self.start_transfer_dialog_for_paths(
             kind,
             sources,
@@ -261,7 +303,7 @@ impl AppState {
             DialogState::input(
                 title,
                 "Destination directory:",
-                destination_dir.to_string_lossy(),
+                encode_path_text(destination_dir.as_os_str()),
             ),
             PendingDialogAction::TransferDestination {
                 kind,
@@ -331,7 +373,7 @@ impl AppState {
         let source = entry.path.clone();
         let current_name = source
             .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+            .map(encode_path_text)
             .unwrap_or_else(|| entry.name.clone());
         self.push_dialog(
             DialogState::input("Rename/Move", "New name:", current_name),
@@ -394,7 +436,159 @@ impl AppState {
             self.stop_quick_cd_search();
         }
         match (pending, result) {
+            (
+                Some(PendingDialogAction::UserMenu(menu)),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(entry) = index.and_then(|i| menu.entries.get(i)) {
+                    self.begin_action(&entry.command, entry.label.clone(), None);
+                }
+            }
+            (
+                Some(PendingDialogAction::UserMenuDebug(menu)),
+                DialogResult::ListboxSubmitted { .. },
+            ) => {
+                self.show_user_menu(menu);
+            }
+            (
+                Some(PendingDialogAction::UserMenu(_) | PendingDialogAction::UserMenuDebug(_)),
+                DialogResult::Canceled,
+            ) => {
+                self.set_status("User menu canceled");
+            }
+            (
+                Some(PendingDialogAction::SetFilenameEncoding { panel }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(encoding) = index.and_then(|i| FilenameEncoding::ALL.get(i)).copied() {
+                    self.set_filename_encoding(panel, encoding);
+                }
+            }
+            (Some(PendingDialogAction::SetFilenameEncoding { .. }), DialogResult::Canceled) => {
+                self.set_status("Filename encoding unchanged")
+            }
+            (
+                Some(PendingDialogAction::CreateLinks {
+                    kind,
+                    sources,
+                    base,
+                    panel,
+                }),
+                DialogResult::InputSubmitted(value),
+            ) => self.submit_link_dialog(kind, sources, base, panel, value),
+            (
+                Some(PendingDialogAction::EditSymlinks { paths, panel }),
+                DialogResult::InputSubmitted(value),
+            ) => self.submit_edit_symlink_dialog(paths, panel, value),
+            (
+                Some(
+                    PendingDialogAction::CreateLinks { .. }
+                    | PendingDialogAction::EditSymlinks { .. },
+                ),
+                DialogResult::Canceled,
+            ) => self.set_status("Links unchanged"),
+            (
+                Some(PendingDialogAction::MetadataChange {
+                    action,
+                    paths,
+                    panel,
+                }),
+                DialogResult::InputSubmitted(value),
+            ) => self.submit_metadata_dialog(action, paths, panel, value, String::new()),
+            (
+                Some(PendingDialogAction::MetadataChange {
+                    action,
+                    paths,
+                    panel,
+                }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_metadata_dialog(action, paths, panel, first, second),
+            (Some(PendingDialogAction::MetadataChange { .. }), DialogResult::Canceled) => {
+                self.set_status("Permissions/ownership unchanged")
+            }
+            (
+                Some(PendingDialogAction::SelectScreen { targets }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(target) = index.and_then(|i| targets.get(i)).cloned() {
+                    self.select_screen(target);
+                }
+            }
+            (Some(PendingDialogAction::SelectScreen { .. }), DialogResult::Canceled) => {
+                self.set_status("Screen unchanged");
+            }
+            (
+                Some(PendingDialogAction::LearnKey { chord, original }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.save_learned_binding(chord, original, first, second),
+            (
+                Some(PendingDialogAction::FilteredView { cwd }),
+                DialogResult::InputSubmitted(command),
+            ) => {
+                if !command.trim().is_empty() {
+                    self.start_command_capture(CommandCaptureSpec::shell(
+                        cwd,
+                        command,
+                        self.settings.shell.clone(),
+                    ));
+                }
+            }
+            (
+                Some(PendingDialogAction::ActionPrompt(pending)),
+                DialogResult::InputSubmitted(answer),
+            ) => self.answer_action_prompt(*pending, answer),
+            (Some(PendingDialogAction::ActionPrompt(_)), DialogResult::Canceled) => {
+                self.set_status("Action canceled")
+            }
+            (
+                Some(PendingDialogAction::CommandHistory { commands }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(command) = index.and_then(|index| commands.get(index)) {
+                    self.recall_command(command);
+                }
+            }
+            (
+                Some(PendingDialogAction::ViewFile { base_dir }),
+                DialogResult::InputSubmitted(value),
+            ) => {
+                self.view_file_input(&base_dir, &value);
+            }
+            (
+                Some(PendingDialogAction::FileHistory { entries }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(entry) = index.and_then(|index| entries.get(index)) {
+                    self.reopen_history_entry(entry);
+                }
+            }
+            (
+                Some(PendingDialogAction::VfsList { mounts }),
+                DialogResult::ListboxSubmitted { index, .. },
+            ) => {
+                if let Some(mount) = index.and_then(|index| mounts.get(index)) {
+                    self.inspect_vfs_mount(Arc::clone(mount));
+                }
+            }
+            (
+                Some(PendingDialogAction::VfsMount { mount }),
+                DialogResult::ListboxSubmitted {
+                    index: Some(index), ..
+                },
+            ) => self.act_on_vfs_mount(mount, index),
+            (
+                Some(PendingDialogAction::SshConnection { panel, shell }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_ssh_connection(panel, shell, &first, &second),
+            (
+                Some(PendingDialogAction::FtpConnection { panel }),
+                DialogResult::PairInputSubmitted { first, second },
+            ) => self.submit_ftp_connection(panel, &first, &second),
             (None, result) => self.set_status(result.status_line()),
+            (
+                Some(PendingDialogAction::ViewVfsFile { base }),
+                DialogResult::InputSubmitted(value),
+            ) => self.view_vfs_file_input(&base, &value),
             (
                 Some(PendingDialogAction::ConfirmDelete { targets, origin }),
                 DialogResult::ConfirmAccepted,
@@ -423,7 +617,7 @@ impl AppState {
                     self.set_status("Mkdir canceled: empty name");
                     return;
                 }
-                let input_path = PathBuf::from(value);
+                let input_path = PathBuf::from(decode_path_text(value));
                 let destination = if input_path.is_absolute() {
                     input_path
                 } else {
@@ -447,7 +641,7 @@ impl AppState {
                     self.set_status("Rename failed: source has no parent directory");
                     return;
                 };
-                let destination = parent.join(value);
+                let destination = parent.join(decode_path_text(value));
                 if destination == source {
                     self.set_status("Rename skipped: name unchanged");
                     return;
@@ -476,12 +670,11 @@ impl AppState {
                     self.set_status("Copy/Move canceled: empty destination");
                     return;
                 }
-                let input_path = PathBuf::from(value);
-                let destination_dir = if input_path.is_absolute() {
-                    input_path
-                } else {
-                    source_base_dir.join(input_path)
-                };
+                // Reject display identities before resolving a relative local path.
+                if self.reject_virtual_transfer_destination(Path::new(&decode_path_text(value))) {
+                    return;
+                }
+                let destination_dir = parse_destination_path(&source_base_dir, value);
                 if self.settings.confirmation.confirm_overwrite {
                     let selected = overwrite_policy_index(self.overwrite_policy());
                     self.push_dialog(
@@ -526,6 +719,11 @@ impl AppState {
                 let destination_input = first.trim();
                 if destination_input.is_empty() {
                     self.set_status("Copy/Move canceled: empty destination");
+                    return;
+                }
+                if self.reject_virtual_transfer_destination(Path::new(&decode_path_text(
+                    destination_input,
+                ))) {
                     return;
                 }
                 let destination = parse_destination_path(&source_base_dir, destination_input);
@@ -693,12 +891,32 @@ impl AppState {
                 DialogResult::ListboxSubmitted { index, .. },
             ) => {
                 if let Some(format) = index.and_then(PanelListingFormat::from_index) {
-                    self.set_panel_listing_format(panel, format);
+                    if format == PanelListingFormat::User {
+                        self.push_user_listing_format_dialog(panel, None);
+                    } else {
+                        self.set_panel_listing_format(panel, format);
+                    }
                 } else {
                     self.set_status("Listing format unchanged");
                 }
             }
             (Some(PendingDialogAction::SetPanelListingFormat { .. }), DialogResult::Canceled) => {
+                self.set_status("Listing format unchanged");
+            }
+            (
+                Some(PendingDialogAction::SetUserListingFormat { panel }),
+                DialogResult::InputSubmitted(value),
+            ) => match UserListingFormat::parse(&value) {
+                Ok(_) => {
+                    self.settings.panel_options.user_listing_formats[panel.index()] = value;
+                    self.set_panel_listing_format(panel, PanelListingFormat::User);
+                }
+                Err(error) => {
+                    self.push_user_listing_format_dialog(panel, Some(value));
+                    self.set_status(error);
+                }
+            },
+            (Some(PendingDialogAction::SetUserListingFormat { .. }), DialogResult::Canceled) => {
                 self.set_status("Listing format unchanged");
             }
             (
@@ -749,6 +967,13 @@ impl AppState {
             }
             (Some(PendingDialogAction::SetPanelFilter { .. }), DialogResult::Canceled) => {
                 self.set_status("Filter unchanged");
+            }
+            (
+                Some(PendingDialogAction::SetGroupSelection { panel, select }),
+                DialogResult::FilterSubmitted(filter),
+            ) => self.apply_group_selection(panel, select, filter),
+            (Some(PendingDialogAction::SetGroupSelection { .. }), DialogResult::Canceled) => {
+                self.set_status("Selection unchanged");
             }
             (Some(PendingDialogAction::FindSearch), DialogResult::FindSubmitted(spec)) => {
                 self.start_find_search(*spec);
@@ -976,7 +1201,7 @@ fn overwrite_policy_items() -> Vec<String> {
 }
 
 fn parse_destination_path(base_dir: &Path, value: &str) -> PathBuf {
-    let input_path = PathBuf::from(value);
+    let input_path = PathBuf::from(decode_path_text(value));
     if input_path.is_absolute() {
         input_path
     } else {
@@ -990,20 +1215,19 @@ fn most_common_file_extension_pattern(sources: &[PathBuf]) -> String {
         let Some(name) = source.file_name() else {
             return String::from("*");
         };
-        let name = name.to_string_lossy();
-        let extension = Path::new(name.as_ref())
+        let extension = Path::new(name)
             .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("");
+            .map(encode_path_text)
+            .unwrap_or_default();
         if extension.is_empty() || extension.contains('*') {
             return String::from("*");
         }
         if let Some(current) = common_extension.as_ref() {
-            if current != extension {
+            if current != &extension {
                 return String::from("*");
             }
         } else {
-            common_extension = Some(String::from(extension));
+            common_extension = Some(extension);
         }
     }
 
@@ -1020,49 +1244,63 @@ fn rename_sources(
     old_pattern: &str,
     new_pattern: &str,
     use_shell_patterns: bool,
-) -> Vec<String> {
+) -> Vec<std::ffi::OsString> {
+    let old_pattern = decode_path_text(old_pattern);
+    let new_pattern = decode_path_text(new_pattern);
     sources
         .iter()
         .map(|source| {
-            let source_name = source
-                .file_name()
-                .map_or_else(|| source.to_string_lossy(), |name| name.to_string_lossy())
-                .into_owned();
-            rename_source_name(&source_name, old_pattern, new_pattern, use_shell_patterns)
+            let source_name = source.file_name().unwrap_or(source.as_os_str());
+            rename_source_name(source_name, &old_pattern, &new_pattern, use_shell_patterns)
         })
         .collect()
 }
 
 fn rename_source_name(
-    source_name: &str,
-    old_pattern: &str,
-    new_pattern: &str,
+    source_name: &std::ffi::OsStr,
+    old_pattern: &std::ffi::OsStr,
+    new_pattern: &std::ffi::OsStr,
     use_shell_patterns: bool,
-) -> String {
+) -> std::ffi::OsString {
     if use_shell_patterns {
-        if let Some(capture) = wildcard_capture(source_name, old_pattern) {
-            if new_pattern.contains('*') {
-                return new_pattern.replace('*', &capture);
+        if let Some(capture) = wildcard_capture(
+            source_name.as_encoded_bytes(),
+            old_pattern.as_encoded_bytes(),
+        ) {
+            if new_pattern.as_encoded_bytes().contains(&b'*') {
+                let mut result = Vec::new();
+                for (index, part) in new_pattern
+                    .as_encoded_bytes()
+                    .split(|byte| *byte == b'*')
+                    .enumerate()
+                {
+                    if index != 0 {
+                        result.extend_from_slice(capture);
+                    }
+                    result.extend_from_slice(part);
+                }
+                return crate::action_macros::os_from_bytes(&result)
+                    .unwrap_or_else(|_| source_name.to_owned());
             }
-            return new_pattern.to_string();
+            return new_pattern.to_owned();
         }
-        return source_name.to_string();
+        return source_name.to_owned();
     }
     if source_name == old_pattern {
-        new_pattern.to_string()
+        new_pattern.to_owned()
     } else {
-        source_name.to_string()
+        source_name.to_owned()
     }
 }
 
-fn wildcard_capture(haystack: &str, pattern: &str) -> Option<String> {
-    let parts: Vec<_> = pattern.split('*').collect();
+fn wildcard_capture<'a>(haystack: &'a [u8], pattern: &[u8]) -> Option<&'a [u8]> {
+    let parts: Vec<_> = pattern.split(|byte| *byte == b'*').collect();
     if parts.len() > 2 {
         return None;
     }
     if parts.len() == 1 {
         if haystack == pattern {
-            return Some(String::new());
+            return Some(&[]);
         }
         return None;
     }
@@ -1076,7 +1314,7 @@ fn wildcard_capture(haystack: &str, pattern: &str) -> Option<String> {
     if middle_end < middle_start {
         return None;
     }
-    Some(haystack[middle_start..middle_end].to_string())
+    Some(&haystack[middle_start..middle_end])
 }
 
 fn overwrite_policy_index(policy: OverwritePolicy) -> usize {
@@ -1100,6 +1338,31 @@ fn overwrite_policy_from_index(index: usize) -> OverwritePolicy {
 mod rename_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn rename_masks_preserve_native_bytes_and_literal_backslashes() {
+        use std::os::unix::ffi::OsStringExt;
+        let source = PathBuf::from(std::ffi::OsString::from_vec(b"raw\xff\\xFF.rs".to_vec()));
+        let names = rename_sources(std::slice::from_ref(&source), "*.rs", "*.txt", true);
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from_vec(b"raw\xff\\xFF.txt".to_vec())]
+        );
+        let old = encode_path_text(source.as_os_str());
+        let renamed = rename_sources(&[source], &old, r"new\xFE.txt", false);
+        assert_eq!(
+            renamed,
+            vec![std::ffi::OsString::from_vec(b"new\xfe.txt".to_vec())]
+        );
+        let sources = [PathBuf::from(r"a.\x41"), PathBuf::from(r"b.\x41")];
+        let mask = most_common_file_extension_pattern(&sources);
+        assert_eq!(mask, r"*.\\x41");
+        assert_eq!(
+            rename_sources(&sources, &mask, "*.bak", true),
+            vec!["a.bak", "b.bak"]
+        );
+    }
+
     #[test]
     fn wildcard_extensions_use_a_valid_catch_all_pattern() {
         let sources = [PathBuf::from("first.*"), PathBuf::from("second.*")];
@@ -1108,7 +1371,7 @@ mod rename_tests {
         assert_eq!(pattern, "*");
         assert_eq!(
             rename_sources(&sources, &pattern, "*.bak", true),
-            vec![String::from("first.*.bak"), String::from("second.*.bak")]
+            vec!["first.*.bak", "second.*.bak"]
         );
     }
 }

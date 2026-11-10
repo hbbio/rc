@@ -177,6 +177,8 @@ pub struct PanelOptionsSettings {
     pub show_hidden_files: bool,
     pub sort_modes: [SortMode; 2],
     pub listing_formats: [PanelListingFormat; 2],
+    pub user_listing_formats: [String; 2],
+    pub filename_encodings: [crate::FilenameEncoding; 2],
     pub filters: [PanelFilter; 2],
 }
 
@@ -186,6 +188,10 @@ impl Default for PanelOptionsSettings {
             show_hidden_files: true,
             sort_modes: [SortMode::default(); 2],
             listing_formats: [PanelListingFormat::Full; 2],
+            filename_encodings: [crate::FilenameEncoding::Utf8; 2],
+            user_listing_formats: std::array::from_fn(|_| {
+                crate::DEFAULT_USER_LISTING_FORMAT.into()
+            }),
             filters: std::array::from_fn(|_| PanelFilter::default()),
         }
     }
@@ -243,6 +249,7 @@ impl Default for DisplayBitsSettings {
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct LearnKeysSettings {
     pub last_learned_binding: Option<String>,
+    pub bindings: Vec<crate::keymap::LearnedBinding>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

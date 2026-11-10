@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -6,7 +7,7 @@ use std::time::Instant;
 use rc_shell::{
     CompletionCandidate, CompletionEdit, CompletionOutcome, CompletionRequest, CompletionResponse,
     LiteralCd, ResolvedShell, ShellDialect, ShellHistoryMode, ShellResolution, ShellSettings,
-    parse_literal_cd, quote_literal_token, resolve_shell,
+    parse_literal_cd, quote_native_argument, resolve_shell,
 };
 use tui_input::{Input, InputRequest};
 use unicode_segmentation::UnicodeSegmentation;
@@ -52,6 +53,7 @@ pub enum CommandLineInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForegroundShellRequest {
     pub activation_id: u64,
+    pub buffer_revision: u64,
     pub command: String,
     pub cwd: PathBuf,
     pub shell: ResolvedShell,
@@ -569,7 +571,7 @@ pub(crate) struct PendingShellResolution {
     transient_status_line: String,
     transient_status_expires_at: Option<Instant>,
     transient_status_generation: u64,
-    command_line_insertions: Vec<Vec<String>>,
+    command_line_insertions: Vec<Vec<OsString>>,
 }
 
 impl CommandLineSession {
@@ -589,6 +591,39 @@ impl CommandLineSession {
 }
 
 impl AppState {
+    pub(crate) fn open_command_history(&mut self) {
+        if self.command_line.history_mode() == ShellHistoryMode::Off {
+            self.set_status("Command history is disabled");
+            return;
+        }
+        let commands: Vec<String> = self.command_line.history().iter().rev().cloned().collect();
+        if commands.is_empty() {
+            self.set_status("Command history is empty");
+            return;
+        }
+        self.cancel_and_close_completion();
+        let labels = commands
+            .iter()
+            .map(|command| normalize_status_message(command.clone()))
+            .collect();
+        self.push_dialog(
+            crate::DialogState::listbox_with_hint(
+                "Command history",
+                labels,
+                0,
+                "Enter: recall for editing",
+            ),
+            crate::PendingDialogAction::CommandHistory { commands },
+        );
+    }
+
+    pub(crate) fn recall_command(&mut self, command: &str) {
+        self.command_line.leave_history_navigation();
+        self.command_line
+            .replace(command.to_owned(), command.chars().count());
+        self.open_command_line();
+    }
+
     pub fn command_line_model(&self) -> &CommandLineModel {
         &self.command_line
     }
@@ -793,7 +828,7 @@ impl AppState {
         }
     }
 
-    fn panel_file_arguments(&self, command: AppCommand) -> Result<Vec<String>, &'static str> {
+    fn panel_file_arguments(&self, command: AppCommand) -> Result<Vec<OsString>, &'static str> {
         let panel = if command == AppCommand::PutOtherTagged {
             self.passive_panel()
         } else {
@@ -811,13 +846,19 @@ impl AppState {
                 if tagged.is_empty() {
                     return selected_panel_argument(panel, false).map(|arg| vec![arg]);
                 }
-                tagged.iter().map(|path| path_file_name(path)).collect()
+                tagged
+                    .iter()
+                    .map(|path| panel_item_argument(panel, path))
+                    .collect()
             }
             _ => unreachable!("non-insertion command passed to panel insertion: {command:?}"),
         }
     }
 
-    fn insert_command_line_arguments(&mut self, arguments: &[String]) -> Result<(), &'static str> {
+    fn insert_command_line_arguments(
+        &mut self,
+        arguments: &[OsString],
+    ) -> Result<(), &'static str> {
         let dialect = self
             .command_line_session()
             .map(|session| session.shell.dialect)
@@ -1040,6 +1081,7 @@ impl AppState {
         self.pending_foreground_shell_requests
             .push(ForegroundShellRequest {
                 activation_id,
+                buffer_revision,
                 command,
                 cwd,
                 shell,
@@ -1117,6 +1159,64 @@ impl AppState {
         std::mem::take(&mut self.pending_foreground_shell_requests)
     }
 
+    pub fn take_panel_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_panel_toggle)
+    }
+
+    pub fn set_shell_available(&mut self, available: bool) {
+        self.shell_available = available;
+    }
+
+    /// Follow a shell directory change only while its original panel is still
+    /// active and has not been navigated elsewhere by the user.
+    pub fn follow_shell_directory(
+        &mut self,
+        panel: crate::ActivePanel,
+        expected: &Path,
+        directory: &Path,
+    ) -> io::Result<bool> {
+        if self.active_panel != panel
+            || self.active_panel().cwd != expected
+            || !directory.is_absolute()
+            || self.active_panel().local_directory() == directory
+        {
+            return Ok(false);
+        }
+        self.set_active_panel_directory(directory.to_path_buf())
+    }
+
+    pub fn finish_persistent_shell_request(
+        &mut self,
+        request: &ForegroundShellRequest,
+        result: Result<i32, String>,
+    ) {
+        match result {
+            Ok(status) => {
+                self.command_line.set_last_exit_status(status);
+                // The user may have closed the modal prompt while this command
+                // ran. Retire its unchanged draft without touching newer text.
+                if self.command_line.revision() == request.buffer_revision {
+                    self.command_line.clear_after_success();
+                }
+                if let Some(session) =
+                    self.command_line_session_by_activation_mut(request.activation_id)
+                {
+                    session.notice = None;
+                }
+            }
+            Err(error) => {
+                let message = format!("Command failed: {error}");
+                if let Some(session) =
+                    self.command_line_session_by_activation_mut(request.activation_id)
+                {
+                    session.notice = Some(message);
+                } else {
+                    self.set_status(message);
+                }
+            }
+        }
+    }
+
     pub fn handle_completion_response(&mut self, response: CompletionResponse) {
         let model_matches = self.command_line.revision() == response.buffer_revision
             && self.command_line.value() == response.original_buffer;
@@ -1174,8 +1274,8 @@ impl AppState {
         result: Result<i32, String>,
     ) {
         let active = self
-            .command_line_session()
-            .is_some_and(|session| session.activation_id == activation_id);
+            .command_line_session_by_activation_mut(activation_id)
+            .is_some();
         if !active {
             return;
         }
@@ -1183,9 +1283,15 @@ impl AppState {
             Ok(status) => {
                 self.command_line.set_last_exit_status(status);
                 self.command_line.clear_after_success();
-                self.clear_command_line_notice();
+                if let Some(session) = self.command_line_session_by_activation_mut(activation_id) {
+                    session.notice = None;
+                }
             }
-            Err(error) => self.set_command_line_notice(format!("Command failed: {error}")),
+            Err(error) => {
+                if let Some(session) = self.command_line_session_by_activation_mut(activation_id) {
+                    session.notice = Some(format!("Command failed: {error}"));
+                }
+            }
         }
     }
 
@@ -1238,30 +1344,32 @@ impl AppState {
     }
 }
 
-fn selected_panel_argument(panel: &PanelState, full_path: bool) -> Result<String, &'static str> {
+fn selected_panel_argument(panel: &PanelState, full_path: bool) -> Result<OsString, &'static str> {
     let entry = panel.selected_entry().ok_or("No panel entry is selected")?;
     if full_path {
-        return entry
-            .path
-            .to_str()
-            .map(ToString::to_string)
-            .ok_or("Selected path is not valid UTF-8 and cannot be inserted");
+        return Ok(entry.path.as_os_str().to_owned());
     }
     if entry.is_parent() {
-        return Ok(String::from(".."));
+        return Ok(OsString::from(".."));
     }
-    path_file_name(&entry.path)
+    panel_item_argument(panel, &entry.path)
 }
 
-fn path_file_name(path: &Path) -> Result<String, &'static str> {
+fn panel_item_argument(panel: &PanelState, path: &Path) -> Result<OsString, &'static str> {
+    if panel.is_panelized() {
+        return Ok(path
+            .strip_prefix(&panel.cwd)
+            .unwrap_or(path)
+            .as_os_str()
+            .to_owned());
+    }
     path.file_name()
-        .and_then(|name| name.to_str())
-        .map(ToString::to_string)
-        .ok_or("Selected file name is not valid UTF-8 and cannot be inserted")
+        .map(OsStr::to_owned)
+        .ok_or("Selected path has no file name")
 }
 
-fn quote_command_line_arguments(
-    arguments: &[String],
+fn quote_command_line_arguments<S: AsRef<OsStr>>(
+    arguments: &[S],
     dialect: ShellDialect,
 ) -> Result<String, &'static str> {
     if arguments.is_empty() {
@@ -1269,13 +1377,14 @@ fn quote_command_line_arguments(
     }
     let mut insertion = String::new();
     for argument in arguments {
+        let argument = argument.as_ref();
         if argument.len() > COMMAND_BUFFER_LIMIT_BYTES {
             return Err("Selected file list exceeds the 64 KiB command limit");
         }
-        if sanitize_paste(argument).ok().as_deref() != Some(argument.as_str()) {
-            return Err("Selected file name contains unsupported control characters");
+        if argument.as_encoded_bytes().contains(&0) {
+            return Err("Selected file name contains NUL");
         }
-        let quoted = quote_literal_token(argument, dialect);
+        let quoted = quote_native_argument(argument, dialect);
         let separator_len = usize::from(!insertion.is_empty());
         if insertion
             .len()
@@ -1311,17 +1420,16 @@ fn command_line_input_refines_completion(input: &CommandLineInput) -> bool {
 
 fn expand_cd_path(path: PathBuf, cwd: &Path, expand_home: bool) -> PathBuf {
     if expand_home {
-        let text = path.to_string_lossy();
-        if text == "~" {
+        if path == Path::new("~") {
             return current_user_home_directory().unwrap_or(path);
         }
-        if let Some(suffix) = text.strip_prefix("~/")
+        if let Ok(suffix) = path.strip_prefix("~")
             && let Some(home) = current_user_home_directory()
         {
             // PathBuf::join replaces its base for an absolute suffix. A repeated slash after
             // the tilde (for example `~//tmp`) leaves such a suffix after strip_prefix, but
             // shells still interpret the path relative to HOME.
-            return home.join(suffix.trim_start_matches('/'));
+            return home.join(suffix);
         }
     }
     if path.is_absolute() {
@@ -1398,6 +1506,78 @@ mod tests {
 
     fn model_with_history() -> CommandLineModel {
         CommandLineModel::new(ShellHistoryMode::Session)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_history_recalls_for_editing_without_executing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = AppState::new(root.path().to_path_buf()).unwrap();
+        app.command_line.record_history("echo first");
+        app.command_line
+            .record_history("printf 'a\\nb'\necho second");
+        app.command_line.replace("draft".into(), 2);
+        app.apply(AppCommand::OpenCommandHistory).unwrap();
+        let Route::Dialog(dialog) = app.top_route() else {
+            panic!("history dialog")
+        };
+        let crate::DialogKind::Listbox(list) = &dialog.kind else {
+            panic!("history list")
+        };
+        assert_eq!(list.items.len(), 2);
+        assert!(!list.items[0].contains('\n'));
+        app.apply(AppCommand::DialogAccept).unwrap();
+        let request = app.take_pending_shell_resolution_request().unwrap();
+        app.handle_shell_resolution_response(resolve_shell_request_blocking(request));
+        assert!(app.command_line_session().is_some());
+        assert_eq!(app.command_line.value(), "printf 'a\\nb'\necho second");
+        assert_eq!(
+            app.command_line.cursor_codepoint(),
+            app.command_line.value().chars().count()
+        );
+        assert!(app.take_pending_foreground_shell_requests().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_history_cancel_preserves_draft_and_off_hides_retained_history() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = AppState::new(root.path().to_path_buf()).unwrap();
+        open_command_line_for_test(&mut app);
+        app.command_line.record_history("old command");
+        app.command_line.replace("draft text".into(), 3);
+        app.apply(AppCommand::OpenCommandHistory).unwrap();
+        app.apply(AppCommand::DialogCancel).unwrap();
+        assert!(app.command_line_session().is_some());
+        assert_eq!(app.command_line.value(), "draft text");
+        assert_eq!(app.command_line.cursor_codepoint(), 3);
+        app.command_line.set_history_mode(ShellHistoryMode::Off);
+        app.apply(AppCommand::OpenCommandHistory).unwrap();
+        assert!(matches!(app.top_route(), Route::CommandLine(_)));
+        assert!(app.status_line.contains("disabled"));
+    }
+
+    #[test]
+    fn command_history_binding_preserves_hotlist_shortcut() {
+        use crate::keymap::{KeyChord, KeyCode, KeyCommand, KeyContext, KeyModifiers, Keymap};
+        let keymap = Keymap::bundled_mc_default().unwrap();
+        for (shift, expected) in [
+            (true, KeyCommand::OpenCommandHistory),
+            (false, KeyCommand::OpenHotlist),
+        ] {
+            let chord = KeyChord {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers {
+                    alt: true,
+                    ctrl: false,
+                    shift,
+                },
+            };
+            assert_eq!(
+                keymap.resolve(KeyContext::FileManager, chord),
+                Some(&expected)
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1611,7 +1791,10 @@ mod tests {
         );
         assert_eq!(
             quote_command_line_arguments(&[String::from("line\nbreak")], ShellDialect::Posix),
-            Err("Selected file name contains unsupported control characters")
+            Ok(quote_native_argument(
+                OsStr::new("line\nbreak"),
+                ShellDialect::Posix
+            ))
         );
         assert_eq!(
             quote_command_line_arguments(
@@ -1619,6 +1802,91 @@ mod tests {
                 ShellDialect::Posix,
             ),
             Err("Selected file list exceeds the 64 KiB command limit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_panel_insertion_survives_foreground_invocation_and_history() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = tempfile::tempdir().unwrap();
+        let name = OsString::from_vec(b"raw\xff'\"\n\n".to_vec());
+        let mut app = crate::tests::app_with_loaded_panels(root.path().to_owned());
+        app.panels[0].entries = vec![crate::FileEntry::file(
+            "native".into(),
+            root.path().join(&name),
+            0,
+            None,
+        )];
+        app.panels[0].cursor = 0;
+        open_command_line_for_test(&mut app);
+        app.handle_command_line_input(CommandLineInput::Paste("printf '%s' ".into()))
+            .unwrap();
+        app.apply(AppCommand::PutCurrentSelected).unwrap();
+        let draft = app.command_line_model().value().to_owned();
+        app.handle_command_line_input(CommandLineInput::Enter)
+            .unwrap();
+        let request = app.take_pending_foreground_shell_requests().remove(0);
+        let invocation = request.shell.invocation(&request.command);
+        let output = std::process::Command::new(invocation.program)
+            .args(invocation.arguments)
+            .envs(invocation.environment)
+            .current_dir(&request.cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, name.as_encoded_bytes());
+        app.finish_foreground_shell_request(request.activation_id, Ok(0));
+        assert_eq!(app.command_line_model().history().back(), Some(&draft));
+        app.apply(AppCommand::CopySelectedPath).unwrap();
+        let copied = app.take_pending_clipboard_copy_requests().remove(0);
+        assert_eq!(
+            PathBuf::from(rc_shell::decode_path_text(&copied.text)),
+            root.path().join(name)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_cd_home_expansion_and_panelized_arguments_keep_relative_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let relative = OsString::from_vec(b"sub/raw\xff".to_vec());
+        let Some(home) = current_user_home_directory() else {
+            return;
+        };
+        let token = quote_native_argument(&relative, ShellDialect::Posix);
+        let Some(LiteralCd::Path { path, expand_home }) =
+            parse_literal_cd(&format!("cd ~/{token}"), ShellDialect::Posix)
+        else {
+            panic!("literal native cd");
+        };
+        assert_eq!(
+            expand_cd_path(path, Path::new("/"), expand_home),
+            home.join(&relative)
+        );
+        let root = tempfile::tempdir().unwrap();
+        let mut app = crate::tests::app_with_loaded_panels(root.path().to_owned());
+        app.panels[0].source = crate::PanelListingSource::Panelize {
+            command: "unused".into(),
+        };
+        let path = root.path().join(&relative);
+        app.panels[0].entries = vec![crate::FileEntry::file(
+            "native".into(),
+            path.clone(),
+            0,
+            None,
+        )];
+        app.panels[0].cursor = 0;
+        assert_eq!(
+            app.panel_file_arguments(AppCommand::PutCurrentSelected)
+                .unwrap(),
+            vec![relative.clone()]
+        );
+        app.panels[0].tagged.insert(path);
+        assert_eq!(
+            app.panel_file_arguments(AppCommand::PutCurrentTagged)
+                .unwrap(),
+            vec![relative]
         );
     }
 
@@ -1688,7 +1956,7 @@ mod tests {
             .expect("full path action");
         assert_eq!(
             app.command_line_model().value(),
-            quote_literal_token(
+            rc_shell::quote_literal_token(
                 root.join("two words's.txt")
                     .to_str()
                     .expect("UTF-8 fixture"),
@@ -1759,18 +2027,21 @@ mod tests {
             .active_panel()
             .entries
             .iter()
-            .position(|entry| entry.name == "line\nbreak")
+            .position(|entry| entry.path.file_name() == Some(std::ffi::OsStr::new("line\nbreak")))
             .expect("control-character fixture");
         app.active_panel_mut().cursor = invalid;
         app.apply(AppCommand::PutCurrentSelected)
-            .expect("invalid insertion should be nonfatal");
-        assert_eq!(app.command_line_model().value(), "");
+            .expect("native insertion should succeed");
+        assert_eq!(
+            app.command_line_model().value(),
+            quote_native_argument(OsStr::new("line\nbreak"), ShellDialect::Posix)
+        );
         assert_eq!(
             app.command_line_session()
                 .expect("session")
                 .notice
                 .as_deref(),
-            Some("Selected file name contains unsupported control characters")
+            None
         );
 
         std::fs::remove_dir_all(root).expect("fixture cleanup");

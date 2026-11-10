@@ -11,7 +11,13 @@ and fast directory navigation.
 
 ### Panels and navigation
 
-- Two independent directory panels with Full, Brief, and Long layouts.
+- Two independent directory panels with Full, Brief, Long, and user-defined layouts.
+  Choose **Listing format → User defined** to arrange `name`, `size`, `mtime`,
+  `perm`, `nlink`, `uid`, `gid`, and `inode` columns, separated by spaces or commas.
+  Add `:width` (1–256) for a fixed width; an unsized `name` fills available space.
+  For example, `perm size:9 name`. Formats are saved per panel with Save setup.
+- `Ctrl-U` swaps the panels with their selection, tags, listing settings, and
+  navigation history. Focus follows the active listing.
 - Browse ZIP, TAR, gzip TAR, and bzip2 TAR archives as read-only folders, with
   normal navigation, sorting, filtering, and tagging.
 - Native filesystem notifications automatically refresh both panels and the open
@@ -19,8 +25,35 @@ and fast directory navigation.
   and scanned in the background while preserving selection and tags.
 - Per-panel sorting, reverse order, glob or regular-expression filters, hidden-file
   control, and persisted configuration.
+- **Left/Right → Encoding** (`Alt-E`) selects the filename encoding on Unix:
+  UTF-8, Windows-1252/1251, ISO-8859-2, KOI8-R, Shift_JIS, EUC-JP, GBK, Big5,
+  EUC-KR, or CP437. Listings, sorting, and panel filters use decoded names; filesystem
+  operations retain original path bytes. The setting also applies to archive and
+  panelized names, follows panel swaps, and persists with Save setup. It does not
+  change file contents or the terminal encoding.
+  ZIP names that are not UTF-8 default to CP437 unless another codec is selected.
+- UTF-8 listings and editable path fields preserve Unix filenames with reversible
+  `\xHH` byte escapes; a literal backslash appears as `\\`. Copy/move, rename,
+  mkdir, link targets, hotlist paths, View file, and Find's start directory accept
+  this spelling. Batch rename masks operate on original bytes. Regex filename
+  search can match raw bytes with patterns such as `(?-u:\xFF)`; editor `{path}`
+  placeholders also retain native bytes. Saved path settings use separate encoded
+  keys when needed, while existing plain-path entries retain their meaning.
+- Panel-to-command insertion and filesystem completion retain native bytes through
+  quoted `RC_NATIVE_HEX_…` references when a filename contains invalid UTF-8 or
+  control characters. Keep these references intact when editing a command; rc
+  supplies their values to the selected POSIX or Fish shell. They survive session
+  history and work with literal `cd`, Quick cd, and completion inside such
+  directories. Clipboard paths use the same reversible spelling as path fields.
 - Tagging for batch operations, recursive selection totals, responsive Brief-mode
   columns, and mouse selection or activation.
+- `Ctrl-Space` calculates recursive apparent sizes for tagged directories, or all
+  visible directories when none are tagged. Results update the size column and
+  size sorting without moving the selection. The cancelable scan supports archives,
+  does not follow local symlinks, and reports unreadable entries as partial results.
+- Select or unselect groups with glob or regular-expression patterns, optional
+  case-insensitive matching, and control over including directories. These
+  commands affect visible entries and preserve tags hidden by a listing filter.
 - Quick view and file information in the passive panel.
 - Quick CD for exact paths, `~`, Unix `~user`, `cd -`, and ranked
   case-insensitive directory search.
@@ -31,8 +64,34 @@ and fast directory navigation.
 ### Files and jobs
 
 - Copy, move, rename, mkdir, and delete for individual or tagged entries.
+- On Unix, **File → Chmod** (`Ctrl-X c`), **Chown** (`Ctrl-X o`), and
+  **Advanced chown** change selected or tagged entries in a cancelable background
+  job. Chmod accepts octal modes or explicit `u/g/o/a` clauses with `+`, `-`, `=`
+  and `rwxXst`, such as `u+rw,g-w,o=r`. As in GNU chmod, clauses apply left to
+  right, and `X` checks the permissions left by preceding clauses. Chown accepts
+  account names or numeric IDs; blank fields keep existing values. Advanced chown
+  combines `owner:group` and an
+  optional mode. Operations affect only the selected entries, without recursion.
+  Chmod rejects symlinks; chown changes the link itself. Completed changes remain
+  if a later entry fails or the job is canceled.
+- **File → Link / Symlink / Relative symlink** (`Ctrl-X l/s/v`) creates links
+  for selected or tagged entries on Unix. Destinations are literal paths relative
+  to the passive panel; `.` uses that directory and the original names. Tagged
+  batches require an existing directory. Existing destinations are never replaced.
+  Hard links require regular files on the same filesystem; relative symlinks are
+  calculated from each destination directory, including directory aliases.
+  **Edit symlink** (`Ctrl-X Ctrl-S`) changes each selected link to the entered
+  literal target, including dangling links, without following it. Editing uses
+  atomic exchange on Linux/macOS; filesystems lacking it report an error. If an
+  entry changes concurrently, rc rolls back and reports a preserved recovery path.
+  Completed batch entries remain if a later entry fails or the job is canceled.
 - Background execution with progress, cancellation, overwrite policies, and a jobs
   screen.
+- Alt + backtick opens the screen list from panels, viewers, searches, trees, help, and
+  jobs. Switch to File manager to keep the current screen open, then restore it
+  later with its cursor and search state intact. Background searches and captured
+  output continue while their screens are suspended. Up to 16 screens can be
+  suspended; restore a screen and close it normally to release it.
 - Metadata preservation, symlink-aware operations, validation against recursive
   destinations, and rollback when an overwrite fails.
 - Incremental, cancelable directory refreshes that preserve selection and tags.
@@ -56,7 +115,7 @@ panelize, and adding the current directory to the hotlist require a local direct
 
 ZIP browsing reads directory metadata without decompressing payloads. Plain TAR
 browsing reads headers and seeks past payloads. Opening a compressed TAR for the
-first time requires a cancellable decompression scan to build its directory and
+first time without a saved index requires a cancellable decompression scan to build its directory and
 seek index. No temporary directory tree or full decompressed TAR is written.
 Indexes are shared between panes and reused for navigation, sorting, size totals,
 and previews/copies during the session. Gzip reads resume from decoder checkpoints;
@@ -70,11 +129,31 @@ archives grow. A large metadata index can exceed the soft budget to keep navigat
 usable. Indexes are invalidated when the source file's identity, size, or timestamps
 change. Use manual refresh to update an open pane after external changes.
 
+On Unix, metadata indexes also survive application restarts in
+`$XDG_CACHE_HOME/rust-commander/archive-indexes`, or
+`~/.cache/rust-commander/archive-indexes` when that variable is unset. The directory
+and files are private to the current user. Atomic, versioned cache files include
+source identities and checksums; missing, corrupt, or outdated entries are rebuilt.
+The disk cache uses a soft budget of 64 indexes and 256 MiB, with a 64 MiB limit per index.
+Larger indexes remain available through the in-memory cache. Nested metadata keys
+include the outer source and every container boundary. Compressed seek checkpoints
+are rebuilt on the first member read after restarting; metadata-only browsing
+does not require that scan. An unwritable cache does not prevent archive access.
+
 ZIP Stored/Deflate entries and TAR regular files/directories are supported,
 including GNU long names and PAX paths, sizes, and modification times. Repeated TAR
 names use the last record. Encrypted ZIP contents, archive symlinks, hard links,
-sparse files, special files, and nested archive browsing are not supported for
+sparse files, and special files are not supported for
 viewing/extraction. Unsafe member paths are omitted.
+
+Enter opens supported archives inside other archives, up to eight container levels.
+`..` returns to the enclosing archive and selects the container just left. Viewing,
+file history, size totals, and copying work at every level. Inner containers are
+materialized into private temporary files, reused while cached, and removed on
+eviction or exit. Each inner container is limited to 512 MiB, with a shared 1 GiB
+temporary-storage limit. Cancellation and errors remove incomplete files; changes
+to any enclosing container invalidate its descendants. Copies cannot replace the
+outer source archive.
 
 On Unix, member paths retain their original bytes, including non-UTF-8 names;
 display labels may contain replacement characters. Unsupported names produce an
@@ -85,8 +164,111 @@ Archive panes and jobs use a common read-only backend interface in
 [`crates/core/src/archive`](crates/core/src/archive.rs). Container backends supply
 immutable metadata and member readers; TAR compression readers supply indexed
 seeking independently. Adding another format does not require format-specific
-navigation, viewer, or copy flows. This archive layer does not yet provide the
-unified local/remote VFS or nested mounts described in the roadmap.
+navigation, viewer, or copy flows. Typed locations and the shared read interface
+in [`crates/core/src/vfs.rs`](crates/core/src/vfs.rs) distinguish native paths,
+archive members, and mounted backends. Mounted readers inherit job cancellation
+and mount closure; their display identities cannot be obtained as native paths.
+
+On Unix, installed MC extfs helpers add read-only package and archive formats.
+`Enter` uses `u7z`, `urar`, `rpm`, `deb`, `uar`, or `ucpio` for matching extensions
+when installed. Quick cd also accepts `/path/package/u7z://subdirectory` and
+standalone helper prefixes such as `rpms://`. An extension action can use
+`Open=%cd %f/u7z://`. Helpers are discovered in absolute directories from
+`RC_EXTFS_PATH`, then `$XDG_DATA_HOME/rust-commander/extfs.d` and
+`$XDG_DATA_HOME/mc/extfs.d` (default `~/.local/share`), followed by common system
+and Homebrew MC directories. Helper executables and their external tools must be
+installed separately.
+
+Mounted panels support navigation, sorting, filtering, tagging, F3, View file,
+Quick view, file history, selection totals, directory sizes, and F5 copies to
+local directories. Relative Quick cd and View file paths stay inside the typed
+location; `..` leaves a mount at its root. Quick cd suggestions are disabled in
+virtual panels. Helpers use MC's `list` and `copyout` protocol; previews therefore
+materialize the selected member in private temporary storage. A zero listed size
+may mean unknown, as with generated RPM entries. Listing totals can undercount
+these entries; reads and copy progress use actual sizes. Links and special files cannot be copied. Copy
+failures restore overwritten destinations, and copies cannot replace a source
+container. Mutation and shell commands require local locations.
+Action macros also reject references to virtual files in the passive panel;
+actions using only the active local panel continue to work.
+
+**Command → Active VFS list** (`Ctrl-X a`) lists up to 16 mounted connections.
+Select one to open it in either panel, reconnect a remote connection, or close it. Closing cancels its jobs and
+dependent mounts and returns affected panels to their containing location.
+Leaving a mount with `..` keeps it available in this list. Manual reread refreshes
+helper metadata. Helpers have a five-minute deadline, 16 MiB listing limit,
+100,000-entry/64 MiB metadata limit, and 256-component path limit. Temporary
+members are limited to 512 MiB each and 1 GiB in total, with one extra guard byte
+per output to detect truncation. Native filename bytes are preserved when the
+helper's listing format preserves them; leading whitespace needs the MC `./`
+prefix convention, and names containing newlines cannot use this line format.
+
+On Unix, **Left / Right → SFTP link** opens a read-only remote panel using the
+installed OpenSSH client and SFTP v3 server. Enter `[user@]host[:port]` (bracket
+IPv6 addresses) and the remote directory separately. SSH aliases, keys, agent,
+and configuration are supported. Authentication runs in batch mode; RC never
+collects or stores SSH passwords or private keys. Host-key verification is
+mandatory, including for connections whose SSH configuration relaxes it. Add or
+verify the host through ordinary SSH first. Agent forwarding and local commands
+are disabled for these connections.
+
+SFTP listings preserve native filename bytes, including newlines. Directory and
+View file inputs use the same reversible `\xHH` notation as local paths. Reads
+stream directly from an owned SSH process and support cancellation. Each RPC has
+a 30-second deadline, directory listings have a five-minute deadline, and cached
+metadata expires after 30 seconds. Listings are bounded to 100,000 entries and
+16 MiB of metadata. SFTP links and special files cannot be read or copied.
+Interrupted or failed operations discard their connection; the next operation
+reconnects. **Rescan** clears metadata and the idle connection. **Active VFS list
+→ Reconnect** cancels that mount's pending jobs, establishes a fresh connection, and
+refreshes its visible panels. Source-change checks use the attributes supplied
+by SFTP v3, including size and second-resolution modification time.
+
+**Options → Virtual FS** controls new mounts. Disabling VFS blocks new archive,
+helper, and remote mounts; existing mounts remain usable until closed. The SFTP
+and Shell toggles separately control new links of each type.
+
+**Left / Right → Shell link** uses SSH to run an in-memory read-only helper on a
+Unix remote host with Python 3.6 or newer (`python3` on its PATH). It accepts the
+same address and directory fields as SFTP, shares its host verification,
+authentication, streaming, limits, and reconnect behavior, and does not require
+the server's SFTP subsystem. Nothing is installed on the remote host. The helper
+runs in Python's [isolated mode](https://docs.python.org/3/using/cmdline.html#cmdoption-I)
+and exchanges binary paths, preserving native bytes without interpreting them
+as shell commands. It supports regular-file reads and directory listings;
+mutation requests are rejected. Source-change checks also include device,
+inode, and nanosecond modification/change times when using this helper.
+
+**Left / Right → FTP link** opens a read-only FTP/FTPS panel using an installed
+curl with FTP and TLS support. A bare `[user@]host[:port]` or `ftpes://` address
+requires explicit TLS (default port 21); `ftps://` uses implicit TLS (default
+port 990). Both control and data connections require TLS, with certificate and
+hostname verification. `ftp://host[:port]` permits anonymous access only. The
+directory is entered separately; an absolute directory starts at the server
+root, and a relative directory starts at the login directory.
+
+For authenticated FTP, put credentials in `~/.netrc`, owned by your user with no
+group or other permissions (normally `chmod 600 ~/.netrc`). RC accepts a regular
+file of at most 64 KiB, rejects symlinks, and passes its contents to curl through
+a pipe. Passwords never appear in the connection dialog, URL, process arguments,
+settings, or error messages. A username in the address selects that login from
+the host's netrc entries. Without credentials, TLS connections use anonymous
+login. Plain FTP never reads the credential file. Curl configuration files and
+proxy environment settings are disabled for these connections.
+
+FTP servers must support [MLSD](https://www.rfc-editor.org/rfc/rfc3659.html#section-7)
+with type and regular-file size facts. Listings retain native filename bytes;
+names containing CR, LF, or NUL are unsupported. Listings are limited to 16 MiB,
+100,000 entries, and a 16 MiB metadata budget. Each curl transfer has a five-minute
+deadline and stops after 30 seconds without transfer progress. A file read also
+performs separate before/after metadata listings. Reads stream
+without temporary downloads, check the reported size, and compare server
+metadata before and after reading. Their change detection is limited by the
+size, timestamps, and mode/ownership facts the server provides. Reported links
+and special files cannot be read or copied; FTP servers may expose a followed
+link as an ordinary file. Each operation opens a fresh connection. Rescan and
+Reconnect clear the 30-second metadata cache; Reconnect also cancels that mount's
+jobs and refreshes visible panels. The FTP toggle controls new FTP/FTPS mounts.
 
 Automatic refresh uses FSEvents on macOS, inotify on Linux, and
 ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
@@ -108,8 +290,73 @@ renaming still update the panels.
 
 ### Viewer and external programs
 
+- Local **Open**, **View**, and **Edit** actions honor ordered `mc.ext.ini` rules
+  on Enter, F3, and F4. Files require `[mc.ext.ini]` with `Version=4.0`.
+  Matching supports `Directory`, `Regex`, literal `Shell` names/suffixes, and
+  `Type` patterns against cancelable background `file -L -b` output. Case flags
+  apply to each matcher. `Include=name` supplies actions from `[Include/name]`;
+  missing actions fall back to `[Default]`, while empty actions suppress that
+  fallback. Invalid configurations report errors; correcting them and closing the
+  configuration editor reloads the rules. Unmatched actions retain normal behavior.
+  Directory navigation changes only when an explicit Directory rule matches.
+- Actions use `/bin/sh` and MC macros: `%f`, `%p`, `%n`, `%x`, `%d`, `%t`, `%s`,
+  `%u`, their uppercase passive-panel forms, `%%`, `%{prompt}`, and
+  `%var{NAME:default}`. Values are quoted by default and preserve native filename
+  bytes. `%1` explicitly enables quoting; `%0` inserts raw shell source.
+  `%u` clears the expanded tags only after the action is scheduled. Extension
+  helpers receive `MC_EXT_FILENAME`, `MC_EXT_BASENAME`, `MC_EXT_CURRENTDIR`,
+  `MC_EXT_SELECTED`, and `MC_EXT_ONLYTAGGED`.
+- `%view{ascii,hex,nroff,unform}` routes action output to the internal viewer;
+  a bare `%view` loads the selected file. Hex retains original bytes; nroff makes
+  overstrikes and ANSI formatting readable as plain text. `%cd` changes to a
+  literal expanded path; native TAR/ZIP paths ending in `/utar://` or `/uzip://`
+  open an archive. Prompt cancellation launches nothing and preserves tags.
+  Templates and expanded arguments are bounded to 64 KiB. Here-document templates
+  report an unsupported-template error; pass macros as arguments to a separate
+  script instead. Regex patterns use the same Rust regex syntax as panel filters,
+  with doubled backslashes for INI escaping.
+- **Command → Edit extension file / Edit menu file / Edit highlighting group file**
+  opens `mc.ext.ini`, `menu`, or `filehighlight.ini` in the configured external
+  editor. Files in `~/.config/mc` take precedence over MC files installed under
+  `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an installed or bundled default
+  first creates a private user copy without replacing an existing file.
+  On Unix, a regular `.mc.menu` in the active directory takes precedence when it is
+  owned by the current user or root and is not writable by group or others;
+  local symlinks are ignored. The same discovery is shared by configuration readers.
+- F2 / **Command → User menu** reads the effective menu on each open: trusted
+  `.mc.menu`, `~/.config/mc/menu` (with `mc.menu` as a compatibility fallback),
+  installed `mc.menu`, then bundled entries. Shortcut letters or Enter launch the
+  selected entry through the shared macro engine, including prompts and `%view`.
+  Addition (`+`) and default (`=`) conditions support active/passive filename,
+  directory, file type and tag tests, executable checks, negation, and left-to-right
+  `&`/`|` logic. `shell_patterns=0/1` selects regex/glob matching; `?` after a
+  condition prefix shows its result before the menu. User menus require a local
+  active directory; syntax conditions (`y`) are false outside an editor.
+- `filehighlight.ini` controls panel colors through groups in the active skin.
+  Rules match in file order and support `type`, `regexp`, and semicolon-separated
+  `extensions`, with optional `extensions_case=true`. Type takes precedence over
+  regexp, which takes precedence over extensions. Regex backslashes must be doubled
+  for INI escaping. Link, directory, executable, device, special-file, and hardlink
+  types use cached listing metadata. Tagged and selected colors retain precedence.
+  Rules load at startup and reload when the external editor closes; invalid edits
+  report an error and retain the last valid rules.
 - Internal text and hex viewer with syntax highlighting, search in both directions,
   goto, wrapping, and bounded previews for large files.
+- File → View file opens an entered local path, including relative paths and `~/`.
+- File → Filtered view (`Alt-!`) runs a shell command in the active local
+  directory and streams stdout and stderr into the searchable text/hex viewer.
+  `Esc` returns to the panels while the command continues; `Alt-J` cancels it.
+  Open Jobs, select the command, and press `Enter` to return to its output.
+  The title records completion or failure. Capture stops at 8 MiB per command;
+  up to eight outputs are retained, evicting the oldest completed, closed output.
+  Captured commands use the configured shell and have no interactive standard input.
+- Command → Compare files (`Ctrl-X Ctrl-D`) compares the selected local file in
+  each panel, preferring `difft` (difftastic) and falling back to unified `diff`.
+  Compare directories (`Ctrl-X D`) reports recursive differences between the two
+  local panel directories with `diff`. Both use the output viewer; differences are
+  a successful comparison, while read/tool errors are reported as failed jobs.
+- `Alt-Shift-E` opens the session's viewed/edited-file history. Its 100 most recent
+  entries reopen with the original action, including files inside archives.
 - External editing through a configured command, `$EDITOR`, `$VISUAL`, or
   detected editors (`hx`, `nvim`, `vim`, `vi`, `emacs`).
 - Executables run in the terminal; documents open with the operating system's
@@ -119,8 +366,25 @@ renaming still update the panels.
 ### Unix command line
 
 - `>` opens a modal prompt in the active panel directory.
+- Commands run in a persistent PTY shell: variables, functions, and directory
+  changes survive between commands. Bash, Zsh, Fish, sh, and dash are supported;
+  other shells and custom command templates retain one-shot execution.
+- `Ctrl-O` or Command → Switch panels on/off shows the shell and returns to the
+  panels. The shell also appears in the Screens selector. Programs keep running
+  while the panels are visible; terminal colors, full-screen applications,
+  resizing, mouse input, and bracketed paste are supported.
+- Panel and shell directories synchronize when the shell is ready. A running
+  command cannot overwrite a directory subsequently chosen in the panels.
+  Unfinished terminal input blocks injected commands and directory changes;
+  use `Ctrl-C` to clear it. This can also be needed after leaving a program with
+  a single key because unread typeahead cannot be distinguished reliably.
+  Fish sessions reserve `Ctrl-Alt-Shift-F12` for this input recovery.
+- `Shift-PgUp` / `Shift-PgDn` scroll shell output. `exit` or `Ctrl-D` at an empty
+  shell prompt closes the shell; `Ctrl-O` starts another when needed.
 - Fish-aware or generic completion, live prefix filtering, bounded history, and
   draft preservation.
+- Command → Command history (`Alt-Shift-H`) lists recent commands and recalls a
+  selection into the prompt for editing. Cancel preserves the current draft.
 - Successful literal `cd` commands refresh and synchronize the active panel.
 - `Alt-Enter` / `Ctrl-Enter` inserts the selected name,
   `Ctrl-Shift-Enter` inserts its full path, and `Ctrl-X t` /
@@ -133,6 +397,10 @@ renaming still update the panels.
 
 - MC-style top menus, contextual help, mouse support, and a parsed
   `mc.default.keymap` with user overrides.
+- Options → Learn keys captures a chord and assigns a command in a chosen context.
+  Learned bindings apply immediately over the bundled/custom keymap. Select a
+  learned binding to edit it, or clear its command to restore the underlying
+  binding. Save setup persists them in `settings.ini`.
 - Bundled MC skins plus custom and system skin discovery.
 - Typed settings for layout, panels, confirmations, appearance, display, shell,
   and command history.
@@ -208,13 +476,19 @@ interface.
 | `Alt-P` / `Ctrl-P` / `Ctrl-X !` | Open external panelize |
 | `Ctrl-X i` / `Ctrl-X q` | Show Info / Quick view in the passive panel |
 | `Ctrl-X y` | Copy the active selected entry's full path to the clipboard |
-| `Alt-Shift-T` | Cycle Full, Brief, and Long panel layouts |
+| `Alt-Shift-T` | Cycle Full, Brief, Long, and user-defined panel layouts |
 | `Shift-F6` / `Shift-F8` | Cycle sort field / reverse sort order |
 | `F9` | Open the menu bar |
 | `q` / `Esc` / `F10` | Quit |
 
 Left-click an entry in either pane to select it and make that pane active.
 Double-click to open the entry.
+Mouse-wheel and terminal-reported touchpad scrolling move three rows at a time
+in the pane under the pointer. Scrolling a listing focuses that pane; scrolling
+a quick preview leaves the listing focused. Scrollable modals (lists, menus,
+settings, help, jobs, search results, trees, and hotlists) receive scrolling while
+open, and panels behind them stay unchanged. Viewers and Quick cd suggestions
+also support scrolling. Scrolling never opens or accepts an entry.
 
 ### Command line
 
@@ -280,8 +554,8 @@ intermediate multiplexer must allow OSC 52 clipboard writes.
 - `crates/platform` (`rust-commander-platform`): platform-specific terminal and
   process integration
 - `crates/ui` (`rust-commander-ui`): Ratatui rendering and skin support
-- `crates/shell` (`rust-commander-shell`): shell selection, completion, and
-  cancelable process primitives
+- `crates/shell` (`rust-commander-shell`): shell selection, completion, cancelable
+  process primitives, and the Unix persistent PTY transport and prompt protocol
 - [ROADMAP.md](https://github.com/hbbio/rc/blob/main/ROADMAP.md): remaining product work
 
 ## Development

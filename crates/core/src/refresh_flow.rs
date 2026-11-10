@@ -196,11 +196,47 @@ impl PanelRefreshPostWorkflow {
 }
 
 impl AppState {
+    pub(crate) fn discard_closed_vfs_reverts(&mut self) {
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            if self.panel_refresh_post.reverts[panel.index()]
+                .as_ref()
+                .is_some_and(|revert| {
+                    revert
+                        .panel
+                        .mounted_location()
+                        .is_some_and(|path| path.mount().is_closed())
+                })
+            {
+                self.discard_panel_refresh_revert(panel);
+                self.panel_refresh_post.clear_focus_target_for_panel(panel);
+            }
+        }
+    }
+    pub(crate) fn prepare_panel_refresh_swap(&mut self) -> [bool; 2] {
+        let loading = [ActivePanel::Left, ActivePanel::Right].map(|panel| {
+            self.panels[panel.index()].loading || self.panel_refresh_post.has_revert(panel)
+        });
+        let mut reverts = std::mem::take(&mut self.panel_refresh_post.reverts);
+        let focus_target = self.panel_refresh_post.focus_target.take();
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            self.cancel_and_invalidate_panel_refresh(panel);
+        }
+        reverts.swap(0, 1);
+        self.panel_refresh_post.reverts = reverts;
+        self.panel_refresh_post.focus_target =
+            focus_target.map(|(panel, path)| (panel.other(), path));
+        [loading[1], loading[0]]
+    }
+
+    pub(crate) fn panel_has_pending_navigation(&self, panel: ActivePanel) -> bool {
+        self.panel_refresh_post.has_revert(panel)
+    }
+
     /// Refresh an invalidated directory without interrupting a scan or navigation.
     /// False means the caller must retain the invalidation and retry once idle.
     pub fn refresh_directory_if_idle(&mut self, panel: ActivePanel) -> bool {
         if self.panels[panel.index()].source.is_panelized()
-            || self.panels[panel.index()].is_archive()
+            || self.panels[panel.index()].is_virtual()
         {
             return true;
         }
@@ -213,6 +249,7 @@ impl AppState {
     }
 
     pub(crate) fn queue_panel_refresh(&mut self, panel: ActivePanel) {
+        self.cancel_directory_sizes(panel);
         let panel_index = panel.index();
         if self.panels[panel_index].source.is_panelized() {
             let snapshot = self.panel_refresh_revert_snapshot(panel);
@@ -259,6 +296,7 @@ impl AppState {
             cwd,
             source,
             sort_mode,
+            filename_encoding: self.panels[panel.index()].filename_encoding,
             filter,
             show_hidden_files,
             cached_panelized_entries,
@@ -392,6 +430,8 @@ impl AppState {
         panel: ActivePanel,
         snapshot: PanelRefreshRevert,
     ) {
+        // A navigation supersedes pending opens; ordinary listing refreshes do not.
+        self.cancel_pending_mount(panel);
         self.panel_refresh_post.ensure_revert(panel, snapshot);
     }
 
@@ -483,6 +523,7 @@ impl AppState {
     }
 
     pub(crate) fn cancel_and_invalidate_panel_refresh(&mut self, panel: ActivePanel) {
+        self.cancel_pending_mount(panel);
         if let Some(job_id) = self.panel_refresh.invalidate_request(panel) {
             let _ = self.request_cancel_for_job(job_id);
         }

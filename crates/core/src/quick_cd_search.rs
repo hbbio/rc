@@ -309,15 +309,15 @@ impl<'a> RankedSuggestions<'a> {
             return false;
         }
         let display = display_path(&path, &self.spec.cwd, self.spec.home.as_deref());
-        let absolute = fold_for_search(&path.to_string_lossy());
+        let absolute = fold_for_search(&rc_shell::encode_path_text(path.as_os_str()));
         let display_folded = fold_for_search(&display);
         let basename = path
             .file_name()
-            .map(|name| fold_for_search(&name.to_string_lossy()))
+            .map(|name| fold_for_search(&rc_shell::encode_path_text(name)))
             .unwrap_or_else(|| absolute.clone());
         let components: Vec<String> = path
             .components()
-            .map(|component| fold_for_search(&component.as_os_str().to_string_lossy()))
+            .map(|component| fold_for_search(&rc_shell::encode_path_text(component.as_os_str())))
             .collect();
         let Some((tier, offset)) =
             match_rank(needle, &basename, &components, &display_folded, &absolute)
@@ -442,17 +442,17 @@ fn display_path(path: &Path, cwd: &Path, home: Option<&Path>) -> String {
         return String::from(".");
     }
     if let Ok(relative) = path.strip_prefix(cwd) {
-        return format!("./{}", relative.to_string_lossy());
+        return format!("./{}", rc_shell::encode_path_text(relative.as_os_str()));
     }
     if let Some(home) = home {
         if path == home {
             return String::from("~");
         }
         if let Ok(relative) = path.strip_prefix(home) {
-            return format!("~/{}", relative.to_string_lossy());
+            return format!("~/{}", rc_shell::encode_path_text(relative.as_os_str()));
         }
     }
-    path.to_string_lossy().into_owned()
+    rc_shell::encode_path_text(path.as_os_str())
 }
 
 #[cfg(test)]

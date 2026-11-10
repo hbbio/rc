@@ -130,14 +130,14 @@ impl AppState {
     }
 
     pub(crate) fn start_hotlist_add_dialog(&mut self) {
-        let cwd = self.active_panel().cwd.clone();
+        let cwd = self.active_panel().local_directory().to_path_buf();
         self.push_dialog(
             DialogState::pair_input(
                 "Add hotlist entry",
                 "Label:",
                 HotlistEntry::suggested_label(&cwd),
                 "Directory:",
-                cwd.to_string_lossy(),
+                rc_shell::encode_path_text(cwd.as_os_str()),
             ),
             PendingDialogAction::HotlistAdd { base_dir: cwd },
         );
@@ -155,9 +155,9 @@ impl AppState {
             self.set_status("No hotlist entry selected");
             return;
         };
-        let base_dir = self.active_panel().cwd.clone();
+        let base_dir = self.active_panel().local_directory().to_path_buf();
         let label = entry.label.clone();
-        let path = entry.path.to_string_lossy().into_owned();
+        let path = rc_shell::encode_path_text(entry.path.as_os_str());
         self.push_dialog(
             DialogState::pair_input("Edit hotlist entry", "Label:", label, "Directory:", path),
             PendingDialogAction::HotlistEdit {
@@ -245,7 +245,7 @@ impl AppState {
             return Err(String::from("Hotlist directory cannot be empty"));
         }
 
-        let resolved = resolve_path(base_dir, Path::new(path));
+        let resolved = resolve_path(base_dir, Path::new(&rc_shell::decode_path_text(path)));
         let canonical = validate_directory(&resolved).map_err(|error| error.to_string())?;
         let normalized_candidate = normalized_label(label);
         for (index, existing) in self.settings.configuration.hotlist.iter().enumerate() {
@@ -334,7 +334,7 @@ impl AppState {
             return Ok(());
         };
 
-        let resolved = resolve_path(&self.active_panel().cwd, &entry.path);
+        let resolved = resolve_path(self.active_panel().local_directory(), &entry.path);
         let destination = match validate_directory(&resolved) {
             Ok(path) => path,
             Err(error) => {

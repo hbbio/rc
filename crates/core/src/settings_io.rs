@@ -307,6 +307,18 @@ fn parse_ini_section_name(line: &str) -> Option<&str> {
     None
 }
 
+fn encoded_path_setting(path: &Path) -> Option<String> {
+    let encoded = rc_shell::encode_path_text(path.as_os_str());
+    (path.to_str() != Some(encoded.as_str()) || encoded.trim() != encoded).then_some(encoded)
+}
+
+fn render_path_setting(key: &str, path: &Path) -> String {
+    match encoded_path_setting(path) {
+        Some(encoded) => format!("{key}_encoded={encoded}"),
+        None => format!("{key}={}", path.to_str().expect("plain Unicode path")),
+    }
+}
+
 fn render_hotlist_entry(entry: &HotlistEntry) -> String {
     format!(
         "{}\t{}",
@@ -473,19 +485,31 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             ("configuration", "use_internal_editor") => {
                 // Legacy rc setting. Internal editing is no longer implemented.
             }
-            ("configuration", "keymap_override") => {
+            ("configuration", "keymap_override" | "keymap_override_encoded") => {
                 if value.is_empty() {
                     settings.configuration.keymap_override = None;
                 } else {
-                    settings.configuration.keymap_override = Some(PathBuf::from(value));
+                    settings.configuration.keymap_override = Some(if key.ends_with("_encoded") {
+                        rc_shell::decode_path_text(value).into()
+                    } else {
+                        PathBuf::from(value)
+                    });
                 }
             }
-            ("configuration", "hotlist") | ("configuration", "hotlist_entry") => {
+            ("configuration", "hotlist" | "hotlist_entry" | "hotlist_entry_encoded") => {
                 if !saw_hotlist {
                     settings.configuration.hotlist.clear();
                     saw_hotlist = true;
                 }
-                let entry = if key == "hotlist_entry" {
+                let entry = if key == "hotlist_entry_encoded" {
+                    parse_hotlist_entry(value).map(|mut entry| {
+                        entry.path = rc_shell::decode_path_text(
+                            entry.path.to_str().expect("decoded text field"),
+                        )
+                        .into();
+                        entry
+                    })
+                } else if key == "hotlist_entry" {
                     parse_hotlist_entry(value)
                 } else {
                     (!value.is_empty())
@@ -604,6 +628,20 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.panel_options.listing_formats[1] = parsed;
                 }
             }
+            ("panel_options", key @ ("left_user_format" | "right_user_format")) => {
+                if let Some(parsed) = unescape_settings_field(value)
+                    && crate::UserListingFormat::parse(&parsed).is_ok()
+                {
+                    settings.panel_options.user_listing_formats
+                        [usize::from(key == "right_user_format")] = parsed;
+                }
+            }
+            ("panel_options", key @ ("left_filename_encoding" | "right_filename_encoding")) => {
+                if let Some(encoding) = crate::FilenameEncoding::parse(value) {
+                    settings.panel_options.filename_encodings
+                        [usize::from(key == "right_filename_encoding")] = encoding;
+                }
+            }
             ("panel_options", "left_filter_pattern") => {
                 if let Some(parsed) = unescape_settings_field(value) {
                     settings.panel_options.filters[0].pattern = parsed;
@@ -667,12 +705,19 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
             ("appearance", "skin") if !value.is_empty() => {
                 settings.appearance.skin = value.to_string();
             }
-            ("appearance", "skin_dir") => {
+            ("appearance", "skin_dir" | "skin_dir_encoded") => {
                 if !saw_skin_dirs {
                     settings.appearance.skin_dirs.clear();
                     saw_skin_dirs = true;
                 }
-                settings.appearance.skin_dirs.push(PathBuf::from(value));
+                settings
+                    .appearance
+                    .skin_dirs
+                    .push(if key.ends_with("_encoded") {
+                        rc_shell::decode_path_text(value).into()
+                    } else {
+                        PathBuf::from(value)
+                    });
             }
             ("display_bits", "utf8_output") => {
                 if let Some(parsed) = parse_bool(value) {
@@ -689,6 +734,23 @@ fn apply_rc_settings_ini(settings: &mut Settings, source: &str) {
                     settings.learn_keys.last_learned_binding = None;
                 } else {
                     settings.learn_keys.last_learned_binding = Some(value.to_string());
+                }
+            }
+            ("learn_keys", "binding") => {
+                let mut fields = value.splitn(3, '\t');
+                if let (Some(context), Some(action), Some(chord)) = (
+                    fields.next().and_then(unescape_settings_field),
+                    fields.next().and_then(unescape_settings_field),
+                    fields.next().and_then(unescape_settings_field),
+                ) {
+                    let binding = crate::keymap::LearnedBinding {
+                        context,
+                        action,
+                        chord,
+                    };
+                    if binding.parse().is_ok() && settings.learn_keys.bindings.len() < 128 {
+                        settings.learn_keys.bindings.push(binding);
+                    }
                 }
             }
             ("virtual_fs", "vfs_enabled") => {
@@ -781,12 +843,20 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
             .unwrap_or_default()
     ));
     if let Some(path) = settings.configuration.keymap_override.as_ref() {
-        lines.push(format!("keymap_override={}", path.to_string_lossy()));
+        lines.push(render_path_setting("keymap_override", path));
     } else {
         lines.push(String::from("keymap_override="));
     }
     for entry in &settings.configuration.hotlist {
-        lines.push(format!("hotlist_entry={}", render_hotlist_entry(entry)));
+        if let Some(encoded) = encoded_path_setting(&entry.path) {
+            lines.push(format!(
+                "hotlist_entry_encoded={}\t{}",
+                escape_settings_field(&entry.label),
+                escape_settings_field(&encoded)
+            ));
+        } else {
+            lines.push(format!("hotlist_entry={}", render_hotlist_entry(entry)));
+        }
     }
     for preset in &settings.configuration.panelize_presets {
         lines.push(format!(
@@ -879,10 +949,23 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
         "right_listing_format={}",
         settings.panel_options.listing_formats[1].title_label()
     ));
+    for (prefix, format) in ["left", "right"]
+        .into_iter()
+        .zip(&settings.panel_options.user_listing_formats)
+    {
+        lines.push(format!(
+            "{prefix}_user_format={}",
+            escape_settings_field(format)
+        ));
+    }
     for (prefix, filter) in ["left", "right"]
         .into_iter()
         .zip(&settings.panel_options.filters)
     {
+        lines.push(format!(
+            "{prefix}_filename_encoding={}",
+            settings.panel_options.filename_encodings[usize::from(prefix == "right")].label()
+        ));
         lines.push(format!(
             "{prefix}_filter_pattern={}",
             escape_settings_field(&filter.pattern)
@@ -918,7 +1001,7 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
     lines.push(String::from("[appearance]"));
     lines.push(format!("skin={}", settings.appearance.skin));
     for skin_dir in &settings.appearance.skin_dirs {
-        lines.push(format!("skin_dir={}", skin_dir.to_string_lossy()));
+        lines.push(render_path_setting("skin_dir", skin_dir));
     }
 
     lines.push(String::new());
@@ -931,6 +1014,14 @@ fn render_rc_settings_ini(settings: &Settings) -> String {
 
     lines.push(String::new());
     lines.push(String::from("[learn_keys]"));
+    for binding in &settings.learn_keys.bindings {
+        lines.push(format!(
+            "binding={}\t{}\t{}",
+            escape_settings_field(&binding.context),
+            escape_settings_field(&binding.action),
+            escape_settings_field(&binding.chord)
+        ));
+    }
     if let Some(binding) = settings.learn_keys.last_learned_binding.as_ref() {
         lines.push(format!("last_learned_binding={binding}"));
     } else {
@@ -1070,6 +1161,7 @@ fn parse_listing_format(value: &str) -> Option<PanelListingFormat> {
         "full" => Some(PanelListingFormat::Full),
         "brief" => Some(PanelListingFormat::Brief),
         "long" => Some(PanelListingFormat::Long),
+        "user" => Some(PanelListingFormat::User),
         _ => None,
     }
 }
@@ -1194,6 +1286,53 @@ skin=default
         assert_eq!(parsed.panel_options.filters, settings.panel_options.filters);
         assert_eq!(parsed.layout.status_message_timeout_seconds, 42);
         assert!(!parsed.confirmation.confirm_hotlist_delete);
+    }
+
+    #[test]
+    fn user_listing_formats_round_trip_and_invalid_input_keeps_default() {
+        let mut settings = Settings::default();
+        settings.panel_options.listing_formats[0] = PanelListingFormat::User;
+        settings.panel_options.filename_encodings = [
+            crate::FilenameEncoding::ShiftJis,
+            crate::FilenameEncoding::Windows1252,
+        ];
+        settings.panel_options.user_listing_formats =
+            ["perm size:9 name".into(), "inode, name:40".into()];
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &render_rc_settings_ini(&settings));
+        assert_eq!(parsed.panel_options, settings.panel_options);
+        apply_rc_settings_ini(
+            &mut parsed,
+            "[panel_options]\nleft_user_format=unknown\nright_user_format=name:0\n",
+        );
+        assert_eq!(parsed.panel_options, settings.panel_options);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_paths_round_trip_without_reinterpreting_legacy_fields() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut settings = Settings::default();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b" /raw\xff\\x41\n ".to_vec()));
+        settings.configuration.keymap_override = Some(path.clone());
+        let whitespace = PathBuf::from("/unicode\u{a0}");
+        settings.appearance.skin_dirs = vec![path.clone(), whitespace.clone()];
+        settings.configuration.hotlist = vec![HotlistEntry::new("Native", path.clone())];
+        let rendered = render_rc_settings_ini(&settings);
+        assert!(rendered.contains("hotlist_entry_encoded="));
+        let mut parsed = Settings::default();
+        apply_rc_settings_ini(&mut parsed, &rendered);
+        assert_eq!(parsed.configuration.keymap_override, Some(path.clone()));
+        assert_eq!(parsed.appearance.skin_dirs, vec![path.clone(), whitespace]);
+        assert_eq!(parsed.configuration.hotlist[0].path, path);
+        apply_rc_settings_ini(
+            &mut parsed,
+            "[configuration]\nkeymap_override=/literal\\xFF\n",
+        );
+        assert_eq!(
+            parsed.configuration.keymap_override,
+            Some(PathBuf::from(r"/literal\xFF"))
+        );
     }
 
     #[test]

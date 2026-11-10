@@ -9,6 +9,24 @@ impl AppCommand {
 
         match (context, key_command) {
             (_, KeyCommand::OpenHelp) => Some(Self::OpenHelp),
+            (
+                KeyContext::FileManager
+                | KeyContext::CommandLine
+                | KeyContext::Viewer
+                | KeyContext::ViewerHex,
+                KeyCommand::TogglePanels,
+            ) => Some(Self::TogglePanels),
+            (
+                KeyContext::FileManager
+                | KeyContext::Viewer
+                | KeyContext::ViewerHex
+                | KeyContext::Jobs
+                | KeyContext::FindResults
+                | KeyContext::Tree
+                | KeyContext::Hotlist
+                | KeyContext::Help,
+                KeyCommand::ScreenList,
+            ) => Some(Self::OpenScreenList),
             (KeyContext::FileManager, KeyCommand::OpenCommandLine) => Some(Self::OpenCommandLine),
             (
                 KeyContext::FileManager | KeyContext::FileManagerXMap | KeyContext::CommandLine,
@@ -43,6 +61,33 @@ impl AppCommand {
             (KeyContext::Tree, KeyCommand::Quit) => Some(Self::CloseTree),
             (KeyContext::Hotlist, KeyCommand::Quit) => Some(Self::CloseHotlist),
             (KeyContext::FileManager, KeyCommand::PanelOther) => Some(Self::SwitchPanel),
+            (KeyContext::FileManager, KeyCommand::SwapPanels) => Some(Self::SwapPanels),
+            (KeyContext::FileManager, KeyCommand::SelectEncoding) => Some(Self::OpenEncoding),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Link) => {
+                Some(Self::CreateLink(crate::LinkKind::Hard))
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Symlink) => {
+                Some(Self::CreateLink(crate::LinkKind::Symbolic))
+            }
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap,
+                KeyCommand::RelativeSymlink,
+            ) => Some(Self::CreateLink(crate::LinkKind::RelativeSymbolic)),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::EditSymlink) => {
+                Some(Self::EditSymlink)
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Chmod) => {
+                Some(Self::Chmod)
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::Chown) => {
+                Some(Self::Chown)
+            }
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::AdvancedChown) => {
+                Some(Self::AdvancedChown)
+            }
+            (KeyContext::FileManager, KeyCommand::ShowDirectorySizes) => {
+                Some(Self::ShowDirectorySizes)
+            }
             (KeyContext::FileManagerXMap, KeyCommand::PanelInfo) => {
                 Some(Self::SetOtherPanelView(crate::PanelViewMode::Info))
             }
@@ -51,6 +96,8 @@ impl AppCommand {
             }
             (KeyContext::FileManager, KeyCommand::ToggleTag) => Some(Self::ToggleTag),
             (KeyContext::FileManager, KeyCommand::InvertTags) => Some(Self::InvertTags),
+            (KeyContext::FileManager, KeyCommand::SelectGroup) => Some(Self::SelectGroup),
+            (KeyContext::FileManager, KeyCommand::UnselectGroup) => Some(Self::UnselectGroup),
             (KeyContext::FileManager, KeyCommand::CycleListingFormat) => {
                 Some(Self::CycleListingFormat)
             }
@@ -84,6 +131,26 @@ impl AppCommand {
             (KeyContext::Help, KeyCommand::HelpNodePrev) => Some(Self::HelpNodePrev),
             (KeyContext::FileManager, KeyCommand::OpenEntry) => Some(Self::OpenEntry),
             (KeyContext::FileManager, KeyCommand::ViewEntry) => Some(Self::ViewEntry),
+            (KeyContext::FileManager, KeyCommand::ViewFile) => Some(Self::ViewFile),
+            (KeyContext::FileManager, KeyCommand::FilteredView) => Some(Self::FilteredView),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::CompareFiles) => {
+                Some(Self::CompareFiles)
+            }
+            (
+                KeyContext::FileManager | KeyContext::FileManagerXMap,
+                KeyCommand::CompareDirectories,
+            ) => Some(Self::CompareDirectories),
+            (KeyContext::Jobs, KeyCommand::OpenEntry) => Some(Self::OpenJobOutput),
+            (KeyContext::Viewer | KeyContext::ViewerHex, KeyCommand::CancelJob) => {
+                Some(Self::CancelJob)
+            }
+            (KeyContext::FileManager, KeyCommand::OpenFileHistory) => Some(Self::OpenFileHistory),
+            (KeyContext::FileManager | KeyContext::FileManagerXMap, KeyCommand::VfsList) => {
+                Some(Self::OpenActiveVfs)
+            }
+            (KeyContext::FileManager | KeyContext::CommandLine, KeyCommand::OpenCommandHistory) => {
+                Some(Self::OpenCommandHistory)
+            }
             (KeyContext::FileManager, KeyCommand::EditEntry) => Some(Self::EditEntry),
             (KeyContext::FileManager, KeyCommand::CdUp) => Some(Self::CdUp),
             (KeyContext::FileManager, KeyCommand::QuickCd) => Some(Self::OpenQuickCd),
@@ -116,7 +183,9 @@ impl AppCommand {
             (KeyContext::FileManager, KeyCommand::OpenPanelizeDialog) => {
                 Some(Self::OpenPanelizeDialog)
             }
-            (KeyContext::FileManager, KeyCommand::EnterXMap) => Some(Self::EnterXMap),
+            (KeyContext::FileManager | KeyContext::CommandLine, KeyCommand::EnterXMap) => {
+                Some(Self::EnterXMap)
+            }
             (KeyContext::FileManagerXMap, KeyCommand::AddHotlist) => {
                 Some(Self::HotlistAddCurrentDirectory)
             }

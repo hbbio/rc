@@ -51,6 +51,9 @@ impl AppState {
     }
 
     pub fn handle_job_event(&mut self, event: JobEvent) {
+        if let JobEvent::Finished { id, result } = &event {
+            self.finish_vfs_job(*id, result);
+        }
         if let JobEvent::Finished { id, .. } = &event {
             self.find_pause_flags.remove(id);
         }
@@ -71,6 +74,14 @@ impl AppState {
                 }
             }
             JobEvent::Progress { id, progress } => {
+                if self
+                    .jobs
+                    .job(id)
+                    .is_some_and(|job| job.kind == JobKind::MeasureDirectories)
+                    && !self.directory_sizes_job_is_current(id)
+                {
+                    return;
+                }
                 let percent = progress.percent();
                 let job_kind = self
                     .jobs
@@ -92,7 +103,7 @@ impl AppState {
                     .current_path
                     .as_deref()
                     .and_then(Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned())
+                    .map(rc_shell::encode_path_text)
                     .unwrap_or_else(|| String::from("-"));
                 self.set_status(format!(
                     "Job #{id} {percent}% | items {}/{} | bytes {}/{} | {path_label}",
@@ -135,6 +146,8 @@ impl AppState {
                         kind,
                         Some(
                             JobKind::Copy
+                                | JobKind::ChangeMetadata
+                                | JobKind::Links
                                 | JobKind::Move
                                 | JobKind::Delete
                                 | JobKind::Mkdir
@@ -169,9 +182,14 @@ impl AppState {
                     }
                 }
                 Err(error) => {
+                    self.fail_directory_sizes(id, &error);
+                    self.fail_command_output(id, &error);
                     self.panel_mkdirs.finish(id, false);
                     let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
+                    if matches!(kind, Some(JobKind::ChangeMetadata | JobKind::Links)) {
+                        self.refresh_panels();
+                    }
                     let job_kind = kind.map(JobKind::label).unwrap_or("unknown");
                     let is_persist_settings = kind == Some(JobKind::PersistSettings);
                     let is_find = kind == Some(JobKind::Find);
@@ -276,6 +294,19 @@ impl AppState {
 
     pub fn handle_background_event(&mut self, event: BackgroundEvent) {
         match event {
+            BackgroundEvent::DirectorySizesMeasured { job_id, sizes } => {
+                self.apply_directory_sizes(job_id, sizes)
+            }
+            BackgroundEvent::FileTypeProbed { job_id, result } => {
+                self.finish_extension_probe(job_id, result)
+            }
+            BackgroundEvent::VfsMounted { job_id, mount } => self.handle_vfs_mounted(job_id, mount),
+            BackgroundEvent::CommandOutput { job_id, bytes } => {
+                self.append_command_output(job_id, &bytes)
+            }
+            BackgroundEvent::CommandCompleted { job_id, status } => {
+                self.complete_command_output(job_id, status)
+            }
             BackgroundEvent::PanelEntriesChunk {
                 panel,
                 cwd,
@@ -320,6 +351,18 @@ impl AppState {
             } => self.handle_panel_identity_resolved(panel, cwd, request_id, result),
             BackgroundEvent::ViewerLoaded { path, result } => match result {
                 Ok(viewer) => {
+                    if viewer
+                        .mounted_location
+                        .as_ref()
+                        .is_some_and(|path| path.mount().is_closed())
+                    {
+                        return;
+                    }
+                    if let Some(mounted) = &viewer.mounted_location {
+                        self.record_viewed_mount(mounted.as_ref().clone());
+                    } else {
+                        self.record_viewed_file(path.clone(), viewer.archive_location.clone());
+                    }
                     let is_preview = viewer.text_is_preview();
                     self.routes.push(Route::Viewer(viewer));
                     if is_preview {
@@ -403,6 +446,29 @@ impl AppState {
         self.jobs.status_counts()
     }
 
+    pub(crate) fn reject_virtual_transfer_destination(&mut self, destination: &Path) -> bool {
+        let virtual_destination = (destination.is_relative()
+            && destination
+                .as_os_str()
+                .as_encoded_bytes()
+                .windows(3)
+                .any(|part| part == b"://"))
+            || self
+                .panels
+                .iter()
+                .filter(|panel| panel.is_virtual())
+                .any(|panel| {
+                    panel
+                        .location()
+                        .resolve_identity(destination.to_path_buf())
+                        .is_ok()
+                });
+        if virtual_destination {
+            self.set_status("VFS destinations are read-only; choose a local destination directory");
+        }
+        virtual_destination
+    }
+
     pub(crate) fn queue_copy_or_move_job(
         &mut self,
         kind: TransferKind,
@@ -411,13 +477,25 @@ impl AppState {
         overwrite: OverwritePolicy,
         origin: OperationOrigin,
     ) {
-        if self
-            .panels
-            .iter()
-            .filter_map(PanelState::archive_location)
-            .any(|location| destination_dir.starts_with(&location.archive))
+        if self.reject_virtual_transfer_destination(&destination_dir) {
+            return;
+        }
+        if let OperationOrigin::Panel(panel) = origin
+            && let Some(location) = self.panels[panel.index()].mounted_location().cloned()
         {
-            self.set_status("Archives are read-only; choose a local destination directory");
+            if kind != TransferKind::Copy {
+                self.set_status("VFS mounts are read-only; use F5 to copy entries out");
+                return;
+            }
+            self.queue_filesystem_job(
+                JobRequest::Vfs(vfs::tasks::Task::Copy {
+                    location,
+                    sources,
+                    destination_dir,
+                    overwrite,
+                }),
+                origin,
+            );
             return;
         }
         if let OperationOrigin::Panel(panel) = origin
@@ -459,7 +537,7 @@ impl AppState {
         kind: TransferKind,
         sources: Vec<PathBuf>,
         destination_dir: PathBuf,
-        destination_names: Vec<String>,
+        destination_names: Vec<std::ffi::OsString>,
         overwrite: OverwritePolicy,
         origin: OperationOrigin,
     ) {
@@ -467,12 +545,10 @@ impl AppState {
             self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite, origin);
             return;
         }
-        if self
-            .panels
-            .iter()
-            .filter_map(PanelState::archive_location)
-            .any(|location| destination_dir.starts_with(&location.archive))
-            || matches!(origin, OperationOrigin::Panel(panel) if self.panels[panel.index()].is_archive())
+        if self.reject_virtual_transfer_destination(&destination_dir) {
+            return;
+        }
+        if matches!(origin, OperationOrigin::Panel(panel) if self.panels[panel.index()].is_virtual())
         {
             self.set_status("Archives are read-only; choose a local destination directory");
             return;
@@ -620,6 +696,7 @@ impl AppState {
         report_status: bool,
     ) -> JobId {
         let job_id = worker_job.id;
+        self.track_vfs_job(job_id, &worker_job.request);
         let job_kind = worker_job.request.kind().label();
         let summary = worker_job.request.summary();
         self.pending_worker_commands
@@ -696,6 +773,7 @@ impl AppState {
             job.request = request.clone();
         }
         let metadata_replaced = self.jobs.replace_queued_request_metadata(job_id, request);
+        self.track_vfs_job(job_id, request);
         debug_assert!(metadata_replaced);
 
         self.remove_pending_cancel_for_job(job_id);
@@ -709,10 +787,10 @@ impl AppState {
     }
 
     pub(crate) fn cancel_latest_job(&mut self) {
-        let selected_id = if matches!(self.top_route(), Route::Jobs) {
-            self.selected_job_record().map(|job| job.id)
-        } else {
-            None
+        let selected_id = match self.top_route() {
+            Route::Jobs => self.selected_job_record().map(|job| job.id),
+            Route::CommandOutput(id) => Some(*id),
+            _ => None,
         };
         let Some(job_id) = selected_id.or_else(|| self.jobs.newest_cancelable_job_id()) else {
             self.set_status("No active job to cancel");
@@ -730,9 +808,18 @@ impl AppState {
         if !self.jobs.request_cancel(job_id) {
             return false;
         }
+        self.cancel_vfs_open(job_id);
         self.handle_quick_view_cancel_requested(job_id);
         self.handle_quick_cd_search_cancel_requested(job_id);
         self.handle_selection_size_cancel_requested(job_id);
+        self.invalidate_directory_sizes_for_job(job_id);
+        if self
+            .pending_extension
+            .as_ref()
+            .is_some_and(|(id, _)| *id == job_id)
+        {
+            self.pending_extension = None;
+        }
         let job_kind = self
             .jobs
             .job(job_id)
@@ -787,6 +874,7 @@ fn suppress_transient_job_status(kind: Option<JobKind>) -> bool {
                 | JobKind::LoadQuickView
                 | JobKind::QuickCdSearch
                 | JobKind::MeasureSelection
+                | JobKind::MeasureDirectories
                 | JobKind::BuildTree
         )
     )
@@ -795,6 +883,9 @@ fn suppress_transient_job_status(kind: Option<JobKind>) -> bool {
 fn tree_mutation_impacts(request: &JobRequest) -> Vec<PathBuf> {
     let mut impacts = Vec::new();
     match request {
+        JobRequest::Vfs(vfs::tasks::Task::Copy {
+            destination_dir, ..
+        }) => impacts.push(destination_dir.clone()),
         JobRequest::Copy {
             destination_dir, ..
         }

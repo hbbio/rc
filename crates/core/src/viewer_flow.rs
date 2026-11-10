@@ -100,15 +100,25 @@ impl AppState {
             return false;
         }
 
-        let request = match self.active_panel().archive_location() {
-            Some(location) => JobRequest::LoadArchiveViewer {
-                location: location.clone(),
-                path: entry.path.clone(),
+        let request = if let Some(location) = self.active_panel().mounted_location() {
+            let Ok(path) = location.resolve_identity(&entry.path) else {
+                return false;
+            };
+            JobRequest::Vfs(vfs::tasks::Task::View {
+                path,
                 quick_view: None,
-            },
-            None => JobRequest::LoadViewer {
-                path: entry.path.clone(),
-            },
+            })
+        } else {
+            match self.active_panel().archive_location() {
+                Some(location) => JobRequest::LoadArchiveViewer {
+                    location: location.clone(),
+                    path: entry.path.clone(),
+                    quick_view: None,
+                },
+                None => JobRequest::LoadViewer {
+                    path: entry.path.clone(),
+                },
+            }
         };
         self.queue_worker_job_request(request);
         true
@@ -117,15 +127,25 @@ impl AppState {
     pub fn active_viewer(&self) -> Option<&ViewerState> {
         self.routes.iter().rev().find_map(|route| match route {
             Route::Viewer(viewer) => Some(viewer),
+            Route::CommandOutput(id) => self.command_outputs.get(id).map(|output| &output.viewer),
             _ => None,
         })
     }
 
     pub(crate) fn active_viewer_mut(&mut self) -> Option<&mut ViewerState> {
-        self.routes.iter_mut().rev().find_map(|route| match route {
+        let route = self
+            .routes
+            .iter_mut()
+            .rev()
+            .find(|route| matches!(route, Route::Viewer(_) | Route::CommandOutput(_)))?;
+        match route {
             Route::Viewer(viewer) => Some(viewer),
+            Route::CommandOutput(id) => self
+                .command_outputs
+                .get_mut(id)
+                .map(|output| &mut output.viewer),
             _ => None,
-        })
+        }
     }
 
     pub(crate) fn open_viewer_search_dialog(&mut self, direction: ViewerSearchDirection) {

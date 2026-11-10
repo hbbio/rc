@@ -1,0 +1,696 @@
+use super::*;
+use crate::tests::drain_background;
+use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
+
+fn fixture() -> (tempfile::TempDir, AppState, vfs::extfs::Helper, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.pkg");
+    fs::write(&source, b"data").unwrap();
+    let helper_path = dir.path().join("fake");
+    fs::write(&helper_path, b"#!/bin/sh\nset -eu\ncase \"$1\" in\nlist) printf '%s\\n' 'dr-xr-xr-x 1 0 0 0 Jan 1 2025 tree' '-rw-r--r-- 1 0 0 4 Jan 1 2025 tree/data' '-rw------- 1 0 0 0 Jan 1 2025 tree/generated' '-rw------- 1 0 0 4 Jan 1 2025 source.pkg';;\ncopyout) printf data > \"$4\";;\nesac\n").unwrap();
+    fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let helper = vfs::extfs::Helper::from_path(&helper_path).unwrap();
+    let mut app = AppState::new(dir.path().into()).unwrap();
+    drain_background(&mut app);
+    (dir, app, helper, source)
+}
+
+#[test]
+fn transfer_dialogs_reject_remote_defaults_before_resolving_local_paths() {
+    struct Remote;
+    impl vfs::Backend for Remote {
+        fn kind(&self) -> vfs::BackendKind {
+            vfs::BackendKind::Sftp
+        }
+        fn read_directory(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+        ) -> io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+        fn metadata(&self, _: &Path, _: &vfs::Cancellation<'_>) -> io::Result<FileEntry> {
+            Err(io::Error::other("unused"))
+        }
+        fn with_file(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+            _: &mut dyn FnMut(&FileEntry, &mut dyn io::Read) -> io::Result<()>,
+        ) -> io::Result<()> {
+            Err(io::Error::other("unused"))
+        }
+    }
+    for confirm_overwrite in [false, true] {
+        for (command, rename) in [
+            (AppCommand::Copy, false),
+            (AppCommand::Move, false),
+            (AppCommand::Move, true),
+        ] {
+            let (dir, mut app, _, source) = fixture();
+            app.refresh_panels();
+            drain_background(&mut app);
+            let mount = Mount::new(
+                "remote".into(),
+                "sftp://host/home/user".into(),
+                VfsPath::Local(dir.path().into()),
+                Arc::new(Remote),
+            )
+            .unwrap();
+            app.panels[1].set_location(mount.root()).unwrap();
+            select(&mut app, "source.pkg");
+            app.settings.confirmation.confirm_overwrite = confirm_overwrite;
+            app.apply(command).unwrap();
+            if rename {
+                app.finish_dialog(DialogResult::PairInputSubmitted {
+                    first: "sftp://host/home/user".into(),
+                    second: "renamed.pkg".into(),
+                });
+            } else {
+                app.apply(AppCommand::DialogAccept).unwrap();
+            }
+            assert!(app.status_line.contains("read-only"), "{}", app.status_line);
+            assert!(matches!(app.top_route(), Route::FileManager));
+            assert!(app.take_pending_worker_commands().is_empty());
+            assert_eq!(fs::read(&source).unwrap(), b"data");
+            assert!(!dir.path().join("sftp:").exists());
+        }
+    }
+}
+
+#[test]
+fn sftp_menu_targets_its_panel_validates_addresses_and_queues_native_paths() {
+    let (dir, mut app, _, _) = fixture();
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::OpenSftp,
+    ))
+    .unwrap();
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "bad;command".into(),
+        second: "/data".into(),
+    });
+    assert!(
+        matches!(app.top_route(), Route::Dialog(_)),
+        "invalid addresses retain the dialog"
+    );
+    assert!(app.take_pending_worker_commands().is_empty());
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "user@[::1]:2222".into(),
+        second: r"/native/\xFF".into(),
+    });
+    let pending = app.take_pending_worker_commands();
+    let job = pending
+        .into_iter()
+        .find_map(|command| {
+            if let WorkerCommand::Run(job) = command {
+                Some(job)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let JobRequest::Vfs(Task::OpenSftp {
+        connection,
+        return_to,
+    }) = &job.request
+    else {
+        panic!("SFTP task")
+    };
+    assert_eq!(connection.endpoint.authority(), "user@[::1]:2222");
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(connection.directory.as_os_str().as_bytes(), b"/native/\xff");
+    assert_eq!(*return_to, VfsPath::Local(dir.path().into()));
+    assert_eq!(app.vfs_workflow.pending[&job.id].panel, ActivePanel::Right);
+    assert!(app.panels.iter().all(|panel| !panel.is_virtual()));
+    assert!(app.request_cancel_for_job(job.id));
+    assert!(app.vfs_workflow.pending.is_empty());
+    app.settings.virtual_fs.sftp_enabled = false;
+    app.apply(AppCommand::Panel(ActivePanel::Left, PanelCommand::OpenSftp))
+        .unwrap();
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(app.status_line.contains("Enable"));
+}
+
+#[test]
+fn global_vfs_setting_blocks_new_archives_and_helpers() {
+    let (dir, mut app, helper, source) = fixture();
+    app.settings.virtual_fs.vfs_enabled = false;
+    assert!(
+        app.open_archive_path(dir.path().join("archive.zip"))
+            .is_err()
+    );
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    assert!(app.take_pending_worker_commands().is_empty());
+    assert!(app.vfs_workflow.pending.is_empty());
+}
+
+#[test]
+fn shell_link_menu_uses_its_own_setting_and_worker() {
+    let (_dir, mut app, _, _) = fixture();
+    app.settings.virtual_fs.sftp_enabled = false;
+    app.apply(AppCommand::Panel(
+        ActivePanel::Left,
+        PanelCommand::OpenShellLink,
+    ))
+    .unwrap();
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "host-alias".into(),
+        second: "/space dir".into(),
+    });
+    assert!(app.take_pending_worker_commands().into_iter().any(|command| matches!(command, WorkerCommand::Run(job) if matches!(job.request, JobRequest::Vfs(Task::OpenShell { .. })))));
+    app.settings.virtual_fs.shell_link_enabled = false;
+    app.apply(AppCommand::Panel(
+        ActivePanel::Right,
+        PanelCommand::OpenShellLink,
+    ))
+    .unwrap();
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(app.status_line.contains("Enable"));
+}
+
+#[test]
+fn ftp_dialog_rejects_plaintext_credentials_and_uses_the_selected_panel() {
+    let (_dir, mut app, _, _) = fixture();
+    app.apply(AppCommand::Panel(ActivePanel::Right, PanelCommand::OpenFtp))
+        .unwrap();
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "ftp://user@host".into(),
+        second: ".".into(),
+    });
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    assert!(app.take_pending_worker_commands().is_empty());
+    app.finish_dialog(DialogResult::PairInputSubmitted {
+        first: "user@host".into(),
+        second: "/data".into(),
+    });
+    let job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| {
+            if let WorkerCommand::Run(job) = command {
+                Some(job)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(matches!(job.request, JobRequest::Vfs(Task::OpenFtp { .. })));
+    assert_eq!(app.vfs_workflow.pending[&job.id].panel, ActivePanel::Right);
+    app.settings.virtual_fs.ftp_enabled = false;
+    app.apply(AppCommand::Panel(ActivePanel::Left, PanelCommand::OpenFtp))
+        .unwrap();
+    assert!(matches!(app.top_route(), Route::FileManager));
+    assert!(app.status_line.contains("Enable"));
+}
+
+#[test]
+fn reconnect_runs_in_a_worker_and_refreshes_only_panels_still_on_the_mount() {
+    struct Remote;
+    impl vfs::Backend for Remote {
+        fn kind(&self) -> vfs::BackendKind {
+            vfs::BackendKind::Sftp
+        }
+        fn read_directory(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+        ) -> io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+        fn metadata(&self, _: &Path, _: &vfs::Cancellation<'_>) -> io::Result<FileEntry> {
+            Err(io::Error::other("unused"))
+        }
+        fn with_file(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+            _: &mut dyn FnMut(&FileEntry, &mut dyn io::Read) -> io::Result<()>,
+        ) -> io::Result<()> {
+            Err(io::Error::other("unused"))
+        }
+    }
+    let (dir, mut app, _, _) = fixture();
+    let mount = Mount::new(
+        "remote".into(),
+        "sftp://host/".into(),
+        VfsPath::Local(dir.path().into()),
+        Arc::new(Remote),
+    )
+    .unwrap();
+    app.vfs_workflow
+        .mounts
+        .insert(mount.id(), Arc::clone(&mount));
+    app.enter_vfs_location(ActivePanel::Left, mount.root(), true);
+    drain_background(&mut app);
+    app.act_on_vfs_mount(Arc::clone(&mount), 3);
+    assert_eq!(app.vfs_workflow.reconnects.len(), 1);
+    drain_background(&mut app);
+    assert!(app.vfs_workflow.reconnects.is_empty());
+    assert_eq!(
+        app.panels[0].mounted_location().unwrap().mount().id(),
+        mount.id()
+    );
+    assert!(!app.panels[1].is_virtual());
+    app.act_on_vfs_mount(Arc::clone(&mount), 3);
+    app.close_vfs_mount(mount.id());
+    drain_background(&mut app);
+    assert!(app.vfs_workflow.reconnects.is_empty());
+    assert!(app.panels.iter().all(|panel| !panel.is_virtual()));
+}
+
+fn mounted(app: &mut AppState, helper: vfs::extfs::Helper, source: PathBuf) -> Arc<Mount> {
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    assert!(
+        !app.active_panel().is_virtual(),
+        "opening must remain asynchronous"
+    );
+    drain_background(app);
+    assert!(app.active_panel().is_virtual(), "{}", app.status_line);
+    Arc::clone(app.active_panel().mounted_location().unwrap().mount())
+}
+
+fn select(app: &mut AppState, name: &str) {
+    app.active_panel_mut().cursor = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.name == name)
+        .unwrap();
+}
+
+#[test]
+fn mounted_panels_navigate_preview_keep_history_and_copy_only_selected_trees() {
+    let (dir, mut app, helper, source) = fixture();
+    let mount = mounted(&mut app, helper, source);
+    let destination = dir.path().join("output");
+    fs::create_dir(&destination).unwrap();
+    select(&mut app, "tree");
+    let selected = app.active_panel().selected_entry().unwrap().path.clone();
+    app.queue_copy_or_move_job(
+        TransferKind::Copy,
+        vec![selected.clone()],
+        destination.clone(),
+        OverwritePolicy::Overwrite,
+        OperationOrigin::Panel(ActivePanel::Left),
+    );
+    drain_background(&mut app);
+    assert!(
+        destination.join("tree/data").exists(),
+        "{}; {:?}",
+        app.status_line,
+        app.jobs.jobs()
+    );
+    assert_eq!(fs::read(destination.join("tree/data")).unwrap(), b"data");
+    assert_eq!(
+        fs::read(destination.join("tree/generated")).unwrap(),
+        b"data"
+    );
+    assert!(!destination.join("source.pkg").exists());
+    assert_eq!(
+        fs::metadata(destination.join("tree"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o555
+    );
+    fs::set_permissions(destination.join("tree"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        fs::metadata(destination.join("tree/generated"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(!fs::read_dir(&destination).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("stage")
+    }));
+    select(&mut app, "tree");
+    assert!(app.open_selected_directory());
+    app.queue_panel_refresh(ActivePanel::Left);
+    drain_background(&mut app);
+    select(&mut app, "data");
+    assert!(app.open_selected_file_in_viewer());
+    drain_background(&mut app);
+    assert!(app.active_viewer().unwrap().mounted_location.is_some());
+    assert_eq!(app.file_history.len(), 1);
+    app.apply(AppCommand::CloseViewer).unwrap();
+    let history = app.file_history[0].clone();
+    app.reopen_history_entry(&history);
+    drain_background(&mut app);
+    assert!(app.active_viewer().unwrap().mounted_location.is_some());
+    app.apply(AppCommand::CloseViewer).unwrap();
+    app.close_vfs_mount(mount.id());
+    drain_background(&mut app);
+    assert!(mount.is_closed());
+    assert!(!app.active_panel().is_virtual());
+    app.reopen_history_entry(&history);
+    assert!(app.take_pending_worker_commands().is_empty());
+    assert!(app.status_line.contains("closed"));
+}
+
+#[test]
+fn quick_cd_and_view_file_resolve_inside_mount_and_typed_parents_leave_it() {
+    let (dir, mut app, helper, source) = fixture();
+    let mount = mounted(&mut app, helper, source);
+    fs::create_dir(dir.path().join("tree")).unwrap();
+    app.apply(AppCommand::OpenQuickCd).unwrap();
+    for ch in "tree".chars() {
+        app.apply(AppCommand::DialogInputChar(ch)).unwrap();
+    }
+    app.poll_deferred_work_at(Instant::now() + Duration::from_secs(1));
+    assert!(!app.take_pending_worker_commands().iter().any(|command| matches!(command, WorkerCommand::Run(job) if matches!(job.request, JobRequest::QuickCdSearch { .. }))));
+    app.apply(AppCommand::DialogAccept).unwrap();
+    drain_background(&mut app);
+    assert_eq!(
+        app.active_panel().mounted_location().unwrap().relative(),
+        Path::new("tree")
+    );
+    app.view_vfs_file_input(&app.active_panel().location(), "data");
+    drain_background(&mut app);
+    assert_eq!(
+        app.active_viewer().unwrap().path(),
+        mount.root().identity().join("tree/data")
+    );
+    app.apply(AppCommand::CloseViewer).unwrap();
+    let target = mount.root().identity().join("tree/../tree");
+    app.submit_quick_cd(rc_shell::encode_path_text(target.as_os_str()), None);
+    drain_background(&mut app);
+    assert_eq!(
+        app.active_panel().mounted_location().unwrap().relative(),
+        Path::new("tree")
+    );
+    app.submit_quick_cd("../..".into(), None);
+    drain_background(&mut app);
+    assert!(!app.active_panel().is_virtual());
+    assert_eq!(app.active_panel().cwd, dir.path());
+}
+
+#[test]
+fn quick_cd_preserves_native_tokens_and_quoted_backslashes_inside_mounts() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let (dir, mut app, _, source) = fixture();
+    let helper_path = dir.path().join("native-helper");
+    fs::write(
+        &helper_path,
+        br#"#!/bin/sh
+if [ "$1" = list ]; then
+    printf 'drwxr-xr-x 1 0 0 0 Jan 1 2025 raw\377\n'
+    printf '%s\n' 'drwxr-xr-x 1 0 0 0 Jan 1 2025 literal\xFF'
+    printf 'drwxr-xr-x 1 0 0 0 Jan 1 2025 literal\377\n'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let helper = vfs::extfs::Helper::from_path(&helper_path).unwrap();
+    let mount = mounted(&mut app, helper, source);
+    let raw = OsStr::from_bytes(b"raw\xff");
+    for (input, expected) in [
+        (
+            rc_shell::quote_native_argument(raw, ShellDialect::Posix),
+            Path::new(raw),
+        ),
+        (String::from(r"'literal\xFF'"), Path::new(r"literal\xFF")),
+    ] {
+        app.enter_vfs_location(ActivePanel::Left, mount.root(), true);
+        drain_background(&mut app);
+        app.submit_quick_cd(input.clone(), None);
+        drain_background(&mut app);
+        assert_eq!(
+            app.active_panel().mounted_location().unwrap().relative(),
+            expected,
+            "{input}: {}",
+            app.status_line
+        );
+    }
+}
+
+#[test]
+fn quick_cd_home_leaves_a_mount_whose_return_directory_is_home() {
+    let (_dir, mut app, helper, source) = fixture();
+    let home = current_user_home_directory().unwrap();
+    app.queue_mount_task(
+        ActivePanel::Left,
+        Task::OpenHelper {
+            helper,
+            source: Some(VfsPath::Local(source)),
+            return_to: VfsPath::Local(home.clone()),
+        },
+        PathBuf::new(),
+    );
+    drain_background(&mut app);
+    let mount = Arc::clone(app.active_panel().mounted_location().unwrap().mount());
+    assert_eq!(app.active_panel().local_directory(), home);
+    app.submit_quick_cd("~".into(), None);
+    assert_eq!(app.active_panel().location(), VfsPath::Local(home));
+    assert!(app.active_panel().loading);
+    assert!(!mount.is_closed());
+}
+
+#[test]
+fn active_vfs_menu_reopens_mounts_and_cancel_discards_an_already_completed_open() {
+    let (_dir, mut app, helper, source) = fixture();
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    let job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| match command {
+            WorkerCommand::Run(job) => Some(*job),
+            _ => None,
+        })
+        .unwrap();
+    let id = job.id;
+    let (jobs, _job_events) = std::sync::mpsc::channel();
+    let (events, background) = std::sync::mpsc::channel();
+    vfs::tasks::execute(job, &jobs, &events);
+    assert!(app.request_cancel_for_job(id));
+    let BackgroundEvent::VfsMounted { mount, .. } = background.try_recv().unwrap() else {
+        panic!("mount completion");
+    };
+    app.handle_vfs_mounted(id, Arc::clone(&mount));
+    assert!(mount.is_closed());
+    assert!(!app.active_panel().is_virtual());
+
+    let (_dir2, mut app, helper, source) = fixture();
+    let mount = mounted(&mut app, helper, source);
+    app.apply(AppCommand::OpenActiveVfs).unwrap();
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.apply(AppCommand::DialogAccept).unwrap();
+    assert!(matches!(app.top_route(), Route::Dialog(_)));
+    app.act_on_vfs_mount(Arc::clone(&mount), 1);
+    drain_background(&mut app);
+    assert_eq!(
+        app.panels[1].mounted_location().unwrap().mount().id(),
+        mount.id()
+    );
+    app.close_vfs_mount(mount.id());
+    drain_background(&mut app);
+    assert!(app.panels.iter().all(|panel| !panel.is_virtual()));
+}
+
+#[test]
+fn mounted_locations_block_native_mutations_and_comparison() {
+    let (_dir, mut app, helper, source) = fixture();
+    mounted(&mut app, helper, source);
+    select(&mut app, "source.pkg");
+    for command in [
+        AppCommand::Move,
+        AppCommand::Delete,
+        AppCommand::EditEntry,
+        AppCommand::CompareFiles,
+        AppCommand::CompareDirectories,
+    ] {
+        app.apply(command).unwrap();
+        assert!(app.take_pending_worker_commands().is_empty(), "{command:?}");
+        assert!(matches!(app.top_route(), Route::FileManager), "{command:?}");
+    }
+    app.active_panel = ActivePanel::Right;
+    let context = app.macro_context();
+    for letter in ['F', 'P', 'D', 'T', 'S', 'U'] {
+        let action = action_macros::ActionTemplate::parse(&format!("echo %{letter}")).unwrap();
+        assert!(action.expand(&context, &[], |_| None).is_err(), "{letter}");
+    }
+    assert!(
+        action_macros::ActionTemplate::parse("echo %d")
+            .unwrap()
+            .expand(&context, &[], |_| None)
+            .is_ok()
+    );
+}
+
+#[test]
+fn source_container_cannot_be_overwritten_but_rename_can_copy_beside_it() {
+    let (dir, mut app, helper, source) = fixture();
+    mounted(&mut app, helper, source.clone());
+    select(&mut app, "source.pkg");
+    let selected = app.active_panel().selected_entry().unwrap().path.clone();
+    for overwrite in [OverwritePolicy::Overwrite, OverwritePolicy::Rename] {
+        app.queue_copy_or_move_job(
+            TransferKind::Copy,
+            vec![selected.clone()],
+            dir.path().into(),
+            overwrite,
+            OperationOrigin::Panel(ActivePanel::Left),
+        );
+        drain_background(&mut app);
+    }
+    assert_eq!(fs::read(&source).unwrap(), b"data");
+    assert_eq!(
+        fs::read(dir.path().join("source.pkg.copy")).unwrap(),
+        b"data"
+    );
+}
+
+#[test]
+fn closing_a_mount_drops_reverts_from_an_inflight_exit_and_cancels_nested_opens() {
+    let (dir, mut app, helper, source) = fixture();
+    let mount = mounted(&mut app, helper.clone(), source);
+    let member = mount.root().resolve_input(Path::new("source.pkg")).unwrap();
+    app.queue_helper_mount(ActivePanel::Left, helper, Some(member), PathBuf::new());
+    let requests = app.take_pending_worker_commands();
+    let nested = requests
+        .iter()
+        .find_map(|command| match command {
+            WorkerCommand::Run(job)
+                if matches!(job.request, JobRequest::Vfs(Task::OpenHelper { .. })) =>
+            {
+                Some(job.cancel_flag())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let destination = dir.path().join("vanishing");
+    fs::create_dir(&destination).unwrap();
+    assert!(app.set_active_panel_directory(destination.clone()).unwrap());
+    fs::remove_dir(&destination).unwrap();
+    app.close_vfs_mount(mount.id());
+    assert!(nested.load(std::sync::atomic::Ordering::Relaxed));
+    drain_background(&mut app);
+    assert!(
+        !app.active_panel().is_virtual(),
+        "failed exit must not restore the closed mount"
+    );
+    assert!(app.vfs_workflow.pending.is_empty());
+}
+
+#[test]
+fn pending_mounts_survive_automatic_and_manual_directory_refreshes() {
+    for automatic in [true, false] {
+        let (dir, mut app, helper, source) = fixture();
+        app.queue_helper_mount(
+            ActivePanel::Left,
+            helper,
+            Some(VfsPath::Local(source)),
+            PathBuf::new(),
+        );
+        fs::write(dir.path().join("unrelated"), b"change").unwrap();
+        if automatic {
+            assert!(app.refresh_directory_if_idle(ActivePanel::Left));
+        } else {
+            app.apply(AppCommand::Reread).unwrap();
+        }
+        drain_background(&mut app);
+        let mounted = app
+            .active_panel()
+            .mounted_location()
+            .expect("a directory refresh must not discard the pending mount");
+        assert!(!mounted.mount().is_closed());
+        assert!(
+            app.active_panel()
+                .entries
+                .iter()
+                .any(|entry| entry.name == "tree")
+        );
+    }
+}
+
+#[test]
+fn completed_mount_is_discarded_after_navigation_away_and_back() {
+    let (dir, mut app, helper, source) = fixture();
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    let job = app
+        .take_pending_worker_commands()
+        .into_iter()
+        .find_map(|command| match command {
+            WorkerCommand::Run(job) => Some(*job),
+            _ => None,
+        })
+        .unwrap();
+    let id = job.id;
+    let (jobs, _job_events) = std::sync::mpsc::channel();
+    let (events, background) = std::sync::mpsc::channel();
+    vfs::tasks::execute(job, &jobs, &events);
+    let BackgroundEvent::VfsMounted { mount, .. } = background.try_recv().unwrap() else {
+        panic!("mount completion");
+    };
+    let other = dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    assert!(app.set_active_panel_directory(other).unwrap());
+    assert!(app.set_active_panel_directory(dir.path().into()).unwrap());
+    app.handle_vfs_mounted(id, Arc::clone(&mount));
+    drain_background(&mut app);
+    assert!(mount.is_closed());
+    assert!(!app.active_panel().is_virtual());
+    assert!(app.vfs_workflow.pending.is_empty());
+    assert!(app.vfs_workflow.mounts.is_empty());
+}
+
+#[test]
+fn helper_uri_parsing_and_stale_completion_do_not_replace_newer_navigation() {
+    let (dir, mut app, helper, source) = fixture();
+    let uri = source.join("fake://tree");
+    assert!(app.open_helper_uri_using(ActivePanel::Left, &uri, vec![helper.clone()]));
+    drain_background(&mut app);
+    assert_eq!(
+        app.active_panel().mounted_location().unwrap().relative(),
+        Path::new("tree")
+    );
+    let id = app.active_panel().mounted_location().unwrap().mount().id();
+    app.close_vfs_mount(id);
+    drain_background(&mut app);
+    app.queue_helper_mount(
+        ActivePanel::Left,
+        helper,
+        Some(VfsPath::Local(source)),
+        PathBuf::new(),
+    );
+    let other = dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    app.set_active_panel_directory(other.clone()).unwrap();
+    drain_background(&mut app);
+    assert_eq!(app.active_panel().cwd, other);
+    assert!(!app.active_panel().is_virtual());
+    assert!(app.vfs_workflow.mounts.is_empty());
+}
