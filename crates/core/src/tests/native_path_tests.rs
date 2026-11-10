@@ -72,6 +72,44 @@ fn move_dialog_passes_native_destination_names_to_jobs() {
                 && names == &vec![OsString::from_vec(b"renamed\xfd.rs".to_vec())]))));
 }
 
+fn assert_copy_dialog_default_preserves_destination(name: OsString) {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("copy.txt");
+    let destination = root.path().join(name);
+    fs::write(&source, b"copy contents").unwrap();
+    fs::create_dir(&destination).unwrap();
+    let mut app = app_with_loaded_panels(root.path().into());
+    app.set_panel_directory(ActivePanel::Right, destination.clone())
+        .unwrap();
+    drain_background(&mut app);
+    app.settings.confirmation.confirm_overwrite = false;
+    app.active_panel_mut().cursor = app
+        .active_panel()
+        .entries
+        .iter()
+        .position(|entry| entry.path == source)
+        .unwrap();
+    app.apply(AppCommand::Copy).unwrap();
+    app.apply(AppCommand::DialogAccept).unwrap();
+    drain_background(&mut app);
+    assert_eq!(
+        fs::read(destination.join("copy.txt")).unwrap(),
+        b"copy contents"
+    );
+    assert_eq!(fs::read(source).unwrap(), b"copy contents");
+}
+
+#[test]
+fn copy_dialog_unchanged_default_preserves_literal_backslashes() {
+    assert_copy_dialog_default_preserves_destination(OsString::from(r"dest\folder"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copy_dialog_unchanged_default_preserves_invalid_utf8() {
+    assert_copy_dialog_default_preserves_destination(OsString::from_vec(b"dest\xff".to_vec()));
+}
+
 #[test]
 fn utf8_panel_spelling_distinguishes_invalid_bytes_from_literal_escape_text() {
     let raw = OsString::from_vec(b"raw\xff".to_vec());

@@ -674,12 +674,7 @@ impl AppState {
                 if self.reject_virtual_transfer_destination(Path::new(&decode_path_text(value))) {
                     return;
                 }
-                let input_path = PathBuf::from(value);
-                let destination_dir = if input_path.is_absolute() {
-                    input_path
-                } else {
-                    source_base_dir.join(input_path)
-                };
+                let destination_dir = parse_destination_path(&source_base_dir, value);
                 if self.settings.confirmation.confirm_overwrite {
                     let selected = overwrite_policy_index(self.overwrite_policy());
                     self.push_dialog(
