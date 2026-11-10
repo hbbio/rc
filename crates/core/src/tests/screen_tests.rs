@@ -88,6 +88,61 @@ fn suspended_find_and_tree_receive_background_completion() {
 }
 
 #[test]
+fn opening_results_from_two_find_screens_cancels_the_superseded_paused_search() {
+    let root = tempfile::tempdir().unwrap();
+    let result_path = root.path().join("result.txt");
+    fs::write(&result_path, b"result").unwrap();
+    let mut app = app_with_loaded_panels(root.path().into());
+    let start = |app: &mut AppState, pattern: &str| {
+        let mut spec = FindSpec::new(root.path().into());
+        spec.filename_pattern = pattern.into();
+        app.start_find_search(spec);
+        let Route::FindResults(results) = app.top_route() else {
+            panic!("find results");
+        };
+        let id = results.job_id;
+        let cancel = app
+            .pending_worker_commands
+            .iter()
+            .find_map(|command| match command {
+                WorkerCommand::Run(job) if job.id == id => Some(job.cancel_flag()),
+                _ => None,
+            })
+            .unwrap();
+        let pause = Arc::clone(&app.find_pause_flags[&id]);
+        app.handle_job_event(JobEvent::Started { id });
+        app.handle_background_event(BackgroundEvent::FindEntriesChunk {
+            job_id: id,
+            entries: vec![FindResultEntry {
+                path: result_path.clone(),
+                is_dir: false,
+            }],
+        });
+        (id, pause, cancel)
+    };
+    let (a, pause_a, cancel_a) = start(&mut app, "A");
+    choose(&mut app, "File manager");
+    let (b, pause_b, cancel_b) = start(&mut app, "B");
+    app.apply(AppCommand::FindResultsOpenEntry).unwrap();
+    assert!(pause_b.load(AtomicOrdering::Relaxed));
+    assert!(!cancel_b.load(AtomicOrdering::Relaxed));
+    choose(&mut app, "Find: A");
+    app.apply(AppCommand::FindResultsOpenEntry).unwrap();
+    assert!(cancel_b.load(AtomicOrdering::Relaxed));
+    assert!(
+        app.pending_worker_commands
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::Cancel(id) if *id == b))
+    );
+    assert_eq!(app.paused_find_results.as_ref().unwrap().job_id, a);
+    assert!(pause_a.load(AtomicOrdering::Relaxed));
+    assert!(!cancel_a.load(AtomicOrdering::Relaxed));
+    app.apply(AppCommand::OpenFindDialog).unwrap();
+    assert!(matches!(app.top_route(), Route::FindResults(results) if results.job_id == a));
+    assert!(!pause_a.load(AtomicOrdering::Relaxed));
+}
+
+#[test]
 fn restoring_pending_tree_invalidates_snapshot_from_before_suspended_mutation() {
     let root = tempfile::tempdir().unwrap();
     let mut app = app_with_loaded_panels(root.path().into());

@@ -337,6 +337,9 @@ impl AppState {
         let Some(mut results) = self.pop_find_results() else {
             return false;
         };
+        // Alt-F retains one paused search. Cancel its predecessor before its
+        // state is replaced, so no unreachable worker keeps a scan permit.
+        self.discard_paused_find_results();
         if matches!(results.status, FindResultsStatus::Running) {
             self.set_find_job_paused(results.job_id, true);
             results.status = FindResultsStatus::Paused;
