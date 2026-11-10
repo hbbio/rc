@@ -43,7 +43,10 @@ PACKAGES: dict[str, PackageSpec] = {
         target_kind="lib",
         target_name="rc_core",
         required_files=("src/lib.rs", "assets/mc.default.keymap"),
-        internal_dependencies={"rc-shell": "rust-commander-shell"},
+        internal_dependencies={
+            "rc-platform": "rust-commander-platform",
+            "rc-shell": "rust-commander-shell",
+        },
     ),
     "rust-commander-ui": PackageSpec(
         source_dir="crates/ui",
@@ -60,6 +63,7 @@ PACKAGES: dict[str, PackageSpec] = {
         internal_dependencies={
             "rc-core": "rust-commander-core",
             "rc-platform": "rust-commander-platform",
+            "rc-shell": "rust-commander-shell",
             "rc-ui": "rust-commander-ui",
         },
     ),
