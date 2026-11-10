@@ -56,7 +56,7 @@ impl PermissionChange {
                     'r' => 0o444,
                     'w' => 0o222,
                     'x' => 0o111,
-                    'X' if directory || original & 0o111 != 0 => 0o111,
+                    'X' if directory || mode & 0o111 != 0 => 0o111,
                     's' => 0o6000,
                     't' => 0o1000,
                     _ => 0,
@@ -242,6 +242,22 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conditional_execute_uses_permissions_from_preceding_clauses() {
+        assert_eq!(
+            PermissionChange::parse("u+x,g+X")
+                .unwrap()
+                .apply(0o644, false),
+            0o754
+        );
+        assert_eq!(
+            PermissionChange::parse("u-x,g+X")
+                .unwrap()
+                .apply(0o744, false),
+            0o644
+        );
+    }
+
     #[test]
     fn mode_changes_preserve_unselected_bits_and_respect_conditional_execute() {
         assert_eq!(

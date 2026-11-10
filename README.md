@@ -67,8 +67,10 @@ and fast directory navigation.
 - On Unix, **File → Chmod** (`Ctrl-X c`), **Chown** (`Ctrl-X o`), and
   **Advanced chown** change selected or tagged entries in a cancelable background
   job. Chmod accepts octal modes or explicit `u/g/o/a` clauses with `+`, `-`, `=`
-  and `rwxXst`, such as `u+rw,g-w,o=r`. Chown accepts account names or numeric IDs;
-  blank fields keep existing values. Advanced chown combines `owner:group` and an
+  and `rwxXst`, such as `u+rw,g-w,o=r`. As in GNU chmod, clauses apply left to
+  right, and `X` checks the permissions left by preceding clauses. Chown accepts
+  account names or numeric IDs; blank fields keep existing values. Advanced chown
+  combines `owner:group` and an
   optional mode. Operations affect only the selected entries, without recursion.
   Chmod rejects symlinks; chown changes the link itself. Completed changes remain
   if a later entry fails or the job is canceled.
