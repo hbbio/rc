@@ -406,6 +406,48 @@ fn quick_cd_and_view_file_resolve_inside_mount_and_typed_parents_leave_it() {
 }
 
 #[test]
+fn quick_cd_preserves_native_tokens_and_quoted_backslashes_inside_mounts() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let (dir, mut app, _, source) = fixture();
+    let helper_path = dir.path().join("native-helper");
+    fs::write(
+        &helper_path,
+        br#"#!/bin/sh
+if [ "$1" = list ]; then
+    printf 'drwxr-xr-x 1 0 0 0 Jan 1 2025 raw\377\n'
+    printf '%s\n' 'drwxr-xr-x 1 0 0 0 Jan 1 2025 literal\xFF'
+    printf 'drwxr-xr-x 1 0 0 0 Jan 1 2025 literal\377\n'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let helper = vfs::extfs::Helper::from_path(&helper_path).unwrap();
+    let mount = mounted(&mut app, helper, source);
+    let raw = OsStr::from_bytes(b"raw\xff");
+    for (input, expected) in [
+        (
+            rc_shell::quote_native_argument(raw, ShellDialect::Posix),
+            Path::new(raw),
+        ),
+        (String::from(r"'literal\xFF'"), Path::new(r"literal\xFF")),
+    ] {
+        app.enter_vfs_location(ActivePanel::Left, mount.root(), true);
+        drain_background(&mut app);
+        app.submit_quick_cd(input.clone(), None);
+        drain_background(&mut app);
+        assert_eq!(
+            app.active_panel().mounted_location().unwrap().relative(),
+            expected,
+            "{input}: {}",
+            app.status_line
+        );
+    }
+}
+
+#[test]
 fn quick_cd_home_leaves_a_mount_whose_return_directory_is_home() {
     let (_dir, mut app, helper, source) = fixture();
     let home = current_user_home_directory().unwrap();

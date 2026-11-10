@@ -153,6 +153,82 @@ fn quick_cd_home_leaves_an_archive_anchored_at_home() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn quick_cd_preserves_native_tokens_and_quoted_paths_in_virtual_panels() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("paths.tar");
+    let raw = OsString::from_vec(b"raw\xff".to_vec());
+    let literal = OsString::from(r"literal\xFF");
+    let mut builder = tar::Builder::new(fs::File::create(&archive).unwrap());
+    for name in [
+        raw.clone(),
+        literal.clone(),
+        OsString::from("$RC_NATIVE_HEX_726177FF"),
+        OsString::from_vec(b"literal\xff".to_vec()),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o755);
+        builder
+            .append_data(&mut header, Path::new(&name), io::empty())
+            .unwrap();
+    }
+    builder.finish().unwrap();
+    for (name, input) in [
+        (
+            raw.clone(),
+            rc_shell::quote_native_argument(&raw, ShellDialect::Posix),
+        ),
+        (literal, String::from(r"'literal\xFF'")),
+    ] {
+        // macOS filesystems cannot represent the invalid UTF-8 local name.
+        if cfg!(target_os = "linux") || std::str::from_utf8(name.as_bytes()).is_ok() {
+            let destination = root.path().join(&name);
+            fs::create_dir(&destination).unwrap();
+            let mut local = app_with_loaded_panels(root.path().into());
+            local.submit_quick_cd(input.clone(), None);
+            drain_background(&mut local);
+            assert_eq!(
+                local.active_panel().location(),
+                vfs::VfsPath::Local(destination)
+            );
+        }
+        let mut virtual_panel = app_with_loaded_panels(root.path().into());
+        virtual_panel.open_archive_path(archive.clone()).unwrap();
+        virtual_panel.queue_panel_refresh(ActivePanel::Left);
+        drain_background(&mut virtual_panel);
+        virtual_panel.submit_quick_cd(input.clone(), None);
+        drain_background(&mut virtual_panel);
+        // Archives omit backslash-containing names. A literal spelling must
+        // fail there instead of entering the distinct raw-byte directory.
+        let expected = if name.as_bytes().contains(&b'\\') {
+            assert!(
+                virtual_panel
+                    .status_line
+                    .contains("invalid archive directory")
+            );
+            PathBuf::new()
+        } else {
+            PathBuf::from(name)
+        };
+        assert_eq!(
+            virtual_panel
+                .active_panel()
+                .archive_location()
+                .unwrap()
+                .directory,
+            expected,
+            "{input}: {}",
+            virtual_panel.status_line
+        );
+    }
+}
+
 #[test]
 fn normal_panel_navigation_updates_quick_cd_history_per_panel() {
     let stamp = SystemTime::now()
