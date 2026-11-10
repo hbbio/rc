@@ -126,6 +126,34 @@ fn quick_cd_queues_refresh_and_dash_toggles_previous_directory() {
 }
 
 #[test]
+fn quick_cd_home_leaves_an_archive_anchored_at_home() {
+    let root = tempfile::tempdir().unwrap();
+    let home = current_user_home_directory().unwrap();
+    let mut app = app_with_loaded_panels(root.path().into());
+    // No archive I/O is needed to test Quick cd from this typed location.
+    app.active_panel_mut()
+        .set_location(ArchiveLocation::root(home.join("quick-cd.zip")).into())
+        .unwrap();
+    assert_eq!(app.active_panel().local_directory(), home);
+    app.apply(AppCommand::OpenQuickCd).unwrap();
+    app.finish_dialog(DialogResult::QuickCdSubmitted {
+        input: "~".into(),
+        selected_path: None,
+    });
+    assert_eq!(
+        app.active_panel().location(),
+        vfs::VfsPath::Local(home.clone())
+    );
+    assert!(app.take_pending_worker_commands().iter().any(|command| {
+        matches!(command, WorkerCommand::Run(job) if matches!(
+            &job.request,
+            JobRequest::RefreshPanel { source: PanelListingSource::Directory, cwd, .. }
+                if cwd == &home
+        ))
+    }));
+}
+
+#[test]
 fn normal_panel_navigation_updates_quick_cd_history_per_panel() {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -177,7 +177,7 @@ impl AppState {
             );
             return;
         }
-        if destination == cwd {
+        if self.active_panel().location() == vfs::VfsPath::Local(destination.clone()) {
             self.set_status(format!("Already in {}", destination.to_string_lossy()));
             return;
         }

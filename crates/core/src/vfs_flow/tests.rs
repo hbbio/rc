@@ -343,6 +343,28 @@ fn quick_cd_and_view_file_resolve_inside_mount_and_typed_parents_leave_it() {
 }
 
 #[test]
+fn quick_cd_home_leaves_a_mount_whose_return_directory_is_home() {
+    let (_dir, mut app, helper, source) = fixture();
+    let home = current_user_home_directory().unwrap();
+    app.queue_mount_task(
+        ActivePanel::Left,
+        Task::OpenHelper {
+            helper,
+            source: Some(VfsPath::Local(source)),
+            return_to: VfsPath::Local(home.clone()),
+        },
+        PathBuf::new(),
+    );
+    drain_background(&mut app);
+    let mount = Arc::clone(app.active_panel().mounted_location().unwrap().mount());
+    assert_eq!(app.active_panel().local_directory(), home);
+    app.submit_quick_cd("~".into(), None);
+    assert_eq!(app.active_panel().location(), VfsPath::Local(home));
+    assert!(app.active_panel().loading);
+    assert!(!mount.is_closed());
+}
+
+#[test]
 fn active_vfs_menu_reopens_mounts_and_cancel_discards_an_already_completed_open() {
     let (_dir, mut app, helper, source) = fixture();
     app.queue_helper_mount(
