@@ -17,6 +17,69 @@ fn fixture() -> (tempfile::TempDir, AppState, vfs::extfs::Helper, PathBuf) {
 }
 
 #[test]
+fn transfer_dialogs_reject_remote_defaults_before_resolving_local_paths() {
+    struct Remote;
+    impl vfs::Backend for Remote {
+        fn kind(&self) -> vfs::BackendKind {
+            vfs::BackendKind::Sftp
+        }
+        fn read_directory(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+        ) -> io::Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+        fn metadata(&self, _: &Path, _: &vfs::Cancellation<'_>) -> io::Result<FileEntry> {
+            Err(io::Error::other("unused"))
+        }
+        fn with_file(
+            &self,
+            _: &Path,
+            _: &vfs::Cancellation<'_>,
+            _: &mut dyn FnMut(&FileEntry, &mut dyn io::Read) -> io::Result<()>,
+        ) -> io::Result<()> {
+            Err(io::Error::other("unused"))
+        }
+    }
+    for confirm_overwrite in [false, true] {
+        for (command, rename) in [
+            (AppCommand::Copy, false),
+            (AppCommand::Move, false),
+            (AppCommand::Move, true),
+        ] {
+            let (dir, mut app, _, source) = fixture();
+            app.refresh_panels();
+            drain_background(&mut app);
+            let mount = Mount::new(
+                "remote".into(),
+                "sftp://host/home/user".into(),
+                VfsPath::Local(dir.path().into()),
+                Arc::new(Remote),
+            )
+            .unwrap();
+            app.panels[1].set_location(mount.root()).unwrap();
+            select(&mut app, "source.pkg");
+            app.settings.confirmation.confirm_overwrite = confirm_overwrite;
+            app.apply(command).unwrap();
+            if rename {
+                app.finish_dialog(DialogResult::PairInputSubmitted {
+                    first: "sftp://host/home/user".into(),
+                    second: "renamed.pkg".into(),
+                });
+            } else {
+                app.apply(AppCommand::DialogAccept).unwrap();
+            }
+            assert!(app.status_line.contains("read-only"), "{}", app.status_line);
+            assert!(matches!(app.top_route(), Route::FileManager));
+            assert!(app.take_pending_worker_commands().is_empty());
+            assert_eq!(fs::read(&source).unwrap(), b"data");
+            assert!(!dir.path().join("sftp:").exists());
+        }
+    }
+}
+
+#[test]
 fn sftp_menu_targets_its_panel_validates_addresses_and_queues_native_paths() {
     let (dir, mut app, _, _) = fixture();
     app.apply(AppCommand::Panel(

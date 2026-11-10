@@ -446,6 +446,29 @@ impl AppState {
         self.jobs.status_counts()
     }
 
+    pub(crate) fn reject_virtual_transfer_destination(&mut self, destination: &Path) -> bool {
+        let virtual_destination = (destination.is_relative()
+            && destination
+                .as_os_str()
+                .as_encoded_bytes()
+                .windows(3)
+                .any(|part| part == b"://"))
+            || self
+                .panels
+                .iter()
+                .filter(|panel| panel.is_virtual())
+                .any(|panel| {
+                    panel
+                        .location()
+                        .resolve_identity(destination.to_path_buf())
+                        .is_ok()
+                });
+        if virtual_destination {
+            self.set_status("VFS destinations are read-only; choose a local destination directory");
+        }
+        virtual_destination
+    }
+
     pub(crate) fn queue_copy_or_move_job(
         &mut self,
         kind: TransferKind,
@@ -454,18 +477,7 @@ impl AppState {
         overwrite: OverwritePolicy,
         origin: OperationOrigin,
     ) {
-        if self
-            .panels
-            .iter()
-            .filter(|panel| panel.is_virtual())
-            .any(|panel| {
-                panel
-                    .location()
-                    .resolve_identity(destination_dir.clone())
-                    .is_ok()
-            })
-        {
-            self.set_status("Archives are read-only; choose a local destination directory");
+        if self.reject_virtual_transfer_destination(&destination_dir) {
             return;
         }
         if let OperationOrigin::Panel(panel) = origin
@@ -533,17 +545,10 @@ impl AppState {
             self.queue_copy_or_move_job(kind, sources, destination_dir, overwrite, origin);
             return;
         }
-        if self
-            .panels
-            .iter()
-            .filter(|panel| panel.is_virtual())
-            .any(|panel| {
-                panel
-                    .location()
-                    .resolve_identity(destination_dir.clone())
-                    .is_ok()
-            })
-            || matches!(origin, OperationOrigin::Panel(panel) if self.panels[panel.index()].is_virtual())
+        if self.reject_virtual_transfer_destination(&destination_dir) {
+            return;
+        }
+        if matches!(origin, OperationOrigin::Panel(panel) if self.panels[panel.index()].is_virtual())
         {
             self.set_status("Archives are read-only; choose a local destination directory");
             return;

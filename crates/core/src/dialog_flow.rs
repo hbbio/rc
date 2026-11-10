@@ -670,6 +670,10 @@ impl AppState {
                     self.set_status("Copy/Move canceled: empty destination");
                     return;
                 }
+                // Reject display identities before resolving a relative local path.
+                if self.reject_virtual_transfer_destination(Path::new(&decode_path_text(value))) {
+                    return;
+                }
                 let input_path = PathBuf::from(value);
                 let destination_dir = if input_path.is_absolute() {
                     input_path
@@ -720,6 +724,11 @@ impl AppState {
                 let destination_input = first.trim();
                 if destination_input.is_empty() {
                     self.set_status("Copy/Move canceled: empty destination");
+                    return;
+                }
+                if self.reject_virtual_transfer_destination(Path::new(&decode_path_text(
+                    destination_input,
+                ))) {
                     return;
                 }
                 let destination = parse_destination_path(&source_base_dir, destination_input);
