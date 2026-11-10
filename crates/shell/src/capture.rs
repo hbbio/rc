@@ -1,5 +1,6 @@
 use std::io::{self, Read};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
@@ -47,10 +48,21 @@ pub fn run_captured_command(
     let mut child = command.spawn()?;
     let stdout = child.stdout.take().expect("stdout pipe requested");
     let stderr = child.stderr.take().expect("stderr pipe requested");
+    #[cfg(unix)]
+    if let Err(error) = set_nonblocking(&stdout).and_then(|()| set_nonblocking(&stderr)) {
+        super::terminate_shell_command(&mut child);
+        let _ = child.wait();
+        return Err(error);
+    }
+    let stopped = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::sync_channel(16);
     let stdout_tx = tx.clone();
-    let stdout_thread = thread::spawn(move || read_pipe(stdout, OutputStream::Stdout, stdout_tx));
-    let stderr_thread = thread::spawn(move || read_pipe(stderr, OutputStream::Stderr, tx));
+    let stdout_stop = Arc::clone(&stopped);
+    let stdout_thread =
+        thread::spawn(move || read_pipe(stdout, OutputStream::Stdout, stdout_tx, stdout_stop));
+    let stderr_stop = Arc::clone(&stopped);
+    let stderr_thread =
+        thread::spawn(move || read_pipe(stderr, OutputStream::Stderr, tx, stderr_stop));
     let result = (|| {
         let mut status = None;
         let mut done = 0;
@@ -102,19 +114,53 @@ pub fn run_captured_command(
         super::terminate_shell_command(&mut child);
         let _ = child.wait();
     }
+    // Stop idle readers even if a detached descendant still holds a write end.
+    stopped.store(true, Ordering::Relaxed);
     // Unblock producers waiting on the bounded channel before joining them.
     drop(rx);
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
+    finish_reader(stdout_thread);
+    finish_reader(stderr_thread);
     result
 }
 
-fn read_pipe(mut pipe: impl Read, stream: OutputStream, tx: SyncSender<Event>) {
+#[cfg(unix)]
+fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
+    let fd = pipe.as_raw_fd();
+    let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL)?);
+    fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+    Ok(())
+}
+
+fn finish_reader(reader: thread::JoinHandle<()>) {
+    // Other platforms use blocking pipe reads. Detach an unfinished reader so
+    // an inherited writer cannot hold up cancellation or application shutdown.
+    #[cfg(not(unix))]
+    if !reader.is_finished() {
+        return;
+    }
+    let _ = reader.join();
+}
+
+fn read_pipe(
+    mut pipe: impl Read,
+    stream: OutputStream,
+    tx: SyncSender<Event>,
+    stopped: Arc<AtomicBool>,
+) {
     let result = (|| {
         let mut buffer = [0; 8192];
         loop {
+            if stopped.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             let count = match pipe.read(&mut buffer) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 result => result?,
             };
             if count == 0 {
@@ -191,6 +237,84 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn detached_pipe_holder() {
+        let Ok(stage) = std::env::var("RC_CAPTURE_TEST_DETACHED") else {
+            return;
+        };
+        if stage == "spawn" {
+            detached_pipe_command("hold")
+                .spawn()
+                .unwrap()
+                .wait()
+                .unwrap();
+        } else {
+            use std::io::Write;
+            nix::unistd::setsid().unwrap();
+            println!("\ndetached-pid:{}", std::process::id());
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    fn detached_pipe_command(stage: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "capture::tests::detached_pipe_holder",
+                "--nocapture",
+            ])
+            .env("RC_CAPTURE_TEST_DETACHED", stage);
+        command
+    }
+
+    #[test]
+    fn cancellation_does_not_wait_for_detached_pipe_writers() {
+        let (pid_tx, pid_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let cancel = AtomicBool::new(false);
+            let mut stdout = Vec::new();
+            let result = run_captured_command(
+                detached_pipe_command("spawn"),
+                &cancel,
+                8192,
+                |stream, bytes| {
+                    if stream == OutputStream::Stdout {
+                        stdout.extend_from_slice(bytes);
+                        if let Some(pid) = String::from_utf8_lossy(&stdout)
+                            .split_inclusive('\n')
+                            .find_map(|line| {
+                                line.strip_prefix("detached-pid:")?
+                                    .strip_suffix('\n')?
+                                    .parse::<i32>()
+                                    .ok()
+                            })
+                        {
+                            pid_tx.send(pid).unwrap();
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            result_tx.send(result).unwrap();
+        });
+        let pid = pid_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result = result_rx.recv_timeout(Duration::from_secs(2));
+        // Also release blocked readers on regression, so the test cannot hang.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        worker.join().unwrap();
+        let error = result
+            .expect("capture cleanup waited for a detached writer")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]
