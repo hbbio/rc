@@ -666,12 +666,6 @@ fn safe_member_path(name: &[u8]) -> io::Result<Option<PathBuf>> {
 
 fn safe_component(name: &OsStr) -> bool {
     let name = name.as_encoded_bytes();
-    if name
-        .iter()
-        .any(|byte| matches!(byte, b'\\' | b'/' | 0 | b':'))
-    {
-        return false;
-    }
     #[cfg(windows)]
     {
         if matches!(name.last(), Some(b'.' | b' ')) {
@@ -692,7 +686,9 @@ fn safe_component(name: &OsStr) -> bool {
             return false;
         }
     }
-    true
+    !name
+        .iter()
+        .any(|byte| matches!(byte, b'\\' | b'/' | 0 | b':'))
 }
 
 fn invalid_data(message: &str) -> io::Error {

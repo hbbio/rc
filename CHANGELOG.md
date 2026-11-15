@@ -112,6 +112,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Security
 
 - Require Tokio 1.53.3 or newer to include its RustSec advisory fix.
+- Require rustix 1.1.6 or newer to address
+  [RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486.html).
 
 ### Documentation
 
