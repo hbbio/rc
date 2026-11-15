@@ -4,8 +4,23 @@
 
 *rust commander* is a Rust terminal file manager inspired by GNU Midnight
 Commander. It keeps the familiar dual-pane workflow and MC-style default
-keybindings while adding responsive background operations, a modal shell prompt,
-and fast directory navigation.
+keybindings while adding responsive background operations, a persistent Unix
+shell, read-only archive and remote browsing, and fast directory navigation.
+
+## What's new in 0.3.0
+
+- Browse ZIP/TAR archives, nested archives, MC extfs helpers, and read-only
+  SFTP, SSH Shell, and FTP/FTPS connections; copy selected contents to local folders.
+- Keep a persistent Unix shell and switch between it and the panels with `Ctrl-O`.
+- Run MC extension actions and conditional F2 user menus, edit filename highlighting,
+  and save learned key bindings and custom listing formats.
+- Change Unix permissions and ownership, create or edit links, compare files and
+  directories, and capture commands in the searchable output viewer.
+- Swap panels, calculate directory sizes, restore suspended screens, and scroll
+  panels and modals with a mouse wheel or touchpad.
+
+See the [0.3.0 changelog](CHANGELOG.md#030---2026-11-15) for the full release notes
+and the [roadmap](ROADMAP.md) for unfinished work.
 
 ## Features
 
@@ -60,6 +75,15 @@ and fast directory navigation.
 - Directory tree navigation with static or dynamic movement, incremental search,
   subtree rescan, and subtree forgetting.
 - A labeled, persistent directory hotlist with add, edit, remove, and quick-add.
+
+Automatic refresh uses FSEvents on macOS, inotify on Linux, and
+ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
+the tree only refreshes affected cached subtrees. Native notifications may be
+unavailable on network or virtual filesystems; use manual refresh there. Watch
+registration failures are reported in the status line and retried in the background.
+Writes to the active tracing log are excluded from automatic invalidations so
+refresh logging cannot trigger another refresh. Log creation, deletion, and
+renaming still update the panels.
 
 ### Files and jobs
 
@@ -169,6 +193,8 @@ in [`crates/core/src/vfs.rs`](crates/core/src/vfs.rs) distinguish native paths,
 archive members, and mounted backends. Mounted readers inherit job cancellation
 and mount closure; their display identities cannot be obtained as native paths.
 
+### Virtual filesystems and remote connections
+
 On Unix, installed MC extfs helpers add read-only package and archive formats.
 `Enter` uses `u7z`, `urar`, `rpm`, `deb`, `uar`, or `ucpio` for matching extensions
 when installed. Quick cd also accepts `/path/package/u7z://subdirectory` and
@@ -269,15 +295,6 @@ and special files cannot be read or copied; FTP servers may expose a followed
 link as an ordinary file. Each operation opens a fresh connection. Rescan and
 Reconnect clear the 30-second metadata cache; Reconnect also cancels that mount's
 jobs and refreshes visible panels. The FTP toggle controls new FTP/FTPS mounts.
-
-Automatic refresh uses FSEvents on macOS, inotify on Linux, and
-ReadDirectoryChangesW on Windows. Watches are shared across directory aliases;
-the tree only refreshes affected cached subtrees. Native notifications may be
-unavailable on network or virtual filesystems; use manual refresh there. Watch
-registration failures are reported in the status line and retried in the background.
-Writes to the active tracing log are excluded from automatic invalidations so
-refresh logging cannot trigger another refresh. Log creation, deletion, and
-renaming still update the panels.
 
 ### Find and panelize
 
@@ -413,10 +430,20 @@ Requirements:
 - Rust 1.88.0 or newer
 - A terminal with ANSI support
 
+Optional tools for Unix features:
+
+- OpenSSH for SFTP and Shell links; Shell links also need Python 3.6 or newer on
+  the remote host.
+- curl with FTP and TLS support for FTP/FTPS links.
+- MC extfs helper executables and their external tools for additional archive and
+  package formats.
+- `diff` for file/directory comparisons; `difft` (difftastic) is preferred for
+  file comparisons when installed.
+
 Install from [crates.io](https://crates.io/crates/rust-commander):
 
 ```bash
-cargo install rust-commander --locked
+cargo install rust-commander --version 0.3.0 --locked
 ```
 
 The package is named `rust-commander`; the installed executable is `rc`.
@@ -461,15 +488,21 @@ interface.
 | Keys | Action |
 | --- | --- |
 | `Tab` | Switch active panel |
+| `Ctrl-U` | Swap panels and follow the active listing |
 | `Enter` | Enter a directory or archive, run an executable, or open a document |
 | `Backspace` | Go to the parent directory |
 | `Space` / `Insert` / `Ctrl-T` | Toggle the selected entry |
 | `/` / `Alt-C` | Open Quick CD |
 | `>` | Open the Unix command line |
+| `Ctrl-O` | Switch between panels and the persistent Unix shell |
+| `F2` | Open the user menu |
 | `F3` | View the selected file internally |
 | `F4` | Edit with the configured external editor |
 | `F5` / `F6` / `F7` / `F8` | Copy / move or rename / mkdir / delete |
 | `Ctrl-J` / `Alt-J` | Open jobs / cancel the latest or selected job |
+| `Ctrl-Space` | Calculate directory sizes |
+| Alt + backtick | Open the screen list |
+| `Ctrl-X a` | Open the active VFS list |
 | `Alt-F` / `Alt-?` / `Ctrl-/` | Find files |
 | `Alt-T` | Open the directory tree |
 | `Alt-H` | Open the directory hotlist |
@@ -534,10 +567,13 @@ normalized before keymap matching.
 
 ## Platform behavior
 
-The modal command line is available on Unix. Foreground commands receive their
-own terminal process group so `Ctrl-C` interrupts the command without terminating
-rc. Windows foreground programs retain normal console interrupt behavior while rc
-temporarily handles control events in the parent.
+The modal command line and persistent PTY shell are available on Unix. Persistent
+shell programs run in their own terminal session; one-shot foreground commands
+receive their own process group so `Ctrl-C` interrupts the command without
+terminating rc. Windows foreground programs retain normal console interrupt
+behavior while rc temporarily handles control events in the parent. Windows shell
+integration and remaining platform-specific work are deferred in the
+[roadmap](ROADMAP.md).
 
 Linux desktop opens prefer the desktop portal. Accepted legacy launchers are reaped
 independently and are not terminated when rc exits.

@@ -382,6 +382,10 @@ pub(super) fn drain_background(app: &mut AppState) {
 
 pub(super) fn app_with_loaded_panels(root: PathBuf) -> AppState {
     let mut app = AppState::new(root).expect("app should initialize");
+    app.set_configuration_files(ConfigurationFiles {
+        user_directory: None,
+        system_directories: vec![],
+    });
     app.refresh_panels();
     drain_background(&mut app);
     app
