@@ -4,7 +4,7 @@ use crate::*;
 
 impl AppState {
     fn archive_command_restriction(&self, command: AppCommand) -> Option<&'static str> {
-        if self.active_panel().is_archive()
+        if self.active_panel().is_virtual()
             && matches!(
                 command,
                 AppCommand::Move
@@ -14,12 +14,14 @@ impl AppState {
                     | AppCommand::OpenInputDialog
             )
         {
-            return Some("Archives are read-only; use F5 to copy entries out");
+            return Some("Virtual locations are read-only; use F5 to copy entries out");
         }
-        if self.active_panel().is_archive()
+        if self.active_panel().is_virtual()
             && matches!(
                 command,
                 AppCommand::OpenCommandLine
+                    | AppCommand::OpenCommandHistory
+                    | AppCommand::FilteredView
                     | AppCommand::PutCurrentSelected
                     | AppCommand::PutCurrentFullSelected
                     | AppCommand::PutCurrentTagged
@@ -29,12 +31,14 @@ impl AppState {
                     | AppCommand::OpenTree
                     | AppCommand::HotlistAddCurrentDirectory
             )
-            || (command == AppCommand::PutOtherTagged && self.passive_panel().is_archive())
+            || (command == AppCommand::PutOtherTagged && self.passive_panel().is_virtual())
         {
-            return Some("This command requires a local directory; leave the archive first");
+            return Some(
+                "This command requires a local directory; leave the virtual location first",
+            );
         }
         if let AppCommand::Panel(panel, PanelCommand::OpenTree) = command
-            && self.panels[panel.index()].is_archive()
+            && self.panels[panel.index()].is_virtual()
         {
             return Some("Directory tree requires a local directory");
         }

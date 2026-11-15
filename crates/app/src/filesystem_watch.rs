@@ -120,7 +120,7 @@ impl FilesystemWatch {
         let panels = state
             .panels
             .each_ref()
-            .map(|panel| (!panel.is_panelized() && !panel.is_archive()).then(|| panel.cwd.clone()));
+            .map(|panel| (!panel.is_panelized() && !panel.is_virtual()).then(|| panel.cwd.clone()));
         let tree = state.directory_tree();
         let tree_key = tree.map(|tree| (tree.root().to_path_buf(), tree.entries_revision()));
         if panels == self.panels && tree_key == self.tree_key {

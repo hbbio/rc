@@ -13,5 +13,8 @@ description = "Platform integration primitives for Rust Commander"
 name = "rc_platform"
 path = "src/lib.rs"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

@@ -12,6 +12,13 @@ impl AppState {
         command: AppCommand,
     ) -> io::Result<CommandOutcome> {
         match command {
+            AppCommand::Panel(panel, PanelCommand::ScrollQuickView(lines)) => {
+                if self.panel_view_mode(panel) == PanelViewMode::QuickView
+                    && let QuickViewState::Ready(viewer) = &mut self.quick_views[panel.index()]
+                {
+                    viewer.move_lines(lines);
+                }
+            }
             AppCommand::Navigate(NavigationTarget::FileManager, motion) => {
                 self.apply_file_manager_navigation(motion);
             }
@@ -31,6 +38,9 @@ impl AppState {
                 self.restore_panelized_results_for(panel);
             }
             AppCommand::Panel(panel, PanelCommand::Reread) => {
+                if let Some(path) = self.panels[panel.index()].mounted_location() {
+                    path.mount().invalidate();
+                }
                 self.queue_panel_refresh(panel);
                 self.set_status(format!("Refreshing {} panel...", panel.label()));
             }
@@ -99,59 +109,23 @@ impl AppState {
             AppCommand::CancelJob => {
                 if matches!(self.top_route(), Route::FindResults(_)) {
                     self.cancel_active_find_search();
-                } else if !self.cancel_active_panelized_refresh() {
+                } else if matches!(self.top_route(), Route::CommandOutput(_))
+                    || !self.cancel_active_panelized_refresh()
+                {
                     self.cancel_latest_job();
                 }
             }
             AppCommand::RestorePanelizedResults => self.restore_panelized_results(),
-            AppCommand::OpenEntry => {
-                if self.open_selected_archive() || self.open_selected_directory() {
-                    self.queue_panel_refresh(self.active_panel);
-                    self.set_status("Loading selected directory...");
-                } else if self.active_panel().is_archive() {
-                    if self.open_selected_file_in_viewer() {
-                        self.set_status("Opening viewer...");
-                    } else {
-                        self.set_status("No entry selected");
-                    }
-                } else {
-                    match self.execute_selected_file() {
-                        ExecuteSelectionResult::OpenedExternal => {
-                            self.set_status("Executing selected file...")
-                        }
-                        ExecuteSelectionResult::QueuedDesktopOpen => {
-                            self.set_status("Opening with the default application...")
-                        }
-                        ExecuteSelectionResult::NoEntrySelected => {
-                            self.set_status("No entry selected")
-                        }
-                        ExecuteSelectionResult::SelectedEntryIsDirectory => {
-                            self.set_status("Selected directory could not be opened")
-                        }
-                    }
+            AppCommand::OpenEntry | AppCommand::ViewEntry | AppCommand::EditEntry => {
+                let action = match command {
+                    AppCommand::OpenEntry => extension_rules::ExtensionAction::Open,
+                    AppCommand::ViewEntry => extension_rules::ExtensionAction::View,
+                    _ => extension_rules::ExtensionAction::Edit,
+                };
+                if !self.try_extension_action(action) {
+                    self.apply_builtin_file_action(action);
                 }
             }
-            AppCommand::ViewEntry => {
-                if self.open_selected_directory() {
-                    self.queue_panel_refresh(self.active_panel);
-                    self.set_status("Loading selected directory...");
-                } else if self.open_selected_file_in_viewer() {
-                    self.set_status("Opening viewer...");
-                } else {
-                    self.set_status("No entry selected");
-                }
-            }
-            AppCommand::EditEntry => match self.open_selected_file_in_editor() {
-                EditSelectionResult::OpenedExternal => {
-                    self.set_status("Opening external editor...")
-                }
-                EditSelectionResult::NoEditorResolved => self
-                    .set_status("No external editor found; set editor_command, EDITOR, or VISUAL"),
-                EditSelectionResult::NoEntrySelected => self.set_status("No entry selected"),
-                EditSelectionResult::SelectedEntryIsDirectory => {
-                    self.set_status("Directory cannot be edited");
-                }
-            },
             AppCommand::CdUp => {
                 if self.exit_panelize_mode() {
                     self.queue_panel_refresh(self.active_panel);
@@ -308,6 +282,7 @@ impl AppState {
     pub(crate) fn find_results_by_job_id(&self, job_id: JobId) -> Option<&FindResultsState> {
         self.routes
             .iter()
+            .chain(self.suspended_screens.iter().flatten())
             .rev()
             .find_map(|route| match route {
                 Route::FindResults(results) if results.job_id == job_id => Some(results),
@@ -324,10 +299,16 @@ impl AppState {
         &mut self,
         job_id: JobId,
     ) -> Option<&mut FindResultsState> {
-        if let Some(results) = self.routes.iter_mut().rev().find_map(|route| match route {
-            Route::FindResults(results) if results.job_id == job_id => Some(results),
-            _ => None,
-        }) {
+        if let Some(results) = self
+            .routes
+            .iter_mut()
+            .chain(self.suspended_screens.iter_mut().flatten())
+            .rev()
+            .find_map(|route| match route {
+                Route::FindResults(results) if results.job_id == job_id => Some(results),
+                _ => None,
+            })
+        {
             return Some(results);
         }
 
@@ -356,6 +337,9 @@ impl AppState {
         let Some(mut results) = self.pop_find_results() else {
             return false;
         };
+        // Alt-F retains one paused search. Cancel its predecessor before its
+        // state is replaced, so no unreachable worker keeps a scan permit.
+        self.discard_paused_find_results();
         if matches!(results.status, FindResultsStatus::Running) {
             self.set_find_job_paused(results.job_id, true);
             results.status = FindResultsStatus::Paused;
@@ -546,7 +530,7 @@ impl AppState {
             return false;
         };
         if let Some(selected) = selected {
-            form.start_directory = selected.to_string_lossy().into_owned();
+            form.start_directory = rc_shell::encode_path_text(selected.as_os_str());
         }
         self.push_dialog(
             DialogState {
@@ -733,10 +717,14 @@ impl AppState {
     }
 
     pub(crate) fn tree_by_job_id_mut(&mut self, job_id: JobId) -> Option<&mut TreeState> {
-        self.routes.iter_mut().rev().find_map(|route| match route {
-            Route::Tree(tree) if tree.scan_job_id() == Some(job_id) => Some(tree.as_mut()),
-            _ => None,
-        })
+        self.routes
+            .iter_mut()
+            .chain(self.suspended_screens.iter_mut().flatten())
+            .rev()
+            .find_map(|route| match route {
+                Route::Tree(tree) if tree.scan_job_id() == Some(job_id) => Some(tree.as_mut()),
+                _ => None,
+            })
     }
 
     pub(crate) fn move_tree_cursor(&mut self, delta: isize) {

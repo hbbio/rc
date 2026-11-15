@@ -4,7 +4,7 @@ mod bundled_skins;
 mod mouse;
 mod skin;
 
-pub use mouse::commands_for_left_click;
+pub use mouse::{ScrollDirection, commands_for_left_click, commands_for_scroll};
 
 use chrono::{DateTime, Local};
 use ratatui::Frame;
@@ -159,7 +159,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.top_route() {
         Route::Dialog(dialog) => render_dialog(frame, dialog, skin.as_ref()),
         Route::Jobs => render_jobs_screen(frame, state, skin.as_ref()),
-        Route::Viewer(_) => {}
+        Route::Viewer(_) | Route::CommandOutput(_) => {}
         Route::FindResults(results) => {
             render_find_results_screen(frame, state, results, skin.as_ref())
         }
@@ -753,12 +753,18 @@ fn panel_topline_titles_with_home(
     if panel.filter().is_active() {
         summary.push(format!("filter:{}", panel.filter().display_pattern()));
     }
+    if panel.filename_encoding != rc_core::FilenameEncoding::Utf8 {
+        summary.push(panel.filename_encoding.label().into());
+    }
     if panel.is_panelized() {
         summary.push(String::from("panelize"));
     }
     if let Some(location) = panel.archive_location() {
         let label = location.format().map_or("Archive", |format| format.label());
         summary.push(format!("{label} read-only"));
+    }
+    if let Some(path) = panel.mounted_location() {
+        summary.push(format!("{} read-only", path.mount().label()));
     }
     let tagged_count = panel.tagged_count();
     if tagged_count > 0 {
@@ -769,11 +775,12 @@ fn panel_topline_titles_with_home(
     }
 
     PanelToplineTitles {
-        path: format_panel_path(
+        path: format_panel_path_with_encoding(
             &panel.cwd,
             home,
             panel.canonical_cwd(),
             panel.canonical_home_directory(),
+            panel.filename_encoding,
         ),
         summary: summary.join(" | "),
     }
@@ -784,6 +791,22 @@ fn format_panel_path(
     home: Option<&Path>,
     canonical_path: Option<&Path>,
     canonical_home: Option<&Path>,
+) -> String {
+    format_panel_path_with_encoding(
+        path,
+        home,
+        canonical_path,
+        canonical_home,
+        rc_core::FilenameEncoding::Utf8,
+    )
+}
+
+fn format_panel_path_with_encoding(
+    path: &Path,
+    home: Option<&Path>,
+    canonical_path: Option<&Path>,
+    canonical_home: Option<&Path>,
+    encoding: rc_core::FilenameEncoding,
 ) -> String {
     let relative = home
         .filter(|home| !home.as_os_str().is_empty())
@@ -800,8 +823,8 @@ fn format_panel_path(
 
     match relative {
         Some(relative) if relative.as_os_str().is_empty() => String::from("~"),
-        Some(relative) => format!("~/{}", relative.to_string_lossy()),
-        None => path.to_string_lossy().into_owned(),
+        Some(relative) => format!("~/{}", encoding.decode(relative.as_os_str())),
+        None => encoding.decode(path.as_os_str()),
     }
 }
 
@@ -961,6 +984,14 @@ fn render_panel(
             PanelListingFormat::Long => {
                 render_long_panel_entries(frame, panel_layout[0], panel, active, skin)
             }
+            PanelListingFormat::User => render_user_panel_entries(
+                frame,
+                panel_layout[0],
+                panel,
+                active,
+                skin,
+                &app.user_listing_format(panel_id),
+            ),
         }
     }
 
@@ -1244,6 +1275,53 @@ fn render_long_panel_entries(
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
+fn render_user_panel_entries(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PanelState,
+    active: bool,
+    skin: &UiSkin,
+    format: &rc_core::UserListingFormat,
+) {
+    use rc_core::ListingField;
+    let (start, end) = panel.visible_window(usize::from(area.height.saturating_sub(1).max(1)), 1);
+    let rows = panel.entries[start..end].iter().map(|entry| {
+        Row::new(format.columns.iter().map(|column| {
+            Cell::from(match column.field {
+                ListingField::Name => panel_entry_display_label(panel, entry),
+                ListingField::Size => panel_entry_size_label(entry),
+                ListingField::Modified => format_modified(entry.modified),
+                ListingField::Permissions => format_file_mode(entry),
+                ListingField::Links => optional_number(entry.metadata.hard_links),
+                ListingField::User => optional_number(entry.metadata.user_id),
+                ListingField::Group => optional_number(entry.metadata.group_id),
+                ListingField::Inode => optional_number(entry.metadata.inode),
+            })
+        }))
+        .style(panel_entry_style(panel, entry, false, skin))
+    });
+    let widths = format
+        .columns
+        .iter()
+        .map(|column| column.width.map_or(Constraint::Fill(1), Constraint::Length));
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(format.columns.iter().map(|c| c.field.label()))
+                .style(skin.style("core", "header")),
+        )
+        .style(skin.style("core", "_default_"))
+        .highlight_style(panel_selection_style(panel, active, skin))
+        .column_spacing(1);
+    let mut state = TableState::default();
+    state.select(Some(
+        panel
+            .cursor
+            .saturating_sub(start)
+            .min(end.saturating_sub(start).saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
 fn panel_entry_display_label(panel: &PanelState, entry: &FileEntry) -> String {
     let marker = if !entry.is_parent() && panel.is_tagged(&entry.path) {
         "*"
@@ -1272,8 +1350,8 @@ fn panel_entry_style(
     } else {
         skin.style("core", "_default_")
     };
-    if entry.is_dir() {
-        style = style.patch(skin.style("filehighlight", "directory"));
+    if !tagged && let Some(group) = panel.file_highlight_group(entry) {
+        style = style.patch(skin.style("filehighlight", group));
     }
     if selected {
         style = style.patch(if tagged {
@@ -1487,7 +1565,7 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     let title = fit_single_line(
         format!(
             "{} | {} {}/{} | wrap:{}",
-            viewer.path().to_string_lossy(),
+            viewer.title(),
             if viewer.hex_mode { "row" } else { "line" },
             viewer.current_line_number(),
             viewer.line_count(),
@@ -2355,7 +2433,11 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
                 ])
             };
             let pattern = if filter.pattern.is_empty() {
-                String::from("<disabled>")
+                String::from(if filter.require_pattern {
+                    "<required>"
+                } else {
+                    "<disabled>"
+                })
             } else {
                 filter.pattern.clone()
             };
@@ -2383,9 +2465,11 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState, skin: &UiSkin) {
             ];
             frame.render_widget(Paragraph::new(rows).style(normal), layout[0]);
             frame.render_widget(
-                Paragraph::new(
-                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Empty pattern disables",
-                )
+                Paragraph::new(if filter.require_pattern {
+                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Pattern required"
+                } else {
+                    "Tab/Up/Down field | Space toggle\nEnter apply | Esc cancel | Empty pattern disables"
+                })
                 .style(skin.style("core", "disabled")),
                 layout[1],
             );
@@ -2459,11 +2543,9 @@ fn render_jobs_screen(frame: &mut Frame, state: &AppState, skin: &UiSkin) {
     .style(skin.style("dialog", "_default_"))
     .highlight_style(skin.style("core", "selected"))
     .highlight_symbol(">> ")
-    .block(
-        Block::default()
-            .borders(Borders::NONE)
-            .title(format!("Up/Down select | {cancel} cancel | {close} close")),
-    );
+    .block(Block::default().borders(Borders::NONE).title(format!(
+        "Up/Down select | Enter output | {cancel} cancel | {close} close"
+    )));
 
     let mut table_state = TableState::default();
     if !state.jobs.jobs().is_empty() {
@@ -3378,11 +3460,28 @@ mod tests {
                         let job_id = job.id;
                         let (event_tx, event_rx) = mpsc::channel();
                         match &job.request {
+                            JobRequest::ProbeFileType { .. }
+                            | JobRequest::LoadActionViewer { .. } => {
+                                let (background_tx, background_rx) = std::sync::mpsc::channel();
+                                if matches!(job.request, JobRequest::ProbeFileType { .. }) {
+                                    rc_core::execute_file_type_probe(
+                                        job,
+                                        &event_tx,
+                                        &background_tx,
+                                    );
+                                } else {
+                                    rc_core::execute_action_viewer(job, &event_tx, &background_tx);
+                                }
+                                for event in background_rx.try_iter() {
+                                    state.handle_background_event(event);
+                                }
+                            }
                             JobRequest::RefreshPanel {
                                 panel,
                                 cwd,
                                 source,
                                 sort_mode,
+                                filename_encoding,
                                 filter,
                                 show_hidden_files,
                                 cached_panelized_entries,
@@ -3397,6 +3496,7 @@ mod tests {
                                         cwd: cwd.clone(),
                                         source: source.clone(),
                                         sort_mode: *sort_mode,
+                                        filename_encoding: *filename_encoding,
                                         filter: filter.clone(),
                                         show_hidden_files: *show_hidden_files,
                                         cached_panelized_entries: cached_panelized_entries.clone(),
@@ -3784,6 +3884,26 @@ mod tests {
     }
 
     #[test]
+    fn render_user_listing_respects_column_order_and_handles_narrow_panels() {
+        let root = temp_root("user-listing");
+        fs::write(root.join("payload.txt"), "hello").unwrap();
+        let mut app = app_with_loaded_panels(root.clone());
+        let mut settings = app.settings().clone();
+        settings.panel_options.listing_formats[0] = PanelListingFormat::User;
+        settings.panel_options.user_listing_formats[0] = "inode:10 name size:8".into();
+        app.replace_settings(settings);
+        let rendered = render_to_text(&app, 160, 24);
+        let header = rendered.lines().find(|l| l.contains("Inode")).unwrap();
+        assert!(header.find("Inode") < header.find("Name"));
+        assert!(header.find("Name") < header.find("Size"));
+        assert!(rendered.contains("payload.txt"));
+        for width in [1, 2, 10, 30] {
+            let _ = render_to_text(&app, width, 6);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn panel_footer_reports_recursive_size_for_a_tagged_directory() {
         let root = temp_root("recursive-selected-total");
         let selected = root.join("selected");
@@ -3808,6 +3928,26 @@ mod tests {
         assert!(measured.contains("3kb in 1 item"));
 
         fs::remove_dir_all(root).expect("temporary root should be removable");
+    }
+
+    #[test]
+    fn render_group_selection_explains_its_required_pattern() {
+        let root = temp_root("group-selection-dialog");
+        let mut app = app_with_loaded_panels(root.clone());
+        for command in [AppCommand::SelectGroup, AppCommand::UnselectGroup] {
+            app.apply(command).unwrap();
+            app.apply(AppCommand::DialogBackspace).unwrap();
+            let dialog_frame = render_to_text(&app, 100, 30);
+            assert!(dialog_frame.contains("<required>"));
+            assert!(dialog_frame.contains("Pattern required"));
+            assert!(!dialog_frame.contains("Empty pattern disables"));
+            app.apply(AppCommand::DialogCancel).unwrap();
+        }
+        app.apply(AppCommand::OpenPanelFilter).unwrap();
+        let filter_frame = render_to_text(&app, 100, 30);
+        assert!(filter_frame.contains("<disabled>"));
+        assert!(filter_frame.contains("Empty pattern disables"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3941,6 +4081,48 @@ mod tests {
         };
 
         assert_eq!(format_file_mode(&entry), "-rwsr-x--x");
+    }
+
+    #[test]
+    fn file_highlighting_preserves_tagged_and_selected_colors() {
+        let root = temp_root("file-highlight-colors");
+        fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        let mut app = app_with_loaded_panels(root.clone());
+        app.set_configuration_files(rc_core::ConfigurationFiles {
+            user_directory: Some(root.clone()),
+            system_directories: vec![],
+        });
+        let index = app
+            .active_panel()
+            .entries
+            .iter()
+            .position(|entry| entry.name == "main.rs")
+            .unwrap();
+        app.active_panel_mut().cursor = index;
+        let entry = app.active_panel().entries[index].clone();
+        let skin = current_skin();
+        let normal = skin
+            .style("core", "_default_")
+            .patch(skin.style("filehighlight", "source"));
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, false, &skin),
+            normal
+        );
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, true, &skin),
+            normal.patch(skin.style("core", "selected"))
+        );
+        app.active_panel_mut().toggle_tag_on_cursor();
+        let tagged = skin.style("core", "marked");
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, false, &skin),
+            tagged
+        );
+        assert_eq!(
+            panel_entry_style(app.active_panel(), &entry, true, &skin),
+            tagged.patch(skin.style("core", "markselect"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4710,34 +4892,21 @@ OpenConfirmDialog = f2
     }
 
     #[test]
-    fn render_styles_unimplemented_menu_entries_as_inactive() {
-        let root = temp_root("menu-inactive");
+    fn remote_links_render_as_available_menu_actions() {
+        let root = temp_root("menu-remote-links");
         let mut app = AppState::new(root.clone()).expect("app should initialize");
-        app.apply(AppCommand::OpenMenuBarAt(1))
+        app.apply(AppCommand::OpenMenuBarAt(0))
             .expect("menu route should open");
 
         let buffer = render_to_buffer(&app, 120, 40);
-        let skin = current_skin();
-        let inactive_style = skin.style("menu", "menuinactive");
-        let disabled_cell = first_cell_for_text(&buffer, "View file...")
-            .expect("unimplemented menu entry should render");
-        assert_eq!(
-            disabled_cell.fg,
-            inactive_style.fg.unwrap_or(Color::Reset),
-            "unimplemented menu label should use inactive foreground"
-        );
-        assert_eq!(
-            disabled_cell.bg,
-            inactive_style.bg.unwrap_or(Color::Reset),
-            "unimplemented menu label should use inactive background"
-        );
-
-        let enabled_cell =
-            first_cell_for_text(&buffer, "Copy").expect("implemented menu entry should render");
-        assert_ne!(
-            disabled_cell.fg, enabled_cell.fg,
-            "implemented and unimplemented menu entries should be visually distinct"
-        );
+        let enabled_cell = first_cell_for_text(&buffer, "Listing format...")
+            .expect("implemented menu entry should render");
+        for label in ["FTP link...", "Shell link...", "SFTP link..."] {
+            let cell =
+                first_cell_for_text(&buffer, label).expect("remote link menu entry should render");
+            assert_eq!(cell.fg, enabled_cell.fg, "{label} must appear available");
+            assert_eq!(cell.bg, enabled_cell.bg, "{label} must appear available");
+        }
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }

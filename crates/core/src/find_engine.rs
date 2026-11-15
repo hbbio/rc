@@ -7,7 +7,6 @@ use std::thread;
 use std::time::Duration;
 
 use globset::{GlobBuilder, GlobMatcher};
-use regex::RegexBuilder;
 use regex::bytes::{Regex as BytesRegex, RegexBuilder as BytesRegexBuilder};
 
 use crate::{FindResultEntry, JOB_CANCELED_MESSAGE};
@@ -378,7 +377,7 @@ impl CompiledFindSpec {
 enum NameMatcher {
     Any,
     Glob(GlobMatcher),
-    Regex(regex::Regex),
+    Regex(BytesRegex),
 }
 
 impl NameMatcher {
@@ -391,7 +390,7 @@ impl NameMatcher {
                 compile_glob(&spec.filename_pattern, !spec.case_sensitive, "filename")
                     .map(Self::Glob)
             }
-            FindNameMode::Regex => RegexBuilder::new(&spec.filename_pattern)
+            FindNameMode::Regex => BytesRegexBuilder::new(&spec.filename_pattern)
                 .case_insensitive(!spec.case_sensitive)
                 .build()
                 .map(Self::Regex)
@@ -406,7 +405,7 @@ impl NameMatcher {
         match self {
             Self::Any => true,
             Self::Glob(matcher) => matcher.is_match(Path::new(name)),
-            Self::Regex(regex) => regex.is_match(&name.to_string_lossy()),
+            Self::Regex(regex) => regex.is_match(name.as_encoded_bytes()),
         }
     }
 }
@@ -556,6 +555,24 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn filename_regex_matches_original_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut spec = FindSpec::new(PathBuf::from("."));
+        spec.name_mode = FindNameMode::Regex;
+        spec.filename_pattern = r"(?-u:^raw\xFF\.rs$)".into();
+        let matcher = NameMatcher::compile(&spec).unwrap();
+        assert!(matcher.is_match(std::ffi::OsStr::from_bytes(b"raw\xff.rs")));
+        assert!(!matcher.is_match(std::ffi::OsStr::new("raw�.rs")));
+        spec.filename_pattern = "café".into();
+        assert!(
+            NameMatcher::compile(&spec)
+                .unwrap()
+                .is_match(std::ffi::OsStr::new("CAFÉ"))
+        );
+    }
 
     #[test]
     fn whole_word_anchor_does_not_match_at_a_retained_window_boundary() {

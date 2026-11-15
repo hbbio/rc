@@ -137,17 +137,27 @@ impl AppState {
 
         let (request_id, previous_job_id) = self.quick_view.begin_request(target_panel);
         self.quick_views[target_panel.index()] = QuickViewState::Loading { path: path.clone() };
-        let request = match self.panels[source_panel.index()].archive_location() {
-            Some(location) => JobRequest::LoadArchiveViewer {
-                location: location.clone(),
+        let request = if let Some(location) = self.panels[source_panel.index()].mounted_location() {
+            let Ok(path) = location.resolve_identity(&path) else {
+                return;
+            };
+            JobRequest::Vfs(vfs::tasks::Task::View {
                 path,
                 quick_view: Some((target_panel, request_id)),
-            },
-            None => JobRequest::LoadQuickView {
-                panel: target_panel,
-                path,
-                request_id,
-            },
+            })
+        } else {
+            match self.panels[source_panel.index()].archive_location() {
+                Some(location) => JobRequest::LoadArchiveViewer {
+                    location: location.clone(),
+                    path,
+                    quick_view: Some((target_panel, request_id)),
+                },
+                None => JobRequest::LoadQuickView {
+                    panel: target_panel,
+                    path,
+                    request_id,
+                },
+            }
         };
 
         if let Some(previous_job_id) = previous_job_id {

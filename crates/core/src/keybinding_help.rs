@@ -411,6 +411,14 @@ impl AppState {
             ),
         );
         replacements.insert(
+            "fm_screens",
+            self.keybinding_primary_or_fallback(
+                KeyContext::FileManager,
+                AppCommand::OpenScreenList,
+                "Alt-backtick",
+            ),
+        );
+        replacements.insert(
             "fm_open_jobs",
             self.keybinding_joined_or_fallback(
                 KeyContext::FileManager,

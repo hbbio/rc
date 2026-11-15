@@ -6,6 +6,61 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::*;
 
 impl AppState {
+    pub(crate) fn swap_panels(&mut self) {
+        if !matches!(self.top_route(), Route::FileManager) {
+            return;
+        }
+        // An initial panelize command cannot be replayed safely, and its partial
+        // entries must not become the cached complete result when requeued.
+        if [ActivePanel::Left, ActivePanel::Right]
+            .into_iter()
+            .any(|side| {
+                let panel = &self.panels[side.index()];
+                panel.source.is_panelized()
+                    && (panel.loading || self.panel_has_pending_navigation(side))
+                    && panel.panelized_entries.is_none()
+            })
+        {
+            self.set_status("Wait for panelized results to finish before swapping panels");
+            return;
+        }
+        let reload = self.prepare_panel_refresh_swap();
+        self.invalidate_selection_sizes_for_swap();
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            self.deactivate_quick_view(panel);
+        }
+        self.panels.swap(0, 1);
+        self.panel_views.swap(0, 1);
+        self.panel_listing_formats.swap(0, 1);
+        self.selection_sizes.swap(0, 1);
+        self.panelized_result_history.swap(0, 1);
+        self.directory_size_jobs.swap(0, 1);
+        self.previous_panel_directories.swap(0, 1);
+        self.panel_mkdirs.latest_job_ids.swap(0, 1);
+        for pending in self.panel_mkdirs.pending.values_mut() {
+            pending.panel = pending.panel.other();
+        }
+        self.active_panel = self.active_panel.other();
+        self.settings.panel_options.listing_formats.swap(0, 1);
+        self.settings.panel_options.filename_encodings.swap(0, 1);
+        self.settings.panel_options.user_listing_formats.swap(0, 1);
+        self.settings.panel_options.sort_modes.swap(0, 1);
+        self.settings.panel_options.filters.swap(0, 1);
+        self.settings.mark_dirty();
+        for panel in [ActivePanel::Left, ActivePanel::Right] {
+            if reload[panel.index()] {
+                self.queue_panel_refresh(panel);
+            } else if !self.panels[panel.index()].is_virtual()
+                && self.panels[panel.index()].canonical_cwd().is_none()
+            {
+                self.queue_panel_identity_resolution(panel);
+            }
+            self.sync_selection_size(panel, true);
+            self.sync_quick_view_from(panel, true);
+        }
+        self.set_status("Panels swapped");
+    }
+
     pub fn new(start_path: PathBuf) -> io::Result<Self> {
         let start_path = std::path::absolute(start_path)?;
         let settings = Settings::default();
@@ -15,8 +70,15 @@ impl AppState {
         let mut right = PanelState::new(start_path)?;
         right.set_home_directory(home_directory);
 
-        Ok(Self {
+        let mut state = Self {
             settings: settings.clone(),
+            configuration_files: ConfigurationFiles::default(),
+            extension_rules: extension_rules::ExtensionRules::parse(
+                ConfigurationFile::Extensions.bundled(),
+            )
+            .map(Arc::new),
+            pending_extension: None,
+            pending_external_action_requests: Vec::new(),
             panels: [left, right],
             active_panel: ActivePanel::Left,
             panel_views: [PanelViewMode::Listing; 2],
@@ -36,6 +98,10 @@ impl AppState {
             pending_skin_preview: None,
             pending_skin_revert: None,
             routes: vec![Route::FileManager],
+            suspended_screens: Vec::new(),
+            file_history: Vec::new(),
+            vfs_workflow: vfs_flow::VfsWorkflow::default(),
+            command_outputs: HashMap::new(),
             command_line: CommandLineModel::new(settings.shell.history),
             next_command_line_activation_id: 1,
             #[cfg(unix)]
@@ -46,6 +112,8 @@ impl AppState {
             pending_completion_requests: Vec::new(),
             pending_completion_cancellations: Vec::new(),
             pending_foreground_shell_requests: Vec::new(),
+            pending_panel_toggle: false,
+            shell_available: false,
             paused_find_results: None,
             pending_find_tree_picker: None,
             pending_worker_commands: Vec::new(),
@@ -59,18 +127,24 @@ impl AppState {
             panel_refresh_post: PanelRefreshPostWorkflow::default(),
             quick_view: QuickViewWorkflow::default(),
             selection_size: SelectionSizeWorkflow::default(),
+            directory_size_jobs: [None, None],
             find_pause_flags: HashMap::new(),
             deferred_persist_settings_request: None,
             panel_mkdirs: PanelMkdirTracker::default(),
             tree_mutations: TreeMutationTracker::default(),
             keybinding_hints: KeybindingHints::default(),
+            base_keymap: Keymap::default(),
+            learned_keymap: Keymap::default(),
             keymap_unknown_actions: 0,
             keymap_invalid_bindings: 0,
             pending_learn_keys_capture: false,
             xmap_pending: false,
             pending_save_setup: false,
             pending_quit: false,
-        })
+        };
+        state.reload_file_highlights();
+        state.reload_extension_rules();
+        Ok(state)
     }
 
     pub fn settings(&self) -> &Settings {
@@ -134,6 +208,7 @@ impl AppState {
 
     pub fn replace_settings(&mut self, settings: Settings) {
         self.settings = settings;
+        self.refresh_learned_keymap();
         self.command_line
             .set_history_mode(self.settings.shell.history);
         self.hotlist_cursor = self
@@ -150,6 +225,7 @@ impl AppState {
         for (index, panel) in self.panels.iter_mut().enumerate() {
             panel.mouse_viewport = None;
             panel.sort_mode = self.settings.panel_options.sort_modes[index];
+            panel.filename_encoding = self.settings.panel_options.filename_encodings[index];
             panel.filter = self.settings.panel_options.filters[index].clone();
             panel.set_show_hidden_files(show_hidden_files);
         }
@@ -190,6 +266,11 @@ impl AppState {
 
     pub fn panel_listing_format(&self, panel: ActivePanel) -> PanelListingFormat {
         self.panel_listing_formats[panel.index()]
+    }
+
+    pub fn user_listing_format(&self, panel: ActivePanel) -> UserListingFormat {
+        UserListingFormat::parse(&self.settings.panel_options.user_listing_formats[panel.index()])
+            .unwrap_or_default()
     }
 
     pub fn quick_view_state(&self, panel: ActivePanel) -> &QuickViewState {
@@ -271,6 +352,9 @@ impl AppState {
     }
 
     pub fn refresh_active_panel(&mut self) {
+        if let Some(path) = self.active_panel().mounted_location() {
+            path.mount().invalidate();
+        }
         self.queue_panel_refresh(self.active_panel);
     }
 
@@ -328,7 +412,7 @@ impl AppState {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
         let previous_local_directory = self.active_panel().local_directory().to_path_buf();
-        let archive_parent = self.active_panel().is_archive()
+        let archive_parent = self.active_panel().is_virtual()
             && self
                 .active_panel()
                 .selected_entry()
@@ -351,22 +435,33 @@ impl AppState {
         opened
     }
 
-    pub(crate) fn open_selected_archive(&mut self) -> bool {
-        if self.active_panel().is_archive() {
-            return false;
+    pub(crate) fn open_selected_archive(&mut self) -> io::Result<bool> {
+        if self.active_panel().mounted_location().is_some() {
+            return Ok(false);
         }
         let Some(path) = self
             .selected_non_parent_entry()
             .filter(|entry| !entry.is_dir() && ArchiveFormat::for_path(&entry.path).is_some())
             .map(|entry| entry.path.clone())
         else {
-            return false;
+            return Ok(false);
+        };
+        self.open_archive_path(path).map(|()| true)
+    }
+
+    pub(crate) fn open_archive_path(&mut self, path: PathBuf) -> io::Result<()> {
+        if !self.settings.virtual_fs.vfs_enabled {
+            return Err(io::Error::other("Enable VFS in Options → Virtual FS first"));
+        }
+        let location = if let Some(parent) = self.active_panel().archive_location() {
+            ArchiveLocation::nested(parent.clone(), path)?
+        } else {
+            ArchiveLocation::root(path)
         };
         let panel = self.active_panel;
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let previous = self.active_panel().local_directory().to_path_buf();
-        let location = ArchiveLocation::root(path);
         let state = self.active_panel_mut();
         state.cwd = location.path();
         state.source = PanelListingSource::Archive(location);
@@ -383,14 +478,14 @@ impl AppState {
         self.remember_previous_directory(panel, previous);
         self.sync_quick_view_from(panel, false);
         self.sync_selection_size(panel, false);
-        true
+        Ok(())
     }
 
     pub fn go_parent_directory(&mut self) -> bool {
         let panel = self.active_panel;
         let previous_directory = self.active_panel().cwd.clone();
         let previous_local_directory = self.active_panel().local_directory().to_path_buf();
-        let was_archive = self.active_panel().is_archive();
+        let was_archive = self.active_panel().is_virtual();
         let revert = self.panel_refresh_revert_snapshot(panel);
         let snapshot = self.completed_panelized_result_snapshot(panel);
         let opened = self.active_panel_mut().go_parent();
@@ -581,7 +676,8 @@ impl AppState {
     }
 
     pub fn set_keybinding_hints_from_keymap(&mut self, keymap: &Keymap) {
-        self.keybinding_hints = KeybindingHints::from_keymap(keymap);
+        self.base_keymap = keymap.clone();
+        self.refresh_learned_keymap();
     }
 
     pub fn set_keymap_parse_report(&mut self, report: &KeymapParseReport) {
@@ -607,17 +703,8 @@ impl AppState {
         let captured = format_key_chord(chord);
         self.settings.learn_keys.last_learned_binding = Some(captured.clone());
         self.settings.mark_dirty();
-        let target = self
-            .settings
-            .configuration
-            .keymap_override
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("<none>"));
-        self.set_status(format!(
-            "Captured key chord: {captured} (override target: {target})"
-        ));
         self.refresh_settings_entries();
+        self.open_learned_binding(chord, None);
         true
     }
 
@@ -644,6 +731,17 @@ impl AppState {
             Route::Jobs => KeyContext::Jobs,
             Route::Viewer(viewer) => {
                 if viewer.hex_mode {
+                    KeyContext::ViewerHex
+                } else {
+                    KeyContext::Viewer
+                }
+            }
+            Route::CommandOutput(id) => {
+                if self
+                    .command_outputs
+                    .get(id)
+                    .is_some_and(|output| output.viewer.hex_mode)
+                {
                     KeyContext::ViewerHex
                 } else {
                     KeyContext::Viewer
@@ -694,10 +792,7 @@ impl AppState {
                 return;
             }
         };
-        let Some(text) = absolute_path.to_str().map(ToString::to_string) else {
-            self.set_command_feedback("Selected path is not valid UTF-8 and cannot be copied");
-            return;
-        };
+        let text = rc_shell::encode_path_text(absolute_path.as_os_str());
 
         self.pending_clipboard_copy_requests
             .push(ClipboardCopyRequest { text });

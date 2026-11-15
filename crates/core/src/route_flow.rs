@@ -11,10 +11,17 @@ impl AppState {
             AppCommand::MenuNotImplemented(label) => {
                 self.set_status(format!("{label} is not implemented yet"));
             }
-            AppCommand::OpenUserMenu => {
-                self.set_status("User menu is not available");
-            }
+            AppCommand::OpenUserMenu => self.open_user_menu(),
+            AppCommand::EditConfigurationFile(file) => self.edit_configuration_file(file),
             AppCommand::OpenCommandLine => self.open_command_line(),
+            AppCommand::ViewFile => self.open_view_file_dialog(),
+            AppCommand::OpenFileHistory => self.open_file_history(),
+            AppCommand::OpenActiveVfs => self.open_active_vfs(),
+            AppCommand::OpenCommandHistory => self.open_command_history(),
+            AppCommand::FilteredView => self.open_filtered_view(),
+            AppCommand::OpenJobOutput => self.open_selected_job_output(),
+            AppCommand::CompareFiles => self.compare_files(),
+            AppCommand::CompareDirectories => self.compare_directories(),
             AppCommand::PutCurrentSelected
             | AppCommand::PutCurrentFullSelected
             | AppCommand::PutCurrentTagged
@@ -56,7 +63,11 @@ impl AppState {
                     self.set_status("The other panel is not a file listing");
                 }
             }
+            AppCommand::SwapPanels => self.swap_panels(),
+            AppCommand::TogglePanels => self.pending_panel_toggle = !self.pending_panel_toggle,
+            AppCommand::ShowDirectorySizes => self.show_directory_sizes(),
             AppCommand::OpenJobsScreen => self.open_jobs_screen(),
+            AppCommand::OpenScreenList => self.open_screen_list(),
             AppCommand::CloseJobsScreen => self.close_jobs_screen(),
             AppCommand::Navigate(NavigationTarget::Jobs, motion) => {
                 self.apply_jobs_navigation(motion);
@@ -329,6 +340,7 @@ impl AppState {
             Route::Dialog(_)
             | Route::Jobs
             | Route::Viewer(_)
+            | Route::CommandOutput(_)
             | Route::Help(_)
             | Route::Settings(_) => None,
         }
@@ -373,7 +385,7 @@ impl AppState {
     }
 
     pub(crate) fn close_viewer(&mut self) {
-        if matches!(self.top_route(), Route::Viewer(_)) {
+        if matches!(self.top_route(), Route::Viewer(_) | Route::CommandOutput(_)) {
             self.routes.pop();
             self.set_status("Closed viewer");
         }

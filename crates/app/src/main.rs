@@ -36,6 +36,8 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 mod clipboard;
 mod filesystem_watch;
 mod runtime;
+#[cfg(unix)]
+mod subshell;
 
 use runtime::RuntimeBridge;
 
@@ -145,6 +147,17 @@ fn main() -> Result<()> {
     });
     apply_env_overrides(&mut settings);
     apply_cli_overrides(&mut settings, &cli);
+
+    #[cfg(unix)]
+    if let Some(root) = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        && let Err(error) =
+            rc_core::configure_archive_index_cache(root.join("rust-commander/archive-indexes"))
+    {
+        tracing::debug!("persistent archive indexes disabled: {error}");
+    }
 
     let start_path = cli
         .path
@@ -618,6 +631,8 @@ fn run_event_loop(
     let mut last_tick = Instant::now();
     let mut mouse_click_tracker = MouseClickTracker::default();
     let mut filesystem_watch = filesystem_watch::FilesystemWatch::spawn(tracing_log)?;
+    #[cfg(unix)]
+    let mut shell = subshell::ShellController::default();
 
     loop {
         runtime.drain_events(state);
@@ -628,6 +643,19 @@ fn run_event_loop(
         dispatch_pending_clipboard_copy_requests(terminal.backend_mut(), state);
         dispatch_pending_external_edit_requests(terminal, state);
         dispatch_pending_external_execute_requests(terminal, state);
+        dispatch_pending_external_action_requests(terminal, state);
+        #[cfg(unix)]
+        {
+            let size = terminal.size().context("failed to read terminal size")?;
+            for request in shell.update(state, size.width, size.height) {
+                let result = run_foreground_shell_request(terminal, &request)
+                    .map(exit_status_number)
+                    .map_err(|error| sanitize_display_field(&error.to_string()));
+                state.finish_persistent_shell_request(&request, result);
+                state.refresh_panels_in_directory(&request.cwd);
+            }
+        }
+        #[cfg(not(unix))]
         dispatch_pending_foreground_shell_requests(terminal, state);
         if TERMINAL_RECOVERY_FAILED.load(AtomicOrdering::Relaxed) {
             return Err(anyhow!(
@@ -636,18 +664,65 @@ fn run_event_loop(
         }
 
         terminal
-            .draw(|frame| rc_ui::render(frame, state))
+            .draw(|frame| {
+                #[cfg(unix)]
+                if shell.visible() {
+                    shell.render(frame);
+                    return;
+                }
+                rc_ui::render(frame, state);
+            })
             .context("failed to draw frame")?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         let timeout = state
             .deferred_work_delay()
             .map_or(timeout, |delay| timeout.min(delay));
+        #[cfg(unix)]
+        let timeout = if shell.active() {
+            timeout.min(Duration::from_millis(20))
+        } else {
+            timeout
+        };
         if event::poll(timeout).context("failed to poll input")? {
             let viewport = terminal.size().context("failed to read terminal size")?;
             let input_event = event::read().context("failed to read input event")?;
             if matches!(&input_event, Event::Key(_)) {
                 mouse_click_tracker.clear();
+            }
+            #[cfg(unix)]
+            if shell.visible() {
+                let toggle = match &input_event {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        (matches!(key.code, CrosstermKeyCode::Char('o' | 'O'))
+                            && key.modifiers == crossterm::event::KeyModifiers::CONTROL)
+                            || map_key_event_to_chord(
+                                *key,
+                                InputCompatibility {
+                                    macos_option_symbols: state
+                                        .settings()
+                                        .configuration
+                                        .macos_option_symbols,
+                                },
+                            )
+                            .and_then(|chord| {
+                                state.resolve_key_command(keymap, KeyContext::FileManager, chord)
+                            })
+                            .is_some_and(|command| {
+                                *command == rc_core::keymap::KeyCommand::TogglePanels
+                            })
+                    }
+                    _ => false,
+                };
+                if toggle {
+                    shell.hide();
+                } else {
+                    shell.input(input_event, state);
+                }
+                if last_tick.elapsed() >= tick_rate {
+                    last_tick = Instant::now();
+                }
+                continue;
             }
             match input_event {
                 Event::Key(key_event)
@@ -727,9 +802,17 @@ fn handle_key(
         return Ok(false);
     }
 
-    if matches!(context, KeyContext::Input | KeyContext::FindDialog)
+    if (matches!(context, KeyContext::Input | KeyContext::FindDialog)
+        || state.user_menu_is_active())
         && let Some(command) = input_char_command(&key_event)
     {
+        let command = if state.user_menu_is_active()
+            && let AppCommand::DialogInputChar(ch) = command
+        {
+            AppCommand::DialogInputChar(shifted_text_character(ch, key_event.modifiers))
+        } else {
+            command
+        };
         return Ok(apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit);
     }
 
@@ -747,13 +830,15 @@ fn handle_key(
     if state.capture_learn_keys_chord(chord) {
         return Ok(false);
     }
-    let key_command = keymap.resolve(context, chord).or_else(|| {
-        if context == KeyContext::ViewerHex {
-            keymap.resolve(KeyContext::Viewer, chord)
-        } else {
-            None
-        }
-    });
+    let key_command = state
+        .resolve_key_command(keymap, context, chord)
+        .or_else(|| {
+            if context == KeyContext::ViewerHex {
+                state.resolve_key_command(keymap, KeyContext::Viewer, chord)
+            } else {
+                None
+            }
+        });
     let command = key_command.and_then(|key_command| {
         AppCommand::from_key_command(context, key_command).or_else(|| {
             (context == KeyContext::FileManagerXMap)
@@ -795,20 +880,19 @@ fn command_line_keymap_command(
         KeyContext::FileManager
     };
     let chord = map_key_event_to_chord(*key_event, input_compatibility)?;
-    let command = keymap
-        .resolve(context, chord)
-        .and_then(|key_command| AppCommand::from_key_command(context, key_command))?;
-    matches!(
-        command,
-        AppCommand::OpenHelp
-            | AppCommand::EnterXMap
-            | AppCommand::PutCurrentSelected
-            | AppCommand::PutCurrentFullSelected
-            | AppCommand::PutCurrentTagged
-            | AppCommand::PutOtherTagged
-            | AppCommand::CopySelectedPath
-    )
-    .then_some(command)
+    let command = (!state.is_xmap_pending())
+        .then(|| {
+            state
+                .resolve_key_command(keymap, KeyContext::CommandLine, chord)
+                .and_then(|key| AppCommand::from_key_command(KeyContext::CommandLine, key))
+        })
+        .flatten()
+        .or_else(|| {
+            state
+                .resolve_key_command(keymap, context, chord)
+                .and_then(|key| AppCommand::from_key_command(context, key))
+        })?;
+    command.is_command_line_action().then_some(command)
 }
 
 fn handle_mouse(
@@ -820,6 +904,26 @@ fn handle_mouse(
     runtime: &mut RuntimeBridge,
     skin_runtime: &SkinRuntimeConfig,
 ) -> Result<bool> {
+    if let Some(direction) = match mouse_event.kind {
+        MouseEventKind::ScrollUp => Some(rc_ui::ScrollDirection::Up),
+        MouseEventKind::ScrollDown => Some(rc_ui::ScrollDirection::Down),
+        _ => None,
+    } {
+        click_tracker.clear();
+        for command in rc_ui::commands_for_scroll(
+            state,
+            mouse_event.column,
+            mouse_event.row,
+            viewport_width,
+            viewport_height,
+            direction,
+        ) {
+            if apply_and_dispatch(state, command, runtime, skin_runtime)? == ApplyResult::Quit {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
     if state.key_context() == KeyContext::CommandLine {
         state.clear_xmap();
         click_tracker.clear();
@@ -922,7 +1026,11 @@ fn dispatch_pending_external_edit_requests(
     for request in state.take_pending_external_edit_requests() {
         if let Err(error) = run_external_editor_request(terminal, &request) {
             state.set_status(format!("Editor launch failed: {error}"));
+        } else {
+            state.record_edited_file(&request);
         }
+        state.reload_file_highlights();
+        state.reload_extension_rules();
     }
 }
 
@@ -941,6 +1049,7 @@ fn dispatch_pending_external_execute_requests(
     }
 }
 
+#[cfg(not(unix))]
 fn dispatch_pending_foreground_shell_requests(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -955,40 +1064,98 @@ fn dispatch_pending_foreground_shell_requests(
     }
 }
 
+fn dispatch_pending_external_action_requests(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+) {
+    for request in state.take_pending_external_action_requests() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(&request.script)
+            .envs(request.environment.iter().map(|(key, value)| (key, value)));
+        let result = run_terminal_shell_command(
+            terminal,
+            &mut command,
+            &request.cwd,
+            &request.label,
+            "action",
+            request.edited_path.is_none(),
+        );
+        match result {
+            Ok(status) if status.success() => {
+                if let Some(path) = request.edited_path {
+                    state.record_edited_file(&ExternalEditRequest {
+                        editor_command: String::new(),
+                        path,
+                        cwd: request.cwd,
+                    });
+                }
+                state.set_status(format!("Finished {}", request.label));
+            }
+            Ok(status) => state.set_status(format!("Action {status}")),
+            Err(error) => state.set_status(format!("Action failed: {error}")),
+        }
+        let directories: std::collections::HashSet<_> =
+            state.panels.iter().map(|panel| panel.cwd.clone()).collect();
+        for directory in directories {
+            state.refresh_panels_in_directory(&directory);
+        }
+        state.reload_file_highlights();
+        state.reload_extension_rules();
+    }
+}
+
 fn run_foreground_shell_request(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     request: &ForegroundShellRequest,
 ) -> Result<ExitStatus> {
-    use std::io::{IsTerminal as _, Write as _};
-
-    suspend_terminal_for_external_command(terminal)?;
     let invocation = request.shell.invocation(&request.command);
     let mut command = Command::new(&invocation.program);
     command
         .args(&invocation.arguments)
-        .current_dir(&request.cwd)
+        .envs(invocation.environment);
+    run_terminal_shell_command(
+        terminal,
+        &mut command,
+        &request.cwd,
+        &request.command,
+        &request.shell.identity,
+        true,
+    )
+}
+
+fn run_terminal_shell_command(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    command: &mut Command,
+    directory: &std::path::Path,
+    label: &str,
+    identity: &str,
+    acknowledge: bool,
+) -> Result<ExitStatus> {
+    use std::io::{IsTerminal as _, Write as _};
+    suspend_terminal_for_external_command(terminal)?;
+    command
+        .current_dir(directory)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let cwd = sanitize_display_field(&request.cwd.to_string_lossy());
-    let submitted = sanitize_display_field(&request.command);
+    let cwd = sanitize_display_field(&directory.to_string_lossy());
+    let submitted = sanitize_display_field(label);
     let echo = sanitize_display_line(&format!("{cwd} > {submitted}"));
-    let run_result = run_interactive_process_after_prepare(&mut command, || {
+    let run_result = run_interactive_process_after_prepare(command, || {
         println!("{echo}");
         io::stdout().flush()
     })
-    .with_context(|| {
-        format!(
-            "failed to launch {}",
-            sanitize_display_field(&request.shell.identity)
-        )
-    });
+    .with_context(|| format!("failed to launch {}", sanitize_display_field(identity)));
 
-    let acknowledgement_result = if let Ok(status) = &run_result {
+    let acknowledgement_result = if let Ok(status) = &run_result
+        && acknowledge
+    {
         let notice = sanitize_display_line(&format!(
             "[{}:{}] Press Enter to return to rc",
-            sanitize_display_field(&request.shell.identity),
+            sanitize_display_field(identity),
             exit_status_number(*status)
         ));
         println!("{notice}");
@@ -2037,13 +2204,14 @@ fn resolve_external_editor_process_command(
     let mut inserted_path = false;
     for part in parts {
         if part.contains("{path}") {
-            let Some(path) = request.path.to_str() else {
-                return Err(anyhow!(
-                    "external editor command '{}' uses {{path}} placeholder but selected path is not valid UTF-8",
-                    request.editor_command
-                ));
-            };
-            args.push(OsString::from(part.replace("{path}", path)));
+            let mut argument = OsString::new();
+            for (index, fragment) in part.split("{path}").enumerate() {
+                if index != 0 {
+                    argument.push(&request.path);
+                }
+                argument.push(fragment);
+            }
+            args.push(argument);
             inserted_path = true;
         } else {
             args.push(OsString::from(part));
@@ -2551,6 +2719,111 @@ mod tests {
             if matches!(&job.request, JobRequest::RefreshPanel { cwd, .. } if cwd == &target))
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wheel_events_target_hovered_panels_and_clear_double_click_state() {
+        let root = tempfile::tempdir().unwrap();
+        for n in 0..20 {
+            fs::create_dir(root.path().join(format!("d{n:02}"))).unwrap();
+        }
+        let mut state = AppState::new(root.path().into()).unwrap();
+        for panel in &mut state.panels {
+            panel.refresh().unwrap();
+        }
+        let (mut runtime, _commands) = runtime::test_runtime_bridge_with_capacity(32);
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        let mut tracker = MouseClickTracker::default();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 61,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(
+            &mut state,
+            click,
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        let selected = state.panels[1].cursor;
+        assert!(tracker.previous.is_some());
+        for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp] {
+            handle_mouse(
+                &mut state,
+                MouseEvent { kind, ..click },
+                120,
+                40,
+                &mut tracker,
+                &mut runtime,
+                &skin_runtime,
+            )
+            .unwrap();
+            assert!(tracker.previous.is_none());
+            assert_eq!(state.active_panel, ActivePanel::Right);
+            assert_eq!(state.panels[0].cursor, 0);
+        }
+        assert_eq!(state.panels[1].cursor, selected);
+        handle_mouse(
+            &mut state,
+            click,
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            state.active_panel().cwd,
+            root.path(),
+            "scrolling between clicks must prevent activation"
+        );
+        state.apply(AppCommand::OpenHelp).unwrap();
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                ..click
+            },
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            state.panels[1].cursor, selected,
+            "wheel outside modal must not reach a panel"
+        );
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 60,
+                row: 20,
+                ..click
+            },
+            120,
+            40,
+            &mut tracker,
+            &mut runtime,
+            &skin_runtime,
+        )
+        .unwrap();
+        assert!(matches!(state.top_route(), rc_core::Route::Help(help) if help.scroll() == 3));
     }
 
     #[test]
@@ -3205,19 +3478,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn external_editor_command_parser_rejects_non_utf8_path_with_placeholder() {
+    fn external_editor_command_parser_preserves_non_utf8_path_with_placeholders() {
         let request = ExternalEditRequest {
-            editor_command: String::from("code --goto {path}:1"),
+            editor_command: String::from("code --goto {path}:1 --label=before{path}after{path}"),
             path: PathBuf::from(OsString::from_vec(vec![b'n', b'o', b't', b'e', 0x80])),
             cwd: PathBuf::from("/tmp"),
         };
-        let error = resolve_external_editor_process_command(&request)
-            .expect_err("non-utf8 placeholder expansion should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("selected path is not valid UTF-8"),
-            "placeholder expansion should fail loudly for non-utf8 paths"
+        let command = resolve_external_editor_process_command(&request).unwrap();
+        assert_eq!(command.args[1].as_bytes(), b"note\x80:1");
+        assert_eq!(
+            command.args[2].as_bytes(),
+            b"--label=beforenote\x80afternote\x80"
         );
     }
 
@@ -3794,6 +4065,116 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn user_menu_shortcut_precedes_listbox_navigation_binding() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-user-menu-keys-{stamp}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".mc.menu"),
+            "h Action\n echo %{lower}\nH Uppercase\n echo %{upper}\n@ Symbol\n echo %{symbol}\n",
+        )
+        .unwrap();
+        let mut state = AppState::new(root.clone()).unwrap();
+        state.set_configuration_files(rc_core::ConfigurationFiles {
+            user_directory: None,
+            system_directories: vec![],
+        });
+        let keymap = Keymap::bundled_mc_default().unwrap();
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        for (ch, modifiers, prompt) in [
+            ('h', KeyModifiers::NONE, "lower"),
+            ('h', KeyModifiers::SHIFT, "upper"),
+            ('2', KeyModifiers::SHIFT, "symbol"),
+        ] {
+            handle_key(
+                &mut state,
+                &keymap,
+                KeyEvent::new(CrosstermKeyCode::F(2), KeyModifiers::NONE),
+                TEST_VIEWPORT_WIDTH,
+                &mut runtime,
+                &skin_runtime,
+                compat_enabled(),
+            )
+            .unwrap();
+            assert!(
+                !handle_key(
+                    &mut state,
+                    &keymap,
+                    KeyEvent::new(CrosstermKeyCode::Char(ch), modifiers),
+                    TEST_VIEWPORT_WIDTH,
+                    &mut runtime,
+                    &skin_runtime,
+                    compat_enabled()
+                )
+                .unwrap()
+            );
+            assert_eq!(state.key_context(), KeyContext::Input);
+            let rc_core::Route::Dialog(dialog) = state.top_route() else {
+                panic!("expected prompt");
+            };
+            let rc_core::DialogKind::Input(input) = &dialog.kind else {
+                panic!("expected input");
+            };
+            assert_eq!(input.prompt, prompt);
+            state.apply(AppCommand::DialogCancel).unwrap();
+        }
+        assert!(state.take_pending_external_action_requests().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn learned_binding_is_used_by_actual_event_dispatch() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("rc-learn-dispatch-{stamp}"));
+        fs::create_dir_all(&root).unwrap();
+        let mut state = AppState::new(root.clone()).unwrap();
+        let keymap = Keymap::bundled_mc_default().unwrap();
+        let mut settings = state.persisted_settings_snapshot();
+        settings
+            .learn_keys
+            .bindings
+            .push(rc_core::keymap::LearnedBinding {
+                context: "filemanager".into(),
+                action: "Swap".into(),
+                chord: "f3".into(),
+            });
+        state.replace_settings(settings);
+        let mut runtime = test_runtime_bridge();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+        handle_key(
+            &mut state,
+            &keymap,
+            KeyEvent::new(CrosstermKeyCode::F(3), KeyModifiers::NONE),
+            TEST_VIEWPORT_WIDTH,
+            &mut runtime,
+            &skin_runtime,
+            compat_enabled(),
+        )
+        .unwrap();
+        assert_eq!(state.active_panel, rc_core::ActivePanel::Right);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

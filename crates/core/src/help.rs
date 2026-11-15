@@ -48,7 +48,7 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
         "File manager quick keys:\n\
   {{fm_switch_panel}} switch panel\n\
   {{fm_open_entry}} enter directory/archive, run executable, or open file\n\
-  {{fm_view_entry}} view file internally\n\
+  {{fm_view_entry}} view file using extension rules or the internal viewer\n\
   {{fm_parent}} go to parent directory\n\
   {{fm_quick_cd}} quick cd\n\
   {{fm_command_line}} open command line (Unix)\n\
@@ -65,16 +65,28 @@ Related topics: [File manager](file-manager), [Viewer](viewer), [Jobs](jobs).",
   {{fm_external_panelize_menu}} -> Command -> External panelize\n\
   {{fm_panel_info}} show info in the passive panel\n\
   {{fm_panel_quick_view}} quick-view the selection in the passive panel\n\
-  {{fm_cycle_listing}} cycle Full/Brief/Long listing formats\n\
+  {{fm_cycle_listing}} cycle Full/Brief/Long/User listing formats\n\
   {{fm_open_jobs}} open jobs screen\n\
+  {{fm_screens}} opens the screen list; choose File manager to keep a screen open.\n\
+  Restore suspended screens from that list; close them normally to release them.\n\
   {{fm_cancel_job}} cancel latest job\n\
   {{fm_skin}} open skin picker\n\
   {{fm_quit}} quit\n\
 \n\
 File operations:\n\
+  Wheel/touchpad scrolls the pane under the pointer, three rows at a time.\n\
+  Scrollable modals receive scrolling while open; background panels stay still.\n\
   {{fm_move}} move cursor\n\
   {{fm_toggle_tag}} toggle selection\n\
   {{fm_file_ops}} copy/move/delete\n\
+  File menu: Chmod, Chown, and Advanced chown apply to selected/tagged entries.\n\
+  Chmod: octal modes or u/g/o/a clauses, e.g. u+rw,g-w,o=r. No recursion.\n\
+  Chown: account names or numeric IDs; blank fields keep existing values.\n\
+  Advanced chown: owner:group plus an optional mode. Jobs can be canceled.\n\
+  Chmod rejects symlinks; chown changes the link itself.\n\
+  File menu: Link, Symlink, and Relative symlink create links without overwrite.\n\
+  Destinations are relative to the passive panel; tagged batches need a directory.\n\
+  Edit symlink assigns a literal target to every selected link, including dangling links.\n\
 \n\
 Quick cd accepts absolute or relative paths, ~ and Unix ~user homes,\n\
 and - for the previous directory. Quote paths containing spaces.\n\
@@ -132,8 +144,13 @@ Views:\n\
   {{fm_panel_quick_view}} and {{fm_panel_info}} target the passive panel.\n\
 \n\
 Listing:\n\
-  Full, Brief, and Long formats are independent and persisted per panel.\n\
+  Full, Brief, Long, and User formats are independent and persisted per panel.\n\
   {{fm_cycle_listing}} cycles the active panel's format.\n\
+  User format accepts name, size, mtime, perm, nlink, uid, gid, inode.\n\
+  Separate columns with spaces; use :width (1-256) for fixed widths.\n\
+  Example: perm size:9 name. An unsized name fills remaining space.\n\
+  Encoding selects a per-panel filename codec, also used for sorting and filters.\n\
+  Filesystem operations retain original bytes; file contents are unchanged.\n\
   In Brief format, Left/Right moves across columns and Up/Down within them.\n\
   Sort order supports name, version, extension, times, size, inode,\n\
   and unsorted discovery order, with an independent reverse toggle.\n\
@@ -170,6 +187,7 @@ See also [File manager](file-manager) and [Panelize and VFS](panelize).",
         "Viewer",
         "Viewer basics:\n\
   {{viewer_scroll}} scroll\n\
+  Mouse wheel and touchpad scroll here and in quick previews.\n\
   {{viewer_search}} search, {{viewer_search_back}} reverse search\n\
   {{viewer_search_continue}} continue search\n\
   {{viewer_goto}} goto line or offset\n\
@@ -682,6 +700,7 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ),
         ("fm_external_panelize_menu", String::from("F9")),
         ("fm_open_jobs", String::from("Ctrl-J")),
+        ("fm_screens", String::from("Alt-backtick")),
         ("fm_cancel_job", String::from("Alt-J")),
         ("fm_skin", String::from("Alt-S/Ctrl-K")),
         ("fm_quit", String::from("q/F10")),
@@ -815,8 +834,9 @@ mod tests {
         assert!(content.contains("Ctrl-X ! (or Alt/Ctrl-P) open external panelize"));
         assert!(content.contains("F9 -> Command -> External panelize"));
         assert!(content.contains("Ctrl-X i show info in the passive panel"));
-        assert!(content.contains("Alt-Shift-T cycle Full/Brief/Long listing formats"));
+        assert!(content.contains("Alt-Shift-T cycle Full/Brief/Long/User listing formats"));
         assert!(content.contains("q/F10 quit"));
+        assert!(content.contains("Alt-backtick opens the screen list"));
     }
 
     #[test]
@@ -841,7 +861,7 @@ mod tests {
         let content = flatten_help_lines(help.lines());
         assert!(content.contains("F9 -> Left or Right"));
         assert!(content.contains("Quick view loads the other panel's selection asynchronously"));
-        assert!(content.contains("Full, Brief, and Long formats"));
+        assert!(content.contains("Full, Brief, Long, and User formats"));
         assert!(content.contains("Left/Right moves across columns"));
         assert!(content.contains("Shift-F6 cycles sort fields"));
         assert!(content.contains("shell pattern or regular expression"));

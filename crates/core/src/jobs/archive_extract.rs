@@ -49,7 +49,7 @@ pub(super) fn extract_archive(
             .filter_map(|(_, member)| member.index)
             .min()
     });
-    let archive_path = fs::canonicalize(&location.archive)?;
+    let archive_path = fs::canonicalize(location.local_archive())?;
     for source in selected {
         progress.ensure_not_canceled()?;
         let members = reader
@@ -71,7 +71,7 @@ pub(super) fn extract_archive(
         // directory, including through a symlink or hard-link alias.
         let destination_identity = canonicalize_allowing_missing_tail(&destination)?;
         if archive_path.starts_with(&destination_identity)
-            || existing_paths_refer_to_same_entry(&location.archive, &destination)?
+            || existing_paths_refer_to_same_entry(location.local_archive(), &destination)?
         {
             match overwrite {
                 OverwritePolicy::Skip => {
@@ -242,7 +242,7 @@ fn extract_selection(
     result
 }
 
-fn cleanup_stage(path: &Path) {
+pub(super) fn cleanup_stage(path: &Path) {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };

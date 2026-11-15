@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 trait ReadSeek: Read + Seek {}
@@ -29,6 +29,62 @@ struct TarIndex {
 }
 struct TarBackend<'a> {
     input: Box<dyn ReadSeek + 'a>,
+}
+
+/// Persisted metadata is enough for browsing. Rebuild compression checkpoints
+/// lazily when a member is actually opened, keeping decoder snapshots in memory.
+struct DeferredTarIndex {
+    format: ArchiveFormat,
+    backend: Mutex<Option<Box<dyn IndexedArchive>>>,
+}
+
+pub(super) fn restored_index(format: ArchiveFormat) -> Box<dyn IndexedArchive> {
+    if format == ArchiveFormat::Tar {
+        Box::new(TarIndex {
+            compression: CompressionIndex::Plain,
+        })
+    } else {
+        Box::new(DeferredTarIndex {
+            format,
+            backend: Mutex::default(),
+        })
+    }
+}
+
+impl IndexedArchive for DeferredTarIndex {
+    fn open<'a>(
+        &self,
+        mut file: File,
+        cancel: Option<&'a AtomicBool>,
+    ) -> io::Result<Box<dyn ArchiveBackend + 'a>> {
+        let mut backend = loop {
+            super::check_canceled(cancel)?;
+            match self.backend.try_lock() {
+                Ok(backend) => break backend,
+                Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(io::Error::other("compression index lock is poisoned"));
+                }
+            }
+        };
+        if backend.is_none() {
+            let (_, index) = build_index(&mut file, self.format, cancel)?;
+            *backend = Some(index);
+        }
+        file.rewind()?;
+        backend
+            .as_ref()
+            .expect("initialized compression index")
+            .open(file, cancel)
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.backend
+            .try_lock()
+            .ok()
+            .and_then(|backend| backend.as_ref().map(|index| index.estimated_bytes()))
+            .unwrap_or(0)
+    }
 }
 
 impl IndexedArchive for TarIndex {

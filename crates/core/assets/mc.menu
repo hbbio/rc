@@ -1,0 +1,7 @@
+shell_patterns=1
+# Entries start with a shortcut and title, followed by indented shell commands.
+v  File information
+    %view{ascii} file -- %f
+
+d  Directory sizes
+    %view{ascii} du -h .
