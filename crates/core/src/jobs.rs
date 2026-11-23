@@ -223,6 +223,10 @@ pub enum JobRequest {
     LoadViewer {
         path: PathBuf,
     },
+    RefreshViewer {
+        path: PathBuf,
+        nroff: bool,
+    },
     LoadQuickView {
         panel: ActivePanel,
         path: PathBuf,
@@ -269,7 +273,7 @@ impl JobRequest {
             Self::Find { .. } => JobKind::Find,
             Self::QuickCdSearch { .. } => JobKind::QuickCdSearch,
             Self::OpenDesktop { .. } => JobKind::OpenDesktop,
-            Self::LoadViewer { .. } => JobKind::LoadViewer,
+            Self::LoadViewer { .. } | Self::RefreshViewer { .. } => JobKind::LoadViewer,
             Self::LoadQuickView { .. } => JobKind::LoadQuickView,
             Self::MeasureSelection { .. } => JobKind::MeasureSelection,
             Self::BuildTree { .. } => JobKind::BuildTree,
@@ -299,7 +303,7 @@ impl JobRequest {
             Self::Find { .. } => 1,
             Self::QuickCdSearch { .. } => 1,
             Self::OpenDesktop { .. } => 1,
-            Self::LoadViewer { .. } => 1,
+            Self::LoadViewer { .. } | Self::RefreshViewer { .. } => 1,
             Self::LoadQuickView { .. } => 1,
             Self::MeasureSelection { paths, .. } => paths.len(),
             Self::BuildTree { .. } => 1,
@@ -456,6 +460,7 @@ impl JobRequest {
                 format!("open with default application {}", path.to_string_lossy())
             }
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
+            Self::RefreshViewer { path, .. } => format!("refresh viewer {}", path.display()),
             Self::LoadQuickView { panel, path, .. } => format!(
                 "preview {} in {} panel",
                 path.to_string_lossy(),
@@ -1221,6 +1226,7 @@ fn execute_job(
             "desktop-open jobs are executed by the runtime adapter",
         )),
         JobRequest::LoadViewer { .. }
+        | JobRequest::RefreshViewer { .. }
         | JobRequest::CaptureCommand { .. }
         | JobRequest::ProbeFileType { .. }
         | JobRequest::LoadActionViewer { .. } => Err(io::Error::new(
@@ -2142,6 +2148,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::RefreshViewer { .. }
         | JobRequest::CaptureCommand { .. }
         | JobRequest::ProbeFileType { .. }
         | JobRequest::LoadActionViewer { .. }

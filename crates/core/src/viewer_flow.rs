@@ -48,6 +48,8 @@ impl AppState {
                     ));
                 }
             }
+            AppCommand::ViewerRefresh => self.refresh_viewer(),
+            AppCommand::ViewerCopyContents => self.copy_viewer_contents(),
             _ => unreachable!("non-viewer command dispatched to viewer handler: {command:?}"),
         }
 
@@ -146,6 +148,111 @@ impl AppState {
                 .map(|output| &mut output.viewer),
             _ => None,
         }
+    }
+
+    pub fn viewer_file_to_watch(&self) -> Option<&Arc<ViewerFileSnapshot>> {
+        let file = self.active_viewer()?.local_file.as_ref()?;
+        (!file.updated_on_disk).then_some(&file.snapshot)
+    }
+
+    pub fn set_viewer_change_detection_unavailable(&mut self, unavailable: bool) {
+        if let Some(viewer) = self.active_viewer_mut()
+            && let Some(file) = viewer.local_file.as_mut()
+        {
+            file.change_detection_unavailable = unavailable;
+        }
+    }
+
+    pub fn mark_viewer_file_changed(&mut self, snapshot: &Arc<ViewerFileSnapshot>) {
+        // A pending disk check may belong to a viewer that has since refreshed.
+        if let Some(viewer) = self.active_viewer_mut()
+            && let Some(file) = viewer.local_file.as_mut()
+            && Arc::ptr_eq(&file.snapshot, snapshot)
+        {
+            file.updated_on_disk = true;
+            file.change_detection_unavailable = false;
+        }
+    }
+
+    fn refresh_viewer(&mut self) {
+        let Some(viewer) = self.active_viewer() else {
+            return;
+        };
+        let Some(file) = viewer.local_file.as_ref() else {
+            self.set_status("Viewer refresh is available for local files");
+            return;
+        };
+        if file.refresh_job.is_some() {
+            return;
+        }
+        let request = JobRequest::RefreshViewer {
+            path: viewer.path().to_path_buf(),
+            nroff: viewer.uses_nroff(),
+        };
+        let job_id = self.queue_worker_job_request(request);
+        if let Some(viewer) = self.active_viewer_mut()
+            && let Some(file) = viewer.local_file.as_mut()
+        {
+            file.refresh_job = Some(job_id);
+        }
+        self.set_status("Refreshing viewer...");
+    }
+
+    pub(crate) fn finish_viewer_refresh(
+        &mut self,
+        job_id: JobId,
+        result: Result<ViewerState, &JobError>,
+    ) {
+        let is_current = matches!(self.top_route(), Route::Viewer(viewer) if viewer.refresh_job() == Some(job_id));
+        let Some(viewer) = self
+            .routes
+            .iter_mut()
+            .rev()
+            .chain(self.suspended_screens.iter_mut().flatten())
+            .find_map(|route| match route {
+                Route::Viewer(viewer) if viewer.refresh_job() == Some(job_id) => Some(viewer),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        if let Some(file) = viewer.local_file.as_mut() {
+            file.refresh_job = None;
+        }
+        let status = match result {
+            Ok(refreshed) => {
+                viewer.replace_after_refresh(refreshed);
+                String::from("Viewer refreshed")
+            }
+            Err(error) if error.is_canceled() => String::from("Viewer refresh canceled"),
+            Err(error) => format!("Viewer refresh failed ({})", error.user_message()),
+        };
+        if is_current {
+            self.set_status(status);
+        }
+    }
+
+    fn copy_viewer_contents(&mut self) {
+        let Some(viewer) = self.active_viewer() else {
+            return;
+        };
+        let Some(text) = viewer.clipboard_text() else {
+            self.set_status(format!(
+                "Clipboard copy failed (OSC 52 copy limit is {MAX_CLIPBOARD_TEXT_BYTES} bytes)"
+            ));
+            return;
+        };
+        let success_message = if viewer.text_is_preview() {
+            "Sent viewer preview to the terminal for copying"
+        } else {
+            "Sent viewer contents to the terminal for copying"
+        };
+        self.pending_clipboard_copy_requests
+            .push(ClipboardCopyRequest {
+                text,
+                success_message,
+            });
+        self.set_status("Copying viewer contents to clipboard...");
     }
 
     pub(crate) fn open_viewer_search_dialog(&mut self, direction: ViewerSearchDirection) {

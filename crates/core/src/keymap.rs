@@ -23,6 +23,13 @@ pub enum KeyContext {
 }
 
 impl KeyContext {
+    pub(crate) fn fallback(self) -> Option<Self> {
+        match self {
+            Self::ViewerHex => Some(Self::Viewer),
+            _ => None,
+        }
+    }
+
     pub fn section_name(self) -> &'static str {
         match self {
             Self::FileManager => "filemanager",
@@ -256,6 +263,7 @@ pub enum KeyCommand {
     Goto,
     ToggleWrap,
     ToggleHex,
+    ViewerCopyContents,
     DialogAccept,
     DialogCancel,
     DialogFocusNext,
@@ -380,6 +388,7 @@ impl KeyCommand {
             "goto" => Self::Goto,
             "togglewrap" | "togglewrapmode" | "wrapmode" => Self::ToggleWrap,
             "togglehex" | "togglehexmode" | "hexmode" => Self::ToggleHex,
+            "viewercopycontents" => Self::ViewerCopyContents,
             "ok" | "dialogaccept" => Self::DialogAccept,
             "cancel" | "dialogcancel" => Self::DialogCancel,
             "focusnext" | "dialogfocusnext" => Self::DialogFocusNext,

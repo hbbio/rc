@@ -559,7 +559,13 @@ also support scrolling. Scrolling never opens or accepts an entry.
 | `g` / `Alt-L` | Go to a line or offset |
 | `w` | Toggle wrapping |
 | `h` | Toggle text / hex mode |
+| `r` | Refresh an open local file from disk |
+| `c` | Copy the displayed version to the clipboard |
 | `Esc` / `q` / `F10` | Close |
+
+When a local file changes on disk, the viewer shows a refresh notice and keeps
+the displayed version available until a refresh succeeds. Copy uses the loaded
+text or hex dump and applies the OSC 52 size limit below.
 
 Default bindings live in
 `crates/core/assets/mc.default.keymap`. Common macOS Option-symbol variants are
@@ -579,7 +585,8 @@ Linux desktop opens prefer the desktop portal. Accepted legacy launchers are rea
 independently and are not terminated when rc exits.
 
 Clipboard copying uses the OSC 52 terminal sequence. The terminal emulator and any
-intermediate multiplexer must allow OSC 52 clipboard writes.
+intermediate multiplexer must allow OSC 52 clipboard writes. Copies larger than
+449,991 bytes before encoding are rejected.
 
 ## Project layout
 

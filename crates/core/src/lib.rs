@@ -146,7 +146,7 @@ pub use tree::{
 pub(crate) use tree::{
     TreeMutationTracker, TreeRescanPlan, TreeScanCompletion, build_tree_entries,
 };
-pub use viewer::ViewerState;
+pub use viewer::{ViewerFileSnapshot, ViewerState, execute_viewer_refresh};
 
 use crate::keymap::{KeyChord, KeyCode, KeyContext, KeyModifiers, Keymap, KeymapParseReport};
 #[cfg(test)]
@@ -298,6 +298,8 @@ pub enum AppCommand {
     ViewerGoto,
     ViewerToggleWrap,
     ViewerToggleHex,
+    ViewerRefresh,
+    ViewerCopyContents,
     MenuNoop,
     MenuNotImplemented(&'static str),
 }
@@ -570,7 +572,9 @@ impl AppCommand {
             | Self::ViewerSearchContinueBackward
             | Self::ViewerGoto
             | Self::ViewerToggleWrap
-            | Self::ViewerToggleHex => CommandDomain::Viewer,
+            | Self::ViewerToggleHex
+            | Self::ViewerRefresh
+            | Self::ViewerCopyContents => CommandDomain::Viewer,
             Self::OpenConfirmDialog
             | Self::Chmod
             | Self::Chown
@@ -2386,7 +2390,12 @@ pub struct ExternalExecuteRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClipboardCopyRequest {
     pub text: String,
+    pub success_message: &'static str,
 }
+
+/// Maximum UTF-8 size of a clipboard copy before Base64 encoding.
+/// This keeps the padded OSC 52 sequence within xterm's default 600,000-byte buffer.
+pub const MAX_CLIPBOARD_TEXT_BYTES: usize = (600_000 - b"\x1b]52;c;\x1b\\".len()) / 4 * 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecuteSelectionResult {
@@ -2436,7 +2445,16 @@ impl KeybindingHints {
         ];
 
         for context in contexts {
-            for (chord, key_command) in keymap.bindings_for_context(context) {
+            let mut bindings = keymap.bindings_for_context(context);
+            if let Some(fallback) = context.fallback() {
+                bindings.extend(
+                    keymap
+                        .bindings_for_context(fallback)
+                        .into_iter()
+                        .filter(|(chord, _)| keymap.resolve(context, *chord).is_none()),
+                );
+            }
+            for (chord, key_command) in bindings {
                 let app_command =
                     AppCommand::from_key_command(context, &key_command).or_else(|| {
                         (context == KeyContext::FileManagerXMap)
@@ -2610,6 +2628,7 @@ fn key_chord_sort_key(chord: &KeyChord) -> (u8, u16, String) {
 
 fn format_key_chord(chord: KeyChord) -> String {
     let key = match chord.code {
+        KeyCode::Char(' ') => String::from("Space"),
         KeyCode::Char(ch) => ch.to_string(),
         KeyCode::F(number) => format!("F{number}"),
         KeyCode::Enter => String::from("Enter"),

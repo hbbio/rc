@@ -2,6 +2,84 @@ use super::*;
 use crate::keymap::LearnedBinding;
 
 #[test]
+fn viewer_hex_inherits_text_overrides_and_honors_hex_specific_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    let mut app = AppState::new(root.path().to_path_buf()).unwrap();
+    let mut keymap = Keymap::bundled_mc_default().unwrap();
+    let context = KeyContext::ViewerHex;
+    let chord = KeyChord::new(KeyCode::Char('c'));
+
+    keymap.merge_from(&Keymap::parse("[viewer]\nQuit = c\n").unwrap());
+    app.set_keybinding_hints_from_keymap(&keymap);
+    assert_eq!(
+        app.resolve_key_command(&keymap, context, chord),
+        Some(&KeyCommand::Quit)
+    );
+    assert_eq!(
+        app.keybinding_primary_label(context, AppCommand::ViewerCopyContents),
+        None
+    );
+
+    keymap.merge_from(&Keymap::parse("[viewer:hex]\nViewerCopyContents = c\n").unwrap());
+    app.set_keybinding_hints_from_keymap(&keymap);
+    assert_eq!(
+        app.resolve_key_command(&keymap, context, chord),
+        Some(&KeyCommand::ViewerCopyContents)
+    );
+    assert_eq!(
+        app.keybinding_primary_label(context, AppCommand::ViewerCopyContents),
+        Some("c")
+    );
+}
+
+#[test]
+fn viewer_help_shows_effective_bindings_and_unbound_commands_in_each_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("report.txt");
+    fs::write(&path, "report").unwrap();
+    let mut app = AppState::new(root.path().to_path_buf()).unwrap();
+    app.routes
+        .push(Route::Viewer(ViewerState::open(path).unwrap()));
+    let mut keymap = Keymap::bundled_mc_default().unwrap();
+    keymap.merge_from(&Keymap::parse("[viewer]\nQuit = c\n").unwrap());
+    app.set_keybinding_hints_from_keymap(&keymap);
+
+    let copy_help = |app: &mut AppState| {
+        app.apply(AppCommand::OpenHelp).unwrap();
+        let Route::Help(help) = app.top_route() else {
+            panic!("viewer help should open");
+        };
+        let line = help
+            .lines()
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find_map(|span| match span {
+                HelpSpan::Text(text) if text.contains("Copy the displayed version") => {
+                    Some(text.trim().to_owned())
+                }
+                _ => None,
+            })
+            .unwrap();
+        app.apply(AppCommand::CloseHelp).unwrap();
+        line
+    };
+
+    let unbound = "Copy the displayed version to the clipboard (Unbound)";
+    assert_eq!(app.key_context(), KeyContext::Viewer);
+    assert_eq!(copy_help(&mut app), unbound);
+    app.apply(AppCommand::ViewerToggleHex).unwrap();
+    assert_eq!(app.key_context(), KeyContext::ViewerHex);
+    assert_eq!(copy_help(&mut app), unbound);
+
+    keymap.merge_from(&Keymap::parse("[viewer:hex]\nViewerCopyContents = space\n").unwrap());
+    app.set_keybinding_hints_from_keymap(&keymap);
+    assert_eq!(
+        copy_help(&mut app),
+        "Copy the displayed version to the clipboard (Space)"
+    );
+}
+
+#[test]
 fn learned_binding_overrides_dispatch_and_hints_then_removal_restores_defaults() {
     let root = tempfile::tempdir().unwrap();
     let mut app = AppState::new(root.path().to_path_buf()).unwrap();

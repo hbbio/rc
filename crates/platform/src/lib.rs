@@ -13,3 +13,12 @@ mod windows_console;
 
 #[cfg(windows)]
 pub use windows_console::ParentConsoleControlGuard;
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_file;
+
+#[cfg(windows)]
+pub use windows_file::{
+    file_change_time, is_symlink_loop, open_file_for_metadata, volume_supports_change_time,
+};
