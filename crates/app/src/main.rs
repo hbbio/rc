@@ -105,6 +105,11 @@ struct Cli {
     path: Option<PathBuf>,
     #[arg(long)]
     skin: Option<String>,
+    #[arg(
+        long,
+        help = "Import the Midnight Commander skin into rc settings and exit"
+    )]
+    import_mc_skin: bool,
     #[arg(long)]
     skin_dir: Option<PathBuf>,
     #[arg(long)]
@@ -127,6 +132,15 @@ struct InputCompatibility {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings_paths = settings_io::settings_paths();
+    if cli.import_mc_skin {
+        let skin =
+            settings_io::import_mc_skin(&settings_paths).context("failed to import MC skin")?;
+        println!(
+            "Imported Midnight Commander skin {}",
+            sanitize_display_field(&skin)
+        );
+        return Ok(());
+    }
     let mut tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
     if let Some(error) = init_tracing(tracing_log_path.as_deref())
         && let Some(path) = tracing_log_path.as_deref()
@@ -3371,6 +3385,7 @@ mod tests {
             tick_rate_ms: 200,
             path: None,
             skin: Some(String::from("cli-skin")),
+            import_mc_skin: false,
             skin_dir: Some(PathBuf::from("/cli/skins")),
             keymap: Some(PathBuf::from("/cli/keymap")),
             macos_option_compat: Some(true),
@@ -3407,6 +3422,7 @@ mod tests {
             tick_rate_ms: 200,
             path: None,
             skin: None,
+            import_mc_skin: false,
             skin_dir: None,
             keymap: None,
             macos_option_compat: None,

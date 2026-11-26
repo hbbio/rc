@@ -334,14 +334,15 @@ jobs and refreshes visible panels. The FTP toggle controls new FTP/FTPS mounts.
   with doubled backslashes for INI escaping.
 - **Command → Edit extension file / Edit menu file / Edit highlighting group file**
   opens `mc.ext.ini`, `menu`, or `filehighlight.ini` in the configured external
-  editor. Files in `~/.config/mc` take precedence over MC files installed under
-  `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an installed or bundled default
-  first creates a private user copy without replacing an existing file.
+  editor. Files under the user configuration directory's `mc/` take precedence over
+  MC files installed under `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an
+  installed or bundled default first creates a private user copy without replacing
+  an existing file.
   On Unix, a regular `.mc.menu` in the active directory takes precedence when it is
   owned by the current user or root and is not writable by group or others;
   local symlinks are ignored. The same discovery is shared by configuration readers.
 - F2 / **Command → User menu** reads the effective menu on each open: trusted
-  `.mc.menu`, `~/.config/mc/menu` (with `mc.menu` as a compatibility fallback),
+  `.mc.menu`, user configuration `mc/menu` (with `mc.menu` as a compatibility fallback),
   installed `mc.menu`, then bundled entries. Shortcut letters or Enter launch the
   selected entry through the shared macro engine, including prompts and `%view`.
   Addition (`+`) and default (`=`) conditions support active/passive filename,
@@ -473,10 +474,14 @@ Settings use this precedence:
 built-in defaults -> persisted configuration -> environment -> CLI
 ```
 
-`Save setup` writes rc-owned settings to `~/.config/rc/settings.ini` and the
-MC-compatible skin choice to `~/.config/mc/ini`.
+`Save setup` stores rc's settings, including the skin, in `$XDG_CONFIG_HOME/rc/settings.ini`.
+An unset, empty, or relative `XDG_CONFIG_HOME` uses `~/.config`.
+`rc --import-mc-skin` reads the skin from `mc/ini` under the same configuration
+directory, saves it to rc's settings, and exits. The import can read a symlinked
+MC configuration. If rc's settings file is a symlink, saving updates its
+existing regular target and preserves the link. A dangling link causes a save error.
 
-Runtime tracing is written to `~/.config/rc/rc.log`. Set `RC_LOG_FILE` to use
+Runtime tracing is written to `rc.log` next to `settings.ini`. Set `RC_LOG_FILE` to use
 another path and `RUST_LOG` to change the default `warn` filter. The log is
 kept away from the terminal so diagnostics cannot corrupt the alternate-screen
 interface.

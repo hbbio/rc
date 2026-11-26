@@ -407,7 +407,6 @@ impl JobRequest {
                 let target = paths
                     .rc_ini_path
                     .as_ref()
-                    .or(paths.mc_ini_path.as_ref())
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_else(|| String::from("<none>"));
                 format!("save setup -> {target}")
@@ -1217,7 +1216,6 @@ fn execute_job(
             let marker = paths
                 .rc_ini_path
                 .as_deref()
-                .or(paths.mc_ini_path.as_deref())
                 .unwrap_or_else(|| Path::new("."));
             progress.set_current_path(marker);
             fs_backend.persist_settings(&paths, snapshot.as_ref())?;

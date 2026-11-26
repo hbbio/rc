@@ -17,10 +17,25 @@ pub struct SettingsPaths {
 }
 
 pub fn settings_paths() -> SettingsPaths {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    settings_paths_from_env(
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+fn settings_paths_from_env(
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> SettingsPaths {
+    let config = xdg_config_home
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".config"))
+        });
     SettingsPaths {
-        mc_ini_path: home.as_ref().map(|root| root.join(".config/mc/ini")),
-        rc_ini_path: home.map(|root| root.join(".config/rc/settings.ini")),
+        mc_ini_path: config.as_ref().map(|root| root.join("mc/ini")),
+        rc_ini_path: config.map(|root| root.join("rc/settings.ini")),
     }
 }
 
@@ -38,24 +53,35 @@ pub fn load_settings(paths: &SettingsPaths) -> io::Result<Settings> {
         }
     }
 
-    if let Some(path) = paths.mc_ini_path.as_deref()
-        && let Some(skin) = read_skin_from_mc_ini(path)?
-    {
-        settings.appearance.skin = skin;
-    }
-
     settings.save_setup.dirty = false;
     Ok(settings)
 }
 
 pub fn save_settings(paths: &SettingsPaths, settings: &Settings) -> io::Result<()> {
-    if let Some(path) = paths.mc_ini_path.as_deref() {
-        write_skin_to_mc_ini(path, &settings.appearance.skin)?;
-    }
     if let Some(path) = paths.rc_ini_path.as_deref() {
-        write_rc_settings_ini(path, settings)?;
+        write_atomic(path, &render_rc_settings_ini(settings))?;
     }
     Ok(())
+}
+
+/// Import the selected Midnight Commander skin and persist it in rc's settings.
+pub fn import_mc_skin(paths: &SettingsPaths) -> io::Result<String> {
+    let (Some(mc_ini_path), Some(_)) = (&paths.mc_ini_path, &paths.rc_ini_path) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "configuration directory unavailable",
+        ));
+    };
+    let skin = read_skin_from_mc_ini(mc_ini_path)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no skin configured in {mc_ini_path:?}"),
+        )
+    })?;
+    let mut settings = load_settings(paths)?;
+    settings.appearance.skin.clone_from(&skin);
+    save_settings(paths, &settings)?;
+    Ok(skin)
 }
 
 pub fn parse_bool(value: &str) -> Option<bool> {
@@ -98,24 +124,38 @@ pub fn read_skin_from_mc_ini(path: &Path) -> io::Result<Option<String>> {
     Ok(None)
 }
 
-pub fn write_skin_to_mc_ini(path: &Path, skin: &str) -> io::Result<()> {
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
+    // Preserve an rc settings symlink by updating its existing regular target.
+    let resolved;
+    let path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            resolved = fs::canonicalize(path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot resolve settings symlink {path:?}: {error}"),
+                )
+            })?;
+            if !fs::metadata(&resolved)?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("settings symlink {path:?} must point to a regular file"),
+                ));
+            }
+            &resolved
+        }
+        Ok(_) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => path,
         Err(error) => return Err(error),
     };
-    let updated = upsert_skin_in_mc_ini(&source, skin);
-    write_atomic(path, &updated)
-}
-
-fn write_rc_settings_ini(path: &Path, settings: &Settings) -> io::Result<()> {
-    let source = render_rc_settings_ini(settings);
-    write_atomic(path, &source)
-}
-
-fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        let mut directories = fs::DirBuilder::new();
+        directories.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directories.mode(0o700);
+        }
+        directories.create(parent)?;
     }
     let stem = path
         .file_name()
@@ -225,56 +265,6 @@ fn sync_parent_dir(_path: &Path) -> io::Result<()> {
 fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::File::open(parent)?.sync_all()
-}
-
-pub fn upsert_skin_in_mc_ini(source: &str, skin: &str) -> String {
-    let mut lines: Vec<String> = source.lines().map(|line| line.to_string()).collect();
-    let mut section_start = None;
-
-    for (index, line) in lines.iter().enumerate() {
-        if let Some(section_name) = parse_ini_section_name(line)
-            && section_name.eq_ignore_ascii_case(MC_CONFIG_SECTION)
-        {
-            section_start = Some(index);
-            break;
-        }
-    }
-
-    match section_start {
-        Some(start) => {
-            let section_end = lines
-                .iter()
-                .enumerate()
-                .skip(start + 1)
-                .find_map(|(index, line)| parse_ini_section_name(line).map(|_| index))
-                .unwrap_or(lines.len());
-            let skin_line = (start + 1..section_end).find(|line_index| {
-                let line = lines[*line_index].trim();
-                if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                    return false;
-                }
-                line.split_once('=')
-                    .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case(MC_SKIN_KEY))
-            });
-
-            if let Some(line_index) = skin_line {
-                lines[line_index] = format!("{MC_SKIN_KEY}={skin}");
-            } else {
-                lines.insert(section_end, format!("{MC_SKIN_KEY}={skin}"));
-            }
-        }
-        None => {
-            if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
-                lines.push(String::new());
-            }
-            lines.push(format!("[{MC_CONFIG_SECTION}]"));
-            lines.push(format!("{MC_SKIN_KEY}={skin}"));
-        }
-    }
-
-    let mut output = lines.join("\n");
-    output.push('\n');
-    output
 }
 
 fn parse_ini_section_name(line: &str) -> Option<&str> {
@@ -1178,25 +1168,21 @@ skin=darkfar
     }
 
     #[test]
-    fn upsert_skin_in_mc_ini_updates_existing_skin_value() {
-        let source = "\
-[Midnight-Commander]
-verbose=true
-skin=default
-";
-        let updated = upsert_skin_in_mc_ini(source, "xoria256");
-        assert!(updated.contains("skin=xoria256"));
-        assert!(
-            !updated.contains("skin=default"),
-            "previous skin key should be replaced"
-        );
-    }
-
-    #[test]
-    fn upsert_skin_in_mc_ini_adds_section_when_missing() {
-        let updated = upsert_skin_in_mc_ini("[Layout]\nmenubar_visible=true\n", "julia256");
-        assert!(updated.contains("[Midnight-Commander]"));
-        assert!(updated.contains("skin=julia256"));
+    fn settings_paths_use_absolute_xdg_or_fall_back_to_home() {
+        let root = std::env::current_dir().unwrap();
+        let xdg = root.join("config");
+        let home = root.join("home");
+        let paths = settings_paths_from_env(Some(xdg.clone()), None);
+        assert_eq!(paths.rc_ini_path, Some(xdg.join("rc/settings.ini")));
+        assert_eq!(paths.mc_ini_path, Some(xdg.join("mc/ini")));
+        for invalid in [None, Some(PathBuf::new()), Some(PathBuf::from("relative"))] {
+            let paths = settings_paths_from_env(invalid, Some(home.clone()));
+            assert_eq!(
+                paths.rc_ini_path,
+                Some(home.join(".config/rc/settings.ini"))
+            );
+            assert_eq!(paths.mc_ini_path, Some(home.join(".config/mc/ini")));
+        }
     }
 
     #[test]
@@ -1439,7 +1425,7 @@ skin=default
     }
 
     #[test]
-    fn load_settings_prefers_mc_skin_over_rc_skin() {
+    fn load_settings_uses_rc_skin_until_mc_skin_is_explicitly_imported() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -1463,18 +1449,21 @@ skin=mc-skin
         fs::write(&rc_ini_path, render_rc_settings_ini(&settings))
             .expect("rc ini should be written");
 
-        let loaded = load_settings(&SettingsPaths {
+        let paths = SettingsPaths {
             mc_ini_path: Some(mc_ini_path.clone()),
-            rc_ini_path: Some(rc_ini_path.clone()),
-        })
-        .expect("settings should load");
-        assert_eq!(loaded.appearance.skin, "mc-skin");
+            rc_ini_path: Some(rc_ini_path),
+        };
+        assert_eq!(load_settings(&paths).unwrap().appearance.skin, "rc-skin");
+        assert_eq!(import_mc_skin(&paths).unwrap(), "mc-skin");
+        assert_eq!(load_settings(&paths).unwrap().appearance.skin, "mc-skin");
+        fs::write(&mc_ini_path, "[Midnight-Commander]\nskin=new-mc-skin\n").unwrap();
+        assert_eq!(load_settings(&paths).unwrap().appearance.skin, "mc-skin");
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
     }
 
     #[test]
-    fn save_settings_writes_mc_and_rc_files() {
+    fn save_settings_writes_rc_settings_when_mc_ini_is_unusable() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be monotonic")
@@ -1483,6 +1472,7 @@ skin=mc-skin
         fs::create_dir_all(&root).expect("test directory should be created");
 
         let mc_ini_path = root.join("mc.ini");
+        fs::create_dir(&mc_ini_path).unwrap();
         let rc_ini_path = root.join("settings.ini");
         let mut settings = Settings::default();
         settings.appearance.skin = String::from("xoria256");
@@ -1501,10 +1491,9 @@ skin=mc-skin
         )
         .expect("settings should save");
 
-        let mc_ini = fs::read_to_string(&mc_ini_path).expect("mc ini should exist");
         let rc_ini = fs::read_to_string(&rc_ini_path).expect("rc ini should exist");
-        assert!(mc_ini.contains("[Midnight-Commander]"));
-        assert!(mc_ini.contains("skin=xoria256"));
+        assert!(mc_ini_path.is_dir());
+        assert!(rc_ini.contains("skin=xoria256"));
         assert!(rc_ini.contains("[configuration]"));
         assert!(rc_ini.contains("overwrite_policy=rename"));
         assert!(rc_ini.contains("hotlist_entry=Temporary\\sfiles\t/tmp"));
@@ -1538,12 +1527,61 @@ skin=mc-skin
         settings.configuration.default_overwrite_policy = OverwritePolicy::Skip;
         save_settings(&paths, &settings).expect("second save should succeed");
 
-        let mc_ini = fs::read_to_string(&mc_ini_path).expect("mc ini should exist");
         let rc_ini = fs::read_to_string(&rc_ini_path).expect("rc ini should exist");
-        assert!(mc_ini.contains("skin=second-skin"));
+        assert!(!mc_ini_path.exists());
+        assert!(rc_ini.contains("skin=second-skin"));
         assert!(rc_ini.contains("overwrite_policy=skip"));
 
         fs::remove_dir_all(&root).expect("test directory should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_and_importing_preserve_configuration_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            mc_ini_path: Some(root.path().join("mc.ini")),
+            rc_ini_path: Some(root.path().join("settings.ini")),
+        };
+        let mc_ini = paths.mc_ini_path.as_ref().unwrap();
+        let rc_ini = paths.rc_ini_path.as_ref().unwrap();
+        let mc_target = root.path().join("mc-dotfile");
+        let rc_target = root.path().join("rc-dotfile");
+        let mc_content = "[Midnight-Commander]\nskin=xoria256\n";
+        fs::write(&mc_target, mc_content).unwrap();
+        fs::write(&rc_target, "[appearance]\nskin=default\n").unwrap();
+        symlink("mc-dotfile", mc_ini).unwrap();
+        symlink("rc-dotfile", rc_ini).unwrap();
+
+        let mut settings = Settings::default();
+        settings.appearance.skin = String::from("rc-skin");
+        settings.configuration.default_overwrite_policy = OverwritePolicy::Rename;
+        save_settings(&paths, &settings).unwrap();
+        assert!(
+            fs::read_to_string(&rc_target)
+                .unwrap()
+                .contains("skin=rc-skin")
+        );
+        assert_eq!(import_mc_skin(&paths).unwrap(), "xoria256");
+        let settings = load_settings(&paths).unwrap();
+        assert_eq!(settings.appearance.skin, "xoria256");
+        assert_eq!(
+            settings.configuration.default_overwrite_policy,
+            OverwritePolicy::Rename
+        );
+        assert_eq!(fs::read_to_string(mc_target).unwrap(), mc_content);
+        assert_eq!(fs::read_link(mc_ini).unwrap(), Path::new("mc-dotfile"));
+        assert_eq!(fs::read_link(rc_ini).unwrap(), Path::new("rc-dotfile"));
+
+        fs::remove_file(&rc_target).unwrap();
+        assert_eq!(
+            save_settings(&paths, &settings).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(fs::read_link(rc_ini).unwrap(), Path::new("rc-dotfile"));
+        assert!(!rc_target.exists());
     }
 
     #[test]
