@@ -149,7 +149,7 @@ fn create_atomic_temp_file(path: &Path, stem: &str) -> io::Result<(PathBuf, fs::
     const CREATE_ATTEMPTS: usize = 16;
 
     for _ in 0..CREATE_ATTEMPTS {
-        let nonce = atomic_temp_nonce()?;
+        let nonce = crate::temp_names::nonce()?;
         let tmp = path.with_file_name(format!("{stem}.tmp-{nonce:032x}"));
         match open_new_atomic_temp(&tmp) {
             Ok(file) => return Ok((tmp, file)),
@@ -162,28 +162,6 @@ fn create_atomic_temp_file(path: &Path, stem: &str) -> io::Result<(PathBuf, fs::
         io::ErrorKind::AlreadyExists,
         "could not allocate a unique settings temp file",
     ))
-}
-
-#[cfg(any(unix, windows))]
-fn atomic_temp_nonce() -> io::Result<u128> {
-    let mut random = [0_u8; 16];
-    getrandom::fill(&mut random)
-        .map_err(|error| io::Error::other(format!("failed to generate temp-file name: {error}")))?;
-    Ok(u128::from_ne_bytes(random))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn atomic_temp_nonce() -> io::Result<u128> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    Ok(timestamp ^ u128::from(counter))
 }
 
 fn open_new_atomic_temp(path: &Path) -> io::Result<fs::File> {

@@ -1,6 +1,6 @@
 use super::{
-    COPY_BUFFER_SIZE, JobTotals, OverwritePolicy, ProgressTracker,
-    canonicalize_allowing_missing_tail, cleanup_stage, destination_path, destination_staging_path,
+    COPY_BUFFER_SIZE, JobTotals, OverwritePolicy, ProgressTracker, STAGE_PREFIX,
+    allocate_transfer_path, canonicalize_allowing_missing_tail, cleanup_stage, destination_path,
     ensure_not_canceled, existing_paths_refer_to_same_entry, private_directories, private_files,
     renamed_destination, resolve_destination,
 };
@@ -127,16 +127,16 @@ fn extract_selection(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    let stage = destination_staging_path(destination)?;
     let root = &reader.members[source];
     let mut directories = private_directories();
     let mut files = private_files();
-    if root.is_dir {
-        directories.create(&stage)?;
-    } else {
-        // Reserve this path before cleanup can ever own it.
-        files.create_new(true).open(&stage)?;
-    }
+    let stage = allocate_transfer_path(destination, STAGE_PREFIX, |stage| {
+        if root.is_dir {
+            directories.create(stage)
+        } else {
+            files.create_new(true).open(stage).map(drop)
+        }
+    })?;
     directories.recursive(true);
     let result = (|| {
         let mut ordered = members.iter().collect::<Vec<_>>();
@@ -242,6 +242,19 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
 
+    fn staged_path(directory: &Path) -> Option<PathBuf> {
+        fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(STAGE_PREFIX)
+            })
+            .map(|entry| entry.path())
+    }
+
     fn fixture(entries: &[(&str, u32, &[u8])]) -> (tempfile::TempDir, ArchiveLocation) {
         let root = tempfile::tempdir().expect("fixture directory should be created");
         let archive = root.path().join("example.tar");
@@ -304,7 +317,6 @@ mod tests {
                 ("tree/later", file_mode, b"later payload"),
             ]);
             let destination = root.path().join("tree");
-            let stage = destination_staging_path(&destination).unwrap();
             let opened = Cell::new(0);
             extract_observing(
                 &location,
@@ -312,6 +324,7 @@ mod tests {
                 &destination,
                 &Arc::default(),
                 |_| {
+                    let stage = staged_path(root.path()).unwrap();
                     assert!(
                         !destination.exists(),
                         "the selection must not be published yet"
@@ -328,7 +341,7 @@ mod tests {
             )
             .expect("directory extraction should succeed");
             assert_eq!(opened.get(), 2);
-            assert!(!stage.exists());
+            assert!(staged_path(root.path()).is_none());
             assert_eq!(mode(&destination), directory_mode & 0o777);
             assert_eq!(mode(&destination.join("nested")), directory_mode & 0o777);
             assert_eq!(
@@ -349,7 +362,6 @@ mod tests {
                 let (root, location) =
                     fixture(&[("credentials", file_mode, b"private credential material")]);
                 let destination = root.path().join("credentials");
-                let stage = destination_staging_path(&destination).unwrap();
                 let cancel = Arc::new(AtomicBool::new(false));
                 let inspected = Cell::new(false);
                 let result = extract_observing(
@@ -358,6 +370,7 @@ mod tests {
                     &destination,
                     &cancel,
                     |_| {
+                        let stage = staged_path(root.path()).unwrap();
                         assert!(!destination.exists());
                         assert_eq!(mode(&stage), 0o600);
                         inspected.set(true);
@@ -365,7 +378,10 @@ mod tests {
                     },
                 );
                 assert!(inspected.get());
-                assert!(!stage.exists(), "staging must be moved or removed");
+                assert!(
+                    staged_path(root.path()).is_none(),
+                    "staging must be moved or removed"
+                );
                 if canceled {
                     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
                     assert!(!destination.exists());

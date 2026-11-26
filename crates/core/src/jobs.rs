@@ -23,6 +23,8 @@ use crate::{
 };
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+const STAGE_PREFIX: &str = ".rc-stage-";
+const BACKUP_PREFIX: &str = ".rc-backup-";
 mod archive_extract;
 mod links;
 mod metadata;
@@ -1662,8 +1664,9 @@ fn copy_path(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    let stage = destination_staging_path(destination)?;
-    copy_entry(source, &stage, &metadata, progress)?;
+    let stage = allocate_transfer_path(destination, STAGE_PREFIX, |stage| {
+        copy_entry(source, stage, &metadata, progress)
+    })?;
     let publish = progress
         .ensure_not_canceled()
         .and_then(|()| fs::rename(&stage, destination));
@@ -1790,21 +1793,28 @@ fn path_entry_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn destination_staging_path(destination: &Path) -> io::Result<PathBuf> {
-    let parent = destination.parent().unwrap_or(Path::new("."));
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("item");
-
-    for index in 1_usize.. {
-        let candidate = parent.join(format!(".{file_name}.rc-stage-{index}"));
-        if !path_entry_exists(&candidate)? {
-            return Ok(candidate);
+fn allocate_transfer_path(
+    destination: &Path,
+    prefix: &str,
+    mut create: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    for _ in 0..16 {
+        let nonce = crate::temp_names::nonce()?;
+        let path = destination.with_file_name(format!("{prefix}{nonce:032x}"));
+        if path == destination {
+            continue;
+        }
+        match create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
         }
     }
 
-    unreachable!("staging candidate generator should always return");
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("could not allocate a temporary path beside {destination:?}"),
+    ))
 }
 
 fn delete_path(path: &Path, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
@@ -1867,8 +1877,9 @@ fn resolve_destination(
     if path_entry_exists(&destination)? {
         match overwrite {
             OverwritePolicy::Overwrite => {
-                let backup = destination_backup_path(&destination)?;
-                fs::rename(&destination, &backup)?;
+                let backup = allocate_transfer_path(&destination, BACKUP_PREFIX, |backup| {
+                    rename_to_vacant_path(&destination, backup)
+                })?;
                 return Ok(Some(ResolvedDestination {
                     path: destination,
                     overwrite_backup: Some(backup),
@@ -2145,21 +2156,25 @@ impl ResolvedDestination {
     }
 }
 
-fn destination_backup_path(destination: &Path) -> io::Result<PathBuf> {
-    let parent = destination.parent().unwrap_or(Path::new("."));
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("item");
+fn rename_to_vacant_path(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        use rustix::io::Errno;
 
-    for index in 1_usize.. {
-        let candidate = parent.join(format!(".{file_name}.rc-backup-{index}"));
-        if !path_entry_exists(&candidate)? {
-            return Ok(candidate);
+        match renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE) {
+            // Older kernels and some filesystems lack exclusive rename.
+            Err(error)
+                if [Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP, Errno::INVAL]
+                    .contains(&error) => {}
+            result => return result.map_err(Into::into),
         }
     }
 
-    unreachable!("backup candidate generator should always return");
+    if path_entry_exists(destination)? {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    fs::rename(source, destination)
 }
 
 fn is_cross_device_error(error: &io::Error) -> bool {
@@ -2979,9 +2994,7 @@ mod tests {
                 fs::write(&source, "source").unwrap();
                 let destination = destination_dir.join("file");
                 let alternate = destination_dir.join("file.copy");
-                let stage = destination_dir.join(".file.rc-stage-1");
-                let backup = destination_dir.join(".file.rc-backup-1");
-                for path in [&destination, &alternate, &stage, &backup] {
+                for path in [&destination, &alternate] {
                     symlink("missing", path).unwrap();
                 }
                 let request = if moving {
@@ -3005,9 +3018,7 @@ mod tests {
                     recv_until_finished(&rx, &mut manager),
                     JobEvent::Finished { result: Ok(()), .. }
                 ));
-                for path in [&alternate, &stage, &backup] {
-                    assert_eq!(fs::read_link(path).unwrap(), Path::new("missing"));
-                }
+                assert_eq!(fs::read_link(&alternate).unwrap(), Path::new("missing"));
                 match overwrite {
                     OverwritePolicy::Overwrite => {
                         assert_eq!(fs::read_to_string(&destination).unwrap(), "source")
@@ -3040,9 +3051,73 @@ mod tests {
         let destination = parent.join("child");
         assert!(path_entry_exists(&destination).is_err());
         assert!(renamed_destination(&destination).is_err());
-        assert!(destination_staging_path(&destination).is_err());
-        assert!(destination_backup_path(&destination).is_err());
+        assert!(
+            allocate_transfer_path(&destination, STAGE_PREFIX, |path| {
+                private_files().create_new(true).open(path).map(drop)
+            })
+            .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_backup_retries_a_collision_with_a_dangling_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("selection");
+        fs::write(&destination, "original").unwrap();
+        let mut occupied = None;
+        let backup = allocate_transfer_path(&destination, BACKUP_PREFIX, |candidate| {
+            if occupied.is_none() {
+                std::os::unix::fs::symlink("missing", candidate).unwrap();
+                occupied = Some(candidate.to_path_buf());
+            }
+            rename_to_vacant_path(&destination, candidate)
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_link(occupied.unwrap()).unwrap(),
+            Path::new("missing")
+        );
+        assert_eq!(fs::read_to_string(backup).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_overwrite_support_long_ascii_and_multibyte_names() {
+        let root = tempfile::tempdir().unwrap();
+        let destination_dir = root.path().join("destination");
+        fs::create_dir(&destination_dir).unwrap();
+        for name in [
+            "a".repeat(255),
+            format!("{}{}", "b".repeat(246), "界".repeat(3)),
+        ] {
+            assert_eq!(name.len(), 255);
+            let source = root.path().join(&name);
+            let destination = destination_dir.join(&name);
+            for (overwrite, payload) in [
+                (OverwritePolicy::Skip, "first copy"),
+                (OverwritePolicy::Overwrite, "replacement"),
+            ] {
+                fs::write(&source, payload).unwrap();
+                let (finished, _) = execute_request_with_backend(
+                    JobRequest::Copy {
+                        sources: vec![source.clone()],
+                        destination_dir: destination_dir.clone(),
+                        overwrite,
+                    },
+                    &LocalFsBackend,
+                );
+                assert!(
+                    matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+                    "{finished:?}"
+                );
+                assert_eq!(fs::read_to_string(&destination).unwrap(), payload);
+                assert_eq!(fs::read_dir(&destination_dir).unwrap().count(), 1);
+            }
+            fs::remove_file(destination).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -3230,7 +3305,17 @@ mod tests {
             );
             assert_eq!(first.exists(), !moving);
             assert_eq!(second.exists(), !moving);
-            let backup = destination_dir.join(".first.rc-backup-1");
+            let backup = fs::read_dir(&destination_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(BACKUP_PREFIX)
+                })
+                .unwrap()
+                .path();
             assert_eq!(
                 fs::read_to_string(backup.join("original")).unwrap(),
                 "original"
@@ -3453,26 +3538,7 @@ mod tests {
             "canceled copy should not materialize destination file"
         );
 
-        let stage_prefix = format!(
-            ".{}.rc-stage-",
-            destination_file
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("destination file name should be valid")
-        );
-        let leaked_stage_file = fs::read_dir(&destination_dir)
-            .expect("destination directory should be readable")
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&stage_prefix)
-            });
-        assert!(
-            !leaked_stage_file,
-            "canceled copy should clean up staged temp files"
-        );
+        assert!(fs::read_dir(&destination_dir).unwrap().next().is_none());
 
         fs::remove_dir_all(&root).expect("temp tree should be removable");
     }
@@ -4176,11 +4242,6 @@ mod tests {
             "failed overwrite move should restore original destination content"
         );
 
-        let file_name = preserved_destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("destination file name should be valid");
-        let backup_prefix = format!(".{file_name}.rc-backup-");
         let leaked_backup = fs::read_dir(&source_root)
             .expect("source root should be readable")
             .filter_map(Result::ok)
@@ -4188,7 +4249,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(&backup_prefix)
+                    .starts_with(BACKUP_PREFIX)
             });
         assert!(
             !leaked_backup,
