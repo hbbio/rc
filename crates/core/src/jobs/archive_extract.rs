@@ -1,8 +1,8 @@
 use super::{
     COPY_BUFFER_SIZE, JobTotals, OverwritePolicy, ProgressTracker,
-    canonicalize_allowing_missing_tail, destination_path, destination_staging_path,
-    ensure_not_canceled, existing_paths_refer_to_same_entry, renamed_destination,
-    resolve_destination,
+    canonicalize_allowing_missing_tail, cleanup_stage, destination_path, destination_staging_path,
+    ensure_not_canceled, existing_paths_refer_to_same_entry, private_directories, private_files,
+    renamed_destination, resolve_destination,
 };
 use crate::ArchiveLocation;
 use crate::archive::{ArchiveIndex, ArchiveMember, ArchiveReader, normalize_archive_io_result};
@@ -129,17 +129,8 @@ fn extract_selection(
     }
     let stage = destination_staging_path(destination)?;
     let root = &reader.members[source];
-    // Staging paths live beside the destination, where other users may be able
-    // to search the parent. Restrict access at creation, before writing payloads.
-    let mut directories = fs::DirBuilder::new();
-    let mut files = fs::OpenOptions::new();
-    files.write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        directories.mode(0o700);
-        files.mode(0o600);
-    }
+    let mut directories = private_directories();
+    let mut files = private_files();
     if root.is_dir {
         directories.create(&stage)?;
     } else {
@@ -240,36 +231,6 @@ fn extract_selection(
         cleanup_stage(&stage);
     }
     result
-}
-
-pub(super) fn cleanup_stage(path: &Path) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if metadata.is_dir() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(
-                path,
-                fs::Permissions::from_mode(metadata.permissions().mode() | 0o700),
-            );
-        }
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                cleanup_stage(&entry.path());
-            }
-        }
-        let _ = fs::remove_dir(path);
-    } else {
-        #[cfg(windows)]
-        if !metadata.file_type().is_symlink() && metadata.permissions().readonly() {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            let _ = fs::set_permissions(path, permissions);
-        }
-        let _ = fs::remove_file(path);
-    }
 }
 
 #[cfg(all(test, unix))]

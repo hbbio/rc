@@ -1643,44 +1643,9 @@ fn copy_path(
 ) -> io::Result<()> {
     progress.ensure_not_canceled()?;
     let metadata = fs::symlink_metadata(source)?;
-    progress.set_current_path(source);
-    if metadata.file_type().is_symlink() {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        copy_symlink(source, destination)?;
-        preserve_copied_metadata(destination, &metadata)?;
-        progress.complete_item(source);
-        return Ok(());
-    }
-
     if metadata.is_dir() {
         validate_directory_destination_not_inside_source(source, destination, "copy")?;
-
-        if path_entry_exists(destination)? {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "destination already exists: {}",
-                    destination.to_string_lossy()
-                ),
-            ));
-        }
-
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let child_source = entry.path();
-            let child_destination = destination.join(entry.file_name());
-            copy_path(&child_source, &child_destination, progress)?;
-        }
-        fs::set_permissions(destination, metadata.permissions())?;
-        preserve_copied_metadata(destination, &metadata)?;
-        progress.complete_item(source);
-        return Ok(());
-    }
-
-    if !metadata.is_file() {
+    } else if !metadata.is_file() && !metadata.file_type().is_symlink() {
         return Err(unsupported_copy_source(source));
     }
 
@@ -1697,18 +1662,59 @@ fn copy_path(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    copy_file(source, destination, progress)?;
-    fs::set_permissions(destination, metadata.permissions())?;
-    preserve_copied_metadata(destination, &metadata)?;
+    let stage = destination_staging_path(destination)?;
+    copy_entry(source, &stage, &metadata, progress)?;
+    let publish = progress
+        .ensure_not_canceled()
+        .and_then(|()| fs::rename(&stage, destination));
+    if publish.is_err() {
+        cleanup_stage(&stage);
+    }
+    publish?;
     progress.complete_item(source);
     Ok(())
 }
 
-fn copy_file(
+fn copy_entry(
     source: &Path,
     destination: &Path,
+    metadata: &fs::Metadata,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
+    progress.ensure_not_canceled()?;
+    progress.set_current_path(source);
+    // Only clean up entries we successfully created.
+    let contents = if metadata.is_dir() {
+        private_directories().create(destination)?;
+        (|| {
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                let child_source = entry.path();
+                let child_destination = destination.join(entry.file_name());
+                let child_metadata = fs::symlink_metadata(&child_source)?;
+                copy_entry(&child_source, &child_destination, &child_metadata, progress)?;
+                progress.complete_item(&child_source);
+            }
+            Ok(())
+        })()
+    } else if metadata.is_file() {
+        let mut input = open_copy_source(source)?;
+        let mut output = private_files().create_new(true).open(destination)?;
+        copy_file_contents(&mut input, &mut output, progress)
+    } else if metadata.file_type().is_symlink() {
+        copy_symlink(source, destination)?;
+        Ok(())
+    } else {
+        return Err(unsupported_copy_source(source));
+    };
+    let result = contents.and_then(|()| preserve_copied_metadata(destination, metadata));
+    if result.is_err() {
+        cleanup_stage(destination);
+    }
+    result
+}
+
+fn open_copy_source(source: &Path) -> io::Result<fs::File> {
     let mut source_options = fs::OpenOptions::new();
     source_options.read(true);
     #[cfg(unix)]
@@ -1717,43 +1723,53 @@ fn copy_file(
         // Do not block if a regular file was replaced by a FIFO after inspection.
         source_options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
-    let mut source_file = source_options.open(source)?;
-    if !source_file.metadata()?.is_file() {
+    let file = source_options.open(source)?;
+    if !file.metadata()?.is_file() {
         return Err(unsupported_copy_source(source));
     }
-    let staged_destination = destination_staging_path(destination)?;
-    // Only clean up a staging entry after we have successfully created it.
-    let mut destination_file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged_destination)?;
-    let write_result = (|| -> io::Result<()> {
-        let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    Ok(file)
+}
 
-        loop {
-            progress.ensure_not_canceled()?;
-            let bytes_read = source_file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            destination_file.write_all(&buffer[..bytes_read])?;
-            progress.advance_bytes(bytes_read as u64);
+fn copy_file_contents(
+    input: &mut fs::File,
+    output: &mut fs::File,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    loop {
+        progress.ensure_not_canceled()?;
+        let bytes_read = input.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
         }
-        destination_file.flush()?;
-        Ok(())
-    })();
-    drop(destination_file);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&staged_destination);
-        return Err(error);
+        output.write_all(&buffer[..bytes_read])?;
+        progress.advance_bytes(bytes_read as u64);
     }
+    output.flush()
+}
 
-    if let Err(error) = fs::rename(&staged_destination, destination) {
-        let _ = fs::remove_file(&staged_destination);
-        return Err(error);
+fn private_directories() -> fs::DirBuilder {
+    let mut builder = fs::DirBuilder::new();
+    // Set the mode before creating an entry in a potentially shared parent.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
+    #[cfg(not(unix))]
+    builder.recursive(false);
+    builder
+}
 
-    Ok(())
+fn private_files() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
 }
 
 fn unsupported_copy_source(source: &Path) -> io::Error {
@@ -2011,7 +2027,25 @@ fn preserve_copied_metadata(destination: &Path, metadata: &fs::Metadata) -> io::
 
     filetime::set_file_times(destination, atime, mtime)?;
     preserve_owner_best_effort(destination, metadata)?;
-    Ok(())
+    // Grant group access only after the staged entry has its intended ownership.
+    let permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let mode = permissions.mode();
+        // Set-ID bits must refer to the original owner and group.
+        if mode & 0o6000 != 0 {
+            let staged = fs::symlink_metadata(destination)?;
+            if staged.uid() != metadata.uid() || staged.gid() != metadata.gid() {
+                return fs::set_permissions(
+                    destination,
+                    fs::Permissions::from_mode(mode & !0o6000),
+                );
+            }
+        }
+    }
+    fs::set_permissions(destination, permissions)
 }
 
 #[cfg(unix)]
@@ -2041,6 +2075,36 @@ fn remove_path(path: &Path) -> io::Result<()> {
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
+    }
+}
+
+fn cleanup_stage(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.is_dir() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(metadata.permissions().mode() | 0o700),
+            );
+        }
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                cleanup_stage(&entry.path());
+            }
+        }
+        let _ = fs::remove_dir(path);
+    } else {
+        #[cfg(windows)]
+        if !metadata.file_type().is_symlink() && metadata.permissions().readonly() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -2264,6 +2328,8 @@ struct ProgressTracker<'a> {
     progress: JobProgress,
     event_tx: &'a Sender<JobEvent>,
     cancel_flag: Arc<AtomicBool>,
+    #[cfg(test)]
+    observer: Option<&'a dyn Fn(&JobProgress)>,
 }
 
 impl<'a> ProgressTracker<'a> {
@@ -2284,10 +2350,16 @@ impl<'a> ProgressTracker<'a> {
             },
             event_tx,
             cancel_flag,
+            #[cfg(test)]
+            observer: None,
         }
     }
 
     fn emit(&self) {
+        #[cfg(test)]
+        if let Some(observer) = self.observer {
+            observer(&self.progress);
+        }
         let _ = self.event_tx.send(JobEvent::Progress {
             id: self.job_id,
             progress: self.progress.clone(),
@@ -2801,21 +2873,10 @@ mod tests {
         let root = make_temp_dir("fifo-open");
         let fifo = root.join("source");
         nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
-        let destination = root.join("destination");
-        let (tx, _rx) = mpsc::channel();
-        let mut progress = ProgressTracker::new(
-            JobId(1),
-            JobTotals::default(),
-            &tx,
-            Arc::new(AtomicBool::new(false)),
-        );
         assert_eq!(
-            copy_file(&fifo, &destination, &mut progress)
-                .unwrap_err()
-                .kind(),
+            open_copy_source(&fifo).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
-        assert!(!destination.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3367,7 +3428,12 @@ mod tests {
         fs::write(&source_file, vec![9_u8; 256 * 1024]).expect("source payload should be writable");
 
         let (event_tx, _event_rx) = mpsc::channel();
-        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_after_first_write = |progress: &JobProgress| {
+            if progress.bytes_done > 0 {
+                cancel_flag.store(true, Ordering::Relaxed);
+            }
+        };
         let mut progress = ProgressTracker::new(
             JobId(1),
             JobTotals {
@@ -3375,9 +3441,10 @@ mod tests {
                 bytes: 256 * 1024,
             },
             &event_tx,
-            cancel_flag,
+            Arc::clone(&cancel_flag),
         );
-        let error = copy_file(&source_file, &destination_file, &mut progress)
+        progress.observer = Some(&cancel_after_first_write);
+        let error = copy_path(&source_file, &destination_file, &mut progress)
             .expect_err("canceled copy should fail");
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
@@ -3408,6 +3475,90 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_copy_keeps_staged_files_and_directories_private_while_writing() {
+        use std::cell::Cell;
+
+        for nested in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let parent = root.path().join("destination");
+            let destination = parent.join("result");
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+            let source_file = if nested {
+                fs::create_dir_all(source.join("child")).unwrap();
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::set_permissions(source.join("child"), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                source.join("child/file")
+            } else {
+                source.clone()
+            };
+            let bytes = vec![42; 2 * COPY_BUFFER_SIZE];
+            fs::write(&source_file, &bytes).unwrap();
+            fs::set_permissions(&source_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+            let checked = Cell::new(false);
+            let inspect_first_write = |progress: &JobProgress| {
+                if progress.bytes_done == 0 || checked.replace(true) {
+                    return;
+                }
+                assert!(!destination.exists());
+                let stage = fs::read_dir(&parent)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let staged_file = if nested {
+                    for directory in [&stage, &stage.join("child")] {
+                        assert_eq!(
+                            fs::metadata(directory).unwrap().permissions().mode() & 0o077,
+                            0
+                        );
+                    }
+                    stage.join("child/file")
+                } else {
+                    stage
+                };
+                let metadata = fs::metadata(staged_file).unwrap();
+                assert_eq!(metadata.len(), COPY_BUFFER_SIZE as u64);
+                assert_eq!(metadata.permissions().mode() & 0o077, 0);
+            };
+            let (tx, _rx) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let totals = measure_path_totals(&source, &cancel).unwrap();
+            let mut progress = ProgressTracker::new(JobId(1), totals, &tx, cancel);
+            progress.observer = Some(&inspect_first_write);
+            copy_path(&source, &destination, &mut progress).unwrap();
+            assert!(checked.get());
+            let copied_file = if nested {
+                assert_eq!(
+                    fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+                assert_eq!(
+                    fs::metadata(destination.join("child"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o755
+                );
+                destination.join("child/file")
+            } else {
+                destination
+            };
+            assert_eq!(
+                fs::metadata(&copied_file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(fs::read(copied_file).unwrap(), bytes);
+        }
     }
 
     #[test]
