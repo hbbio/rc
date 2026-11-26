@@ -543,6 +543,7 @@ pub enum JobErrorCode {
     Interrupted,
     Unsupported,
     Dispatch,
+    PartialMove,
     Other,
 }
 
@@ -573,6 +574,16 @@ impl JobError {
     }
 
     pub fn from_io(error: io::Error) -> Self {
+        if error
+            .get_ref()
+            .is_some_and(|error| error.is::<PartialMove>())
+        {
+            return Self {
+                code: JobErrorCode::PartialMove,
+                message: error.to_string(),
+                retry_hint: JobRetryHint::None,
+            };
+        }
         let kind = error.kind();
         let message = error.to_string();
         match kind {
@@ -882,6 +893,9 @@ pub struct JobStatusCounts {
 pub trait FsBackend {
     fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn rename(&self, source: &Path, destination: &Path) -> io::Result<()>;
+    fn remove_path(&self, path: &Path) -> io::Result<()> {
+        remove_path(path)
+    }
     fn persist_settings(&self, paths: &SettingsPaths, snapshot: &Settings) -> io::Result<()>;
 }
 
@@ -1179,6 +1193,7 @@ fn execute_job(
             destination_names.as_deref(),
             overwrite,
             progress,
+            fs_backend,
         ),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
         JobRequest::Mkdir { path } => {
@@ -1277,6 +1292,7 @@ fn move_paths(
     destination_names: Option<&[std::ffi::OsString]>,
     overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
+    fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     if let Some(destination_names) = destination_names
         && destination_names.len() != sources.len()
@@ -1294,23 +1310,25 @@ fn move_paths(
         let source = planned_move.source;
         progress.ensure_not_canceled()?;
         let source_totals = measure_path_totals(source, progress.cancel_flag.as_ref())?;
-        if is_case_only_rename(source, &planned_move.destination)? {
-            move_path(source, &planned_move.destination, source_totals, progress)?;
-            continue;
-        }
-
-        let Some(destination) = resolve_destination(
-            source,
-            planned_move.destination,
-            overwrite,
-            source_totals,
-            progress,
-        )?
-        else {
-            continue;
+        let destination = if is_case_only_rename(source, &planned_move.destination)? {
+            ResolvedDestination {
+                path: planned_move.destination,
+                overwrite_backup: None,
+            }
+        } else {
+            let Some(destination) = resolve_destination(
+                source,
+                planned_move.destination,
+                overwrite,
+                source_totals,
+                progress,
+            )?
+            else {
+                continue;
+            };
+            destination
         };
-        let move_result = move_path(source, &destination.path, source_totals, progress);
-        destination.finish(move_result)?;
+        move_path(source, destination, source_totals, progress, fs_backend)?;
     }
     Ok(())
 }
@@ -1458,23 +1476,64 @@ fn move_plan_conflict_error(
 
 fn move_path(
     source: &Path,
-    destination: &Path,
+    destination: ResolvedDestination,
     source_totals: JobTotals,
     progress: &mut ProgressTracker<'_>,
+    fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     progress.set_current_path(source);
-    validate_move_destination(source, destination)?;
-    match fs::rename(source, destination) {
+    if let Err(error) = validate_move_destination(source, &destination.path) {
+        return destination.finish(Err(error));
+    }
+    match fs_backend.rename(source, &destination.path) {
         Ok(()) => {
             progress.advance_totals(source, source_totals);
-            Ok(())
         }
         Err(error) if is_cross_device_error(&error) => {
-            copy_path(source, destination, progress)?;
-            remove_path(source)?;
-            Ok(())
+            if let Err(error) = copy_path(source, &destination.path, progress) {
+                return destination.finish(Err(error));
+            }
+            // Cleanup can remove only part of the source. The complete copy
+            // must stay in place from this point on.
+            if let Err(error) = fs_backend.remove_path(source) {
+                return Err(io::Error::other(PartialMove {
+                    source: source.into(),
+                    destination: destination.path,
+                    backup: destination.overwrite_backup,
+                    error,
+                }));
+            }
         }
-        Err(error) => Err(error),
+        Err(error) => return destination.finish(Err(error)),
+    }
+    destination.finish(Ok(()))
+}
+
+#[derive(Debug)]
+struct PartialMove {
+    source: PathBuf,
+    destination: PathBuf,
+    backup: Option<PathBuf>,
+    error: io::Error,
+}
+
+impl fmt::Display for PartialMove {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Partial move: complete copy at {:?}. Source cleanup failed at {:?}: {}.",
+            self.destination, self.source, self.error,
+        )?;
+        if let Some(backup) = &self.backup {
+            write!(formatter, " Previous destination retained at {backup:?}.")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PartialMove {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -3836,6 +3895,87 @@ mod tests {
             .join()
             .expect("worker thread should terminate cleanly");
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[test]
+    fn cross_device_overwrite_keeps_complete_copy_when_source_removal_fails_partway() {
+        struct FailingCleanup;
+
+        impl FsBackend for FailingCleanup {
+            fn create_dir(&self, path: &Path) -> io::Result<()> {
+                LocalFsBackend.create_dir(path)
+            }
+
+            fn rename(&self, _source: &Path, _destination: &Path) -> io::Result<()> {
+                Err(io::ErrorKind::CrossesDevices.into())
+            }
+
+            fn remove_path(&self, path: &Path) -> io::Result<()> {
+                fs::remove_file(path.join("removed.txt")).unwrap();
+                Err(io::ErrorKind::PermissionDenied.into())
+            }
+
+            fn persist_settings(
+                &self,
+                paths: &SettingsPaths,
+                settings: &Settings,
+            ) -> io::Result<()> {
+                LocalFsBackend.persist_settings(paths, settings)
+            }
+        }
+
+        let root = make_temp_dir("move-partial-cleanup");
+        let source = root.join("selection");
+        let destination_dir = root.join("into");
+        let destination = destination_dir.join("selection");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("removed.txt"), "removed from source").unwrap();
+        fs::write(source.join("remaining.txt"), "remaining at source").unwrap();
+        fs::write(destination.join("old.txt"), "previous destination").unwrap();
+
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Move {
+                sources: vec![source.clone()],
+                destination_dir: destination_dir.clone(),
+                destination_names: None,
+                overwrite: OverwritePolicy::Overwrite,
+            },
+            &FailingCleanup,
+        );
+
+        let JobEvent::Finished {
+            result: Err(error), ..
+        } = finished
+        else {
+            panic!("expected partial move failure, got {finished:?}");
+        };
+        assert_eq!(counts.failed, 1);
+        assert_eq!(error.code, JobErrorCode::PartialMove);
+        assert_eq!(error.retry_hint, JobRetryHint::None);
+        assert!(!source.join("removed.txt").exists());
+        assert!(source.join("remaining.txt").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("removed.txt")).unwrap(),
+            "removed from source"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("remaining.txt")).unwrap(),
+            "remaining at source"
+        );
+        let backup = fs::read_dir(destination_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path != &destination)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(backup.join("old.txt")).unwrap(),
+            "previous destination"
+        );
+        for path in [source, destination, backup] {
+            assert!(error.message.contains(&format!("{path:?}")), "{error:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
