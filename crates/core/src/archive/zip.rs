@@ -3,7 +3,8 @@ use super::{
     normalize_archive_io_result, safe_member_path,
 };
 use ::zip::ZipArchive;
-use chrono::TimeZone;
+use jiff::civil::DateTime;
+use jiff::tz::{AmbiguousOffset, TimeZone};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek};
@@ -83,17 +84,27 @@ fn open_zip_archive<R: Read + Seek>(
 }
 
 fn zip_time(time: ::zip::DateTime) -> Option<SystemTime> {
-    chrono::Local
-        .with_ymd_and_hms(
-            i32::from(time.year()),
-            u32::from(time.month()),
-            u32::from(time.day()),
-            u32::from(time.hour()),
-            u32::from(time.minute()),
-            u32::from(time.second()),
-        )
-        .earliest()
-        .map(SystemTime::from)
+    zip_time_in(time, &TimeZone::system())
+}
+
+fn zip_time_in(time: ::zip::DateTime, zone: &TimeZone) -> Option<SystemTime> {
+    let local = DateTime::new(
+        time.year() as i16,
+        time.month() as i8,
+        time.day() as i8,
+        time.hour() as i8,
+        time.minute() as i8,
+        time.second() as i8,
+        0,
+    )
+    .ok()?;
+    let timestamp = zone.to_ambiguous_timestamp(local);
+    // ZIP stores local civil time. Use the first occurrence of a repeated
+    // time and omit timestamps that fall in a daylight-saving gap.
+    if matches!(timestamp.offset(), AmbiguousOffset::Gap { .. }) {
+        return None;
+    }
+    timestamp.earlier().ok().map(SystemTime::from)
 }
 
 pub(crate) fn zip_error(error: ::zip::result::ZipError) -> io::Error {
@@ -110,6 +121,16 @@ mod tests {
     use std::cell::Cell;
     use std::io::{Cursor, SeekFrom, Write};
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn zip_timestamps_choose_the_earlier_fold_and_skip_dst_gaps() {
+        let zone = TimeZone::get("America/New_York").unwrap();
+        let fold = ::zip::DateTime::from_date_and_time(2024, 11, 3, 1, 30, 0).unwrap();
+        let gap = ::zip::DateTime::from_date_and_time(2024, 3, 10, 2, 30, 0).unwrap();
+        let expected = "2024-11-03T05:30:00Z".parse::<jiff::Timestamp>().unwrap();
+        assert_eq!(zip_time_in(fold, &zone), Some(expected.into()));
+        assert_eq!(zip_time_in(gap, &zone), None);
+    }
 
     struct Fixture {
         bytes: Vec<u8>,

@@ -1,6 +1,7 @@
 //! RFC 3659 MLSD, parsed as bytes so filename encodings are never guessed.
 use super::*;
 use crate::FileEntryMetadata;
+use jiff::{civil::DateTime, tz::TimeZone};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
@@ -21,10 +22,27 @@ fn number(value: &[u8]) -> io::Result<u64> {
         .map_err(|_| invalid("numeric fact overflow"))
 }
 fn time(value: &[u8]) -> io::Result<std::time::SystemTime> {
-    let text = std::str::from_utf8(value).map_err(|_| invalid("invalid timestamp"))?;
-    let time = chrono::NaiveDateTime::parse_from_str(text, "%Y%m%d%H%M%S%.f")
+    let (whole, fraction) = value
+        .split_at_checked(14)
+        .filter(|(whole, _)| whole.iter().all(u8::is_ascii_digit))
+        .ok_or_else(|| invalid("invalid timestamp"))?;
+    if !fraction.is_empty()
+        && !fraction
+            .strip_prefix(b".")
+            .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+    {
+        return Err(invalid("invalid timestamp"));
+    }
+    // MLSD can carry more fractional digits than SystemTime can represent.
+    let date = DateTime::strptime("%Y%m%d%H%M%S%.f", &value[..value.len().min(24)])
         .map_err(|_| invalid("invalid timestamp"))?;
-    Ok(time.and_utc().into())
+    let timestamp = TimeZone::UTC
+        .to_timestamp(date)
+        .map_err(|_| invalid("invalid timestamp"))?;
+    let time = std::time::SystemTime::from(timestamp);
+    // Jiff parses a leap second as :59. SystemTime falls on the next second.
+    time.checked_add(Duration::from_secs(u64::from(&whole[12..] == b"60")))
+        .ok_or_else(|| invalid("invalid timestamp"))
 }
 
 pub(super) fn parse(

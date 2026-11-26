@@ -213,6 +213,15 @@ fn mlsd_parses_native_names_and_rejects_aliases_and_malformed_facts() {
     assert_eq!(entries[0].path.as_os_str().as_bytes(), b"folder/ \xff name");
     assert_eq!(entries[0].metadata.mode, Some(0o100644));
     assert_eq!(entries[0].metadata.user_id, Some(42));
+    assert_eq!(
+        entries[0].modified,
+        Some(
+            "2026-10-29T12:34:56.123Z"
+                .parse::<jiff::Timestamp>()
+                .unwrap()
+                .into()
+        ),
+    );
     assert!(entries[1].is_dir());
     assert_eq!(entries[2].metadata.symlink_target, Some(false));
     for bytes in [
@@ -232,4 +241,22 @@ fn mlsd_parses_native_names_and_rejects_aliases_and_malformed_facts() {
             "{bytes:?}"
         );
     }
+}
+
+#[test]
+fn mlsd_keeps_leap_seconds_and_clips_fractional_precision_to_nanoseconds() {
+    let cancel = Cancellation {
+        requested: None,
+        closed: None,
+    };
+    let entries = listing::parse(
+        Path::new(""),
+        b"type=file;size=1;modify=20161231235960.123456789123; entry\r\n",
+        &cancel,
+    )
+    .unwrap();
+    let expected = "2017-01-01T00:00:00.123456789Z"
+        .parse::<jiff::Timestamp>()
+        .unwrap();
+    assert_eq!(entries[0].modified, Some(expected.into()));
 }

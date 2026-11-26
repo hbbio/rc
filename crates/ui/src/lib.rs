@@ -6,7 +6,7 @@ mod skin;
 
 pub use mouse::{ScrollDirection, commands_for_left_click, commands_for_scroll};
 
-use chrono::{DateTime, Local};
+use jiff::Zoned;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -3229,14 +3229,17 @@ fn panel_disk_summary(panel: &PanelState, _app: &AppState) -> String {
 
 fn format_modified(modified: Option<SystemTime>) -> String {
     modified
-        .map(|time| {
-            let local: DateTime<Local> = DateTime::from(time);
-            let now = Local::now();
-            if local < now - chrono::Duration::days(365) {
-                local.format("%b %Y").to_string()
+        .and_then(|time| {
+            let local = Zoned::try_from(time).ok()?;
+            let format = if SystemTime::now()
+                .duration_since(time)
+                .is_ok_and(|age| age > Duration::from_secs(365 * 24 * 60 * 60))
+            {
+                "%b %Y"
             } else {
-                local.format("%b %e %H:%M").to_string()
-            }
+                "%b %e %H:%M"
+            };
+            Some(local.strftime(format).to_string())
         })
         .unwrap_or_default()
 }
@@ -3843,19 +3846,19 @@ mod tests {
         let old = SystemTime::now()
             .checked_sub(Duration::from_secs(366 * 24 * 60 * 60))
             .expect("old timestamp should be representable");
-        let old_local: DateTime<Local> = DateTime::from(old);
+        let old_local = Zoned::try_from(old).unwrap();
         assert_eq!(
             format_modified(Some(old)),
-            old_local.format("%b %Y").to_string()
+            old_local.strftime("%b %Y").to_string()
         );
 
         let recent = SystemTime::now()
             .checked_sub(Duration::from_secs(60))
             .expect("recent timestamp should be representable");
-        let recent_local: DateTime<Local> = DateTime::from(recent);
+        let recent_local = Zoned::try_from(recent).unwrap();
         assert_eq!(
             format_modified(Some(recent)),
-            recent_local.format("%b %e %H:%M").to_string()
+            recent_local.strftime("%b %e %H:%M").to_string()
         );
     }
 

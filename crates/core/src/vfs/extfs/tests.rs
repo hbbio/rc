@@ -1,6 +1,5 @@
 use super::*;
 use crate::{ArchiveLocation, SortMode};
-use chrono::Datelike;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 
@@ -63,8 +62,13 @@ fn listing_preserves_names_dates_modes_and_synthesized_directories() {
     let link = listing.member(Path::new("link")).unwrap();
     assert!(!link.extractable);
     assert_eq!(
-        chrono::DateTime::<chrono::Utc>::from(link.entry.modified.unwrap()).year(),
-        2025
+        link.entry.modified,
+        Some(
+            "2025-01-02T03:04:05Z"
+                .parse::<jiff::Timestamp>()
+                .unwrap()
+                .into()
+        )
     );
     assert!(!listing.member(Path::new("hard")).unwrap().extractable);
     assert!(
