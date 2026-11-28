@@ -187,6 +187,9 @@ impl AppState {
                     self.panel_mkdirs.finish(id, false);
                     let tree_impacts = self.tree_mutations.finish(id, false);
                     let kind = self.jobs.job(id).map(|job| job.kind);
+                    if kind == Some(JobKind::LoadViewer) {
+                        self.finish_viewer_refresh(id, Err(&error));
+                    }
                     if matches!(kind, Some(JobKind::ChangeMetadata | JobKind::Links)) {
                         self.refresh_panels();
                     }
@@ -378,6 +381,9 @@ impl AppState {
                     self.set_status(format!("Viewer open failed: {error}"));
                 }
             },
+            BackgroundEvent::ViewerRefreshed { job_id, viewer } => {
+                self.finish_viewer_refresh(job_id, Ok(viewer));
+            }
             BackgroundEvent::DesktopOpenFinished { path, result } => match result {
                 Ok(()) => self.set_status(format!(
                     "Opened {} with the default application",

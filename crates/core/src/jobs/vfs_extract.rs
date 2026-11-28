@@ -1,5 +1,5 @@
 use super::{
-    JobTotals, OverwritePolicy, ProgressTracker, canonicalize_allowing_missing_tail,
+    JobTotals, OverwritePolicy, ProgressTracker, canonicalize_allowing_missing_tail, cleanup_stage,
     destination_path, existing_paths_refer_to_same_entry, renamed_destination, resolve_destination,
 };
 use crate::{
@@ -262,7 +262,7 @@ fn stage_selection(
         fs::rename(&stage, destination)
     })();
     if result.is_err() {
-        super::archive_extract::cleanup_stage(&stage);
+        cleanup_stage(&stage);
     }
     if result.is_ok() && root_is_directory {
         let _ = temporary.keep();

@@ -14,7 +14,7 @@ name = "rc_ui"
 path = "src/lib.rs"
 
 [dependencies]
-chrono.workspace = true
+jiff.workspace = true
 ratatui.workspace = true
 rc-core.workspace = true
 syntect.workspace = true

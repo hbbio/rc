@@ -185,14 +185,16 @@ See also [File manager](file-manager) and [Panelize and VFS](panelize).",
     (
         "viewer",
         "Viewer",
-        "Viewer basics:\n\
-  {{viewer_scroll}} scroll\n\
+        "Viewer controls\n\
+  Scroll ({{viewer_scroll}})\n\
   Mouse wheel and touchpad scroll here and in quick previews.\n\
-  {{viewer_search}} search, {{viewer_search_back}} reverse search\n\
-  {{viewer_search_continue}} continue search\n\
-  {{viewer_goto}} goto line or offset\n\
-  {{viewer_wrap}} toggle wrap\n\
-  {{viewer_hex}} toggle hex mode\n\
+  Search ({{viewer_search}}) or reverse search ({{viewer_search_back}})\n\
+  Continue search ({{viewer_search_continue}})\n\
+  Go to a line or offset ({{viewer_goto}})\n\
+  Toggle wrap ({{viewer_wrap}})\n\
+  Toggle hex mode ({{viewer_hex}})\n\
+  Refresh a local file from disk ({{viewer_refresh}})\n\
+  Copy the displayed version to the clipboard ({{viewer_copy}})\n\
 \n\
 Return to [File manager](file-manager).",
     ),
@@ -714,6 +716,8 @@ fn default_replacements() -> HashMap<&'static str, String> {
         ("viewer_goto", String::from("g")),
         ("viewer_wrap", String::from("w")),
         ("viewer_hex", String::from("h")),
+        ("viewer_refresh", String::from("r")),
+        ("viewer_copy", String::from("c")),
         ("jobs_move", String::from("Up/Down")),
         ("jobs_cancel", String::from("Alt-J")),
         ("jobs_close", String::from("Esc/q")),

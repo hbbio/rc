@@ -8,9 +8,13 @@ impl AppState {
         context: KeyContext,
         chord: KeyChord,
     ) -> Option<&'a KeyCommand> {
-        self.learned_keymap
-            .resolve(context, chord)
-            .or_else(|| base.resolve(context, chord))
+        std::iter::once(context)
+            .chain(context.fallback())
+            .find_map(|context| {
+                self.learned_keymap
+                    .resolve(context, chord)
+                    .or_else(|| base.resolve(context, chord))
+            })
     }
 
     pub(crate) fn refresh_learned_keymap(&mut self) {

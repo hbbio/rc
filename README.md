@@ -7,19 +7,17 @@ Commander. It keeps the familiar dual-pane workflow and MC-style default
 keybindings while adding responsive background operations, a persistent Unix
 shell, read-only archive and remote browsing, and fast directory navigation.
 
-## What's new in 0.3.0
+## What's new in 0.3.1
 
-- Browse ZIP/TAR archives, nested archives, MC extfs helpers, and read-only
-  SFTP, SSH Shell, and FTP/FTPS connections; copy selected contents to local folders.
-- Keep a persistent Unix shell and switch between it and the panels with `Ctrl-O`.
-- Run MC extension actions and conditional F2 user menus, edit filename highlighting,
-  and save learned key bindings and custom listing formats.
-- Change Unix permissions and ownership, create or edit links, compare files and
-  directories, and capture commands in the searchable output viewer.
-- Swap panels, calculate directory sizes, restore suspended screens, and scroll
-  panels and modals with a mouse wheel or touchpad.
+- See when a local file changes on disk, refresh it with `r`, and copy the
+  viewer's loaded text or hex dump with `c`.
+- Save the skin in rc's own settings and import a Midnight Commander skin choice
+  with `rc --import-mc-skin`.
+- Preview and copy SFTP files faster on high-latency connections.
+- Stage local copies privately on Unix and keep completed copies if a
+  cross-filesystem move fails to remove its source.
 
-See the [0.3.0 changelog](CHANGELOG.md#030---2026-11-15) for the full release notes
+See the [0.3.1 changelog](CHANGELOG.md#031---2026-11-28) for the full release notes
 and the [roadmap](ROADMAP.md) for unfinished work.
 
 ## Features
@@ -334,14 +332,15 @@ jobs and refreshes visible panels. The FTP toggle controls new FTP/FTPS mounts.
   with doubled backslashes for INI escaping.
 - **Command → Edit extension file / Edit menu file / Edit highlighting group file**
   opens `mc.ext.ini`, `menu`, or `filehighlight.ini` in the configured external
-  editor. Files in `~/.config/mc` take precedence over MC files installed under
-  `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an installed or bundled default
-  first creates a private user copy without replacing an existing file.
+  editor. Files under the user configuration directory's `mc/` take precedence over
+  MC files installed under `/opt/homebrew`, `/usr/local`, and `/usr`. Editing an
+  installed or bundled default first creates a private user copy without replacing
+  an existing file.
   On Unix, a regular `.mc.menu` in the active directory takes precedence when it is
   owned by the current user or root and is not writable by group or others;
   local symlinks are ignored. The same discovery is shared by configuration readers.
 - F2 / **Command → User menu** reads the effective menu on each open: trusted
-  `.mc.menu`, `~/.config/mc/menu` (with `mc.menu` as a compatibility fallback),
+  `.mc.menu`, user configuration `mc/menu` (with `mc.menu` as a compatibility fallback),
   installed `mc.menu`, then bundled entries. Shortcut letters or Enter launch the
   selected entry through the shared macro engine, including prompts and `%view`.
   Addition (`+`) and default (`=`) conditions support active/passive filename,
@@ -443,7 +442,7 @@ Optional tools for Unix features:
 Install from [crates.io](https://crates.io/crates/rust-commander):
 
 ```bash
-cargo install rust-commander --version 0.3.0 --locked
+cargo install rust-commander --version 0.3.1 --locked
 ```
 
 The package is named `rust-commander`; the installed executable is `rc`.
@@ -473,10 +472,14 @@ Settings use this precedence:
 built-in defaults -> persisted configuration -> environment -> CLI
 ```
 
-`Save setup` writes rc-owned settings to `~/.config/rc/settings.ini` and the
-MC-compatible skin choice to `~/.config/mc/ini`.
+`Save setup` stores rc's settings, including the skin, in `$XDG_CONFIG_HOME/rc/settings.ini`.
+An unset, empty, or relative `XDG_CONFIG_HOME` uses `~/.config`.
+`rc --import-mc-skin` reads the skin from `mc/ini` under the same configuration
+directory, saves it to rc's settings, and exits. The import can read a symlinked
+MC configuration. If rc's settings file is a symlink, saving updates its
+existing regular target and preserves the link. A dangling link causes a save error.
 
-Runtime tracing is written to `~/.config/rc/rc.log`. Set `RC_LOG_FILE` to use
+Runtime tracing is written to `rc.log` next to `settings.ini`. Set `RC_LOG_FILE` to use
 another path and `RUST_LOG` to change the default `warn` filter. The log is
 kept away from the terminal so diagnostics cannot corrupt the alternate-screen
 interface.
@@ -559,7 +562,13 @@ also support scrolling. Scrolling never opens or accepts an entry.
 | `g` / `Alt-L` | Go to a line or offset |
 | `w` | Toggle wrapping |
 | `h` | Toggle text / hex mode |
+| `r` | Refresh an open local file from disk |
+| `c` | Copy the displayed version to the clipboard |
 | `Esc` / `q` / `F10` | Close |
+
+When a local file changes on disk, the viewer shows a refresh notice and keeps
+the displayed version available until a refresh succeeds. Copy uses the loaded
+text or hex dump and applies the OSC 52 size limit below.
 
 Default bindings live in
 `crates/core/assets/mc.default.keymap`. Common macOS Option-symbol variants are
@@ -579,7 +588,8 @@ Linux desktop opens prefer the desktop portal. Accepted legacy launchers are rea
 independently and are not terminated when rc exits.
 
 Clipboard copying uses the OSC 52 terminal sequence. The terminal emulator and any
-intermediate multiplexer must allow OSC 52 clipboard writes.
+intermediate multiplexer must allow OSC 52 clipboard writes. Copies larger than
+449,991 bytes before encoding are rejected.
 
 ## Project layout
 

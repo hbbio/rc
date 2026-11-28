@@ -113,6 +113,10 @@ pub enum BackgroundEvent {
         path: PathBuf,
         result: Result<ViewerState, String>,
     },
+    ViewerRefreshed {
+        job_id: JobId,
+        viewer: ViewerState,
+    },
     DesktopOpenFinished {
         path: PathBuf,
         result: Result<(), String>,

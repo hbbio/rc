@@ -1,14 +1,34 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::mpsc::Sender;
+#[cfg(any(windows, test))]
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use memchr::memmem;
 
-use crate::{FOUNDATION_SLO, JOB_CANCELED_MESSAGE, VIEWER_TEXT_PREVIEW_LIMIT_BYTES};
+#[cfg(windows)]
+use rc_platform::is_symlink_loop;
+
+use crate::archive::SourceIdentity;
+use crate::{
+    BackgroundEvent, FOUNDATION_SLO, JOB_CANCELED_MESSAGE, JobError, JobEvent, JobId, JobRequest,
+    MAX_CLIPBOARD_TEXT_BYTES, VIEWER_TEXT_PREVIEW_LIMIT_BYTES, WorkerJob,
+};
 
 const VIEWER_READ_CHUNK_BYTES: usize = 64 * 1024;
+const VIEWER_HEX_ROW_BYTES: usize = 16;
+// Eight offset digits, two spaces, three columns per byte, " |", ASCII, "|\n".
+const HEX_COPY_ROW_BYTES: usize = 8 + 2 + 3 * VIEWER_HEX_ROW_BYTES + 2 + VIEWER_HEX_ROW_BYTES + 2;
+#[cfg(any(windows, test))]
+const CONTENT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default)]
 struct NroffState {
@@ -81,9 +101,141 @@ enum ViewerGotoTarget {
     Offset(usize),
 }
 
+#[derive(Debug)]
+pub struct ViewerFileSnapshot {
+    path: PathBuf,
+    identity: SourceIdentity,
+    #[cfg(windows)]
+    change_time: Option<i64>,
+    #[cfg(windows)]
+    contents: ViewerFileContents,
+}
+
+impl ViewerFileSnapshot {
+    pub fn has_changed(&self) -> bool {
+        self.check_disk(true)
+    }
+
+    /// Check metadata and run a content comparison only when it is due.
+    pub fn poll_for_change(&self) -> bool {
+        self.check_disk(false)
+    }
+
+    fn check_disk(&self, force_content_check: bool) -> bool {
+        self.compare_to_disk(force_content_check)
+            .unwrap_or_else(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) || is_symlink_loop(&error)
+            })
+    }
+
+    fn compare_to_disk(&self, force_content_check: bool) -> io::Result<bool> {
+        #[cfg(windows)]
+        let file = rc_platform::open_file_for_metadata(&self.path)?;
+        #[cfg(windows)]
+        let metadata = file.metadata()?;
+        #[cfg(not(windows))]
+        let metadata = fs::metadata(&self.path)?;
+        if !self.matches_metadata(&metadata) {
+            return Ok(true);
+        }
+        #[cfg(windows)]
+        let changed = {
+            if let Some(loaded) = self.change_time
+                && let Some(current) = rc_platform::file_change_time(&file)
+            {
+                return Ok(current != loaded);
+            }
+            // FAT and exFAT lack an independent change timestamp. Compare the
+            // original preview bytes at a lower frequency than metadata checks.
+            if !force_content_check && !self.contents.begin_automatic_check(Instant::now()) {
+                return Ok(false);
+            }
+            let input = crate::vfs::open_local_file(&self.path)?;
+            !self.matches_metadata(&input.metadata()?) || self.contents.has_changed(input)?
+        };
+        #[cfg(not(windows))]
+        let changed = {
+            let _ = force_content_check;
+            false
+        };
+        Ok(changed)
+    }
+
+    fn matches_metadata(&self, metadata: &fs::Metadata) -> bool {
+        metadata.is_file() && self.identity == SourceIdentity::new(metadata)
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+struct ViewerFileContents {
+    length: usize,
+    fingerprint: u64,
+    next_automatic_check: Mutex<Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl ViewerFileContents {
+    fn new(bytes: &[u8], loaded_at: Instant) -> Self {
+        Self {
+            length: bytes.len(),
+            fingerprint: preview_fingerprint(bytes, bytes.len())
+                .expect("the loaded bytes are available"),
+            next_automatic_check: Mutex::new(loaded_at + CONTENT_CHECK_INTERVAL),
+        }
+    }
+
+    fn begin_automatic_check(&self, now: Instant) -> bool {
+        let mut next_check = self
+            .next_automatic_check
+            .lock()
+            .expect("viewer content check schedule lock");
+        if now < *next_check {
+            return false;
+        }
+        *next_check = now + CONTENT_CHECK_INTERVAL;
+        true
+    }
+
+    fn has_changed(&self, input: impl Read) -> io::Result<bool> {
+        match preview_fingerprint(input, self.length) {
+            Ok(fingerprint) => Ok(fingerprint != self.fingerprint),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn preview_fingerprint(mut input: impl Read, mut remaining: usize) -> io::Result<u64> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut buffer = [0; VIEWER_READ_CHUNK_BYTES];
+    while remaining != 0 {
+        let chunk = remaining.min(buffer.len());
+        input.read_exact(&mut buffer[..chunk])?;
+        hasher.write(&buffer[..chunk]);
+        remaining -= chunk;
+    }
+    Ok(hasher.finish())
+}
+
+#[cfg(unix)]
+fn is_symlink_loop(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(nix::libc::ELOOP)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_symlink_loop(_: &io::Error) -> bool {
+    false
+}
+
 #[derive(Clone, Debug)]
 pub struct ViewerState {
     path: PathBuf,
+    pub(crate) local_file: Option<Box<ViewerLocalFile>>,
     pub(crate) archive_location: Option<crate::ArchiveLocation>,
     pub(crate) mounted_location: Option<Box<crate::vfs::MountedPath>>,
     output: Option<Box<ViewerOutputState>>,
@@ -103,6 +255,14 @@ pub struct ViewerState {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ViewerLocalFile {
+    pub snapshot: Arc<ViewerFileSnapshot>,
+    pub updated_on_disk: bool,
+    pub change_detection_unavailable: bool,
+    pub refresh_job: Option<JobId>,
+}
+
+#[derive(Clone, Debug)]
 struct ViewerOutputState {
     status: String,
     utf8_tail: Vec<u8>,
@@ -111,40 +271,52 @@ struct ViewerOutputState {
 
 impl ViewerState {
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        Self::open_with_cancellation(path, None)
+        Self::open_local(path, None, None)
     }
 
     pub fn open_cancellable(path: PathBuf, cancel_flag: &AtomicBool) -> io::Result<Self> {
-        Self::open_with_cancellation(path, Some(cancel_flag))
+        Self::open_local(path, Some(cancel_flag), None)
     }
 
-    fn open_with_cancellation(path: PathBuf, cancel_flag: Option<&AtomicBool>) -> io::Result<Self> {
-        ensure_viewer_not_canceled(cancel_flag)?;
-        let metadata = fs::metadata(&path)?;
-        if !metadata.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "viewer supports regular files only",
-            ));
-        }
-        Self::open_with_reported_size_and_cancellation(path, metadata.len(), cancel_flag)
-    }
-
-    #[cfg(test)]
-    fn open_with_reported_size(path: PathBuf, total_size: u64) -> io::Result<Self> {
-        Self::open_with_reported_size_and_cancellation(path, total_size, None)
-    }
-
-    fn open_with_reported_size_and_cancellation(
+    fn open_local(
         path: PathBuf,
-        total_size: u64,
         cancel_flag: Option<&AtomicBool>,
+        reported_size: Option<u64>,
     ) -> io::Result<Self> {
+        ensure_viewer_not_canceled(cancel_flag)?;
+        ensure_regular_file(&fs::metadata(&path)?)?;
+        let mut file = crate::vfs::open_local_file(&path)?;
+        // Use the opened handle's metadata so a replacement between stat and
+        // open cannot pair one version's bytes with another version's identity.
+        let metadata = file.metadata()?;
+        ensure_regular_file(&metadata)?;
+        #[cfg(windows)]
+        let change_time = if rc_platform::volume_supports_change_time(&file) {
+            rc_platform::file_change_time(&file)
+        } else {
+            None
+        };
         let text_limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
-        let (bytes, hit_read_limit) = read_file_prefix(&path, text_limit, cancel_flag)?;
-        Ok(Self::from_prefix(path, total_size, bytes, hit_read_limit))
+        let (bytes, hit_read_limit) = read_prefix(&mut file, text_limit, cancel_flag)?;
+        let file_snapshot = Arc::new(ViewerFileSnapshot {
+            path: path.clone(),
+            identity: SourceIdentity::new(&metadata),
+            #[cfg(windows)]
+            change_time,
+            #[cfg(windows)]
+            contents: ViewerFileContents::new(&bytes, Instant::now()),
+        });
+        let total_size = reported_size.unwrap_or(metadata.len());
+        let mut viewer = Self::from_prefix(path, total_size, bytes, hit_read_limit);
+        viewer.local_file = Some(Box::new(ViewerLocalFile {
+            snapshot: file_snapshot,
+            updated_on_disk: false,
+            change_detection_unavailable: false,
+            refresh_job: None,
+        }));
+        Ok(viewer)
     }
 
     /// Loads a bounded preview of a regular archive member synchronously.
@@ -181,6 +353,9 @@ impl ViewerState {
         path: crate::vfs::VfsPath,
         cancel: &AtomicBool,
     ) -> io::Result<Self> {
+        if let crate::vfs::VfsPath::Local(path) = path {
+            return Self::open_cancellable(path, cancel);
+        }
         let limit = FOUNDATION_SLO
             .viewer_memory_soft_limit_bytes
             .clamp(1, VIEWER_TEXT_PREVIEW_LIMIT_BYTES);
@@ -223,6 +398,7 @@ impl ViewerState {
 
         Self {
             path,
+            local_file: None,
             archive_location: None,
             mounted_location: None,
             output: None,
@@ -247,7 +423,7 @@ impl ViewerState {
         path: PathBuf,
         total_size: u64,
     ) -> io::Result<Self> {
-        Self::open_with_reported_size(path, total_size)
+        Self::open_local(path, None, Some(total_size))
     }
 
     pub fn line_count(&self) -> usize {
@@ -371,6 +547,62 @@ impl ViewerState {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    pub fn updated_on_disk(&self) -> bool {
+        self.local_file
+            .as_ref()
+            .is_some_and(|file| file.updated_on_disk)
+    }
+
+    pub fn change_detection_unavailable(&self) -> bool {
+        self.local_file
+            .as_ref()
+            .is_some_and(|file| file.change_detection_unavailable)
+    }
+
+    pub(crate) fn refresh_job(&self) -> Option<JobId> {
+        self.local_file.as_ref()?.refresh_job
+    }
+
+    pub(crate) fn uses_nroff(&self) -> bool {
+        self.nroff.is_some()
+    }
+
+    pub(crate) fn replace_after_refresh(&mut self, mut refreshed: Self) {
+        refreshed.hex_mode = self.hex_mode;
+        refreshed.wrap = self.wrap;
+        refreshed.scroll = self.scroll.min(refreshed.line_count().saturating_sub(1));
+        refreshed.last_search_query = self.last_search_query.take();
+        refreshed.last_search_direction = self.last_search_direction;
+        *self = refreshed;
+    }
+
+    pub(crate) fn clipboard_text(&self) -> Option<String> {
+        if !self.hex_mode {
+            return (self.content.len() <= MAX_CLIPBOARD_TEXT_BYTES).then(|| self.content.clone());
+        }
+        let rows = self.bytes.len().div_ceil(VIEWER_HEX_ROW_BYTES);
+        if rows > MAX_CLIPBOARD_TEXT_BYTES / HEX_COPY_ROW_BYTES {
+            return None;
+        }
+        let mut text = String::with_capacity(rows * HEX_COPY_ROW_BYTES);
+        for (row, bytes) in self.bytes.chunks(VIEWER_HEX_ROW_BYTES).enumerate() {
+            write_hex_row(&mut text, row * VIEWER_HEX_ROW_BYTES, bytes);
+            text.push('\n');
+        }
+        Some(text)
+    }
+
+    pub fn hex_line(&self, row: usize) -> Option<String> {
+        if row >= self.hex_line_count() {
+            return None;
+        }
+        let offset = row * VIEWER_HEX_ROW_BYTES;
+        let end = (offset + VIEWER_HEX_ROW_BYTES).min(self.bytes.len());
+        let mut line = String::new();
+        write_hex_row(&mut line, offset, &self.bytes[offset..end]);
+        Some(line)
     }
 
     pub(crate) fn apply_action_view_options(&mut self, options: crate::action_macros::ViewOptions) {
@@ -525,7 +757,7 @@ impl ViewerState {
         if self.hex_mode {
             return self
                 .scroll
-                .saturating_mul(16)
+                .saturating_mul(VIEWER_HEX_ROW_BYTES)
                 .min(self.bytes.len().saturating_sub(1));
         }
         let index = self.scroll.min(self.line_count().saturating_sub(1));
@@ -535,7 +767,7 @@ impl ViewerState {
     fn line_index_for_offset(&self, offset: usize) -> usize {
         if self.hex_mode {
             return offset
-                .saturating_div(16)
+                .saturating_div(VIEWER_HEX_ROW_BYTES)
                 .min(self.hex_line_count().saturating_sub(1));
         }
         if self.line_offsets.is_empty() {
@@ -550,23 +782,76 @@ impl ViewerState {
     }
 
     fn hex_line_count(&self) -> usize {
-        let lines = (self.bytes.len().saturating_add(15)).saturating_div(16);
-        lines.max(1)
+        self.bytes.len().div_ceil(VIEWER_HEX_ROW_BYTES).max(1)
     }
 }
 
-fn read_file_prefix(
-    path: &Path,
-    byte_limit: usize,
-    cancel_flag: Option<&AtomicBool>,
-) -> io::Result<(Vec<u8>, bool)> {
-    ensure_viewer_not_canceled(cancel_flag)?;
-    let mut result = None;
-    crate::vfs::VfsPath::Local(path.to_path_buf()).with_file(cancel_flag, &mut |_, file| {
-        result = Some(read_prefix(file, byte_limit, cancel_flag)?);
+fn write_hex_row(text: &mut String, offset: usize, bytes: &[u8]) {
+    write!(text, "{offset:08x}  ").expect("writing to String cannot fail");
+    for byte in bytes {
+        write!(text, "{byte:02x} ").expect("writing to String cannot fail");
+    }
+    for _ in bytes.len()..VIEWER_HEX_ROW_BYTES {
+        text.push_str("   ");
+    }
+    text.push_str(" |");
+    for &byte in bytes {
+        text.push(if byte.is_ascii_graphic() || byte == b' ' {
+            char::from(byte)
+        } else {
+            '.'
+        });
+    }
+    for _ in bytes.len()..VIEWER_HEX_ROW_BYTES {
+        text.push(' ');
+    }
+    text.push('|');
+}
+
+fn ensure_regular_file(metadata: &fs::Metadata) -> io::Result<()> {
+    if metadata.is_file() {
         Ok(())
-    })?;
-    result.ok_or_else(|| io::Error::other("file reader did not provide data"))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "viewer supports regular files only",
+        ))
+    }
+}
+
+pub fn execute_viewer_refresh(
+    job: WorkerJob,
+    jobs: &Sender<JobEvent>,
+    events: &Sender<BackgroundEvent>,
+) {
+    let cancel = job.cancel_flag();
+    let JobRequest::RefreshViewer { path, nroff } = job.request else {
+        return;
+    };
+    let job_id = job.id;
+    let _ = jobs.send(JobEvent::Started { id: job_id });
+    let result = ViewerState::open_cancellable(path, &cancel)
+        .and_then(|mut viewer| {
+            if nroff {
+                viewer.apply_action_view_options(crate::action_macros::ViewOptions {
+                    hex: viewer.hex_mode,
+                    nroff,
+                });
+            }
+            if viewer
+                .local_file
+                .as_ref()
+                .is_some_and(|file| file.snapshot.has_changed())
+            {
+                return Err(io::Error::other("file changed during refresh"));
+            }
+            ensure_viewer_not_canceled(Some(&cancel))?;
+            events
+                .send(BackgroundEvent::ViewerRefreshed { job_id, viewer })
+                .map_err(|_| io::Error::other("background event channel disconnected"))
+        })
+        .map_err(JobError::from_io);
+    let _ = jobs.send(JobEvent::Finished { id: job_id, result });
 }
 
 fn read_prefix(
@@ -719,26 +1004,132 @@ mod tests {
     use super::*;
 
     fn viewer(bytes: &[u8]) -> ViewerState {
-        let content = String::from_utf8_lossy(bytes).into_owned();
-        ViewerState {
-            nroff: None,
-            path: PathBuf::from("fixture"),
-            archive_location: None,
-            mounted_location: None,
-            output: None,
-            bytes: bytes.to_vec(),
-            line_offsets: compute_line_offsets(&content),
-            content,
-            text_is_preview: false,
-            content_fingerprint: 0,
-            path_fingerprint: 0,
-            scroll: 0,
-            wrap: false,
-            hex_mode: true,
-            last_search_query: None,
-            last_search_match_offset: None,
-            last_search_direction: ViewerSearchDirection::Forward,
-        }
+        let mut viewer = ViewerState::from_prefix(
+            PathBuf::from("fixture"),
+            bytes.len() as u64,
+            bytes.to_vec(),
+            false,
+        );
+        viewer.hex_mode = true;
+        viewer
+    }
+
+    #[test]
+    fn clipboard_preflights_text_and_hex_dump_size() {
+        let bytes = vec![b'a'; MAX_CLIPBOARD_TEXT_BYTES + 1];
+        let mut text_viewer = viewer(&bytes);
+        text_viewer.hex_mode = false;
+        assert!(text_viewer.clipboard_text().is_none());
+
+        let rows = MAX_CLIPBOARD_TEXT_BYTES / HEX_COPY_ROW_BYTES;
+        let bytes_at_limit = rows * VIEWER_HEX_ROW_BYTES;
+        let hex_text = viewer(&bytes[..bytes_at_limit]).clipboard_text().unwrap();
+        assert_eq!(hex_text.len(), rows * HEX_COPY_ROW_BYTES);
+        assert!(
+            viewer(&bytes[..bytes_at_limit + 1])
+                .clipboard_text()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn content_check_detects_same_length_edits_with_the_original_last_write_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.bin");
+        let mut bytes = vec![0xff; VIEWER_READ_CHUNK_BYTES + 1];
+        fs::write(&path, &bytes).unwrap();
+        let original_modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let contents = ViewerFileContents::new(&bytes, Instant::now());
+        assert!(
+            !contents
+                .has_changed(fs::File::open(&path).unwrap())
+                .unwrap()
+        );
+
+        bytes[VIEWER_READ_CHUNK_BYTES] = 0xfe;
+        fs::write(&path, &bytes).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
+        assert_eq!(metadata.len(), bytes.len() as u64);
+        assert_eq!(metadata.modified().unwrap(), original_modified);
+        assert!(contents.has_changed(file).unwrap());
+    }
+
+    #[test]
+    fn automatic_content_checks_wait_between_comparisons() {
+        let loaded_at = Instant::now();
+        let contents = ViewerFileContents::new(b"preview", loaded_at);
+        let metadata_check_interval = Duration::from_millis(500);
+        assert!(!contents.begin_automatic_check(loaded_at + metadata_check_interval));
+
+        let first_check = loaded_at + CONTENT_CHECK_INTERVAL;
+        assert!(contents.begin_automatic_check(first_check));
+        assert!(!contents.begin_automatic_check(first_check + metadata_check_interval));
+        assert!(contents.begin_automatic_check(first_check + CONTENT_CHECK_INTERVAL));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn viewer_marks_a_path_replaced_by_a_symlink_loop_as_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        fs::write(&path, "original").unwrap();
+        let viewer = ViewerState::open(path.clone()).unwrap();
+        let snapshot = &viewer.local_file.as_ref().unwrap().snapshot;
+        assert!(!snapshot.has_changed());
+
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("report.txt", &path).unwrap();
+        assert!(snapshot.has_changed());
+        assert_eq!(viewer.content(), "original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn viewer_detects_a_same_size_edit_with_last_write_time_restored() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        fs::write(&path, b"old").unwrap();
+        let original_modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut viewer = ViewerState::open(path.clone()).unwrap();
+        let snapshot = Arc::get_mut(&mut viewer.local_file.as_mut().unwrap().snapshot).unwrap();
+        assert!(!snapshot.has_changed());
+
+        // Separate the two writes even on a system with a coarse clock.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"new")
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(original_modified)
+            .unwrap();
+
+        assert_eq!(
+            snapshot.identity,
+            SourceIdentity::new(&fs::metadata(&path).unwrap())
+        );
+        assert!(snapshot.has_changed());
+        snapshot.change_time = None;
+        *snapshot.contents.next_automatic_check.get_mut().unwrap() =
+            Instant::now() + CONTENT_CHECK_INTERVAL;
+        assert!(!snapshot.poll_for_change());
+        assert!(snapshot.has_changed());
+        *snapshot.contents.next_automatic_check.get_mut().unwrap() = Instant::now();
+        assert!(snapshot.poll_for_change());
     }
 
     #[test]

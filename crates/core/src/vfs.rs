@@ -28,6 +28,17 @@ pub mod shell_link;
 #[cfg(unix)]
 pub mod ssh;
 
+pub(crate) fn open_local_file(path: &Path) -> io::Result<File> {
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {
     Local,
@@ -562,14 +573,7 @@ impl VfsPath {
         crate::archive::check_canceled(cancel)?;
         match self {
             Self::Local(path) => {
-                let mut options = File::options();
-                options.read(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.custom_flags(nix::libc::O_NONBLOCK);
-                }
-                let file = options.open(path)?;
+                let file = open_local_file(path)?;
                 let metadata = file.metadata()?;
                 if !metadata.is_file() {
                     return Err(io::Error::new(

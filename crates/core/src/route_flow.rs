@@ -386,7 +386,11 @@ impl AppState {
 
     pub(crate) fn close_viewer(&mut self) {
         if matches!(self.top_route(), Route::Viewer(_) | Route::CommandOutput(_)) {
-            self.routes.pop();
+            if let Some(Route::Viewer(viewer)) = self.routes.pop()
+                && let Some(job_id) = viewer.refresh_job()
+            {
+                self.request_cancel_for_job(job_id);
+            }
             self.set_status("Closed viewer");
         }
     }

@@ -14,7 +14,7 @@ name = "rc_core"
 path = "src/lib.rs"
 
 [dependencies]
-chrono.workspace = true
+jiff.workspace = true
 filetime = "0.2"
 encoding_rs = "0.8"
 globset = "0.4"

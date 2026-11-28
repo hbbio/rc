@@ -1,6 +1,6 @@
 # Roadmap
 
-This file tracks unfinished product work after [0.3.0](CHANGELOG.md#030---2026-11-15).
+This file tracks unfinished product work after [0.3.1](CHANGELOG.md#031---2026-11-28).
 Supported behavior is documented in the project [README](README.md).
 
 ## Deferred: Windows (out of current scope)

@@ -215,6 +215,12 @@ impl AppCommand {
             (KeyContext::ViewerHex, KeyCommand::ToggleWrap) => Some(Self::ViewerToggleWrap),
             (KeyContext::Viewer, KeyCommand::ToggleHex)
             | (KeyContext::ViewerHex, KeyCommand::ToggleHex) => Some(Self::ViewerToggleHex),
+            (KeyContext::Viewer | KeyContext::ViewerHex, KeyCommand::Reread) => {
+                Some(Self::ViewerRefresh)
+            }
+            (KeyContext::Viewer | KeyContext::ViewerHex, KeyCommand::ViewerCopyContents) => {
+                Some(Self::ViewerCopyContents)
+            }
             (KeyContext::FileManager, KeyCommand::OpenConfirmDialog) => {
                 Some(Self::OpenConfirmDialog)
             }
