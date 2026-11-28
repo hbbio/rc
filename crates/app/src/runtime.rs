@@ -1131,6 +1131,7 @@ async fn run_runtime_loop(
                                 (Arc::clone(&capture_limit), "capture")
                             }
                             JobRequest::LoadViewer { .. }
+                            | JobRequest::RefreshViewer { .. }
                             | JobRequest::LoadActionViewer { .. }
                             | JobRequest::ProbeFileType { .. }
                             | JobRequest::LoadArchiveViewer { .. }
@@ -1482,6 +1483,9 @@ fn execute_runtime_worker_job(
         }
         JobRequest::LoadActionViewer { .. } => {
             rc_core::execute_action_viewer(worker_job, worker_event_tx, background_event_tx)
+        }
+        JobRequest::RefreshViewer { .. } => {
+            rc_core::execute_viewer_refresh(worker_job, worker_event_tx, background_event_tx)
         }
         JobRequest::MeasureDirectories { .. } => {
             rc_core::execute_directory_sizes(worker_job, worker_event_tx, background_event_tx)
@@ -2491,6 +2495,7 @@ fn worker_command_priority(command: &WorkerCommand) -> CommandPriority {
             ) => CommandPriority::Low,
             JobRequest::OpenDesktop { .. }
             | JobRequest::LoadViewer { .. }
+            | JobRequest::RefreshViewer { .. }
             | JobRequest::LoadArchiveViewer { .. }
             | JobRequest::LoadQuickView { .. } => CommandPriority::High,
             JobRequest::RefreshPanel { .. }

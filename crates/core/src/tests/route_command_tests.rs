@@ -64,6 +64,7 @@ fn copy_selected_path_queues_its_absolute_clipboard_text() {
                 .to_str()
                 .expect("temporary path should be valid UTF-8")
                 .to_string(),
+            success_message: "Copied selected path to clipboard",
         }]
     );
     assert!(app.status_line.contains("Copying selected path"));
@@ -101,6 +102,7 @@ fn copy_selected_parent_from_a_relative_initial_path_uses_its_resolved_path() {
                 .to_str()
                 .expect("parent path should be valid UTF-8")
                 .to_string(),
+            success_message: "Copied selected path to clipboard",
         }]
     );
 }

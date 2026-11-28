@@ -23,6 +23,8 @@ use crate::{
 };
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+const STAGE_PREFIX: &str = ".rc-stage-";
+const BACKUP_PREFIX: &str = ".rc-backup-";
 mod archive_extract;
 mod links;
 mod metadata;
@@ -223,6 +225,10 @@ pub enum JobRequest {
     LoadViewer {
         path: PathBuf,
     },
+    RefreshViewer {
+        path: PathBuf,
+        nroff: bool,
+    },
     LoadQuickView {
         panel: ActivePanel,
         path: PathBuf,
@@ -269,7 +275,7 @@ impl JobRequest {
             Self::Find { .. } => JobKind::Find,
             Self::QuickCdSearch { .. } => JobKind::QuickCdSearch,
             Self::OpenDesktop { .. } => JobKind::OpenDesktop,
-            Self::LoadViewer { .. } => JobKind::LoadViewer,
+            Self::LoadViewer { .. } | Self::RefreshViewer { .. } => JobKind::LoadViewer,
             Self::LoadQuickView { .. } => JobKind::LoadQuickView,
             Self::MeasureSelection { .. } => JobKind::MeasureSelection,
             Self::BuildTree { .. } => JobKind::BuildTree,
@@ -299,7 +305,7 @@ impl JobRequest {
             Self::Find { .. } => 1,
             Self::QuickCdSearch { .. } => 1,
             Self::OpenDesktop { .. } => 1,
-            Self::LoadViewer { .. } => 1,
+            Self::LoadViewer { .. } | Self::RefreshViewer { .. } => 1,
             Self::LoadQuickView { .. } => 1,
             Self::MeasureSelection { paths, .. } => paths.len(),
             Self::BuildTree { .. } => 1,
@@ -401,7 +407,6 @@ impl JobRequest {
                 let target = paths
                     .rc_ini_path
                     .as_ref()
-                    .or(paths.mc_ini_path.as_ref())
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_else(|| String::from("<none>"));
                 format!("save setup -> {target}")
@@ -456,6 +461,7 @@ impl JobRequest {
                 format!("open with default application {}", path.to_string_lossy())
             }
             Self::LoadViewer { path } => format!("open viewer {}", path.to_string_lossy()),
+            Self::RefreshViewer { path, .. } => format!("refresh viewer {}", path.display()),
             Self::LoadQuickView { panel, path, .. } => format!(
                 "preview {} in {} panel",
                 path.to_string_lossy(),
@@ -538,6 +544,7 @@ pub enum JobErrorCode {
     Interrupted,
     Unsupported,
     Dispatch,
+    PartialMove,
     Other,
 }
 
@@ -568,6 +575,16 @@ impl JobError {
     }
 
     pub fn from_io(error: io::Error) -> Self {
+        if error
+            .get_ref()
+            .is_some_and(|error| error.is::<PartialMove>())
+        {
+            return Self {
+                code: JobErrorCode::PartialMove,
+                message: error.to_string(),
+                retry_hint: JobRetryHint::None,
+            };
+        }
         let kind = error.kind();
         let message = error.to_string();
         match kind {
@@ -877,6 +894,9 @@ pub struct JobStatusCounts {
 pub trait FsBackend {
     fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn rename(&self, source: &Path, destination: &Path) -> io::Result<()>;
+    fn remove_path(&self, path: &Path) -> io::Result<()> {
+        remove_path(path)
+    }
     fn persist_settings(&self, paths: &SettingsPaths, snapshot: &Settings) -> io::Result<()>;
 }
 
@@ -1174,6 +1194,7 @@ fn execute_job(
             destination_names.as_deref(),
             overwrite,
             progress,
+            fs_backend,
         ),
         JobRequest::Delete { targets } => delete_paths(&targets, progress),
         JobRequest::Mkdir { path } => {
@@ -1195,7 +1216,6 @@ fn execute_job(
             let marker = paths
                 .rc_ini_path
                 .as_deref()
-                .or(paths.mc_ini_path.as_deref())
                 .unwrap_or_else(|| Path::new("."));
             progress.set_current_path(marker);
             fs_backend.persist_settings(&paths, snapshot.as_ref())?;
@@ -1221,6 +1241,7 @@ fn execute_job(
             "desktop-open jobs are executed by the runtime adapter",
         )),
         JobRequest::LoadViewer { .. }
+        | JobRequest::RefreshViewer { .. }
         | JobRequest::CaptureCommand { .. }
         | JobRequest::ProbeFileType { .. }
         | JobRequest::LoadActionViewer { .. } => Err(io::Error::new(
@@ -1271,6 +1292,7 @@ fn move_paths(
     destination_names: Option<&[std::ffi::OsString]>,
     overwrite: OverwritePolicy,
     progress: &mut ProgressTracker<'_>,
+    fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     if let Some(destination_names) = destination_names
         && destination_names.len() != sources.len()
@@ -1288,23 +1310,25 @@ fn move_paths(
         let source = planned_move.source;
         progress.ensure_not_canceled()?;
         let source_totals = measure_path_totals(source, progress.cancel_flag.as_ref())?;
-        if is_case_only_rename(source, &planned_move.destination)? {
-            move_path(source, &planned_move.destination, source_totals, progress)?;
-            continue;
-        }
-
-        let Some(destination) = resolve_destination(
-            source,
-            planned_move.destination,
-            overwrite,
-            source_totals,
-            progress,
-        )?
-        else {
-            continue;
+        let destination = if is_case_only_rename(source, &planned_move.destination)? {
+            ResolvedDestination {
+                path: planned_move.destination,
+                overwrite_backup: None,
+            }
+        } else {
+            let Some(destination) = resolve_destination(
+                source,
+                planned_move.destination,
+                overwrite,
+                source_totals,
+                progress,
+            )?
+            else {
+                continue;
+            };
+            destination
         };
-        let move_result = move_path(source, &destination.path, source_totals, progress);
-        destination.finish(move_result)?;
+        move_path(source, destination, source_totals, progress, fs_backend)?;
     }
     Ok(())
 }
@@ -1452,23 +1476,64 @@ fn move_plan_conflict_error(
 
 fn move_path(
     source: &Path,
-    destination: &Path,
+    destination: ResolvedDestination,
     source_totals: JobTotals,
     progress: &mut ProgressTracker<'_>,
+    fs_backend: &dyn FsBackend,
 ) -> io::Result<()> {
     progress.set_current_path(source);
-    validate_move_destination(source, destination)?;
-    match fs::rename(source, destination) {
+    if let Err(error) = validate_move_destination(source, &destination.path) {
+        return destination.finish(Err(error));
+    }
+    match fs_backend.rename(source, &destination.path) {
         Ok(()) => {
             progress.advance_totals(source, source_totals);
-            Ok(())
         }
         Err(error) if is_cross_device_error(&error) => {
-            copy_path(source, destination, progress)?;
-            remove_path(source)?;
-            Ok(())
+            if let Err(error) = copy_path(source, &destination.path, progress) {
+                return destination.finish(Err(error));
+            }
+            // Cleanup can remove only part of the source. The complete copy
+            // must stay in place from this point on.
+            if let Err(error) = fs_backend.remove_path(source) {
+                return Err(io::Error::other(PartialMove {
+                    source: source.into(),
+                    destination: destination.path,
+                    backup: destination.overwrite_backup,
+                    error,
+                }));
+            }
         }
-        Err(error) => Err(error),
+        Err(error) => return destination.finish(Err(error)),
+    }
+    destination.finish(Ok(()))
+}
+
+#[derive(Debug)]
+struct PartialMove {
+    source: PathBuf,
+    destination: PathBuf,
+    backup: Option<PathBuf>,
+    error: io::Error,
+}
+
+impl fmt::Display for PartialMove {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Partial move: complete copy at {:?}. Source cleanup failed at {:?}: {}.",
+            self.destination, self.source, self.error,
+        )?;
+        if let Some(backup) = &self.backup {
+            write!(formatter, " Previous destination retained at {backup:?}.")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PartialMove {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -1578,44 +1643,9 @@ fn copy_path(
 ) -> io::Result<()> {
     progress.ensure_not_canceled()?;
     let metadata = fs::symlink_metadata(source)?;
-    progress.set_current_path(source);
-    if metadata.file_type().is_symlink() {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        copy_symlink(source, destination)?;
-        preserve_copied_metadata(destination, &metadata)?;
-        progress.complete_item(source);
-        return Ok(());
-    }
-
     if metadata.is_dir() {
         validate_directory_destination_not_inside_source(source, destination, "copy")?;
-
-        if path_entry_exists(destination)? {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "destination already exists: {}",
-                    destination.to_string_lossy()
-                ),
-            ));
-        }
-
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let child_source = entry.path();
-            let child_destination = destination.join(entry.file_name());
-            copy_path(&child_source, &child_destination, progress)?;
-        }
-        fs::set_permissions(destination, metadata.permissions())?;
-        preserve_copied_metadata(destination, &metadata)?;
-        progress.complete_item(source);
-        return Ok(());
-    }
-
-    if !metadata.is_file() {
+    } else if !metadata.is_file() && !metadata.file_type().is_symlink() {
         return Err(unsupported_copy_source(source));
     }
 
@@ -1632,18 +1662,60 @@ fn copy_path(
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    copy_file(source, destination, progress)?;
-    fs::set_permissions(destination, metadata.permissions())?;
-    preserve_copied_metadata(destination, &metadata)?;
+    let stage = allocate_transfer_path(destination, STAGE_PREFIX, |stage| {
+        copy_entry(source, stage, &metadata, progress)
+    })?;
+    let publish = progress
+        .ensure_not_canceled()
+        .and_then(|()| fs::rename(&stage, destination));
+    if publish.is_err() {
+        cleanup_stage(&stage);
+    }
+    publish?;
     progress.complete_item(source);
     Ok(())
 }
 
-fn copy_file(
+fn copy_entry(
     source: &Path,
     destination: &Path,
+    metadata: &fs::Metadata,
     progress: &mut ProgressTracker<'_>,
 ) -> io::Result<()> {
+    progress.ensure_not_canceled()?;
+    progress.set_current_path(source);
+    // Only clean up entries we successfully created.
+    let contents = if metadata.is_dir() {
+        private_directories().create(destination)?;
+        (|| {
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                let child_source = entry.path();
+                let child_destination = destination.join(entry.file_name());
+                let child_metadata = fs::symlink_metadata(&child_source)?;
+                copy_entry(&child_source, &child_destination, &child_metadata, progress)?;
+                progress.complete_item(&child_source);
+            }
+            Ok(())
+        })()
+    } else if metadata.is_file() {
+        let mut input = open_copy_source(source)?;
+        let mut output = private_files().create_new(true).open(destination)?;
+        copy_file_contents(&mut input, &mut output, progress)
+    } else if metadata.file_type().is_symlink() {
+        copy_symlink(source, destination)?;
+        Ok(())
+    } else {
+        return Err(unsupported_copy_source(source));
+    };
+    let result = contents.and_then(|()| preserve_copied_metadata(destination, metadata));
+    if result.is_err() {
+        cleanup_stage(destination);
+    }
+    result
+}
+
+fn open_copy_source(source: &Path) -> io::Result<fs::File> {
     let mut source_options = fs::OpenOptions::new();
     source_options.read(true);
     #[cfg(unix)]
@@ -1652,43 +1724,53 @@ fn copy_file(
         // Do not block if a regular file was replaced by a FIFO after inspection.
         source_options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
     }
-    let mut source_file = source_options.open(source)?;
-    if !source_file.metadata()?.is_file() {
+    let file = source_options.open(source)?;
+    if !file.metadata()?.is_file() {
         return Err(unsupported_copy_source(source));
     }
-    let staged_destination = destination_staging_path(destination)?;
-    // Only clean up a staging entry after we have successfully created it.
-    let mut destination_file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged_destination)?;
-    let write_result = (|| -> io::Result<()> {
-        let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    Ok(file)
+}
 
-        loop {
-            progress.ensure_not_canceled()?;
-            let bytes_read = source_file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            destination_file.write_all(&buffer[..bytes_read])?;
-            progress.advance_bytes(bytes_read as u64);
+fn copy_file_contents(
+    input: &mut fs::File,
+    output: &mut fs::File,
+    progress: &mut ProgressTracker<'_>,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    loop {
+        progress.ensure_not_canceled()?;
+        let bytes_read = input.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
         }
-        destination_file.flush()?;
-        Ok(())
-    })();
-    drop(destination_file);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&staged_destination);
-        return Err(error);
+        output.write_all(&buffer[..bytes_read])?;
+        progress.advance_bytes(bytes_read as u64);
     }
+    output.flush()
+}
 
-    if let Err(error) = fs::rename(&staged_destination, destination) {
-        let _ = fs::remove_file(&staged_destination);
-        return Err(error);
+fn private_directories() -> fs::DirBuilder {
+    let mut builder = fs::DirBuilder::new();
+    // Set the mode before creating an entry in a potentially shared parent.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
+    #[cfg(not(unix))]
+    builder.recursive(false);
+    builder
+}
 
-    Ok(())
+fn private_files() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
 }
 
 fn unsupported_copy_source(source: &Path) -> io::Error {
@@ -1709,21 +1791,28 @@ fn path_entry_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn destination_staging_path(destination: &Path) -> io::Result<PathBuf> {
-    let parent = destination.parent().unwrap_or(Path::new("."));
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("item");
-
-    for index in 1_usize.. {
-        let candidate = parent.join(format!(".{file_name}.rc-stage-{index}"));
-        if !path_entry_exists(&candidate)? {
-            return Ok(candidate);
+fn allocate_transfer_path(
+    destination: &Path,
+    prefix: &str,
+    mut create: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<PathBuf> {
+    for _ in 0..16 {
+        let nonce = crate::temp_names::nonce()?;
+        let path = destination.with_file_name(format!("{prefix}{nonce:032x}"));
+        if path == destination {
+            continue;
+        }
+        match create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
         }
     }
 
-    unreachable!("staging candidate generator should always return");
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("could not allocate a temporary path beside {destination:?}"),
+    ))
 }
 
 fn delete_path(path: &Path, progress: &mut ProgressTracker<'_>) -> io::Result<()> {
@@ -1786,8 +1875,9 @@ fn resolve_destination(
     if path_entry_exists(&destination)? {
         match overwrite {
             OverwritePolicy::Overwrite => {
-                let backup = destination_backup_path(&destination)?;
-                fs::rename(&destination, &backup)?;
+                let backup = allocate_transfer_path(&destination, BACKUP_PREFIX, |backup| {
+                    rename_to_vacant_path(&destination, backup)
+                })?;
                 return Ok(Some(ResolvedDestination {
                     path: destination,
                     overwrite_backup: Some(backup),
@@ -1946,7 +2036,25 @@ fn preserve_copied_metadata(destination: &Path, metadata: &fs::Metadata) -> io::
 
     filetime::set_file_times(destination, atime, mtime)?;
     preserve_owner_best_effort(destination, metadata)?;
-    Ok(())
+    // Grant group access only after the staged entry has its intended ownership.
+    let permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let mode = permissions.mode();
+        // Set-ID bits must refer to the original owner and group.
+        if mode & 0o6000 != 0 {
+            let staged = fs::symlink_metadata(destination)?;
+            if staged.uid() != metadata.uid() || staged.gid() != metadata.gid() {
+                return fs::set_permissions(
+                    destination,
+                    fs::Permissions::from_mode(mode & !0o6000),
+                );
+            }
+        }
+    }
+    fs::set_permissions(destination, permissions)
 }
 
 #[cfg(unix)]
@@ -1976,6 +2084,36 @@ fn remove_path(path: &Path) -> io::Result<()> {
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
+    }
+}
+
+fn cleanup_stage(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.is_dir() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(metadata.permissions().mode() | 0o700),
+            );
+        }
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                cleanup_stage(&entry.path());
+            }
+        }
+        let _ = fs::remove_dir(path);
+    } else {
+        #[cfg(windows)]
+        if !metadata.file_type().is_symlink() && metadata.permissions().readonly() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -2016,21 +2154,25 @@ impl ResolvedDestination {
     }
 }
 
-fn destination_backup_path(destination: &Path) -> io::Result<PathBuf> {
-    let parent = destination.parent().unwrap_or(Path::new("."));
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("item");
+fn rename_to_vacant_path(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
+        use rustix::io::Errno;
 
-    for index in 1_usize.. {
-        let candidate = parent.join(format!(".{file_name}.rc-backup-{index}"));
-        if !path_entry_exists(&candidate)? {
-            return Ok(candidate);
+        match renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE) {
+            // Older kernels and some filesystems lack exclusive rename.
+            Err(error)
+                if [Errno::NOSYS, Errno::NOTSUP, Errno::OPNOTSUPP, Errno::INVAL]
+                    .contains(&error) => {}
+            result => return result.map_err(Into::into),
         }
     }
 
-    unreachable!("backup candidate generator should always return");
+    if path_entry_exists(destination)? {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    fs::rename(source, destination)
 }
 
 fn is_cross_device_error(error: &io::Error) -> bool {
@@ -2142,6 +2284,7 @@ fn measure_request_totals(request: &JobRequest, cancel_flag: &AtomicBool) -> io:
         | JobRequest::QuickCdSearch { .. }
         | JobRequest::OpenDesktop { .. }
         | JobRequest::LoadViewer { .. }
+        | JobRequest::RefreshViewer { .. }
         | JobRequest::CaptureCommand { .. }
         | JobRequest::ProbeFileType { .. }
         | JobRequest::LoadActionViewer { .. }
@@ -2198,6 +2341,8 @@ struct ProgressTracker<'a> {
     progress: JobProgress,
     event_tx: &'a Sender<JobEvent>,
     cancel_flag: Arc<AtomicBool>,
+    #[cfg(test)]
+    observer: Option<&'a dyn Fn(&JobProgress)>,
 }
 
 impl<'a> ProgressTracker<'a> {
@@ -2218,10 +2363,16 @@ impl<'a> ProgressTracker<'a> {
             },
             event_tx,
             cancel_flag,
+            #[cfg(test)]
+            observer: None,
         }
     }
 
     fn emit(&self) {
+        #[cfg(test)]
+        if let Some(observer) = self.observer {
+            observer(&self.progress);
+        }
         let _ = self.event_tx.send(JobEvent::Progress {
             id: self.job_id,
             progress: self.progress.clone(),
@@ -2735,21 +2886,10 @@ mod tests {
         let root = make_temp_dir("fifo-open");
         let fifo = root.join("source");
         nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
-        let destination = root.join("destination");
-        let (tx, _rx) = mpsc::channel();
-        let mut progress = ProgressTracker::new(
-            JobId(1),
-            JobTotals::default(),
-            &tx,
-            Arc::new(AtomicBool::new(false)),
-        );
         assert_eq!(
-            copy_file(&fifo, &destination, &mut progress)
-                .unwrap_err()
-                .kind(),
+            open_copy_source(&fifo).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
-        assert!(!destination.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2852,9 +2992,7 @@ mod tests {
                 fs::write(&source, "source").unwrap();
                 let destination = destination_dir.join("file");
                 let alternate = destination_dir.join("file.copy");
-                let stage = destination_dir.join(".file.rc-stage-1");
-                let backup = destination_dir.join(".file.rc-backup-1");
-                for path in [&destination, &alternate, &stage, &backup] {
+                for path in [&destination, &alternate] {
                     symlink("missing", path).unwrap();
                 }
                 let request = if moving {
@@ -2878,9 +3016,7 @@ mod tests {
                     recv_until_finished(&rx, &mut manager),
                     JobEvent::Finished { result: Ok(()), .. }
                 ));
-                for path in [&alternate, &stage, &backup] {
-                    assert_eq!(fs::read_link(path).unwrap(), Path::new("missing"));
-                }
+                assert_eq!(fs::read_link(&alternate).unwrap(), Path::new("missing"));
                 match overwrite {
                     OverwritePolicy::Overwrite => {
                         assert_eq!(fs::read_to_string(&destination).unwrap(), "source")
@@ -2913,9 +3049,73 @@ mod tests {
         let destination = parent.join("child");
         assert!(path_entry_exists(&destination).is_err());
         assert!(renamed_destination(&destination).is_err());
-        assert!(destination_staging_path(&destination).is_err());
-        assert!(destination_backup_path(&destination).is_err());
+        assert!(
+            allocate_transfer_path(&destination, STAGE_PREFIX, |path| {
+                private_files().create_new(true).open(path).map(drop)
+            })
+            .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_backup_retries_a_collision_with_a_dangling_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("selection");
+        fs::write(&destination, "original").unwrap();
+        let mut occupied = None;
+        let backup = allocate_transfer_path(&destination, BACKUP_PREFIX, |candidate| {
+            if occupied.is_none() {
+                std::os::unix::fs::symlink("missing", candidate).unwrap();
+                occupied = Some(candidate.to_path_buf());
+            }
+            rename_to_vacant_path(&destination, candidate)
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_link(occupied.unwrap()).unwrap(),
+            Path::new("missing")
+        );
+        assert_eq!(fs::read_to_string(backup).unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_overwrite_support_long_ascii_and_multibyte_names() {
+        let root = tempfile::tempdir().unwrap();
+        let destination_dir = root.path().join("destination");
+        fs::create_dir(&destination_dir).unwrap();
+        for name in [
+            "a".repeat(255),
+            format!("{}{}", "b".repeat(246), "界".repeat(3)),
+        ] {
+            assert_eq!(name.len(), 255);
+            let source = root.path().join(&name);
+            let destination = destination_dir.join(&name);
+            for (overwrite, payload) in [
+                (OverwritePolicy::Skip, "first copy"),
+                (OverwritePolicy::Overwrite, "replacement"),
+            ] {
+                fs::write(&source, payload).unwrap();
+                let (finished, _) = execute_request_with_backend(
+                    JobRequest::Copy {
+                        sources: vec![source.clone()],
+                        destination_dir: destination_dir.clone(),
+                        overwrite,
+                    },
+                    &LocalFsBackend,
+                );
+                assert!(
+                    matches!(finished, JobEvent::Finished { result: Ok(()), .. }),
+                    "{finished:?}"
+                );
+                assert_eq!(fs::read_to_string(&destination).unwrap(), payload);
+                assert_eq!(fs::read_dir(&destination_dir).unwrap().count(), 1);
+            }
+            fs::remove_file(destination).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -3103,7 +3303,17 @@ mod tests {
             );
             assert_eq!(first.exists(), !moving);
             assert_eq!(second.exists(), !moving);
-            let backup = destination_dir.join(".first.rc-backup-1");
+            let backup = fs::read_dir(&destination_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(BACKUP_PREFIX)
+                })
+                .unwrap()
+                .path();
             assert_eq!(
                 fs::read_to_string(backup.join("original")).unwrap(),
                 "original"
@@ -3301,7 +3511,12 @@ mod tests {
         fs::write(&source_file, vec![9_u8; 256 * 1024]).expect("source payload should be writable");
 
         let (event_tx, _event_rx) = mpsc::channel();
-        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_after_first_write = |progress: &JobProgress| {
+            if progress.bytes_done > 0 {
+                cancel_flag.store(true, Ordering::Relaxed);
+            }
+        };
         let mut progress = ProgressTracker::new(
             JobId(1),
             JobTotals {
@@ -3309,9 +3524,10 @@ mod tests {
                 bytes: 256 * 1024,
             },
             &event_tx,
-            cancel_flag,
+            Arc::clone(&cancel_flag),
         );
-        let error = copy_file(&source_file, &destination_file, &mut progress)
+        progress.observer = Some(&cancel_after_first_write);
+        let error = copy_path(&source_file, &destination_file, &mut progress)
             .expect_err("canceled copy should fail");
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(error.to_string(), JOB_CANCELED_MESSAGE);
@@ -3320,28 +3536,93 @@ mod tests {
             "canceled copy should not materialize destination file"
         );
 
-        let stage_prefix = format!(
-            ".{}.rc-stage-",
-            destination_file
-                .file_name()
-                .and_then(|name| name.to_str())
-                .expect("destination file name should be valid")
-        );
-        let leaked_stage_file = fs::read_dir(&destination_dir)
-            .expect("destination directory should be readable")
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(&stage_prefix)
-            });
-        assert!(
-            !leaked_stage_file,
-            "canceled copy should clean up staged temp files"
-        );
+        assert!(fs::read_dir(&destination_dir).unwrap().next().is_none());
 
         fs::remove_dir_all(&root).expect("temp tree should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_copy_keeps_staged_files_and_directories_private_while_writing() {
+        use std::cell::Cell;
+
+        for nested in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let parent = root.path().join("destination");
+            let destination = parent.join("result");
+            fs::create_dir(&parent).unwrap();
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+            let source_file = if nested {
+                fs::create_dir_all(source.join("child")).unwrap();
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::set_permissions(source.join("child"), fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                source.join("child/file")
+            } else {
+                source.clone()
+            };
+            let bytes = vec![42; 2 * COPY_BUFFER_SIZE];
+            fs::write(&source_file, &bytes).unwrap();
+            fs::set_permissions(&source_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+            let checked = Cell::new(false);
+            let inspect_first_write = |progress: &JobProgress| {
+                if progress.bytes_done == 0 || checked.replace(true) {
+                    return;
+                }
+                assert!(!destination.exists());
+                let stage = fs::read_dir(&parent)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let staged_file = if nested {
+                    for directory in [&stage, &stage.join("child")] {
+                        assert_eq!(
+                            fs::metadata(directory).unwrap().permissions().mode() & 0o077,
+                            0
+                        );
+                    }
+                    stage.join("child/file")
+                } else {
+                    stage
+                };
+                let metadata = fs::metadata(staged_file).unwrap();
+                assert_eq!(metadata.len(), COPY_BUFFER_SIZE as u64);
+                assert_eq!(metadata.permissions().mode() & 0o077, 0);
+            };
+            let (tx, _rx) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let totals = measure_path_totals(&source, &cancel).unwrap();
+            let mut progress = ProgressTracker::new(JobId(1), totals, &tx, cancel);
+            progress.observer = Some(&inspect_first_write);
+            copy_path(&source, &destination, &mut progress).unwrap();
+            assert!(checked.get());
+            let copied_file = if nested {
+                assert_eq!(
+                    fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+                assert_eq!(
+                    fs::metadata(destination.join("child"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o755
+                );
+                destination.join("child/file")
+            } else {
+                destination
+            };
+            assert_eq!(
+                fs::metadata(&copied_file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(fs::read(copied_file).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -3832,6 +4113,87 @@ mod tests {
     }
 
     #[test]
+    fn cross_device_overwrite_keeps_complete_copy_when_source_removal_fails_partway() {
+        struct FailingCleanup;
+
+        impl FsBackend for FailingCleanup {
+            fn create_dir(&self, path: &Path) -> io::Result<()> {
+                LocalFsBackend.create_dir(path)
+            }
+
+            fn rename(&self, _source: &Path, _destination: &Path) -> io::Result<()> {
+                Err(io::ErrorKind::CrossesDevices.into())
+            }
+
+            fn remove_path(&self, path: &Path) -> io::Result<()> {
+                fs::remove_file(path.join("removed.txt")).unwrap();
+                Err(io::ErrorKind::PermissionDenied.into())
+            }
+
+            fn persist_settings(
+                &self,
+                paths: &SettingsPaths,
+                settings: &Settings,
+            ) -> io::Result<()> {
+                LocalFsBackend.persist_settings(paths, settings)
+            }
+        }
+
+        let root = make_temp_dir("move-partial-cleanup");
+        let source = root.join("selection");
+        let destination_dir = root.join("into");
+        let destination = destination_dir.join("selection");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("removed.txt"), "removed from source").unwrap();
+        fs::write(source.join("remaining.txt"), "remaining at source").unwrap();
+        fs::write(destination.join("old.txt"), "previous destination").unwrap();
+
+        let (finished, counts) = execute_request_with_backend(
+            JobRequest::Move {
+                sources: vec![source.clone()],
+                destination_dir: destination_dir.clone(),
+                destination_names: None,
+                overwrite: OverwritePolicy::Overwrite,
+            },
+            &FailingCleanup,
+        );
+
+        let JobEvent::Finished {
+            result: Err(error), ..
+        } = finished
+        else {
+            panic!("expected partial move failure, got {finished:?}");
+        };
+        assert_eq!(counts.failed, 1);
+        assert_eq!(error.code, JobErrorCode::PartialMove);
+        assert_eq!(error.retry_hint, JobRetryHint::None);
+        assert!(!source.join("removed.txt").exists());
+        assert!(source.join("remaining.txt").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("removed.txt")).unwrap(),
+            "removed from source"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("remaining.txt")).unwrap(),
+            "remaining at source"
+        );
+        let backup = fs::read_dir(destination_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path != &destination)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(backup.join("old.txt")).unwrap(),
+            "previous destination"
+        );
+        for path in [source, destination, backup] {
+            assert!(error.message.contains(&format!("{path:?}")), "{error:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn move_overwrite_restores_destination_when_validation_fails() {
         let root = make_temp_dir("move-overwrite-rollback");
         let source_root = root.join("source");
@@ -3878,11 +4240,6 @@ mod tests {
             "failed overwrite move should restore original destination content"
         );
 
-        let file_name = preserved_destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("destination file name should be valid");
-        let backup_prefix = format!(".{file_name}.rc-backup-");
         let leaked_backup = fs::read_dir(&source_root)
             .expect("source root should be readable")
             .filter_map(Result::ok)
@@ -3890,7 +4247,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(&backup_prefix)
+                    .starts_with(BACKUP_PREFIX)
             });
         assert!(
             !leaked_backup,

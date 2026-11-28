@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-28
+
+### Added
+
+- Show a notice when an open local file changes on disk. Press `r` to reload it
+  in the background while keeping the displayed version available until the
+  reload succeeds.
+- Copy the viewer's loaded text or hex dump with `c` via OSC 52, up to
+  449,991 bytes before encoding.
+
+### Changed
+
+- Store the selected skin in rc's own `settings.ini`. Settings and the default
+  log live in `$XDG_CONFIG_HOME/rc/` when `XDG_CONFIG_HOME` is absolute, with
+  `~/.config/rc/` as the fallback. Run `rc --import-mc-skin` to import a skin
+  choice saved by Midnight Commander.
+- Pipeline SFTP reads to speed up previews and copies on high-latency
+  connections, handling out-of-order replies and short reads.
+- Replace Chrono with Jiff for panel timestamps and ZIP, FTP/FTPS, and extfs
+  listing dates.
+
+### Fixed
+
+- Preserve the completed copy and any overwrite backup when source cleanup
+  fails during a cross-filesystem move. Report the partial move with the
+  source, destination, and any backup path.
+- Use short, randomized staging and backup names for copies, archive
+  extraction, and overwrites to avoid filename-length failures.
+- Preserve symlinked rc settings files when saving by updating their existing
+  regular-file targets.
+
+### Security
+
+- Stage local copies before publishing them at the destination. On Unix,
+  create staged files and directories with private permissions.
+
 ## [0.3.0] - 2026-11-15
 
 ### Added
@@ -245,7 +281,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added bounded, cancelable, request-correlated background work throughout expensive
   filesystem workflows.
 
-[Unreleased]: https://github.com/hbbio/rc/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hbbio/rc/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/hbbio/rc/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hbbio/rc/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/hbbio/rc/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/hbbio/rc/compare/v0.2.0...v0.2.1

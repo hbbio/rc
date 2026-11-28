@@ -6,7 +6,7 @@ mod skin;
 
 pub use mouse::{ScrollDirection, commands_for_left_click, commands_for_scroll};
 
-use chrono::{DateTime, Local};
+use jiff::Zoned;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -93,7 +93,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     if let Some(viewer) = state.active_viewer() {
-        render_viewer(frame, root[1], viewer, skin.as_ref());
+        render_viewer(frame, root[1], viewer, skin.as_ref(), state);
     } else {
         if uses_single_panel_layout(state) {
             let panel = state.active_panel;
@@ -1558,7 +1558,13 @@ fn render_quick_view_panel(
     }
 }
 
-fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiSkin) {
+fn render_viewer(
+    frame: &mut Frame,
+    area: Rect,
+    viewer: &ViewerState,
+    skin: &UiSkin,
+    state: &AppState,
+) {
     frame.render_widget(Clear, area);
     let visible_lines = area.height.saturating_sub(2).max(1) as usize;
     let content_width = area.width.saturating_sub(2) as usize;
@@ -1578,16 +1584,36 @@ fn render_viewer(frame: &mut Frame, area: Rect, viewer: &ViewerState, skin: &UiS
     if surface_style.fg.is_none() && surface_style.bg.is_none() {
         surface_style = viewer_theme_surface_style().unwrap_or_default();
     }
-    let mut paragraph = Paragraph::new(content)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_set(skin.panel_border_set())
-                .border_style(skin.style("core", "selected"))
-                .style(surface_style),
-        )
+    let mut border = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_set(skin.panel_border_set())
+        .border_style(skin.style("core", "selected"))
         .style(surface_style);
+    let updated_on_disk = viewer.updated_on_disk();
+    if updated_on_disk || viewer.change_detection_unavailable() {
+        let context = if viewer.hex_mode {
+            KeyContext::ViewerHex
+        } else {
+            KeyContext::Viewer
+        };
+        let mut notice = String::from(if updated_on_disk {
+            "Updated on disk"
+        } else {
+            "Automatic change detection unavailable"
+        });
+        if let Some(key) = state.keybinding_primary_label(context, AppCommand::ViewerRefresh) {
+            notice.push_str(&format!(", press {key} to refresh"));
+        }
+        if updated_on_disk
+            && let Some(key) =
+                state.keybinding_primary_label(context, AppCommand::ViewerCopyContents)
+        {
+            notice.push_str(&format!(", {key} to copy"));
+        }
+        border = border.title_bottom(fit_single_line(notice, content_width));
+    }
+    let mut paragraph = Paragraph::new(content).block(border).style(surface_style);
     if viewer.wrap && !viewer.hex_mode {
         paragraph = paragraph.wrap(Wrap { trim: false });
     }
@@ -1809,46 +1835,13 @@ fn plain_viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize)
 }
 
 fn hex_viewer_window(viewer: &ViewerState, visible_lines: usize, width: usize) -> Text<'static> {
-    let total_rows = ((viewer.bytes.len().saturating_add(15)).saturating_div(16)).max(1);
+    let total_rows = viewer.line_count();
     let start = viewer.scroll.min(total_rows.saturating_sub(1));
     let end = start.saturating_add(visible_lines.max(1)).min(total_rows);
-    let mut lines = Vec::with_capacity(end.saturating_sub(start));
-
-    for row in start..end {
-        let offset = row.saturating_mul(16);
-        let chunk_end = offset.saturating_add(16).min(viewer.bytes.len());
-        let chunk = &viewer.bytes[offset..chunk_end];
-
-        let mut hex = String::new();
-        let mut ascii = String::new();
-        for index in 0..16 {
-            if index < chunk.len() {
-                let byte = chunk[index];
-                if !hex.is_empty() {
-                    hex.push(' ');
-                }
-                hex.push_str(&format!("{byte:02x}"));
-                let ch = byte as char;
-                if ch.is_ascii_graphic() || ch == ' ' {
-                    ascii.push(ch);
-                } else {
-                    ascii.push('.');
-                }
-            } else {
-                if !hex.is_empty() {
-                    hex.push(' ');
-                }
-                hex.push_str("  ");
-                ascii.push(' ');
-            }
-        }
-
-        lines.push(pad_line_to_width(
-            format!("{offset:08x}  {hex}  |{ascii}|"),
-            width,
-        ));
-    }
-
+    let lines: Vec<Line<'static>> = (start..end)
+        .filter_map(|row| viewer.hex_line(row))
+        .map(|line| pad_line_to_width(line, width))
+        .collect();
     Text::from(lines)
 }
 
@@ -3236,14 +3229,17 @@ fn panel_disk_summary(panel: &PanelState, _app: &AppState) -> String {
 
 fn format_modified(modified: Option<SystemTime>) -> String {
     modified
-        .map(|time| {
-            let local: DateTime<Local> = DateTime::from(time);
-            let now = Local::now();
-            if local < now - chrono::Duration::days(365) {
-                local.format("%b %Y").to_string()
+        .and_then(|time| {
+            let local = Zoned::try_from(time).ok()?;
+            let format = if SystemTime::now()
+                .duration_since(time)
+                .is_ok_and(|age| age > Duration::from_secs(365 * 24 * 60 * 60))
+            {
+                "%b %Y"
             } else {
-                local.format("%b %e %H:%M").to_string()
-            }
+                "%b %e %H:%M"
+            };
+            Some(local.strftime(format).to_string())
         })
         .unwrap_or_default()
 }
@@ -3850,19 +3846,19 @@ mod tests {
         let old = SystemTime::now()
             .checked_sub(Duration::from_secs(366 * 24 * 60 * 60))
             .expect("old timestamp should be representable");
-        let old_local: DateTime<Local> = DateTime::from(old);
+        let old_local = Zoned::try_from(old).unwrap();
         assert_eq!(
             format_modified(Some(old)),
-            old_local.format("%b %Y").to_string()
+            old_local.strftime("%b %Y").to_string()
         );
 
         let recent = SystemTime::now()
             .checked_sub(Duration::from_secs(60))
             .expect("recent timestamp should be representable");
-        let recent_local: DateTime<Local> = DateTime::from(recent);
+        let recent_local = Zoned::try_from(recent).unwrap();
         assert_eq!(
             format_modified(Some(recent)),
-            recent_local.format("%b %e %H:%M").to_string()
+            recent_local.strftime("%b %e %H:%M").to_string()
         );
     }
 

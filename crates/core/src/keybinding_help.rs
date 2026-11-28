@@ -486,57 +486,55 @@ impl AppState {
             ),
         );
 
-        replacements.insert("viewer_scroll", "Up/Down and PgUp/PgDn".to_string());
+        let viewer_context = if self.active_viewer().is_some_and(|viewer| viewer.hex_mode) {
+            KeyContext::ViewerHex
+        } else {
+            KeyContext::Viewer
+        };
+        let viewer_key = |command| {
+            self.keybinding_primary_label(viewer_context, command)
+                .unwrap_or("Unbound")
+        };
+        let scroll_keys: Vec<_> = [
+            (NavigationMotion::Up, "Up"),
+            (NavigationMotion::Down, "Down"),
+            (NavigationMotion::PageUp, "PgUp"),
+            (NavigationMotion::PageDown, "PgDn"),
+        ]
+        .into_iter()
+        .filter_map(|(motion, preferred)| {
+            self.keybinding_preferred_label(
+                viewer_context,
+                AppCommand::Navigate(NavigationTarget::Viewer, motion),
+                preferred,
+            )
+        })
+        .collect();
         replacements.insert(
-            "viewer_search",
-            self.keybinding_primary_or_fallback(
-                KeyContext::Viewer,
-                AppCommand::ViewerSearchForward,
-                "F7",
-            ),
+            "viewer_scroll",
+            if scroll_keys.is_empty() {
+                "Unbound".to_owned()
+            } else {
+                scroll_keys.join(" / ")
+            },
         );
-        replacements.insert(
-            "viewer_search_back",
-            self.keybinding_primary_or_fallback(
-                KeyContext::Viewer,
-                AppCommand::ViewerSearchBackward,
-                "Shift-F7",
-            ),
-        );
+        for (name, command) in [
+            ("viewer_search", AppCommand::ViewerSearchForward),
+            ("viewer_search_back", AppCommand::ViewerSearchBackward),
+            ("viewer_goto", AppCommand::ViewerGoto),
+            ("viewer_wrap", AppCommand::ViewerToggleWrap),
+            ("viewer_hex", AppCommand::ViewerToggleHex),
+            ("viewer_refresh", AppCommand::ViewerRefresh),
+            ("viewer_copy", AppCommand::ViewerCopyContents),
+        ] {
+            replacements.insert(name, viewer_key(command).to_owned());
+        }
         replacements.insert(
             "viewer_search_continue",
             format!(
                 "{} / {}",
-                self.keybinding_primary_or_fallback(
-                    KeyContext::Viewer,
-                    AppCommand::ViewerSearchContinue,
-                    "n"
-                ),
-                self.keybinding_primary_or_fallback(
-                    KeyContext::Viewer,
-                    AppCommand::ViewerSearchContinueBackward,
-                    "Shift-n",
-                ),
-            ),
-        );
-        replacements.insert(
-            "viewer_goto",
-            self.keybinding_primary_or_fallback(KeyContext::Viewer, AppCommand::ViewerGoto, "g"),
-        );
-        replacements.insert(
-            "viewer_wrap",
-            self.keybinding_primary_or_fallback(
-                KeyContext::Viewer,
-                AppCommand::ViewerToggleWrap,
-                "w",
-            ),
-        );
-        replacements.insert(
-            "viewer_hex",
-            self.keybinding_primary_or_fallback(
-                KeyContext::Viewer,
-                AppCommand::ViewerToggleHex,
-                "h",
+                viewer_key(AppCommand::ViewerSearchContinue),
+                viewer_key(AppCommand::ViewerSearchContinueBackward),
             ),
         );
 

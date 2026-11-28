@@ -795,7 +795,10 @@ impl AppState {
         let text = rc_shell::encode_path_text(absolute_path.as_os_str());
 
         self.pending_clipboard_copy_requests
-            .push(ClipboardCopyRequest { text });
+            .push(ClipboardCopyRequest {
+                text,
+                success_message: "Copied selected path to clipboard",
+            });
         self.set_command_feedback("Copying selected path to clipboard...");
     }
 }

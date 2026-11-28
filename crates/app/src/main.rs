@@ -38,6 +38,7 @@ mod filesystem_watch;
 mod runtime;
 #[cfg(unix)]
 mod subshell;
+mod viewer_watch;
 
 use runtime::RuntimeBridge;
 
@@ -104,6 +105,11 @@ struct Cli {
     path: Option<PathBuf>,
     #[arg(long)]
     skin: Option<String>,
+    #[arg(
+        long,
+        help = "Import the Midnight Commander skin into rc settings and exit"
+    )]
+    import_mc_skin: bool,
     #[arg(long)]
     skin_dir: Option<PathBuf>,
     #[arg(long)]
@@ -126,6 +132,15 @@ struct InputCompatibility {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let settings_paths = settings_io::settings_paths();
+    if cli.import_mc_skin {
+        let skin =
+            settings_io::import_mc_skin(&settings_paths).context("failed to import MC skin")?;
+        println!(
+            "Imported Midnight Commander skin {}",
+            sanitize_display_field(&skin)
+        );
+        return Ok(());
+    }
     let mut tracing_log_path = tracing_log_path(&settings_paths, std::env::var_os("RC_LOG_FILE"));
     if let Some(error) = init_tracing(tracing_log_path.as_deref())
         && let Some(path) = tracing_log_path.as_deref()
@@ -631,12 +646,14 @@ fn run_event_loop(
     let mut last_tick = Instant::now();
     let mut mouse_click_tracker = MouseClickTracker::default();
     let mut filesystem_watch = filesystem_watch::FilesystemWatch::spawn(tracing_log)?;
+    let mut viewer_watch = viewer_watch::ViewerWatch::default();
     #[cfg(unix)]
     let mut shell = subshell::ShellController::default();
 
     loop {
         runtime.drain_events(state);
         filesystem_watch.poll(state);
+        viewer_watch.poll(state);
         state.poll_deferred_work();
         runtime.dispatch_pending_commands(state);
         state.expire_status_line();
@@ -830,15 +847,7 @@ fn handle_key(
     if state.capture_learn_keys_chord(chord) {
         return Ok(false);
     }
-    let key_command = state
-        .resolve_key_command(keymap, context, chord)
-        .or_else(|| {
-            if context == KeyContext::ViewerHex {
-                state.resolve_key_command(keymap, KeyContext::Viewer, chord)
-            } else {
-                None
-            }
-        });
+    let key_command = state.resolve_key_command(keymap, context, chord);
     let command = key_command.and_then(|key_command| {
         AppCommand::from_key_command(context, key_command).or_else(|| {
             (context == KeyContext::FileManagerXMap)
@@ -1011,7 +1020,7 @@ fn persist_dirty_settings(state: &mut AppState, skin_runtime: &SkinRuntimeConfig
 fn dispatch_pending_clipboard_copy_requests(writer: &mut impl io::Write, state: &mut AppState) {
     for request in state.take_pending_clipboard_copy_requests() {
         match clipboard::write_text(writer, &request.text) {
-            Ok(()) => state.set_command_feedback("Copied selected path to clipboard"),
+            Ok(()) => state.set_command_feedback(request.success_message),
             Err(error) => {
                 state.set_command_feedback(format!("Clipboard copy failed: {error}"));
             }
@@ -3376,6 +3385,7 @@ mod tests {
             tick_rate_ms: 200,
             path: None,
             skin: Some(String::from("cli-skin")),
+            import_mc_skin: false,
             skin_dir: Some(PathBuf::from("/cli/skins")),
             keymap: Some(PathBuf::from("/cli/keymap")),
             macos_option_compat: Some(true),
@@ -3412,6 +3422,7 @@ mod tests {
             tick_rate_ms: 200,
             path: None,
             skin: None,
+            import_mc_skin: false,
             skin_dir: None,
             keymap: None,
             macos_option_compat: None,
@@ -4489,6 +4500,138 @@ mod tests {
         assert_eq!(state.key_context(), KeyContext::FileManager);
 
         fs::remove_dir_all(&root).expect("must remove temp root");
+    }
+
+    #[test]
+    fn viewer_copies_the_displayed_version_until_a_refresh_succeeds() {
+        fn wait_for(
+            state: &mut AppState,
+            runtime: &mut RuntimeBridge,
+            watch: &mut viewer_watch::ViewerWatch,
+            ready: impl Fn(&AppState) -> bool,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                runtime.drain_events(state);
+                watch.poll(state);
+                runtime.dispatch_pending_commands(state);
+                if ready(state) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "viewer status was {}",
+                    state.status_line
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        let fixture = tempfile::tempdir().expect("viewer fixture directory");
+        let panel_dir = fixture.path().join("panels");
+        fs::create_dir(&panel_dir).expect("panel directory should be created");
+        let path = fixture.path().join("report.txt");
+        let old_text = "Old café\r\nSecond line\n";
+        let new_text = "Revised report\n";
+        fs::write(&path, old_text).expect("viewer fixture should be writable");
+        let mut state = AppState::new(panel_dir).expect("app should initialize");
+        let keymap = Keymap::bundled_mc_default().expect("bundled keymap should parse");
+        state.set_keybinding_hints_from_keymap(&keymap);
+        let mut runtime = RuntimeBridge::spawn().expect("runtime should start");
+        let mut watch = viewer_watch::ViewerWatch::default();
+        let skin_runtime = SkinRuntimeConfig {
+            skin_dirs: Vec::new(),
+            settings_paths: settings_io::SettingsPaths {
+                mc_ini_path: None,
+                rc_ini_path: None,
+            },
+        };
+
+        let press_key = |state: &mut AppState, runtime: &mut RuntimeBridge, key| {
+            handle_key(
+                state,
+                &keymap,
+                KeyEvent::new(CrosstermKeyCode::Char(key), KeyModifiers::NONE),
+                TEST_VIEWPORT_WIDTH,
+                runtime,
+                &skin_runtime,
+                compat_enabled(),
+            )
+            .expect("viewer key should be handled");
+        };
+        let copy = |state: &mut AppState, runtime: &mut RuntimeBridge| {
+            press_key(state, runtime, 'c');
+            let mut output = Vec::new();
+            dispatch_pending_clipboard_copy_requests(&mut output, state);
+            let encoded = output
+                .strip_prefix(b"\x1b]52;c;")
+                .and_then(|output| output.strip_suffix(b"\x1b\\"))
+                .expect("viewer copy should emit an OSC 52 sequence");
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("clipboard text should be encoded")
+        };
+        let rendered = |state: &AppState| {
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+                .expect("test terminal should initialize");
+            terminal
+                .draw(|frame| rc_ui::render(frame, state))
+                .expect("viewer should render");
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        state.enqueue_worker_job_request(JobRequest::LoadViewer { path: path.clone() });
+        wait_for(&mut state, &mut runtime, &mut watch, |state| {
+            state.active_viewer().is_some()
+        });
+        fs::write(&path, new_text).expect("external edit should succeed");
+        wait_for(&mut state, &mut runtime, &mut watch, |state| {
+            state
+                .active_viewer()
+                .is_some_and(rc_core::ViewerState::updated_on_disk)
+        });
+        assert!(rendered(&state).contains("Updated on disk, press r to refresh, c to copy"));
+        assert_eq!(copy(&mut state, &mut runtime), old_text.as_bytes());
+
+        fs::remove_file(&path).expect("file should be removable");
+        press_key(&mut state, &mut runtime, 'r');
+        wait_for(&mut state, &mut runtime, &mut watch, |state| {
+            state.status_line.starts_with("Viewer refresh failed")
+        });
+        assert!(state.active_viewer().unwrap().updated_on_disk());
+        assert_eq!(copy(&mut state, &mut runtime), old_text.as_bytes());
+
+        fs::write(&path, new_text).expect("file should be restorable");
+        press_key(&mut state, &mut runtime, 'r');
+        wait_for(&mut state, &mut runtime, &mut watch, |state| {
+            state
+                .active_viewer()
+                .is_some_and(|viewer| viewer.content() == new_text)
+        });
+        assert_eq!(state.route_depth(), 2);
+        assert!(!rendered(&state).contains("Updated on disk"));
+        assert_eq!(copy(&mut state, &mut runtime), new_text.as_bytes());
+
+        let replacement = fixture.path().join("replacement.txt");
+        fs::write(&replacement, "Atomic replacement\n").expect("replacement should be writable");
+        fs::rename(replacement, path).expect("file should be replaceable");
+        wait_for(&mut state, &mut runtime, &mut watch, |state| {
+            state
+                .active_viewer()
+                .is_some_and(rc_core::ViewerState::updated_on_disk)
+        });
+        press_key(&mut state, &mut runtime, 'h');
+        assert!(rendered(&state).contains("Updated on disk, press r to refresh, c to copy"));
+        let hex_copy = copy(&mut state, &mut runtime);
+        assert!(hex_copy.starts_with(b"00000000  52 65 76 69 73 65 64 20 72 65 70 6f 72 74 0a "));
+        assert!(hex_copy.ends_with(b"|Revised report. |\n"));
+        runtime.shutdown().expect("runtime should shut down");
     }
 
     #[cfg(unix)]

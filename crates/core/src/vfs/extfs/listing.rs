@@ -6,7 +6,9 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime, Utc};
+use jiff::civil::{Date, DateTime};
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, ToSpan};
 
 use super::super::Cancellation;
 use crate::{FileEntry, FileEntryKind, FileEntryMetadata};
@@ -114,11 +116,11 @@ fn modified(line: &[u8], position: &mut usize) -> io::Result<SystemTime> {
         };
         formats
             .into_iter()
-            .find_map(|format| NaiveDateTime::parse_from_str(&text, format).ok())
+            .find_map(|format| parse_datetime(format, &text))
     } else {
         let third = token(line, position)?;
         if third.contains(&b':') {
-            let now = Utc::now();
+            let now = Timestamp::now().to_zoned(TimeZone::UTC);
             let text = format!(
                 "{} {} {} {}",
                 now.year(),
@@ -128,26 +130,37 @@ fn modified(line: &[u8], position: &mut usize) -> io::Result<SystemTime> {
             );
             let parsed = ["%Y %b %d %H:%M:%S", "%Y %b %d %H:%M"]
                 .into_iter()
-                .find_map(|format| NaiveDateTime::parse_from_str(&text, format).ok());
+                .find_map(|format| parse_datetime(format, &text));
             // ls uses the current year, except recent dates across New Year.
             parsed.map(|date| {
-                if date.and_utc() > now + chrono::Duration::days(1) {
-                    date.with_year(now.year() - 1).unwrap_or(date)
+                if date > now.datetime().saturating_add(1.day()) {
+                    date.with().year(now.year() - 1).build().unwrap_or(date)
                 } else {
                     date
                 }
             })
         } else {
-            NaiveDate::parse_from_str(
-                &format!("{} {} {}", ascii(first)?, ascii(second)?, ascii(third)?),
+            Date::strptime(
                 "%b %d %Y",
+                format!("{} {} {}", ascii(first)?, ascii(second)?, ascii(third)?),
             )
             .ok()
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|date| date.at(0, 0, 0, 0))
         }
     };
-    date.map(|date| SystemTime::from(date.and_utc()))
+    date.and_then(|date| TimeZone::UTC.to_timestamp(date).ok())
+        .map(SystemTime::from)
         .ok_or_else(|| invalid("invalid date"))
+}
+
+fn parse_datetime(format: &str, text: &str) -> Option<DateTime> {
+    let date = DateTime::strptime(format, text).ok()?;
+    // Jiff clamps the displayed leap second to :59. Keep its following
+    // second when mapping the helper's timestamp to SystemTime.
+    if format.ends_with("%S") && text.ends_with(":60") {
+        return date.checked_add(1.second()).ok();
+    }
+    Some(date)
 }
 
 fn relative(bytes: &[u8]) -> io::Result<PathBuf> {

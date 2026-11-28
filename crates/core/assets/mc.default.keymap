@@ -660,6 +660,8 @@ SearchContinueBackward = shift-n
 Goto = g; alt-l
 ToggleWrap = w
 ToggleHex = h
+Reread = r
+ViewerCopyContents = c
 
 [viewer:hex]
 ScreenList = alt-backquote
