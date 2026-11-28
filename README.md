@@ -7,19 +7,17 @@ Commander. It keeps the familiar dual-pane workflow and MC-style default
 keybindings while adding responsive background operations, a persistent Unix
 shell, read-only archive and remote browsing, and fast directory navigation.
 
-## What's new in 0.3.0
+## What's new in 0.3.1
 
-- Browse ZIP/TAR archives, nested archives, MC extfs helpers, and read-only
-  SFTP, SSH Shell, and FTP/FTPS connections; copy selected contents to local folders.
-- Keep a persistent Unix shell and switch between it and the panels with `Ctrl-O`.
-- Run MC extension actions and conditional F2 user menus, edit filename highlighting,
-  and save learned key bindings and custom listing formats.
-- Change Unix permissions and ownership, create or edit links, compare files and
-  directories, and capture commands in the searchable output viewer.
-- Swap panels, calculate directory sizes, restore suspended screens, and scroll
-  panels and modals with a mouse wheel or touchpad.
+- See when a local file changes on disk, refresh it with `r`, and copy the
+  viewer's loaded text or hex dump with `c`.
+- Save the skin in rc's own settings and import a Midnight Commander skin choice
+  with `rc --import-mc-skin`.
+- Preview and copy SFTP files faster on high-latency connections.
+- Stage local copies privately on Unix and keep completed copies if a
+  cross-filesystem move fails to remove its source.
 
-See the [0.3.0 changelog](CHANGELOG.md#030---2026-11-15) for the full release notes
+See the [0.3.1 changelog](CHANGELOG.md#031---2026-11-28) for the full release notes
 and the [roadmap](ROADMAP.md) for unfinished work.
 
 ## Features
@@ -444,7 +442,7 @@ Optional tools for Unix features:
 Install from [crates.io](https://crates.io/crates/rust-commander):
 
 ```bash
-cargo install rust-commander --version 0.3.0 --locked
+cargo install rust-commander --version 0.3.1 --locked
 ```
 
 The package is named `rust-commander`; the installed executable is `rc`.
